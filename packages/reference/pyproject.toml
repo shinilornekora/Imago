@@ -1,0 +1,22 @@
+[project]
+name = "stand-reference"
+version = "0.1.0"
+description = "Независимый эталон предметной модели стенда (SPEC §6)"
+requires-python = ">=3.11"
+dependencies = ["psycopg[binary]==3.3.2"]
+
+[project.scripts]
+compare-db = "reference.compare:main_compare_db"
+compare-snapshots = "reference.compare:main_compare_snapshots"
+stand-reference = "reference.compare:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["reference"]

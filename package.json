@@ -1,0 +1,19 @@
+{
+  "name": "stand",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Экспериментальный стенд: управление клиентским состоянием веб-редактора макетов при частичной загрузке (H / TanStack Query / Zero, режимы F/P)",
+  "engines": { "node": ">=24" },
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/client",
+    "packages/generator",
+    "packages/netshaper",
+    "packages/bench"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/shared && npm run build -w packages/server && npm run build -w packages/client",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}

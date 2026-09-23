@@ -1,0 +1,155 @@
+{
+  "config": {
+    "adapter": "Q",
+    "mode": "F",
+    "cache": 1
+  },
+  "key": "QF1",
+  "label": "Q/F",
+  "checks": [
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 0), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+      "durationMs": 3076,
+      "details": {
+        "summary": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 0), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+        "source": "doc-acc-50x500-src-1",
+        "activePage": "doc-acc-50x500-p2",
+        "neverLoaded": [],
+        "result": {
+          "opId": "3605cc88-cf2a-445a-805d-1d979b61d857",
+          "revision": 1,
+          "affectedPages": [
+            "doc-acc-50x500-p12",
+            "doc-acc-50x500-p17",
+            "doc-acc-50x500-p2",
+            "doc-acc-50x500-p22",
+            "doc-acc-50x500-p28",
+            "doc-acc-50x500-p33",
+            "doc-acc-50x500-p38",
+            "doc-acc-50x500-p43",
+            "doc-acc-50x500-p50",
+            "doc-acc-50x500-p7"
+          ],
+          "affectedShapes": 81
+        },
+        "oracleReport": "/home/claude/stand/results/functional/2026-09-13_00-31-17/artifacts/QF1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон; F: все 10 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+      "durationMs": 4010,
+      "details": {
+        "summary": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон; F: все 10 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+        "source": "doc-acc-50x500-src-1",
+        "activePage": "doc-acc-50x500-p2",
+        "latePage": "doc-acc-50x500-p50",
+        "affected": [
+          "doc-acc-50x500-p12",
+          "doc-acc-50x500-p17",
+          "doc-acc-50x500-p2",
+          "doc-acc-50x500-p22",
+          "doc-acc-50x500-p28",
+          "doc-acc-50x500-p33",
+          "doc-acc-50x500-p38",
+          "doc-acc-50x500-p43",
+          "doc-acc-50x500-p50",
+          "doc-acc-50x500-p7"
+        ],
+        "readsY": 0,
+        "refetched": 10,
+        "unaffectedRefetched": []
+      }
+    },
+    {
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "F: старое чтение: ответ 200 через 1542 мс, команда отправлена через 16 мс после его начала; чтений X: 2; итог doc-acc-50x500-p7 rev=1, doc-acc-50x500-inst-1-20=#112233; зонд 648 опросов, без отката",
+      "durationMs": 3050,
+      "details": {
+        "summary": "F: старое чтение: ответ 200 через 1542 мс, команда отправлена через 16 мс после его начала; чтений X: 2; итог doc-acc-50x500-p7 rev=1, doc-acc-50x500-inst-1-20=#112233; зонд 648 опросов, без отката",
+        "mechanism": "HTTP-хук POST /api/test/delay на чтение страницы X (onSend)",
+        "page": "doc-acc-50x500-p7",
+        "instance": "doc-acc-50x500-inst-1-20",
+        "firstRead": {
+          "id": 8,
+          "t": 1789259495940,
+          "endT": 1789259497482,
+          "method": "GET",
+          "url": "http://127.0.0.1:3011/api/documents/doc-acc-50x500/pages/doc-acc-50x500-p7",
+          "path": "/api/documents/doc-acc-50x500/pages/doc-acc-50x500-p7",
+          "hasAuth": true,
+          "status": 200,
+          "failed": null
+        },
+        "cmdPost": {
+          "id": 10,
+          "t": 1789259495956,
+          "endT": 1789259496002,
+          "method": "POST",
+          "url": "http://127.0.0.1:3011/api/documents/doc-acc-50x500/commands",
+          "path": "/api/documents/doc-acc-50x500/commands",
+          "hasAuth": true,
+          "status": 200,
+          "failed": null
+        },
+        "probeRecords": [
+          {
+            "t": 76,
+            "size": null,
+            "revision": null,
+            "fill": null
+          },
+          {
+            "t": 1836.5999999996275,
+            "size": 500,
+            "revision": 1,
+            "fill": "#112233"
+          }
+        ],
+        "readsX": 2
+      }
+    },
+    {
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 3448,
+      "details": {
+        "summary": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+        "opIds": [
+          "4b730ca8-2a52-416d-91eb-fee5c69c621c",
+          "43e3ce65-4afb-4404-b415-63956f7a66a1"
+        ],
+        "retries": {
+          "A": [
+            "poll"
+          ],
+          "B": [
+            "poll",
+            "repost"
+          ]
+        },
+        "oracleReport": "/home/claude/stand/results/functional/2026-09-13_00-31-17/artifacts/QF1/6-retry-compare-db.json"
+      }
+    }
+  ],
+  "passed": true,
+  "verdict": {
+    "verdict": "допуск (частичный набор)",
+    "admitted": false,
+    "caveats": [
+      "набор сокращён: 3-source-fill, 4-late-nav, 5-stale-read, 6-retry"
+    ],
+    "failed": [],
+    "skippedChecks": [],
+    "notApplicable": []
+  }
+}

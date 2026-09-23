@@ -1,0 +1,340 @@
+{
+  "config": {
+    "adapter": "H",
+    "mode": "P",
+    "cache": 1
+  },
+  "key": "HP1",
+  "label": "H/P/cache=1",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 52 опросов без частичных снимков; p2: 500 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (760 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1410,
+      "details": {
+        "summary": "p1: 500 фигур, ревизия 0, зонд 52 опросов без частичных снимков; p2: 500 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (760 мс), state=loading; холст: 65 цветов",
+        "probe1": {
+          "ticks": 52,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 184,
+          "records": 2,
+          "immediate": {
+            "state": "loading",
+            "snapNull": true
+          },
+          "dt": 760
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-frac-25x500-src-1, #aa00aa) с активной doc-frac-25x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-frac-25x500-p2 = эталон",
+      "durationMs": 1497,
+      "details": {
+        "summary": "setSourceFill(doc-frac-25x500-src-1, #aa00aa) с активной doc-frac-25x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-frac-25x500-p2 = эталон",
+        "source": "doc-frac-25x500-src-1",
+        "activePage": "doc-frac-25x500-p2",
+        "neverLoaded": [
+          "doc-frac-25x500-p11",
+          "doc-frac-25x500-p14",
+          "doc-frac-25x500-p16",
+          "doc-frac-25x500-p19",
+          "doc-frac-25x500-p21",
+          "doc-frac-25x500-p25",
+          "doc-frac-25x500-p4",
+          "doc-frac-25x500-p6",
+          "doc-frac-25x500-p9"
+        ],
+        "result": {
+          "opId": "24ba713d-ee31-405c-a826-61dc1774a69a",
+          "revision": 1,
+          "affectedPages": [
+            "doc-frac-25x500-p11",
+            "doc-frac-25x500-p14",
+            "doc-frac-25x500-p16",
+            "doc-frac-25x500-p19",
+            "doc-frac-25x500-p2",
+            "doc-frac-25x500-p21",
+            "doc-frac-25x500-p25",
+            "doc-frac-25x500-p4",
+            "doc-frac-25x500-p6",
+            "doc-frac-25x500-p9"
+          ],
+          "affectedShapes": 81
+        },
+        "oracleReport": "/home/claude/stand/results/functional/precheck-frac-25x500/artifacts/HP1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-frac-25x500-src-1) rev=1 открыта doc-frac-25x500-p25: page-ready rev=1, снимок = эталон",
+      "durationMs": 967,
+      "details": {
+        "summary": "после setSourceFill(doc-frac-25x500-src-1) rev=1 открыта doc-frac-25x500-p25: page-ready rev=1, снимок = эталон",
+        "source": "doc-frac-25x500-src-1",
+        "activePage": "doc-frac-25x500-p2",
+        "latePage": "doc-frac-25x500-p25",
+        "affected": [
+          "doc-frac-25x500-p11",
+          "doc-frac-25x500-p14",
+          "doc-frac-25x500-p16",
+          "doc-frac-25x500-p19",
+          "doc-frac-25x500-p2",
+          "doc-frac-25x500-p21",
+          "doc-frac-25x500-p25",
+          "doc-frac-25x500-p4",
+          "doc-frac-25x500-p6",
+          "doc-frac-25x500-p9"
+        ],
+        "readsY": 1
+      }
+    },
+    {
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→25: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+      "durationMs": 1293,
+      "details": {
+        "summary": "маршрут 2→3→1→4→2→5→1→6→3→25: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+        "steps": [
+          {
+            "target": "doc-frac-25x500-p2",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p1",
+              "doc-frac-25x500-p2"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p2",
+              "doc-frac-25x500-p1"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p3",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p2",
+              "doc-frac-25x500-p3"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p3",
+              "doc-frac-25x500-p2"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p1",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p3",
+              "doc-frac-25x500-p1"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p1",
+              "doc-frac-25x500-p3"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p4",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p1",
+              "doc-frac-25x500-p4"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p4",
+              "doc-frac-25x500-p1"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p2",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p4",
+              "doc-frac-25x500-p2"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p2",
+              "doc-frac-25x500-p4"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p5",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p2",
+              "doc-frac-25x500-p5"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p5",
+              "doc-frac-25x500-p2"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p1",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p5",
+              "doc-frac-25x500-p1"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p1",
+              "doc-frac-25x500-p5"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p6",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p1",
+              "doc-frac-25x500-p6"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p6",
+              "doc-frac-25x500-p1"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p3",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p6",
+              "doc-frac-25x500-p3"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p3",
+              "doc-frac-25x500-p6"
+            ]
+          },
+          {
+            "target": "doc-frac-25x500-p25",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-frac-25x500-p3",
+              "doc-frac-25x500-p25"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-frac-25x500-p25",
+              "doc-frac-25x500-p3"
+            ]
+          }
+        ],
+        "expectedReads": {
+          "doc-frac-25x500-p1": 3,
+          "doc-frac-25x500-p2": 2,
+          "doc-frac-25x500-p3": 2,
+          "doc-frac-25x500-p4": 1,
+          "doc-frac-25x500-p5": 1,
+          "doc-frac-25x500-p6": 1,
+          "doc-frac-25x500-p7": 0,
+          "doc-frac-25x500-p8": 0,
+          "doc-frac-25x500-p9": 0,
+          "doc-frac-25x500-p10": 0,
+          "doc-frac-25x500-p11": 0,
+          "doc-frac-25x500-p12": 0,
+          "doc-frac-25x500-p13": 0,
+          "doc-frac-25x500-p14": 0,
+          "doc-frac-25x500-p15": 0,
+          "doc-frac-25x500-p16": 0,
+          "doc-frac-25x500-p17": 0,
+          "doc-frac-25x500-p18": 0,
+          "doc-frac-25x500-p19": 0,
+          "doc-frac-25x500-p20": 0,
+          "doc-frac-25x500-p21": 0,
+          "doc-frac-25x500-p22": 0,
+          "doc-frac-25x500-p23": 0,
+          "doc-frac-25x500-p24": 0,
+          "doc-frac-25x500-p25": 1
+        }
+      }
+    }
+  ],
+  "passed": true,
+  "verdict": {
+    "verdict": "допуск (частичный набор)",
+    "admitted": false,
+    "caveats": [
+      "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+    ],
+    "failed": [],
+    "skippedChecks": [],
+    "notApplicable": [
+      {
+        "id": "I1-full-load",
+        "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+      }
+    ]
+  }
+}

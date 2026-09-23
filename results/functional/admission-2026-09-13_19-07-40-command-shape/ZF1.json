@@ -1,0 +1,158 @@
+{
+  "config": {
+    "adapter": "Z",
+    "mode": "F",
+    "cache": 1
+  },
+  "key": "ZF1",
+  "label": "Z/F",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 95 опросов без частичных снимков; p2: 500 фигур, зонд 5 опросов; холст: 65 цветов",
+      "durationMs": 1159,
+      "details": {
+        "summary": "p1: 500 фигур, ревизия 0, зонд 95 опросов без частичных снимков; p2: 500 фигур, зонд 5 опросов; холст: 65 цветов",
+        "probe1": {
+          "ticks": 95,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 5,
+          "records": 1,
+          "immediate": {
+            "state": "loading",
+            "snapNull": false
+          },
+          "dt": 71
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 0), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+      "durationMs": 7172,
+      "details": {
+        "summary": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 0), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+        "source": "doc-cmd-50x500-src-23",
+        "activePage": "doc-cmd-50x500-p2",
+        "neverLoaded": [],
+        "result": {
+          "opId": "d153d67f-793e-4bde-8f2b-e7f457a05adb",
+          "revision": 1,
+          "affectedPages": [
+            "doc-cmd-50x500-p1",
+            "doc-cmd-50x500-p10",
+            "doc-cmd-50x500-p11",
+            "doc-cmd-50x500-p12",
+            "doc-cmd-50x500-p13",
+            "doc-cmd-50x500-p14",
+            "doc-cmd-50x500-p15",
+            "doc-cmd-50x500-p16",
+            "doc-cmd-50x500-p17",
+            "doc-cmd-50x500-p18",
+            "doc-cmd-50x500-p19",
+            "doc-cmd-50x500-p2",
+            "doc-cmd-50x500-p20",
+            "doc-cmd-50x500-p21",
+            "doc-cmd-50x500-p22",
+            "doc-cmd-50x500-p23",
+            "doc-cmd-50x500-p24",
+            "doc-cmd-50x500-p25",
+            "doc-cmd-50x500-p26",
+            "doc-cmd-50x500-p27",
+            "doc-cmd-50x500-p28",
+            "doc-cmd-50x500-p29",
+            "doc-cmd-50x500-p3",
+            "doc-cmd-50x500-p30",
+            "doc-cmd-50x500-p31",
+            "doc-cmd-50x500-p32",
+            "doc-cmd-50x500-p33",
+            "doc-cmd-50x500-p34",
+            "doc-cmd-50x500-p35",
+            "doc-cmd-50x500-p36",
+            "doc-cmd-50x500-p37",
+            "doc-cmd-50x500-p38",
+            "doc-cmd-50x500-p39",
+            "doc-cmd-50x500-p4",
+            "doc-cmd-50x500-p40",
+            "doc-cmd-50x500-p41",
+            "doc-cmd-50x500-p42",
+            "doc-cmd-50x500-p43",
+            "doc-cmd-50x500-p44",
+            "doc-cmd-50x500-p45",
+            "doc-cmd-50x500-p46",
+            "doc-cmd-50x500-p47",
+            "doc-cmd-50x500-p48",
+            "doc-cmd-50x500-p49",
+            "doc-cmd-50x500-p5",
+            "doc-cmd-50x500-p50",
+            "doc-cmd-50x500-p6",
+            "doc-cmd-50x500-p7",
+            "doc-cmd-50x500-p8",
+            "doc-cmd-50x500-p9"
+          ],
+          "affectedShapes": 2001
+        },
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_19-07-40-command-shape/artifacts/ZF1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541) |     at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266) |     at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 4857,
+      "details": {
+        "stack": "page.evaluate: ApiHttpError: expected revision 1, current is 0\n    at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541)\n    at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266)\n    at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825)\n    at async eval (eval at evaluate (:290:30), <anonymous>:4:22)\n    at async <anonymous>:316:30\n    at runCommand (/home/claude/stand/packages/bench/src/functional/lib/stand.mjs:268:15)\n    at Object.run (/home/claude/stand/packages/bench/src/functional/checks/04-late-nav.mjs:38:21)\n    at async Object.runConfig (/home/claude/stand/packages/bench/src/functional/lib/runner.mjs:81:29)\n    at async main (/home/claude/stand/packages/bench/src/functional/run.mjs:82:7)",
+        "partial": {}
+      }
+    },
+    {
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "Z: все 50 страниц материализованы (25000 фигур), retained=50/25000",
+      "durationMs": 5647,
+      "details": {
+        "summary": "Z: все 50 страниц материализованы (25000 фигур), retained=50/25000"
+      }
+    },
+    {
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    }
+  ],
+  "passed": false,
+  "verdict": {
+    "verdict": "не допущено",
+    "admitted": false,
+    "caveats": [
+      "провалы: 4-late-nav"
+    ],
+    "failed": [
+      "4-late-nav"
+    ],
+    "skippedChecks": [],
+    "notApplicable": [
+      {
+        "id": "I2-window",
+        "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+      }
+    ]
+  }
+}

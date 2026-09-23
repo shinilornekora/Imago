@@ -1,0 +1,124 @@
+{
+  "name": "main",
+  "doc": "doc-acc-50x500",
+  "sourceId": "doc-acc-50x500-src-1",
+  "fill": "#1e90ff",
+  "docJson": "data/acceptance.json",
+  "configs": [
+    {
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    }
+  ],
+  "repetitions": 30,
+  "seed": 20260911,
+  "shaper": {
+    "delayMs": 25,
+    "bandwidthMbit": 20,
+    "handshakeRtt": true,
+    "statsUrl": "http://127.0.0.1:8081"
+  },
+  "baseUrl": "http://127.0.0.1:8080",
+  "api": {
+    "url": "http://127.0.0.1:3000",
+    "login": "alice"
+  },
+  "resetCommand": null,
+  "referenceCommand": "scripts/reference-check.sh",
+  "procGroups": [
+    {
+      "name": "api",
+      "pidFile": "results/logs/api.pid",
+      "exclude": [
+        "netshaper",
+        "zero-cache"
+      ]
+    },
+    {
+      "name": "pg",
+      "patterns": [
+        "(^|/)postgres .*16/main",
+        "^postgres: 16/main"
+      ],
+      "exclude": [
+        "zerospike",
+        "spike"
+      ]
+    },
+    {
+      "name": "zero",
+      "pidFile": "results/logs/zero.pid",
+      "patterns": [
+        "stand/node_modules/.*zero-cache",
+        "zero-cache.*results/zero-replica"
+      ],
+      "exclude": [
+        "spike-zero"
+      ],
+      "dir": "results/zero-replica",
+      "adapters": [
+        "Z"
+      ]
+    }
+  ],
+  "browser": {
+    "channel": "chromium",
+    "headless": true,
+    "args": [
+      "--disable-extensions"
+    ],
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "scenario": {
+    "route": [
+      2,
+      3,
+      1,
+      4,
+      2,
+      5,
+      1,
+      6,
+      3,
+      50
+    ],
+    "pauseMs": 1000,
+    "cmdAfterStep": 5,
+    "stepTimeoutMs": 20000,
+    "autologin": "alice"
+  },
+  "docPages": 50,
+  "docShapesPerPage": 500,
+  "cooldownMs": 1000,
+  "maxConsecutiveErrors": 5,
+  "notes": "основная серия: 6 конфигураций, RTT 50 мс, 20 Мбит/с"
+}

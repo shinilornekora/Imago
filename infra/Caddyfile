@@ -1,0 +1,57 @@
+# Маршрутизатор стенда (SPEC §7.1, §8): /api/* → api:3000, /zero/* → zero-cache:4848 (WebSocket), остальное → статика api.
+{
+    admin off
+    auto_https off
+}
+
+:80 {
+    # ВНИМАНИЕ (граница применимости чисел обмена): здесь HTTP сжимается, а в
+    # измеряемом пути песочницы (шейпер → Fastify) сжатия НЕТ ни у HTTP, ни у
+    # WebSocket. Поэтому `bytes_in` из серий — это несжатый JSON, и соотношение
+    # объёмов H/Q против Z в этом контуре будет другим. Либо включайте такое же
+    # сжатие в измеряемом пути, либо не переносите абсолютные объёмы обмена на
+    # контур Compose. См. docs/DEVIATIONS.md, «Границы выполненной работы».
+    encode zstd gzip
+
+    # Административные интерфейсы zero-cache наружу не выставляются (§1.6:
+    # «административные интерфейсы zero-cache доступны только внутри контура»).
+    # Путь синхронизации (/zero/sync, WebSocket) при этом не затронут.
+    @zero_admin path /zero/statz* /zero/heapz* /zero/inspector* /zero/replication-status*
+    handle @zero_admin {
+        respond "forbidden" 403
+    }
+
+    # Тестовые хуки (SPEC §2.3) наружу НЕ публикуются. /api/* проксируется целиком, поэтому без
+    # этого блока POST /api/test/reset и /api/test/delay доступны всем, кто видит публикуемый порт
+    # (а §1.2 прямо предусматривает STAND_PUBLIC_BIND=0.0.0.0 для контрольного клиента).
+    # Блокируемый путь задаётся подстановкой: по умолчанию это и есть /api/test/*. Чтобы
+    # опубликовать хуки ОСОЗНАННО, замените в infra/.env значение на путь-заглушку
+    # STAND_CADDY_TEST_HOOKS_MATCH=/__test_hooks_published__ — он не совпадёт ни с одним запросом,
+    # и /api/test/* пойдёт в api как обычный /api/*. Вторая, независимая мера — сам api: при
+    # непетлевой привязке он не поднимется с STAND_TEST_HOOKS=1 и пустым секретом.
+    @test_hooks path {$STAND_CADDY_TEST_HOOKS_MATCH:/api/test/*}
+    handle @test_hooks {
+        respond "forbidden: test hooks are not published by this proxy" 403
+    }
+
+    @api path /api/*
+    handle @api {
+        reverse_proxy api:3000
+    }
+
+    # zero-cache ожидает пути /zero/... (ZERO_PATH в shared); WebSocket проксируется прозрачно.
+    @zero path /zero/*
+    handle @zero {
+        reverse_proxy {$ZERO_UPSTREAM:zero-cache:4848}
+    }
+
+    # Статика клиента (SPA) отдаётся тем же api (packages/client/dist).
+    handle {
+        reverse_proxy api:3000
+    }
+
+    log {
+        output stdout
+        format json
+    }
+}

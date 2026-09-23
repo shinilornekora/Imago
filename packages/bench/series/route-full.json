@@ -1,0 +1,166 @@
+{
+  "name": "route-full",
+  "doc": "doc-acc-50x500",
+  "sourceId": "doc-acc-50x500-src-1",
+  "fill": "#1e90ff",
+  "docJson": "data/acceptance.json",
+  "configs": [
+    {
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    }
+  ],
+  "repetitions": 10,
+  "seed": 20260911,
+  "shaper": {
+    "delayMs": 25,
+    "bandwidthMbit": 20,
+    "handshakeRtt": true,
+    "statsUrl": "http://127.0.0.1:8081"
+  },
+  "baseUrl": "http://127.0.0.1:8080",
+  "api": {
+    "url": "http://127.0.0.1:3000",
+    "login": "alice"
+  },
+  "resetCommand": null,
+  "referenceCommand": "scripts/reference-check.sh",
+  "procGroups": [
+    {
+      "name": "api",
+      "pidFile": "results/logs/api.pid",
+      "exclude": [
+        "netshaper",
+        "zero-cache"
+      ]
+    },
+    {
+      "name": "pg",
+      "patterns": [
+        "(^|/)postgres .*16/main",
+        "^postgres: 16/main"
+      ],
+      "exclude": [
+        "zerospike",
+        "spike"
+      ]
+    },
+    {
+      "name": "zero",
+      "pidFile": "results/logs/zero.pid",
+      "patterns": [
+        "stand/node_modules/.*zero-cache",
+        "zero-cache.*results/zero-replica"
+      ],
+      "exclude": [
+        "spike-zero"
+      ],
+      "dir": "results/zero-replica",
+      "adapters": [
+        "Z"
+      ]
+    }
+  ],
+  "browser": {
+    "channel": "chromium",
+    "headless": true,
+    "args": [
+      "--disable-extensions"
+    ],
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "scenario": {
+    "route": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50
+    ],
+    "pauseMs": 1000,
+    "cmdAfterStep": 5,
+    "stepTimeoutMs": 20000,
+    "autologin": "alice",
+    "budgets": {
+      "scenarioMs": 70000
+    }
+  },
+  "docPages": 50,
+  "docShapesPerPage": 500,
+  "cooldownMs": 1000,
+  "maxConsecutiveErrors": 5,
+  "notes": "последовательный просмотр всего документа: 49 переходов 2→50, все 50 страниц; бюджет сценария 70 с (30 с §1.2 + 40 объявленных пауз сверх маршрута §7.2)"
+}

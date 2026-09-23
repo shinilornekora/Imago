@@ -1,0 +1,271 @@
+{
+  "base": "http://127.0.0.1:3011",
+  "label": "isolated-recheck",
+  "docId": "doc-acc-50x500",
+  "docJson": "data/acceptance.json",
+  "docPages": 50,
+  "docShapes": 25000,
+  "docProfile": "doc-acc-50x500: 50 страниц × 500 фигур; источник проверок doc-acc-50x500-src-1 (100 экземпляров на 10 страницах, непереопределённые на 10); библиотечная страница doc-acc-50x500-p50",
+  "bobDocId": "doc-bob-5x50",
+  "adapters": [
+    "H",
+    "Q"
+  ],
+  "zeroUrl": null,
+  "zeroQueryApi": "http://127.0.0.1:3011",
+  "startedAt": "2026-09-13T00:31:19.033Z",
+  "finishedAt": "2026-09-13T00:31:42.246Z",
+  "checkSet": [
+    "3-source-fill",
+    "4-late-nav",
+    "5-stale-read",
+    "6-retry"
+  ],
+  "partialCheckSet": true,
+  "totals": {
+    "pass": 8,
+    "fail": 0,
+    "skip": 0,
+    "na": 0,
+    "configs": 2,
+    "admitted": [],
+    "admittedPartial": [
+      "Q/P/cache=1",
+      "Q/F"
+    ],
+    "admittedWithCaveat": [],
+    "notAdmitted": []
+  },
+  "verdicts": [
+    {
+      "label": "Q/P/cache=1",
+      "key": "QP1",
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 3-source-fill, 4-late-nav, 5-stale-read, 6-retry"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Q/F",
+      "key": "QF1",
+      "config": {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 3-source-fill, 4-late-nav, 5-stale-read, 6-retry"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    }
+  ],
+  "configs": [
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "Q/P/cache=1",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 3-source-fill, 4-late-nav, 5-stale-read, 6-retry"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+          "durationMs": 2466
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 1275
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P: старое чтение: ответ 200 через 1514 мс, команда отправлена через 125 мс после его начала; чтений X: 2; итог doc-acc-50x500-p7 rev=1, doc-acc-50x500-inst-1-20=#112233; зонд 536 опросов, без отката",
+          "durationMs": 2672
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 2889
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "Q/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 3-source-fill, 4-late-nav, 5-stale-read, 6-retry"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 0), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+          "durationMs": 3076
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон; F: все 10 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+          "durationMs": 4010
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "F: старое чтение: ответ 200 через 1542 мс, команда отправлена через 16 мс после его начала; чтений X: 2; итог doc-acc-50x500-p7 rev=1, doc-acc-50x500-inst-1-20=#112233; зонд 648 опросов, без отката",
+          "durationMs": 3050
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 3448
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+      "durationMs": 2466
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1275
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P: старое чтение: ответ 200 через 1514 мс, команда отправлена через 125 мс после его начала; чтений X: 2; итог doc-acc-50x500-p7 rev=1, doc-acc-50x500-inst-1-20=#112233; зонд 536 опросов, без отката",
+      "durationMs": 2672
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 2889
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 0), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+      "durationMs": 3076
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон; F: все 10 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+      "durationMs": 4010
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "F: старое чтение: ответ 200 через 1542 мс, команда отправлена через 16 мс после его начала; чтений X: 2; итог doc-acc-50x500-p7 rev=1, doc-acc-50x500-inst-1-20=#112233; зонд 648 опросов, без отката",
+      "durationMs": 3050
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 3448
+    }
+  ]
+}

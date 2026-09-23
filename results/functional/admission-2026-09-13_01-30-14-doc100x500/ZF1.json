@@ -1,0 +1,132 @@
+{
+  "config": {
+    "adapter": "Z",
+    "mode": "F",
+    "cache": 1
+  },
+  "key": "ZF1",
+  "label": "Z/F",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 89 опросов без частичных снимков; p2: 500 фигур, зонд 4 опросов; холст: 65 цветов",
+      "durationMs": 1096,
+      "details": {
+        "summary": "p1: 500 фигур, ревизия 0, зонд 89 опросов без частичных снимков; p2: 500 фигур, зонд 4 опросов; холст: 65 цветов",
+        "probe1": {
+          "ticks": 89,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 4,
+          "records": 1,
+          "immediate": {
+            "state": "loading",
+            "snapNull": false
+          },
+          "dt": 59
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-large-100x500-src-1, #aa00aa) с активной doc-large-100x500-p2: affectedPages=10 (незагруженных до команды: 0), affectedShapes=81; compare-db + operations ok; снимок doc-large-100x500-p2 = эталон",
+      "durationMs": 9411,
+      "details": {
+        "summary": "setSourceFill(doc-large-100x500-src-1, #aa00aa) с активной doc-large-100x500-p2: affectedPages=10 (незагруженных до команды: 0), affectedShapes=81; compare-db + operations ok; снимок doc-large-100x500-p2 = эталон",
+        "source": "doc-large-100x500-src-1",
+        "activePage": "doc-large-100x500-p2",
+        "neverLoaded": [],
+        "result": {
+          "opId": "58345a22-e8f2-4bf8-8834-419086c840f8",
+          "revision": 1,
+          "affectedPages": [
+            "doc-large-100x500-p100",
+            "doc-large-100x500-p12",
+            "doc-large-100x500-p2",
+            "doc-large-100x500-p23",
+            "doc-large-100x500-p34",
+            "doc-large-100x500-p45",
+            "doc-large-100x500-p55",
+            "doc-large-100x500-p66",
+            "doc-large-100x500-p77",
+            "doc-large-100x500-p88"
+          ],
+          "affectedShapes": 81
+        },
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_01-30-14-doc100x500/artifacts/ZF1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-large-100x500-src-1) rev=1 открыта doc-large-100x500-p100: page-ready rev=1, снимок = эталон; F: все 10 затронутых страниц обновлены синхронизацией, снимки всех 100 страниц = эталон",
+      "durationMs": 11310,
+      "details": {
+        "summary": "после setSourceFill(doc-large-100x500-src-1) rev=1 открыта doc-large-100x500-p100: page-ready rev=1, снимок = эталон; F: все 10 затронутых страниц обновлены синхронизацией, снимки всех 100 страниц = эталон",
+        "source": "doc-large-100x500-src-1",
+        "activePage": "doc-large-100x500-p2",
+        "latePage": "doc-large-100x500-p100",
+        "affected": [
+          "doc-large-100x500-p100",
+          "doc-large-100x500-p12",
+          "doc-large-100x500-p2",
+          "doc-large-100x500-p23",
+          "doc-large-100x500-p34",
+          "doc-large-100x500-p45",
+          "doc-large-100x500-p55",
+          "doc-large-100x500-p66",
+          "doc-large-100x500-p77",
+          "doc-large-100x500-p88"
+        ],
+        "readsY": 0,
+        "note": "Z: обновление затронутых страниц приходит синхронизацией (HTTP-чтений нет)"
+      }
+    },
+    {
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "Z: все 100 страниц материализованы (50000 фигур), retained=100/50000",
+      "durationMs": 11027,
+      "details": {
+        "summary": "Z: все 100 страниц материализованы (50000 фигур), retained=100/50000"
+      }
+    },
+    {
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    }
+  ],
+  "passed": true,
+  "verdict": {
+    "verdict": "допуск (частичный набор)",
+    "admitted": false,
+    "caveats": [
+      "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+    ],
+    "failed": [],
+    "skippedChecks": [],
+    "notApplicable": [
+      {
+        "id": "I2-window",
+        "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+      }
+    ]
+  }
+}

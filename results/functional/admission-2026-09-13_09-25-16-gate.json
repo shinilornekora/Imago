@@ -1,0 +1,471 @@
+{
+  "rows": [
+    {
+      "series": "main",
+      "doc": "doc-acc-50x500",
+      "config": "H/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "main",
+      "doc": "doc-acc-50x500",
+      "config": "H/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "main",
+      "doc": "doc-acc-50x500",
+      "config": "Q/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "main",
+      "doc": "doc-acc-50x500",
+      "config": "Q/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "main",
+      "doc": "doc-acc-50x500",
+      "config": "Z/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "main",
+      "doc": "doc-acc-50x500",
+      "config": "Z/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "cache3",
+      "doc": "doc-acc-50x500",
+      "config": "H/P/cache=3",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (3 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance-win/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "cache3",
+      "doc": "doc-acc-50x500",
+      "config": "Q/P/cache=3",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (3 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance-win/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "cache3",
+      "doc": "doc-acc-50x500",
+      "config": "Z/P/cache=3",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (3 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance-win/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "cache10",
+      "doc": "doc-acc-50x500",
+      "config": "H/P/cache=10",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (3 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance-win/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "cache10",
+      "doc": "doc-acc-50x500",
+      "config": "Q/P/cache=10",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (3 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance-win/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "cache10",
+      "doc": "doc-acc-50x500",
+      "config": "Z/P/cache=10",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (3 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance-win/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc5x100",
+      "doc": "doc-small-5x100",
+      "config": "H/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc5x100/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc5x100",
+      "doc": "doc-small-5x100",
+      "config": "H/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc5x100/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc5x100",
+      "doc": "doc-small-5x100",
+      "config": "Q/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc5x100/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc5x100",
+      "doc": "doc-small-5x100",
+      "config": "Q/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc5x100/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc5x100",
+      "doc": "doc-small-5x100",
+      "config": "Z/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc5x100/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc5x100",
+      "doc": "doc-small-5x100",
+      "config": "Z/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc5x100/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc10x200",
+      "doc": "doc-small-10x200",
+      "config": "H/F",
+      "status": "ok",
+      "onDoc": "допуск (11 проверок, results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc10x200",
+      "doc": "doc-small-10x200",
+      "config": "H/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (11 проверок, results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc10x200",
+      "doc": "doc-small-10x200",
+      "config": "Q/F",
+      "status": "ok",
+      "onDoc": "допуск (11 проверок, results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc10x200",
+      "doc": "doc-small-10x200",
+      "config": "Q/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (11 проверок, results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc10x200",
+      "doc": "doc-small-10x200",
+      "config": "Z/F",
+      "status": "ok",
+      "onDoc": "допуск (11 проверок, results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc10x200",
+      "doc": "doc-small-10x200",
+      "config": "Z/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (11 проверок, results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc100x500",
+      "doc": "doc-large-100x500",
+      "config": "H/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc100x500/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc100x500",
+      "doc": "doc-large-100x500",
+      "config": "H/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc100x500/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc100x500",
+      "doc": "doc-large-100x500",
+      "config": "Q/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc100x500/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc100x500",
+      "doc": "doc-large-100x500",
+      "config": "Q/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc100x500/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc100x500",
+      "doc": "doc-large-100x500",
+      "config": "Z/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc100x500/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc100x500",
+      "doc": "doc-large-100x500",
+      "config": "Z/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc100x500/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc50x1000",
+      "doc": "doc-dense-50x1000",
+      "config": "H/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc50x1000/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc50x1000",
+      "doc": "doc-dense-50x1000",
+      "config": "H/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc50x1000/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc50x1000",
+      "doc": "doc-dense-50x1000",
+      "config": "Q/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc50x1000/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc50x1000",
+      "doc": "doc-dense-50x1000",
+      "config": "Q/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc50x1000/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc50x1000",
+      "doc": "doc-dense-50x1000",
+      "config": "Z/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc50x1000/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "doc50x1000",
+      "doc": "doc-dense-50x1000",
+      "config": "Z/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (5 проверок, results/functional/admission-2026-09-13_09-25-16-doc50x1000/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "rtt150",
+      "doc": "doc-acc-50x500",
+      "config": "H/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "rtt150",
+      "doc": "doc-acc-50x500",
+      "config": "H/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "rtt150",
+      "doc": "doc-acc-50x500",
+      "config": "Q/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "rtt150",
+      "doc": "doc-acc-50x500",
+      "config": "Q/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "rtt150",
+      "doc": "doc-acc-50x500",
+      "config": "Z/F",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    },
+    {
+      "series": "rtt150",
+      "doc": "doc-acc-50x500",
+      "config": "Z/P/cache=1",
+      "status": "ok",
+      "onDoc": "допуск (частичный набор) (8 проверок, results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json)",
+      "full": "допуск @ doc-small-10x200 (results/functional/admission-2026-09-13_09-25-16-small/summary.json)",
+      "notes": ""
+    }
+  ],
+  "problems": [],
+  "caveats": [],
+  "summaries": [
+    {
+      "file": "results/functional/admission-2026-09-13_09-25-16-small/summary.json",
+      "docId": "doc-small-10x200",
+      "label": "small",
+      "partial": false,
+      "checkSet": [
+        "1-open",
+        "2-local-fill",
+        "3-source-fill",
+        "4-late-nav",
+        "5-stale-read",
+        "6-retry",
+        "S1-access",
+        "S2-logout",
+        "S3-zero-query",
+        "I1-full-load",
+        "I2-window"
+      ]
+    },
+    {
+      "file": "results/functional/admission-2026-09-13_09-25-16-acceptance/summary.json",
+      "docId": "doc-acc-50x500",
+      "label": "acceptance",
+      "partial": true,
+      "checkSet": [
+        "1-open",
+        "2-local-fill",
+        "3-source-fill",
+        "4-late-nav",
+        "5-stale-read",
+        "6-retry",
+        "I1-full-load",
+        "I2-window"
+      ]
+    },
+    {
+      "file": "results/functional/admission-2026-09-13_09-25-16-acceptance-win/summary.json",
+      "docId": "doc-acc-50x500",
+      "label": "acceptance-win",
+      "partial": true,
+      "checkSet": [
+        "2-local-fill",
+        "4-late-nav",
+        "I2-window"
+      ]
+    },
+    {
+      "file": "results/functional/admission-2026-09-13_09-25-16-doc5x100/summary.json",
+      "docId": "doc-small-5x100",
+      "label": "doc5x100",
+      "partial": true,
+      "checkSet": [
+        "1-open",
+        "3-source-fill",
+        "4-late-nav",
+        "I1-full-load",
+        "I2-window"
+      ]
+    },
+    {
+      "file": "results/functional/admission-2026-09-13_09-25-16-doc100x500/summary.json",
+      "docId": "doc-large-100x500",
+      "label": "doc100x500",
+      "partial": true,
+      "checkSet": [
+        "1-open",
+        "3-source-fill",
+        "4-late-nav",
+        "I1-full-load",
+        "I2-window"
+      ]
+    },
+    {
+      "file": "results/functional/admission-2026-09-13_09-25-16-doc50x1000/summary.json",
+      "docId": "doc-dense-50x1000",
+      "label": "doc50x1000",
+      "partial": true,
+      "checkSet": [
+        "1-open",
+        "3-source-fill",
+        "4-late-nav",
+        "I1-full-load",
+        "I2-window"
+      ]
+    }
+  ]
+}

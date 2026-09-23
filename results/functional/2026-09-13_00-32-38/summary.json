@@ -1,0 +1,325 @@
+{
+  "base": "http://127.0.0.1:3011",
+  "label": "isolated-z",
+  "docId": "doc-acc-50x500",
+  "docJson": "data/acceptance.json",
+  "docPages": 50,
+  "docShapes": 25000,
+  "docProfile": "doc-acc-50x500: 50 страниц × 500 фигур; источник проверок doc-acc-50x500-src-1 (100 экземпляров на 10 страницах, непереопределённые на 10); библиотечная страница doc-acc-50x500-p50",
+  "bobDocId": "doc-bob-5x50",
+  "adapters": [
+    "Z"
+  ],
+  "zeroUrl": "http://127.0.0.1:4848",
+  "zeroQueryApi": "http://127.0.0.1:3011",
+  "startedAt": "2026-09-13T00:32:40.296Z",
+  "finishedAt": "2026-09-13T00:33:18.149Z",
+  "checkSet": [
+    "1-open",
+    "3-source-fill",
+    "4-late-nav",
+    "5-stale-read",
+    "6-retry"
+  ],
+  "partialCheckSet": true,
+  "totals": {
+    "pass": 4,
+    "fail": 6,
+    "skip": 0,
+    "na": 0,
+    "configs": 2,
+    "admitted": [],
+    "admittedPartial": [],
+    "admittedWithCaveat": [],
+    "notAdmitted": [
+      "Z/P/cache=1",
+      "Z/F"
+    ]
+  },
+  "verdicts": [
+    {
+      "label": "Z/P/cache=1",
+      "key": "ZP1",
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 4-late-nav, 5-stale-read, 6-retry"
+      ],
+      "failed": [
+        "4-late-nav",
+        "5-stale-read",
+        "6-retry"
+      ],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Z/F",
+      "key": "ZF1",
+      "config": {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 3-source-fill, 4-late-nav, 5-stale-read"
+      ],
+      "failed": [
+        "3-source-fill",
+        "4-late-nav",
+        "5-stale-read"
+      ],
+      "skippedChecks": [],
+      "notApplicable": []
+    }
+  ],
+  "configs": [
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "Z/P/cache=1",
+      "passed": false,
+      "skipped": null,
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 4-late-nav, 5-stale-read, 6-retry"
+      ],
+      "failed": [
+        "4-late-nav",
+        "5-stale-read",
+        "6-retry"
+      ],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 500 фигур, ревизия 0, зонд 107 опросов без частичных снимков; p2: 500 фигур, зонд 40 опросов; P (Z, WebSocket, без хука задержки): снимок null и state=loading до полного набора (266 мс); холст: 65 цветов",
+          "durationMs": 1291
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+          "durationMs": 2202
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "fail",
+          "message": "page.evaluate: ApiHttpError: operation \"5023d030-668b-4659-8d09-eda4768eefa0\" not found |     at je (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:63790) |     at async yC.fetchOperationResult (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:29094) |     at async yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22971) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:68975) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22)",
+          "durationMs": 3386
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "fail",
+          "message": "к моменту команды doc-acc-50x500-p2 ещё не доставлена",
+          "durationMs": 1164
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "fail",
+          "message": "журнал операций пуст после сброса |  | 3 !== 0 | ",
+          "durationMs": 1158
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "Z/F",
+      "passed": false,
+      "skipped": null,
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 3-source-fill, 4-late-nav, 5-stale-read"
+      ],
+      "failed": [
+        "3-source-fill",
+        "4-late-nav",
+        "5-stale-read"
+      ],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 500 фигур, ревизия 0, зонд 126 опросов без частичных снимков; p2: 500 фигур, зонд 7 опросов; холст: 65 цветов",
+          "durationMs": 1451
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "fail",
+          "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at _C (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:19241) |     at yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22886) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:69180) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+          "durationMs": 6632
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "fail",
+          "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at _C (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:19241) |     at yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22886) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:69180) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+          "durationMs": 7723
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "fail",
+          "message": "команда оболочки (HTTP, alice): 409 {\"error\":\"revision_mismatch\",\"message\":\"expected revision 0, current is 1\",\"currentRevision\":1} |  | 409 !== 200 | ",
+          "durationMs": 921
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "Z А: офлайн 707 мс до отправки → доставлено после восстановления (.server через 1347 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 983 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+          "durationMs": 10068
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 107 опросов без частичных снимков; p2: 500 фигур, зонд 40 опросов; P (Z, WebSocket, без хука задержки): снимок null и state=loading до полного набора (266 мс); холст: 65 цветов",
+      "durationMs": 1291
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+      "durationMs": 2202
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: operation \"5023d030-668b-4659-8d09-eda4768eefa0\" not found |     at je (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:63790) |     at async yC.fetchOperationResult (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:29094) |     at async yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22971) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:68975) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22)",
+      "durationMs": 3386
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "fail",
+      "message": "к моменту команды doc-acc-50x500-p2 ещё не доставлена",
+      "durationMs": 1164
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "fail",
+      "message": "журнал операций пуст после сброса |  | 3 !== 0 | ",
+      "durationMs": 1158
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 126 опросов без частичных снимков; p2: 500 фигур, зонд 7 опросов; холст: 65 цветов",
+      "durationMs": 1451
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at _C (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:19241) |     at yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22886) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:69180) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 6632
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at _C (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:19241) |     at yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22886) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:69180) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 7723
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "fail",
+      "message": "команда оболочки (HTTP, alice): 409 {\"error\":\"revision_mismatch\",\"message\":\"expected revision 0, current is 1\",\"currentRevision\":1} |  | 409 !== 200 | ",
+      "durationMs": 921
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "Z А: офлайн 707 мс до отправки → доставлено после восстановления (.server через 1347 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 983 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+      "durationMs": 10068
+    }
+  ]
+}

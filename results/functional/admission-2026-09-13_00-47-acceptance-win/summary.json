@@ -1,0 +1,613 @@
+{
+  "base": "http://127.0.0.1:3007",
+  "label": "acceptance-win",
+  "docId": "doc-acc-50x500",
+  "docJson": "data/acceptance.json",
+  "docPages": 50,
+  "docShapes": 25000,
+  "docProfile": "doc-acc-50x500: 50 страниц × 500 фигур; источник проверок doc-acc-50x500-src-1 (100 экземпляров на 10 страницах, непереопределённые на 10); библиотечная страница doc-acc-50x500-p50",
+  "bobDocId": "doc-bob-5x50",
+  "adapters": [
+    "H",
+    "Q",
+    "Z"
+  ],
+  "zeroUrl": "http://127.0.0.1:4848",
+  "zeroQueryApi": "http://127.0.0.1:3000",
+  "startedAt": "2026-09-13T00:51:24.512Z",
+  "finishedAt": "2026-09-13T00:51:56.775Z",
+  "checkSet": [
+    "2-local-fill",
+    "4-late-nav",
+    "I2-window"
+  ],
+  "partialCheckSet": true,
+  "totals": {
+    "pass": 18,
+    "fail": 0,
+    "skip": 0,
+    "na": 0,
+    "configs": 6,
+    "admitted": [],
+    "admittedPartial": [
+      "H/P/cache=3",
+      "H/P/cache=10",
+      "Q/P/cache=3",
+      "Q/P/cache=10",
+      "Z/P/cache=3",
+      "Z/P/cache=10"
+    ],
+    "admittedWithCaveat": [],
+    "notAdmitted": []
+  },
+  "verdicts": [
+    {
+      "label": "H/P/cache=3",
+      "key": "HP3",
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 3
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "H/P/cache=10",
+      "key": "HP10",
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 10
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Q/P/cache=3",
+      "key": "QP3",
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 3
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Q/P/cache=10",
+      "key": "QP10",
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 10
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Z/P/cache=3",
+      "key": "ZP3",
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 3
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Z/P/cache=10",
+      "key": "ZP10",
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 10
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    }
+  ],
+  "configs": [
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 3
+      },
+      "label": "H/P/cache=3",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1859
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 1003
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, чтений 8 (по LRU-модели)",
+          "durationMs": 1338
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 10
+      },
+      "label": "H/P/cache=10",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 2153
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 974
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, чтений 7 (по LRU-модели)",
+          "durationMs": 1304
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 3
+      },
+      "label": "Q/P/cache=3",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1835
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 992
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, чтений 8 (по LRU-модели)",
+          "durationMs": 1244
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 10
+      },
+      "label": "Q/P/cache=10",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 2484
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 957
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, чтений 7 (по LRU-модели)",
+          "durationMs": 1283
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 3
+      },
+      "label": "Z/P/cache=3",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 2792
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 1342
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 7 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+          "durationMs": 2308
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 10
+      },
+      "label": "Z/P/cache=10",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 3703
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 1279
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 6 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+          "durationMs": 2146
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1859
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1003
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, чтений 8 (по LRU-модели)",
+      "durationMs": 1338
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 2153
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 974
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, чтений 7 (по LRU-модели)",
+      "durationMs": 1304
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1835
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 992
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, чтений 8 (по LRU-модели)",
+      "durationMs": 1244
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 2484
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 957
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, чтений 7 (по LRU-модели)",
+      "durationMs": 1283
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 2792
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1342
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 7 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+      "durationMs": 2308
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 3703
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1279
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 6 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+      "durationMs": 2146
+    }
+  ]
+}

@@ -1,0 +1,3151 @@
+{
+  "base": "http://127.0.0.1:3005",
+  "label": "small",
+  "docId": "doc-small-10x200",
+  "docJson": "data/small-10x200.json",
+  "docPages": 10,
+  "docShapes": 2000,
+  "docProfile": "doc-small-10x200: 10 страниц × 200 фигур; источник проверок doc-small-10x200-src-1 (100 экземпляров на 9 страницах, непереопределённые на 9); библиотечная страница doc-small-10x200-p10",
+  "bobDocId": "doc-bob-5x50",
+  "adapters": [
+    "H",
+    "Q",
+    "Z"
+  ],
+  "zeroUrl": "http://127.0.0.1:4848",
+  "zeroQueryApi": "http://127.0.0.1:3000",
+  "startedAt": "2026-09-13T01:30:15.727Z",
+  "finishedAt": "2026-09-13T01:33:21.557Z",
+  "checkSet": [
+    "1-open",
+    "2-local-fill",
+    "3-source-fill",
+    "4-late-nav",
+    "5-stale-read",
+    "6-retry",
+    "S1-access",
+    "S2-logout",
+    "S3-zero-query",
+    "I1-full-load",
+    "I2-window"
+  ],
+  "partialCheckSet": false,
+  "totals": {
+    "pass": 112,
+    "fail": 0,
+    "skip": 0,
+    "na": 20,
+    "configs": 12,
+    "admitted": [
+      "H/F",
+      "H/P/cache=1",
+      "H/P/cache=3",
+      "H/P/cache=10",
+      "Q/F",
+      "Q/P/cache=1",
+      "Q/P/cache=3",
+      "Q/P/cache=10",
+      "Z/F",
+      "Z/P/cache=1",
+      "Z/P/cache=3",
+      "Z/P/cache=10"
+    ],
+    "admittedPartial": [],
+    "admittedWithCaveat": [],
+    "notAdmitted": []
+  },
+  "verdicts": [
+    {
+      "label": "H/F",
+      "key": "HF1",
+      "config": {
+        "adapter": "H",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ]
+    },
+    {
+      "label": "H/P/cache=1",
+      "key": "HP1",
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "H/P/cache=3",
+      "key": "HP3",
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 3
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "H/P/cache=10",
+      "key": "HP10",
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 10
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "Q/F",
+      "key": "QF1",
+      "config": {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ]
+    },
+    {
+      "label": "Q/P/cache=1",
+      "key": "QP1",
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "Q/P/cache=3",
+      "key": "QP3",
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 3
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "Q/P/cache=10",
+      "key": "QP10",
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 10
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "Z/F",
+      "key": "ZF1",
+      "config": {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ]
+    },
+    {
+      "label": "Z/P/cache=1",
+      "key": "ZP1",
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "Z/P/cache=3",
+      "key": "ZP3",
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 3
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "Z/P/cache=10",
+      "key": "ZP10",
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 10
+      },
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2"
+        }
+      ]
+    }
+  ],
+  "configs": [
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "H/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 51 опросов без частичных снимков; p2: 200 фигур, зонд 3 опросов; холст: 65 цветов",
+          "durationMs": 609
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 10 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1290
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 0), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 1080
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон; F: все 9 затронутых страниц перечитаны, снимки всех 10 страниц = эталон",
+          "durationMs": 1315
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "F: старое чтение: отменено клиентом (net::ERR_ABORTED) через 140 мс, команда отправлена через 72 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 622 опросов, без отката",
+          "durationMs": 2843
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 2039
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 1015
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=10/2000, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+          "durationMs": 848
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "na",
+          "message": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+          "durationMs": 0
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "pass",
+          "message": "все 10 страниц загружены (2000 фигур), 10 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+          "durationMs": 467
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "na",
+          "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+          "durationMs": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "H/P/cache=1",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 41 опросов без частичных снимков; p2: 200 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (735 мс), state=loading; холст: 65 цветов",
+          "durationMs": 1185
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1171
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 987
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 707
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P: старое чтение: отменено клиентом (net::ERR_ABORTED) через 141 мс, команда отправлена через 125 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 549 опросов, без отката",
+          "durationMs": 2646
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 1994
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 984
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=2/400, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+          "durationMs": 811
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "na",
+          "message": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+          "durationMs": 0
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+          "durationMs": 825
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 3
+      },
+      "label": "H/P/cache=3",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 32 опросов без частичных снимков; p2: 200 фигур, зонд 180 опросов; P: снимок null во время задержанного чтения (733 мс), state=loading; холст: 65 цветов",
+          "durationMs": 1171
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1306
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 1005
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 705
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P: старое чтение: отменено клиентом (net::ERR_ABORTED) через 140 мс, команда отправлена через 127 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 551 опросов, без отката",
+          "durationMs": 2565
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 1975
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 986
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=3/600, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+          "durationMs": 855
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "na",
+          "message": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+          "durationMs": 0
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, чтений 8 (по LRU-модели)",
+          "durationMs": 815
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 10
+      },
+      "label": "H/P/cache=10",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 39 опросов без частичных снимков; p2: 200 фигур, зонд 182 опросов; P: снимок null во время задержанного чтения (730 мс), state=loading; холст: 65 цветов",
+          "durationMs": 1197
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 11 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1429
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 984
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 669
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P: старое чтение: отменено клиентом (net::ERR_ABORTED) через 139 мс, команда отправлена через 128 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 552 опросов, без отката",
+          "durationMs": 2551
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 2006
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 994
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=3/600, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+          "durationMs": 827
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "na",
+          "message": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+          "durationMs": 0
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, чтений 7 (по LRU-модели)",
+          "durationMs": 735
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "Q/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 31 опросов без частичных снимков; p2: 200 фигур, зонд 3 опросов; холст: 65 цветов",
+          "durationMs": 488
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 10 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1252
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 0), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 1059
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон; F: все 9 затронутых страниц перечитаны, снимки всех 10 страниц = эталон",
+          "durationMs": 1263
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "F: старое чтение: ответ 200 через 1547 мс, команда отправлена через 100 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 629 опросов, без отката",
+          "durationMs": 2833
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 2113
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 1028
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=10/2000, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+          "durationMs": 827
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "na",
+          "message": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+          "durationMs": 0
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "pass",
+          "message": "все 10 страниц загружены (2000 фигур), 10 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+          "durationMs": 513
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "na",
+          "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+          "durationMs": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "Q/P/cache=1",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 34 опросов без частичных снимков; p2: 200 фигур, зонд 182 опросов; P: снимок null во время задержанного чтения (731 мс), state=loading; холст: 65 цветов",
+          "durationMs": 1169
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1164
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 987
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 687
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P: старое чтение: ответ 200 через 1508 мс, команда отправлена через 126 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 551 опросов, без отката",
+          "durationMs": 2555
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 1987
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 918
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=2/400, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+          "durationMs": 797
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "na",
+          "message": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+          "durationMs": 0
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+          "durationMs": 823
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 3
+      },
+      "label": "Q/P/cache=3",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 39 опросов без частичных снимков; p2: 200 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (741 мс), state=loading; холст: 65 цветов",
+          "durationMs": 1186
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1214
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 1030
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 676
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P: старое чтение: ответ 200 через 1507 мс, команда отправлена через 124 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 549 опросов, без отката",
+          "durationMs": 2551
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 1974
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 997
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=3/600, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+          "durationMs": 917
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "na",
+          "message": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+          "durationMs": 0
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, чтений 8 (по LRU-модели)",
+          "durationMs": 825
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 10
+      },
+      "label": "Q/P/cache=10",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "S3-zero-query",
+          "reason": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)"
+        },
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 23 опросов без частичных снимков; p2: 200 фигур, зонд 183 опросов; P: снимок null во время задержанного чтения (731 мс), state=loading; холст: 65 цветов",
+          "durationMs": 1170
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 11 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1399
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 999
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 690
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P: старое чтение: ответ 200 через 1507 мс, команда отправлена через 124 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 551 опросов, без отката",
+          "durationMs": 2582
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+          "durationMs": 2022
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 979
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=3/600, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+          "durationMs": 844
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "na",
+          "message": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+          "durationMs": 0
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, чтений 7 (по LRU-модели)",
+          "durationMs": 769
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "Z/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 62 опросов без частичных снимков; p2: 200 фигур, зонд 8 опросов; холст: 65 цветов",
+          "durationMs": 758
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 10 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1916
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 0), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 1538
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон; F: все 9 затронутых страниц обновлены синхронизацией, снимки всех 10 страниц = эталон",
+          "durationMs": 1704
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "F (Z): запрос страницы doc-small-10x200-p10 сделан за 416 мс ДО команды; команда (HTTP, второй участник) завершилась через 423 мс, а данные doc-small-10x200-p10 доставлены через 4204 мс — на 3781 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #2, срабатываний ?; страниц загружено к моменту команды: 0); готовность doc-small-10x200-p10: rev=1; итог doc-small-10x200-p10 rev=1, doc-small-10x200-inst-1-94=#112233; зонд 1048 опросов, без отката",
+          "durationMs": 4757
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "Z А: офлайн 703 мс до отправки → доставлено после восстановления (.server через 716 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 719 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+          "durationMs": 2874
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 1069
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=10/2000, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+          "durationMs": 1223
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "pass",
+          "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}} | page: zero query error: {\"error\":\"app\",\"id\":\"30woaxuoz7zlp\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+          "durationMs": 7576
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "pass",
+          "message": "Z: все 10 страниц материализованы (2000 фигур), retained=10/2000",
+          "durationMs": 1145
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "na",
+          "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+          "durationMs": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "Z/P/cache=1",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 49 опросов без частичных снимков; p2: 200 фигур, зонд 191 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 774 мс; холст: 65 цветов",
+          "durationMs": 1324
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1669
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 1260
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 1003
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P (Z): запрос страницы doc-small-10x200-p2 сделан за 157 мс ДО команды; команда (HTTP, второй участник) завершилась через 169 мс, а данные doc-small-10x200-p2 доставлены через 1852 мс — на 1683 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #4, срабатываний 1; страниц загружено к моменту команды: 1); готовность doc-small-10x200-p2: rev=0 (готовность наступила на прежней ревизии — клиент ещё не знал о чужой команде; итог сошёлся); итог doc-small-10x200-p2 rev=1, doc-small-10x200-inst-1-5=#112233; зонд 548 опросов, без отката",
+          "durationMs": 3069
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "Z А: офлайн 708 мс до отправки → доставлено после восстановления (.server через 729 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 733 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+          "durationMs": 2832
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 1066
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=2/400, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+          "durationMs": 1060
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "pass",
+          "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+          "durationMs": 7406
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 10 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+          "durationMs": 1529
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 3
+      },
+      "label": "Z/P/cache=3",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 54 опросов без частичных снимков; p2: 200 фигур, зонд 188 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 770 мс; холст: 65 цветов",
+          "durationMs": 1344
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 1896
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 1263
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 1069
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P (Z): запрос страницы doc-small-10x200-p2 сделан за 158 мс ДО команды; команда (HTTP, второй участник) завершилась через 166 мс, а данные doc-small-10x200-p2 доставлены через 1869 мс — на 1703 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #6, срабатываний 1; страниц загружено к моменту команды: 1); готовность doc-small-10x200-p2: rev=0 (готовность наступила на прежней ревизии — клиент ещё не знал о чужой команде; итог сошёлся); итог doc-small-10x200-p2 rev=1, doc-small-10x200-inst-1-5=#112233; зонд 549 опросов, без отката",
+          "durationMs": 3103
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "Z А: офлайн 701 мс до отправки → доставлено после восстановления (.server через 726 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 714 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+          "durationMs": 2786
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 1069
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=3/600, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+          "durationMs": 1026
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "pass",
+          "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+          "durationMs": 7392
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 7 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+          "durationMs": 1450
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 10
+      },
+      "label": "Z/P/cache=10",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск",
+      "admitted": true,
+      "caveats": [],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 200 фигур, ревизия 0, зонд 49 опросов без частичных снимков; p2: 200 фигур, зонд 187 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 791 мс; холст: 65 цветов",
+          "durationMs": 1385
+        },
+        {
+          "id": "2-local-fill",
+          "title": "2. Локальная заливка",
+          "status": "pass",
+          "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 11 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+          "durationMs": 2178
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+          "durationMs": 1211
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+          "durationMs": 975
+        },
+        {
+          "id": "5-stale-read",
+          "title": "5. Ответ старого чтения",
+          "status": "pass",
+          "message": "P (Z): запрос страницы doc-small-10x200-p2 сделан за 161 мс ДО команды; команда (HTTP, второй участник) завершилась через 169 мс, а данные doc-small-10x200-p2 доставлены через 1851 мс — на 1682 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #8, срабатываний 1; страниц загружено к моменту команды: 1); готовность doc-small-10x200-p2: rev=0 (готовность наступила на прежней ревизии — клиент ещё не знал о чужой команде; итог сошёлся); итог doc-small-10x200-p2 rev=1, doc-small-10x200-inst-1-5=#112233; зонд 554 опросов, без отката",
+          "durationMs": 3095
+        },
+        {
+          "id": "6-retry",
+          "title": "6. Повтор команды",
+          "status": "pass",
+          "message": "Z А: офлайн 701 мс до отправки → доставлено после восстановления (.server через 728 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 716 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+          "durationMs": 2870
+        },
+        {
+          "id": "S1-access",
+          "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+          "status": "pass",
+          "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+          "durationMs": 1067
+        },
+        {
+          "id": "S2-logout",
+          "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+          "status": "pass",
+          "message": "до выхода retained=2/400, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+          "durationMs": 1055
+        },
+        {
+          "id": "S3-zero-query",
+          "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+          "status": "pass",
+          "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+          "durationMs": 7380
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 6 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+          "durationMs": 1432
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 51 опросов без частичных снимков; p2: 200 фигур, зонд 3 опросов; холст: 65 цветов",
+      "durationMs": 609
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 10 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1290
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 0), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1080
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон; F: все 9 затронутых страниц перечитаны, снимки всех 10 страниц = эталон",
+      "durationMs": 1315
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "F: старое чтение: отменено клиентом (net::ERR_ABORTED) через 140 мс, команда отправлена через 72 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 622 опросов, без отката",
+      "durationMs": 2843
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 2039
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 1015
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=10/2000, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+      "durationMs": 848
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "na",
+      "message": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+      "durationMs": 0
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "все 10 страниц загружены (2000 фигур), 10 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+      "durationMs": 467
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 41 опросов без частичных снимков; p2: 200 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (735 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1185
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1171
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 987
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 707
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P: старое чтение: отменено клиентом (net::ERR_ABORTED) через 141 мс, команда отправлена через 125 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 549 опросов, без отката",
+      "durationMs": 2646
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 1994
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 984
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=2/400, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+      "durationMs": 811
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "na",
+      "message": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+      "durationMs": 825
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 32 опросов без частичных снимков; p2: 200 фигур, зонд 180 опросов; P: снимок null во время задержанного чтения (733 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1171
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1306
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1005
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 705
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P: старое чтение: отменено клиентом (net::ERR_ABORTED) через 140 мс, команда отправлена через 127 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 551 опросов, без отката",
+      "durationMs": 2565
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 1975
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 986
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=3/600, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+      "durationMs": 855
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "na",
+      "message": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=3",
+      "configKey": "HP3",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, чтений 8 (по LRU-модели)",
+      "durationMs": 815
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 39 опросов без частичных снимков; p2: 200 фигур, зонд 182 опросов; P: снимок null во время задержанного чтения (730 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1197
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 11 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1429
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 984
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 669
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P: старое чтение: отменено клиентом (net::ERR_ABORTED) через 139 мс, команда отправлена через 128 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 552 опросов, без отката",
+      "durationMs": 2551
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 2006
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 994
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=3/600, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+      "durationMs": 827
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "na",
+      "message": "путь синхронизации Zero отсутствует у адаптера H: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=10",
+      "configKey": "HP10",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, чтений 7 (по LRU-модели)",
+      "durationMs": 735
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 31 опросов без частичных снимков; p2: 200 фигур, зонд 3 опросов; холст: 65 цветов",
+      "durationMs": 488
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 10 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1252
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 0), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1059
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон; F: все 9 затронутых страниц перечитаны, снимки всех 10 страниц = эталон",
+      "durationMs": 1263
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "F: старое чтение: ответ 200 через 1547 мс, команда отправлена через 100 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 629 опросов, без отката",
+      "durationMs": 2833
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 2113
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 1028
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=10/2000, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+      "durationMs": 827
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "na",
+      "message": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "все 10 страниц загружены (2000 фигур), 10 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+      "durationMs": 513
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 34 опросов без частичных снимков; p2: 200 фигур, зонд 182 опросов; P: снимок null во время задержанного чтения (731 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1169
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1164
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 987
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 687
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P: старое чтение: ответ 200 через 1508 мс, команда отправлена через 126 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 551 опросов, без отката",
+      "durationMs": 2555
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 1987
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 918
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=2/400, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+      "durationMs": 797
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "na",
+      "message": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+      "durationMs": 823
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 39 опросов без частичных снимков; p2: 200 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (741 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1186
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1214
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1030
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 676
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P: старое чтение: ответ 200 через 1507 мс, команда отправлена через 124 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 549 опросов, без отката",
+      "durationMs": 2551
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 1974
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 997
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=3/600, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+      "durationMs": 917
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "na",
+      "message": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=3",
+      "configKey": "QP3",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, чтений 8 (по LRU-модели)",
+      "durationMs": 825
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 23 опросов без частичных снимков; p2: 200 фигур, зонд 183 опросов; P: снимок null во время задержанного чтения (731 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1170
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 11 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1399
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 999
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 690
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P: старое чтение: ответ 200 через 1507 мс, команда отправлена через 124 мс после его начала; чтений X: 2; итог doc-small-10x200-p3 rev=1, doc-small-10x200-inst-1-17=#112233; зонд 551 опросов, без отката",
+      "durationMs": 2582
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 2022
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 979
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=3/600, IDB до: 0; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401",
+      "durationMs": 844
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "na",
+      "message": "путь синхронизации Zero отсутствует у адаптера Q: чтение идёт по HTTP и покрыто проверкой Б1 (403/401)",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=10",
+      "configKey": "QP10",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, чтений 7 (по LRU-модели)",
+      "durationMs": 769
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 62 опросов без частичных снимков; p2: 200 фигур, зонд 8 опросов; холст: 65 цветов",
+      "durationMs": 758
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 10 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1916
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 0), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1538
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон; F: все 9 затронутых страниц обновлены синхронизацией, снимки всех 10 страниц = эталон",
+      "durationMs": 1704
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "F (Z): запрос страницы doc-small-10x200-p10 сделан за 416 мс ДО команды; команда (HTTP, второй участник) завершилась через 423 мс, а данные doc-small-10x200-p10 доставлены через 4204 мс — на 3781 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #2, срабатываний ?; страниц загружено к моменту команды: 0); готовность doc-small-10x200-p10: rev=1; итог doc-small-10x200-p10 rev=1, doc-small-10x200-inst-1-94=#112233; зонд 1048 опросов, без отката",
+      "durationMs": 4757
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "Z А: офлайн 703 мс до отправки → доставлено после восстановления (.server через 716 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 719 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+      "durationMs": 2874
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 1069
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=10/2000, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+      "durationMs": 1223
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "pass",
+      "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}} | page: zero query error: {\"error\":\"app\",\"id\":\"30woaxuoz7zlp\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+      "durationMs": 7576
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "Z: все 10 страниц материализованы (2000 фигур), retained=10/2000",
+      "durationMs": 1145
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 49 опросов без частичных снимков; p2: 200 фигур, зонд 191 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 774 мс; холст: 65 цветов",
+      "durationMs": 1324
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1669
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1260
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 1003
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P (Z): запрос страницы doc-small-10x200-p2 сделан за 157 мс ДО команды; команда (HTTP, второй участник) завершилась через 169 мс, а данные doc-small-10x200-p2 доставлены через 1852 мс — на 1683 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #4, срабатываний 1; страниц загружено к моменту команды: 1); готовность doc-small-10x200-p2: rev=0 (готовность наступила на прежней ревизии — клиент ещё не знал о чужой команде; итог сошёлся); итог doc-small-10x200-p2 rev=1, doc-small-10x200-inst-1-5=#112233; зонд 548 опросов, без отката",
+      "durationMs": 3069
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "Z А: офлайн 708 мс до отправки → доставлено после восстановления (.server через 729 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 733 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+      "durationMs": 2832
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 1066
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=2/400, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+      "durationMs": 1060
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "pass",
+      "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+      "durationMs": 7406
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 10 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+      "durationMs": 1529
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 54 опросов без частичных снимков; p2: 200 фигур, зонд 188 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 770 мс; холст: 65 цветов",
+      "durationMs": 1344
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1896
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1263
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 1069
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P (Z): запрос страницы doc-small-10x200-p2 сделан за 158 мс ДО команды; команда (HTTP, второй участник) завершилась через 166 мс, а данные doc-small-10x200-p2 доставлены через 1869 мс — на 1703 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #6, срабатываний 1; страниц загружено к моменту команды: 1); готовность doc-small-10x200-p2: rev=0 (готовность наступила на прежней ревизии — клиент ещё не знал о чужой команде; итог сошёлся); итог doc-small-10x200-p2 rev=1, doc-small-10x200-inst-1-5=#112233; зонд 549 опросов, без отката",
+      "durationMs": 3103
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "Z А: офлайн 701 мс до отправки → доставлено после восстановления (.server через 726 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 714 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+      "durationMs": 2786
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 1069
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=3/600, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+      "durationMs": 1026
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "pass",
+      "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+      "durationMs": 7392
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 3) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "Z/P/cache=3",
+      "configKey": "ZP3",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 7 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+      "durationMs": 1450
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 49 опросов без частичных снимков; p2: 200 фигур, зонд 187 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 791 мс; холст: 65 цветов",
+      "durationMs": 1385
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 11 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 2178
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 8), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1211
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон",
+      "durationMs": 975
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P (Z): запрос страницы doc-small-10x200-p2 сделан за 161 мс ДО команды; команда (HTTP, второй участник) завершилась через 169 мс, а данные doc-small-10x200-p2 доставлены через 1851 мс — на 1682 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #8, срабатываний 1; страниц загружено к моменту команды: 1); готовность doc-small-10x200-p2: rev=0 (готовность наступила на прежней ревизии — клиент ещё не знал о чужой команде; итог сошёлся); итог doc-small-10x200-p2 rev=1, doc-small-10x200-inst-1-5=#112233; зонд 554 опросов, без отката",
+      "durationMs": 3095
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "Z А: офлайн 701 мс до отправки → доставлено после восстановления (.server через 728 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 716 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+      "durationMs": 2870
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 1067
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=2/400, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+      "durationMs": 1055
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "pass",
+      "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+      "durationMs": 7380
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 10) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "Z/P/cache=10",
+      "configKey": "ZP10",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=10) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→10: retained.pages ≤ 11 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 6 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+      "durationMs": 1432
+    }
+  ]
+}

@@ -1,0 +1,2196 @@
+{
+  "series": "main",
+  "startedAt": "2026-09-13T19:47:09.122Z",
+  "finishedAt": "2026-09-13T20:37:27.134Z",
+  "host": {
+    "hostname": "vm",
+    "os": "Linux 6.18.44-fc-v24",
+    "platform": "linux",
+    "arch": "x64",
+    "kernel": "6.18.44-fc-v24",
+    "distro": "Ubuntu 24.04.4 LTS",
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+    "cpuCount": 2,
+    "totalMemMib": 8024
+  },
+  "versions": {
+    "node": "v24.21.0",
+    "npm": "11.19.0",
+    "postgres": "psql (PostgreSQL) 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)",
+    "chromium": "141.0.7390.37",
+    "playwright": "1.56.0",
+    "zero": "1.9.0",
+    "reactQuery": "5.102.8",
+    "react": "19.3.0",
+    "fastify": "5.12.4",
+    "vite": "8.3.0",
+    "typescript": "5.9.3",
+    "python": "Python 3.11.15"
+  },
+  "packages": {
+    "playwright": "1.56.0",
+    "@types/node": "24.13.4",
+    "typescript": "5.9.3",
+    "ws": "8.21.3",
+    "@rocicorp/zero": "1.9.0",
+    "@tanstack/react-query": "5.102.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "vite": "8.3.0",
+    "postgres": "3.4.9",
+    "tsx": "4.23.13",
+    "@fastify/cors": "11.3.0",
+    "@fastify/http-proxy": "11.6.2",
+    "@fastify/jwt": "10.2.2",
+    "@fastify/static": "10.1.3",
+    "fastify": "5.12.4"
+  },
+  "packagesHoistedDifferent": {
+    "postgres": "3.4.7",
+    "@fastify/cors": "10.1.0"
+  },
+  "workspacePackages": {
+    "packages/bench": {
+      "playwright": "1.56.0",
+      "@types/node": "24.13.4",
+      "typescript": "5.9.3",
+      "ws": "8.21.3"
+    },
+    "packages/client": {
+      "@rocicorp/zero": "1.9.0",
+      "@tanstack/react-query": "5.102.8",
+      "react": "19.3.0",
+      "react-dom": "19.3.0",
+      "@types/react": "19.3.0",
+      "@types/react-dom": "19.3.0",
+      "@vitejs/plugin-react": "6.1.1",
+      "playwright": "1.56.0",
+      "typescript": "5.9.3",
+      "vite": "8.3.0"
+    },
+    "packages/generator": {
+      "postgres": "3.4.9",
+      "@types/node": "24.13.4",
+      "tsx": "4.23.13",
+      "typescript": "5.9.3"
+    },
+    "packages/netshaper": {
+      "@types/node": "24.13.4",
+      "typescript": "5.9.3",
+      "ws": "8.21.3"
+    },
+    "packages/server": {
+      "@fastify/cors": "11.3.0",
+      "@fastify/http-proxy": "11.6.2",
+      "@fastify/jwt": "10.2.2",
+      "@fastify/static": "10.1.3",
+      "@rocicorp/zero": "1.9.0",
+      "fastify": "5.12.4",
+      "postgres": "3.4.9",
+      "@types/node": "24.13.4",
+      "tsx": "4.23.13",
+      "typescript": "5.9.3"
+    },
+    "packages/shared": {
+      "typescript": "5.9.3"
+    }
+  },
+  "lockfileVersion": 3,
+  "shaper": {
+    "delayMs": 25,
+    "bandwidthMbit": 20,
+    "handshakeRtt": true,
+    "statsUrl": "http://127.0.0.1:8081",
+    "effective": {
+      "delayMs": 25,
+      "bandwidthMbit": 20,
+      "bucketMs": 20,
+      "segmentBytes": 4096,
+      "bucketBytes": 50000,
+      "handshakeRtt": true,
+      "handshakeRttMs": 50
+    },
+    "beforeSeries": {
+      "delayMs": 25,
+      "bandwidthMbit": 20,
+      "bucketMs": 20,
+      "segmentBytes": 4096,
+      "bucketBytes": 50000,
+      "handshakeRtt": true,
+      "handshakeRttMs": 50
+    }
+  },
+  "seed": 20260911,
+  "repetitions": 30,
+  "configs": [
+    {
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    }
+  ],
+  "seriesConfig": {
+    "name": "main",
+    "doc": "doc-acc-50x500",
+    "sourceId": "doc-acc-50x500-src-1",
+    "fill": "#1e90ff",
+    "docJson": "data/acceptance.json",
+    "configs": [
+      {
+        "adapter": "H",
+        "mode": "F",
+        "cache": 1
+      },
+      {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 1
+      },
+      {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      }
+    ],
+    "repetitions": 30,
+    "seed": 20260911,
+    "shaper": {
+      "delayMs": 25,
+      "bandwidthMbit": 20,
+      "handshakeRtt": true,
+      "statsUrl": "http://127.0.0.1:8081"
+    },
+    "baseUrl": "http://127.0.0.1:8080",
+    "api": {
+      "url": "http://127.0.0.1:3000",
+      "login": "alice"
+    },
+    "resetCommand": null,
+    "referenceCommand": "scripts/reference-check.sh",
+    "procGroups": [
+      {
+        "name": "api",
+        "pidFile": "results/logs/api.pid",
+        "exclude": [
+          "netshaper",
+          "zero-cache"
+        ]
+      },
+      {
+        "name": "pg",
+        "patterns": [
+          "(^|/)postgres .*16/main",
+          "^postgres: 16/main"
+        ],
+        "exclude": [
+          "zerospike",
+          "spike"
+        ]
+      },
+      {
+        "name": "zero",
+        "pidFile": "results/logs/zero.pid",
+        "patterns": [
+          "stand/node_modules/.*zero-cache",
+          "zero-cache.*results/zero-replica"
+        ],
+        "exclude": [
+          "spike-zero"
+        ],
+        "dir": "results/zero-replica",
+        "adapters": [
+          "Z"
+        ]
+      }
+    ],
+    "browser": {
+      "channel": "chromium",
+      "headless": true,
+      "args": [
+        "--disable-extensions"
+      ],
+      "viewport": {
+        "width": 1280,
+        "height": 800
+      }
+    },
+    "scenario": {
+      "route": [
+        2,
+        3,
+        1,
+        4,
+        2,
+        5,
+        1,
+        6,
+        3,
+        50
+      ],
+      "pauseMs": 1000,
+      "cmdAfterStep": 5,
+      "stepTimeoutMs": 20000,
+      "autologin": "alice"
+    },
+    "docPages": 50,
+    "docShapesPerPage": 500,
+    "cooldownMs": 1000,
+    "maxConsecutiveErrors": 5,
+    "notes": "основная серия: 6 конфигураций, RTT 50 мс, 20 Мбит/с"
+  },
+  "procGroups": [
+    {
+      "name": "api",
+      "pidFile": "/home/claude/stand/results/logs/api.pid",
+      "exclude": [
+        "netshaper",
+        "zero-cache"
+      ]
+    },
+    {
+      "name": "pg",
+      "patterns": [
+        "(^|/)postgres .*16/main",
+        "^postgres: 16/main"
+      ],
+      "exclude": [
+        "zerospike",
+        "spike"
+      ]
+    },
+    {
+      "name": "zero",
+      "pidFile": "/home/claude/stand/results/logs/zero.pid",
+      "patterns": [
+        "stand/node_modules/.*zero-cache",
+        "zero-cache.*results/zero-replica"
+      ],
+      "exclude": [
+        "spike-zero"
+      ],
+      "dir": "/home/claude/stand/results/zero-replica",
+      "adapters": [
+        "Z"
+      ]
+    }
+  ],
+  "browser": {
+    "channel": "chromium",
+    "args": [
+      "--disable-extensions"
+    ],
+    "headless": true,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "scenario": {
+    "route": [
+      2,
+      3,
+      1,
+      4,
+      2,
+      5,
+      1,
+      6,
+      3,
+      50
+    ],
+    "pauseMs": 1000,
+    "budgets": {
+      "firstReadyMs": 2000,
+      "navMs": 1000,
+      "cmdDrawnMs": 2000,
+      "scenarioMs": 30000
+    }
+  },
+  "plan": [
+    {
+      "run_id": "main-0000-QP1",
+      "order_index": 0,
+      "repetition": 0,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0001-ZP1",
+      "order_index": 1,
+      "repetition": 0,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0002-ZF1",
+      "order_index": 2,
+      "repetition": 0,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0003-HP1",
+      "order_index": 3,
+      "repetition": 0,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0004-QF1",
+      "order_index": 4,
+      "repetition": 0,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0005-HF1",
+      "order_index": 5,
+      "repetition": 0,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0006-HF1",
+      "order_index": 6,
+      "repetition": 1,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0007-HP1",
+      "order_index": 7,
+      "repetition": 1,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0008-QF1",
+      "order_index": 8,
+      "repetition": 1,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0009-ZP1",
+      "order_index": 9,
+      "repetition": 1,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0010-QP1",
+      "order_index": 10,
+      "repetition": 1,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0011-ZF1",
+      "order_index": 11,
+      "repetition": 1,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0012-ZP1",
+      "order_index": 12,
+      "repetition": 2,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0013-QF1",
+      "order_index": 13,
+      "repetition": 2,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0014-QP1",
+      "order_index": 14,
+      "repetition": 2,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0015-HF1",
+      "order_index": 15,
+      "repetition": 2,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0016-HP1",
+      "order_index": 16,
+      "repetition": 2,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0017-ZF1",
+      "order_index": 17,
+      "repetition": 2,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0018-QP1",
+      "order_index": 18,
+      "repetition": 3,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0019-HF1",
+      "order_index": 19,
+      "repetition": 3,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0020-QF1",
+      "order_index": 20,
+      "repetition": 3,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0021-HP1",
+      "order_index": 21,
+      "repetition": 3,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0022-ZP1",
+      "order_index": 22,
+      "repetition": 3,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0023-ZF1",
+      "order_index": 23,
+      "repetition": 3,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0024-QF1",
+      "order_index": 24,
+      "repetition": 4,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0025-HF1",
+      "order_index": 25,
+      "repetition": 4,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0026-QP1",
+      "order_index": 26,
+      "repetition": 4,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0027-ZP1",
+      "order_index": 27,
+      "repetition": 4,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0028-HP1",
+      "order_index": 28,
+      "repetition": 4,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0029-ZF1",
+      "order_index": 29,
+      "repetition": 4,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0030-ZF1",
+      "order_index": 30,
+      "repetition": 5,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0031-QP1",
+      "order_index": 31,
+      "repetition": 5,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0032-QF1",
+      "order_index": 32,
+      "repetition": 5,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0033-ZP1",
+      "order_index": 33,
+      "repetition": 5,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0034-HP1",
+      "order_index": 34,
+      "repetition": 5,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0035-HF1",
+      "order_index": 35,
+      "repetition": 5,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0036-QF1",
+      "order_index": 36,
+      "repetition": 6,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0037-HP1",
+      "order_index": 37,
+      "repetition": 6,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0038-ZP1",
+      "order_index": 38,
+      "repetition": 6,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0039-QP1",
+      "order_index": 39,
+      "repetition": 6,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0040-ZF1",
+      "order_index": 40,
+      "repetition": 6,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0041-HF1",
+      "order_index": 41,
+      "repetition": 6,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0042-HF1",
+      "order_index": 42,
+      "repetition": 7,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0043-ZP1",
+      "order_index": 43,
+      "repetition": 7,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0044-ZF1",
+      "order_index": 44,
+      "repetition": 7,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0045-QF1",
+      "order_index": 45,
+      "repetition": 7,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0046-HP1",
+      "order_index": 46,
+      "repetition": 7,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0047-QP1",
+      "order_index": 47,
+      "repetition": 7,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0048-ZP1",
+      "order_index": 48,
+      "repetition": 8,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0049-HP1",
+      "order_index": 49,
+      "repetition": 8,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0050-HF1",
+      "order_index": 50,
+      "repetition": 8,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0051-ZF1",
+      "order_index": 51,
+      "repetition": 8,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0052-QF1",
+      "order_index": 52,
+      "repetition": 8,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0053-QP1",
+      "order_index": 53,
+      "repetition": 8,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0054-HP1",
+      "order_index": 54,
+      "repetition": 9,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0055-ZF1",
+      "order_index": 55,
+      "repetition": 9,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0056-QP1",
+      "order_index": 56,
+      "repetition": 9,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0057-ZP1",
+      "order_index": 57,
+      "repetition": 9,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0058-QF1",
+      "order_index": 58,
+      "repetition": 9,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0059-HF1",
+      "order_index": 59,
+      "repetition": 9,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0060-HF1",
+      "order_index": 60,
+      "repetition": 10,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0061-ZP1",
+      "order_index": 61,
+      "repetition": 10,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0062-HP1",
+      "order_index": 62,
+      "repetition": 10,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0063-QP1",
+      "order_index": 63,
+      "repetition": 10,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0064-QF1",
+      "order_index": 64,
+      "repetition": 10,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0065-ZF1",
+      "order_index": 65,
+      "repetition": 10,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0066-ZP1",
+      "order_index": 66,
+      "repetition": 11,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0067-ZF1",
+      "order_index": 67,
+      "repetition": 11,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0068-QF1",
+      "order_index": 68,
+      "repetition": 11,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0069-QP1",
+      "order_index": 69,
+      "repetition": 11,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0070-HP1",
+      "order_index": 70,
+      "repetition": 11,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0071-HF1",
+      "order_index": 71,
+      "repetition": 11,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0072-ZF1",
+      "order_index": 72,
+      "repetition": 12,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0073-QF1",
+      "order_index": 73,
+      "repetition": 12,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0074-HP1",
+      "order_index": 74,
+      "repetition": 12,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0075-ZP1",
+      "order_index": 75,
+      "repetition": 12,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0076-QP1",
+      "order_index": 76,
+      "repetition": 12,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0077-HF1",
+      "order_index": 77,
+      "repetition": 12,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0078-QF1",
+      "order_index": 78,
+      "repetition": 13,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0079-HF1",
+      "order_index": 79,
+      "repetition": 13,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0080-QP1",
+      "order_index": 80,
+      "repetition": 13,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0081-HP1",
+      "order_index": 81,
+      "repetition": 13,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0082-ZF1",
+      "order_index": 82,
+      "repetition": 13,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0083-ZP1",
+      "order_index": 83,
+      "repetition": 13,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0084-QP1",
+      "order_index": 84,
+      "repetition": 14,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0085-HF1",
+      "order_index": 85,
+      "repetition": 14,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0086-ZF1",
+      "order_index": 86,
+      "repetition": 14,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0087-QF1",
+      "order_index": 87,
+      "repetition": 14,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0088-ZP1",
+      "order_index": 88,
+      "repetition": 14,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0089-HP1",
+      "order_index": 89,
+      "repetition": 14,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0090-ZF1",
+      "order_index": 90,
+      "repetition": 15,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0091-HF1",
+      "order_index": 91,
+      "repetition": 15,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0092-QF1",
+      "order_index": 92,
+      "repetition": 15,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0093-HP1",
+      "order_index": 93,
+      "repetition": 15,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0094-QP1",
+      "order_index": 94,
+      "repetition": 15,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0095-ZP1",
+      "order_index": 95,
+      "repetition": 15,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0096-HF1",
+      "order_index": 96,
+      "repetition": 16,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0097-QP1",
+      "order_index": 97,
+      "repetition": 16,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0098-QF1",
+      "order_index": 98,
+      "repetition": 16,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0099-ZF1",
+      "order_index": 99,
+      "repetition": 16,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0100-HP1",
+      "order_index": 100,
+      "repetition": 16,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0101-ZP1",
+      "order_index": 101,
+      "repetition": 16,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0102-ZP1",
+      "order_index": 102,
+      "repetition": 17,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0103-HF1",
+      "order_index": 103,
+      "repetition": 17,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0104-QP1",
+      "order_index": 104,
+      "repetition": 17,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0105-QF1",
+      "order_index": 105,
+      "repetition": 17,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0106-HP1",
+      "order_index": 106,
+      "repetition": 17,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0107-ZF1",
+      "order_index": 107,
+      "repetition": 17,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0108-HP1",
+      "order_index": 108,
+      "repetition": 18,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0109-QF1",
+      "order_index": 109,
+      "repetition": 18,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0110-ZF1",
+      "order_index": 110,
+      "repetition": 18,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0111-HF1",
+      "order_index": 111,
+      "repetition": 18,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0112-ZP1",
+      "order_index": 112,
+      "repetition": 18,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0113-QP1",
+      "order_index": 113,
+      "repetition": 18,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0114-ZF1",
+      "order_index": 114,
+      "repetition": 19,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0115-HF1",
+      "order_index": 115,
+      "repetition": 19,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0116-HP1",
+      "order_index": 116,
+      "repetition": 19,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0117-ZP1",
+      "order_index": 117,
+      "repetition": 19,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0118-QP1",
+      "order_index": 118,
+      "repetition": 19,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0119-QF1",
+      "order_index": 119,
+      "repetition": 19,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0120-HP1",
+      "order_index": 120,
+      "repetition": 20,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0121-QF1",
+      "order_index": 121,
+      "repetition": 20,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0122-QP1",
+      "order_index": 122,
+      "repetition": 20,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0123-ZP1",
+      "order_index": 123,
+      "repetition": 20,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0124-HF1",
+      "order_index": 124,
+      "repetition": 20,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0125-ZF1",
+      "order_index": 125,
+      "repetition": 20,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0126-QP1",
+      "order_index": 126,
+      "repetition": 21,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0127-QF1",
+      "order_index": 127,
+      "repetition": 21,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0128-HF1",
+      "order_index": 128,
+      "repetition": 21,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0129-ZF1",
+      "order_index": 129,
+      "repetition": 21,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0130-HP1",
+      "order_index": 130,
+      "repetition": 21,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0131-ZP1",
+      "order_index": 131,
+      "repetition": 21,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0132-QP1",
+      "order_index": 132,
+      "repetition": 22,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0133-QF1",
+      "order_index": 133,
+      "repetition": 22,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0134-ZF1",
+      "order_index": 134,
+      "repetition": 22,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0135-ZP1",
+      "order_index": 135,
+      "repetition": 22,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0136-HP1",
+      "order_index": 136,
+      "repetition": 22,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0137-HF1",
+      "order_index": 137,
+      "repetition": 22,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0138-QF1",
+      "order_index": 138,
+      "repetition": 23,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0139-HP1",
+      "order_index": 139,
+      "repetition": 23,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0140-HF1",
+      "order_index": 140,
+      "repetition": 23,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0141-ZP1",
+      "order_index": 141,
+      "repetition": 23,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0142-ZF1",
+      "order_index": 142,
+      "repetition": 23,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0143-QP1",
+      "order_index": 143,
+      "repetition": 23,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0144-QF1",
+      "order_index": 144,
+      "repetition": 24,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0145-QP1",
+      "order_index": 145,
+      "repetition": 24,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0146-ZF1",
+      "order_index": 146,
+      "repetition": 24,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0147-ZP1",
+      "order_index": 147,
+      "repetition": 24,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0148-HF1",
+      "order_index": 148,
+      "repetition": 24,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0149-HP1",
+      "order_index": 149,
+      "repetition": 24,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0150-QP1",
+      "order_index": 150,
+      "repetition": 25,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0151-ZP1",
+      "order_index": 151,
+      "repetition": 25,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0152-QF1",
+      "order_index": 152,
+      "repetition": 25,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0153-HF1",
+      "order_index": 153,
+      "repetition": 25,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0154-HP1",
+      "order_index": 154,
+      "repetition": 25,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0155-ZF1",
+      "order_index": 155,
+      "repetition": 25,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0156-ZP1",
+      "order_index": 156,
+      "repetition": 26,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0157-QP1",
+      "order_index": 157,
+      "repetition": 26,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0158-ZF1",
+      "order_index": 158,
+      "repetition": 26,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0159-QF1",
+      "order_index": 159,
+      "repetition": 26,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0160-HF1",
+      "order_index": 160,
+      "repetition": 26,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0161-HP1",
+      "order_index": 161,
+      "repetition": 26,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0162-ZP1",
+      "order_index": 162,
+      "repetition": 27,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0163-QP1",
+      "order_index": 163,
+      "repetition": 27,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0164-HF1",
+      "order_index": 164,
+      "repetition": 27,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0165-ZF1",
+      "order_index": 165,
+      "repetition": 27,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0166-QF1",
+      "order_index": 166,
+      "repetition": 27,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0167-HP1",
+      "order_index": 167,
+      "repetition": 27,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0168-ZP1",
+      "order_index": 168,
+      "repetition": 28,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0169-QP1",
+      "order_index": 169,
+      "repetition": 28,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0170-QF1",
+      "order_index": 170,
+      "repetition": 28,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0171-HF1",
+      "order_index": 171,
+      "repetition": 28,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0172-ZF1",
+      "order_index": 172,
+      "repetition": 28,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0173-HP1",
+      "order_index": 173,
+      "repetition": 28,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0174-ZF1",
+      "order_index": 174,
+      "repetition": 29,
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0175-QF1",
+      "order_index": 175,
+      "repetition": 29,
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0176-ZP1",
+      "order_index": 176,
+      "repetition": 29,
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0177-HP1",
+      "order_index": 177,
+      "repetition": 29,
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0178-QP1",
+      "order_index": 178,
+      "repetition": 29,
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "run_id": "main-0179-HF1",
+      "order_index": 179,
+      "repetition": 29,
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    }
+  ],
+  "client": {
+    "dist": [
+      {
+        "path": "adapter-settings.json",
+        "bytes": 1004,
+        "mtime": "2026-09-13T19:30:30.755Z",
+        "sha256": "5d7d9af8420141ebb66ea6894d26792039f489306b9ba46bfea9900ef01071b1"
+      },
+      {
+        "path": "assets/h-BRsLg0zF.js",
+        "bytes": 4990,
+        "mtime": "2026-09-13T19:30:30.753Z",
+        "sha256": "6cfc5ad195d1271c49b17777df12ae0b0d8170757b81aabf1e7cd83c5897d5b8"
+      },
+      {
+        "path": "assets/index-BfgYf3UG.js",
+        "bytes": 246760,
+        "mtime": "2026-09-13T19:30:30.748Z",
+        "sha256": "d78f4acdd0dcf3a39fd7f8193f313a63322679749142aaacfe75155404e9fd20"
+      },
+      {
+        "path": "assets/index-D_KRL6V4.css",
+        "bytes": 2142,
+        "mtime": "2026-09-13T19:30:30.755Z",
+        "sha256": "01f1d15b03650b48ab7eef93c26dc44eabf0a7da0aaf3c80deb6af24c44bed60"
+      },
+      {
+        "path": "assets/lazy-inspector-DeGKwGVj.js",
+        "bytes": 9927,
+        "mtime": "2026-09-13T19:30:30.753Z",
+        "sha256": "3948fdcd574809b3ad06183530996cda7c69823998a88a46a6078e37a2dced1e"
+      },
+      {
+        "path": "assets/limiter-DI9RcTLr.js",
+        "bytes": 1400,
+        "mtime": "2026-09-13T19:30:30.753Z",
+        "sha256": "04b277f25ab79c4f844ea5d70fdf1739a8976babd0ca2edc2760d7041183e411"
+      },
+      {
+        "path": "assets/q-hteeqiyb.js",
+        "bytes": 36001,
+        "mtime": "2026-09-13T19:30:30.753Z",
+        "sha256": "96dcf18971699a9d70662285ee3af4b3036b5549443fd7f7796098e0e7b9ebc2"
+      },
+      {
+        "path": "assets/read-page-DBb1QrXq.js",
+        "bytes": 1701,
+        "mtime": "2026-09-13T19:30:30.753Z",
+        "sha256": "39aa3b5745fb40c9849e1f19575d81835ba8bf753fec5bd0a8eba845d7984b8c"
+      },
+      {
+        "path": "assets/z-C-AxeNhe.js",
+        "bytes": 308890,
+        "mtime": "2026-09-13T19:30:30.753Z",
+        "sha256": "e18528dd23b374026559f2f0142c16e0cb83b0b2441bcd4d29b362805da27ce8"
+      },
+      {
+        "path": "index.html",
+        "bytes": 426,
+        "mtime": "2026-09-13T19:30:30.755Z",
+        "sha256": "7ac863394a1477fe44267bcc07537e0b7550343e1a12bf2ba391671265d69210"
+      }
+    ],
+    "distDir": "packages/client/dist",
+    "distTotalBytes": 613241,
+    "buildId": "e8d6c0b226b1ac5d27bc8bd39b66d2b5bc2aab491b4d5f8e554ce639da0f837e"
+  },
+  "adapters": {
+    "available": true,
+    "source": "packages/client/dist/adapter-settings.json",
+    "generatedFrom": [
+      "packages/client/src/adapters/types.ts → ADAPTER_SETTINGS",
+      "packages/client/src/adapters/settings.ts → Z_SETTINGS"
+    ],
+    "ADAPTER_SETTINGS": {
+      "fullLoadConcurrency": 4,
+      "readRetry": 2,
+      "readRetryDelayMs": [
+        500,
+        1000
+      ],
+      "staleReadRereads": 3,
+      "commandPollAttempts": 3,
+      "commandPollDelayMs": [
+        300,
+        600,
+        1200
+      ],
+      "commandRepostAttempts": 2,
+      "query": {
+        "staleTime": "Infinity",
+        "gcTime": 300000,
+        "retry": 2,
+        "refetchOnWindowFocus": false,
+        "refetchOnReconnect": false,
+        "refetchOnMount": false,
+        "networkMode": "always",
+        "structuralSharing": false
+      }
+    },
+    "Z_SETTINGS": {
+      "kvStore": "idb",
+      "ttl": "none",
+      "fullLoadConcurrency": 4,
+      "logLevel": "error",
+      "retainedRecheckDelaysMs": [
+        150,
+        450
+      ],
+      "retainedDebounceMs": 300,
+      "cacheUrlParam": "zero",
+      "optimistic": false,
+      "optimisticParam": "zopt"
+    }
+  },
+  "api": {
+    "url": "http://127.0.0.1:3000",
+    "available": true,
+    "logLevel": "warn",
+    "health": {
+      "status": "ok",
+      "db": "ok",
+      "uptimeSec": 41032,
+      "testHooks": true,
+      "logLevel": "warn",
+      "now": "2026-09-13T19:47:09.387Z"
+    }
+  },
+  "zero": {
+    "config": {
+      "pid": 1025,
+      "env": {
+        "ZERO_QUERY_URL": "http://127.0.0.1:3000/api/zero/query",
+        "NODE_OPTIONS": "--max-old-space-size=8192 --import=/home/claude/stand/scripts/zero-ipv4-shim.mjs",
+        "ZERO_ENABLE_CRUD_MUTATIONS": "false",
+        "ZERO_MUTATE_URL": "http://127.0.0.1:3000/api/zero/mutate",
+        "ZERO_ADMIN_PASSWORD": "(задан, не записывается)",
+        "ZERO_LOG_FORMAT": "text",
+        "ZERO_APP_PUBLICATIONS": "stand_zero",
+        "ZERO_ENABLE_TELEMETRY": "false",
+        "ZERO_REPLICA_FILE": "/home/claude/stand/results/zero-replica/zero.db",
+        "ZERO_APP_ID": "stand",
+        "ZERO_LOG_LEVEL": "warn",
+        "ZERO_UPSTREAM_DB": "postgres://***@127.0.0.1:5432/editor",
+        "ZERO_PORT": "4848",
+        "ZERO_AUTH_SECRET": "(задан, не записывается)",
+        "ZERO_NUM_SYNC_WORKERS": "1",
+        "DO_NOT_TRACK": "1"
+      },
+      "envAvailable": true,
+      "replicaDir": "results/zero-replica",
+      "replicaBytesAtSeriesStart": 89940984,
+      "port": 4848,
+      "httpReachable": true,
+      "httpStatus": 200
+    }
+  },
+  "commit": null,
+  "code": {
+    "commit": null,
+    "isGitRepo": false,
+    "dirty": null,
+    "codeId": "4bb9e4465904a250bc72d8338d19363855cfe7f827b12662d8600f4f90ee5917",
+    "clientBuildId": "e8d6c0b226b1ac5d27bc8bd39b66d2b5bc2aab491b4d5f8e554ce639da0f837e",
+    "serverDistSha256": "4e890fb5bc037d062328ad0dc2be5e0d41bfefd52fcb344faa102ce73c09e45e"
+  },
+  "harness": {
+    "harnessId": "ab2103e73b1655e77b5a64c23e51cdefdcc213e3b9c1c5df5bd2deaf98e6b157",
+    "harnessIdShort": "ab2103e73b1655e7",
+    "benchId": "8e1bdf1d09f201b6d42ff58f62fccfc4be22cd53ac554a5dd2aeb14ed5a99ccf",
+    "benchSrcSha256": "8e1bdf1d09f201b6d42ff58f62fccfc4be22cd53ac554a5dd2aeb14ed5a99ccf",
+    "netshaperSrcSha256": "e9950cbdcf0b1959d1fcd1c7bc205ffc43dae8a76901d1566cd6a85ba84dc15c",
+    "seriesConfigSha256": "ab12433cc540432efca8a909c86039a08161565abaec07abac7df31e21ff88ec",
+    "columnsSha256": "f647801b18f5d18983db1cdf191ccc9a4cbbcfb21c7ac84f472a573d8ba2cab7",
+    "columnCount": 136,
+    "columns": [
+      "run_id",
+      "series",
+      "adapter",
+      "mode",
+      "cache",
+      "doc",
+      "repetition",
+      "order_index",
+      "started_at",
+      "outcome",
+      "error_stage",
+      "t_first_ready_ms",
+      "t_nav_1_ms",
+      "t_nav_2_ms",
+      "t_nav_3_ms",
+      "t_nav_4_ms",
+      "t_nav_5_ms",
+      "t_nav_6_ms",
+      "t_nav_7_ms",
+      "t_nav_8_ms",
+      "t_nav_9_ms",
+      "t_nav_10_ms",
+      "t_nav_new_median_ms",
+      "t_nav_return_median_ms",
+      "t_cmd_ack_ms",
+      "t_cmd_drawn_ms",
+      "t_scenario_ms",
+      "bytes_in",
+      "bytes_out",
+      "cdp_bytes_in",
+      "js_heap_peak_mb",
+      "js_heap_end_mb",
+      "chromium_private_peak_mib",
+      "chromium_private_end_mib",
+      "client_storage_bytes",
+      "retained_pages_end",
+      "retained_shapes_end",
+      "retained_pages_max",
+      "retained_shapes_max",
+      "loaded_pages_end",
+      "server_api_cpu_ms",
+      "server_api_mem_peak_mib",
+      "server_api_mem_integral_mib_s",
+      "server_pg_cpu_ms",
+      "server_pg_mem_peak_mib",
+      "server_pg_mem_integral_mib_s",
+      "server_zero_cpu_ms",
+      "server_zero_mem_peak_mib",
+      "server_zero_mem_integral_mib_s",
+      "zero_replica_bytes",
+      "within_budget_first",
+      "within_budget_nav",
+      "within_budget_cmd",
+      "within_budget_scenario",
+      "reference_ok",
+      "doc_pages",
+      "doc_shapes_per_page",
+      "rtt_ms",
+      "bandwidth_mbps",
+      "seed",
+      "finished_at",
+      "error_message",
+      "notes",
+      "wall_ms",
+      "browser_launch_ms",
+      "cdp_bytes_out",
+      "cdp_ws_bytes_in",
+      "cdp_ws_bytes_out",
+      "shaper_requests",
+      "shaper_connections",
+      "cmd_revision",
+      "cmd_affected_pages",
+      "cmd_affected_shapes",
+      "server_api_rss_peak_mib",
+      "server_pg_rss_peak_mib",
+      "server_zero_rss_peak_mib",
+      "chromium_processes_peak",
+      "client_transfer_bytes_in",
+      "client_transfer_bytes_out",
+      "t_scenario_wall_ms",
+      "probe_overrun_ms",
+      "t_cmd_server_ms",
+      "t_cmd_synced_ms",
+      "t_cmd_opget_ms",
+      "cmd_drawn_before_ack",
+      "t_scenario_model_ms",
+      "t_scenario_model_residual_ms",
+      "probe_total_ms",
+      "retained_probe_mode",
+      "retained_pages_end_exact",
+      "retained_shapes_end_exact",
+      "js_heap_samples",
+      "js_heap_sample_interval_ms",
+      "js_heap_gc_count",
+      "js_heap_post_gc_mb",
+      "js_heap_suspended_ms",
+      "sampling_incomplete",
+      "sampling_ticks",
+      "server_zero_applicable",
+      "server_disk_used_bytes",
+      "route_len",
+      "route_distinct_pages",
+      "t_nav_count",
+      "t_nav_new_count",
+      "t_nav_return_count",
+      "t_nav_median_ms",
+      "t_nav_ms_list",
+      "nav_cache_hits",
+      "nav_cache_misses",
+      "page_loads_observed",
+      "api_page_reads",
+      "api_page_reads_distinct",
+      "api_page_read_bytes",
+      "cmd_variant",
+      "cmd_target_id",
+      "bytes_in_api",
+      "bytes_in_zero",
+      "bytes_in_static",
+      "bytes_in_other",
+      "bytes_out_api",
+      "bytes_out_zero",
+      "bytes_out_static",
+      "bytes_out_other",
+      "bytes_in_route_residual",
+      "bytes_out_route_residual",
+      "chromium_private_peak_raw_mib",
+      "chromium_private_peak_excl_probe_mib",
+      "chromium_probe_ticks",
+      "chromium_samples",
+      "server_api_mem_peak_excl_probe_mib",
+      "server_pg_mem_peak_excl_probe_mib",
+      "server_zero_mem_peak_excl_probe_mib",
+      "probe_window_count",
+      "probe_window_ms",
+      "js_heap_sampler_coverage",
+      "harness_id"
+    ],
+    "referenceSha256": "195a34fe715d46e3836d7d9d9a1cd3850fffa4c6960a76fcc2b7d2a8436d1206",
+    "referencePySha256": "89a13106170458694cc33328f0187c7705af9cfb68dcc13bb4e0293120683d74",
+    "referenceScriptSha256": "dea04e38b32438dd69955d10c0b2ccc9eaa0c8e2616d3386df47069041e35207",
+    "comparableBy": [
+      "benchId",
+      "benchSrcSha256",
+      "netshaperSrcSha256",
+      "columnsSha256",
+      "referenceSha256"
+    ],
+    "note": "две серии сопоставимы по построению, если совпадают все поля comparableBy; harnessId дополнительно включает конфигурацию серии и потому у разных серий различается"
+  },
+  "preSeriesChecks": {
+    "at": "2026-09-13T19:47:09.432Z",
+    "samplers": {
+      "ok": true,
+      "groups": [
+        {
+          "group": "api",
+          "needed": true,
+          "processes": 1,
+          "pids": [
+            984
+          ],
+          "verdict": "ok",
+          "spec": "pidFile=/home/claude/stand/results/logs/api.pid"
+        },
+        {
+          "group": "pg",
+          "needed": true,
+          "processes": 17,
+          "pids": [
+            1100,
+            24539,
+            26804,
+            27564,
+            28534,
+            28998,
+            29067,
+            29068,
+            29084,
+            29085,
+            29086,
+            798,
+            799,
+            800,
+            802,
+            803,
+            804
+          ],
+          "verdict": "ok",
+          "spec": "patterns=(^|/)postgres .*16/main|^postgres: 16/main"
+        },
+        {
+          "group": "zero",
+          "needed": true,
+          "processes": 6,
+          "pids": [
+            1025,
+            1036,
+            1048,
+            1066,
+            1076,
+            1088
+          ],
+          "verdict": "ok",
+          "spec": "pidFile=/home/claude/stand/results/logs/zero.pid patterns=stand/node_modules/.*zero-cache|zero-cache.*results/zero-replica dir=/home/claude/stand/results/zero-replica"
+        }
+      ]
+    },
+    "disk": {
+      "dirs": {
+        "/var/lib/postgresql/16/main": 4764258611,
+        "/home/claude/stand/results/zero-replica": 89940984
+      },
+      "totalBytes": 4854199595,
+      "stopThresholdBytes": 34359738368,
+      "withinBudget": true
+    },
+    "manual": {
+      "status": "performed",
+      "file": "results/main/pre-series-checks.txt",
+      "text": "=== pre-series checks: программа 2026-09-13_19-33-22, серии: main size-fraction-25x500 size-fraction-50x500 size-fraction-100x500 route-repeat command-shape route-full rtt150 doc50x1000 doc5x100 cache3 ===\n\n=== replication-check [before] (2026-09-13T19:33:23Z) ===\nбаза editor @ 127.0.0.1:5432 | app 'stand' → слот 'stand_0_a'\nпороги: задержка доставки ≤ 64 МиБ, удержанный WAL ≤ 4 ГиБ на слот, диск ≤ 32 ГиБ\n\n[1] Слоты репликации кластера\n  slot               database     type     active      WAL, GiB\n  stand_0_a          editor       logical  true            0.00\n  ✅ слот стенда 'stand_0_a' в базе editor присутствует\n\n[2] Задержка доставки (pg_stat_replication)\n  consumer                 state           sent, MiB   flush, MiB  replay, MiB\n  zero-replicator          streaming            0.00         0.00         0.00\n  ✅ отставание в пределах порога 64 МиБ\n\n[3] Журнал WAL и дисковый бюджет (§1.7, 80 % от 40 ГиБ = 32 ГиБ)\n  pg_wal: 0.97 ГиБ (/var/lib/postgresql/16/main/pg_wal)\n  /home/claude/stand/results/zero-replica            0.08 ГиБ\n  /var/lib/postgresql/16/main                        4.13 ГиБ\n  /home/claude/stand/results/logs                    0.02 ГиБ\n  ИТОГО: 4.23 ГиБ из бюджета 32 ГиБ\n  ✅ дисковый бюджет соблюдён\n  Filesystem      Size  Used Avail Use%\n  /dev/vda        252G   20G   23G  47%\n\n[4] zero-cache\n  ✅ zero-cache отвечает на http://127.0.0.1:4848/: HTTP 200\n  реплика: /home/claude/stand/results/zero-replica/zero.db, 58.0 МиБ\n\nВЕРДИКТ [before]: ПРОЙДЕНА — слот активен, отставание и диск в пределах порогов.\n=== backup-restore-check (2026-09-13T19:33:23Z) ===\nисточник: editor @ 127.0.0.1:5432 | проверочная база: editor_restore_check\n[19:33:23] pg_dump editor → /home/claude/stand/results/backup/editor-20260913T193323Z.dump\nдамп: 36815404 байт (35.1 МиБ) за 21786 мс, pg_dump 16.13\n[19:33:45] restore → editor_restore_check\nNOTICE:  database \"editor_restore_check\" does not exist, skipping\nвосстановление: 101877 мс\n\nдокумент       ревизия страниц фигур переопр источн md5(страницы)              md5(фигуры)                 \ndoc-acc-50x500                 0      50    25000       116       20 afe61458e94f1d13149367e551df9edb   2c144c17abf3c99fc0331cdda48e716a  \ndoc-bob-5x50                   0       5      250         5        3 a2e73a6e2927bd1ce7edba2996edc798   1e9dd8d067cac5d4b1672bfe2d8c502f  \ndoc-cmd-50x500                 0      50    25000       636       23 aa390ba1ad3b2373efbc74f3ad79e528   619f934d4f51d5a060fe63cb42aff7ec  \ndoc-dense-50x1000              0      50    50000       352       40 df8a94f7c21fa3cacc99bb84f8daec8d   16a3f796c5ed86f39ce37b303ebded26  \ndoc-frac-100x500               0     100    50000       102       20 113106e8bcae02c9c02eb7d8a4b809ec   20975ea94d3b73781e032e1da1087749  \ndoc-frac-25x500                0      25    12500       105       20 d9b9e5b98c88ed279cd9d617c2378dc7   4825ff45ff005275277adf717129796a  \ndoc-large-100x500              0     100    50000       202       30 b435ed5b7520ddef2e881256bf88e9f9   383cc4d266984f126b6b2330b07bb31f  \ndoc-small-10x200               0      10     2000        38       10 1aa576200bd98a3fa6855185c46e405b   b6de8605a7d472c60328f1d7cf2ec353  \ndoc-small-5x100                0       5      500        27        5 ea76376ec198d81d1598c9b24d9ae239   fc282d615e36177caf45168d0aede152  \n\nитоги таблиц (documents|pages|shapes|shapes_baseline|users):\n  источник:      9|395|215250|215250|2\n  восстановлено: 9|395|215250|215250|2\n\nВЕРДИКТ: ПРОЙДЕНА — 9 документ(ов) восстановлены и совпали по ревизии, страницам, фигурам,\n         переопределениям, источникам и контрольным суммам состава; итоги таблиц совпали.\n"
+    }
+  },
+  "runsExecutedNow": 180,
+  "runsExecutedTotal": 180,
+  "runsOk": 180,
+  "runsTotalPlanned": 180
+}

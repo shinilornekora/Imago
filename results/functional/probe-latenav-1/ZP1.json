@@ -1,0 +1,35 @@
+{
+  "config": {
+    "adapter": "Z",
+    "mode": "P",
+    "cache": 1
+  },
+  "key": "ZP1",
+  "label": "Z/P/cache=1",
+  "checks": [
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541) |     at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266) |     at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 1241,
+      "details": {
+        "stack": "page.evaluate: ApiHttpError: expected revision 1, current is 0\n    at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541)\n    at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266)\n    at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825)\n    at async eval (eval at evaluate (:290:30), <anonymous>:4:22)\n    at async <anonymous>:316:30\n    at runCommand (/home/claude/stand/packages/bench/src/functional/lib/stand.mjs:268:15)\n    at Object.run (/home/claude/stand/packages/bench/src/functional/checks/04-late-nav.mjs:38:21)\n    at async Object.runConfig (/home/claude/stand/packages/bench/src/functional/lib/runner.mjs:81:29)\n    at async main (/home/claude/stand/packages/bench/src/functional/run.mjs:82:7)",
+        "partial": {}
+      }
+    }
+  ],
+  "passed": false,
+  "verdict": {
+    "verdict": "не допущено",
+    "admitted": false,
+    "caveats": [
+      "провалы: 4-late-nav"
+    ],
+    "failed": [
+      "4-late-nav"
+    ],
+    "skippedChecks": [],
+    "notApplicable": []
+  }
+}

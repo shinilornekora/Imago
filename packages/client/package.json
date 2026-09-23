@@ -1,0 +1,30 @@
+{
+  "name": "@stand/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "preview": "vite preview",
+    "mock": "node dev/mock-server.mjs",
+    "test": "node --test test/smoke.spec.mjs test/z.spec.mjs",
+    "test:z": "STAND_Z_E2E=1 node --test test/z.spec.mjs"
+  },
+  "dependencies": {
+    "@rocicorp/zero": "1.9.0",
+    "@stand/shared": "0.1.0",
+    "@tanstack/react-query": "5.102.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "playwright": "1.56.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.0"
+  }
+}

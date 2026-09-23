@@ -1,0 +1,397 @@
+{
+  "config": {
+    "adapter": "Z",
+    "mode": "F",
+    "cache": 1
+  },
+  "key": "ZF1",
+  "label": "Z/F",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 200 фигур, ревизия 0, зонд 66 опросов без частичных снимков; p2: 200 фигур, зонд 3 опросов; холст: 65 цветов",
+      "durationMs": 650,
+      "details": {
+        "summary": "p1: 200 фигур, ревизия 0, зонд 66 опросов без частичных снимков; p2: 200 фигур, зонд 3 опросов; холст: 65 цветов",
+        "probe1": {
+          "ticks": 66,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 3,
+          "records": 1,
+          "immediate": {
+            "state": "loading",
+            "snapNull": false
+          },
+          "dt": 37
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 10 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1642,
+      "details": {
+        "summary": "экземпляр doc-small-10x200-inst-1-5 на doc-small-10x200-p2: локальная #00aa00 сохранена после перехода туда-обратно без вытеснения (окно 10 ≥ 10 страниц), после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+        "source": "doc-small-10x200-src-1",
+        "page": "doc-small-10x200-p2",
+        "instance": "doc-small-10x200-inst-1-5",
+        "sibling": "doc-small-10x200-inst-1-8",
+        "reads": {
+          "before": 0,
+          "after": 0
+        },
+        "revisions": [
+          1,
+          2,
+          3
+        ],
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_00-47-small/artifacts/ZF1/2-local-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 0), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+      "durationMs": 1442,
+      "details": {
+        "summary": "setSourceFill(doc-small-10x200-src-1, #aa00aa) с активной doc-small-10x200-p2: affectedPages=9 (незагруженных до команды: 0), affectedShapes=83; compare-db + operations ok; снимок doc-small-10x200-p2 = эталон",
+        "source": "doc-small-10x200-src-1",
+        "activePage": "doc-small-10x200-p2",
+        "neverLoaded": [],
+        "result": {
+          "opId": "aaa62cfa-d8e3-4ddb-8427-08c825d447be",
+          "revision": 1,
+          "affectedPages": [
+            "doc-small-10x200-p10",
+            "doc-small-10x200-p2",
+            "doc-small-10x200-p3",
+            "doc-small-10x200-p4",
+            "doc-small-10x200-p5",
+            "doc-small-10x200-p6",
+            "doc-small-10x200-p7",
+            "doc-small-10x200-p8",
+            "doc-small-10x200-p9"
+          ],
+          "affectedShapes": 83
+        },
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_00-47-small/artifacts/ZF1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон; F: все 9 затронутых страниц обновлены синхронизацией, снимки всех 10 страниц = эталон",
+      "durationMs": 1617,
+      "details": {
+        "summary": "после setSourceFill(doc-small-10x200-src-1) rev=1 открыта doc-small-10x200-p10: page-ready rev=1, снимок = эталон; F: все 9 затронутых страниц обновлены синхронизацией, снимки всех 10 страниц = эталон",
+        "source": "doc-small-10x200-src-1",
+        "activePage": "doc-small-10x200-p2",
+        "latePage": "doc-small-10x200-p10",
+        "affected": [
+          "doc-small-10x200-p10",
+          "doc-small-10x200-p2",
+          "doc-small-10x200-p3",
+          "doc-small-10x200-p4",
+          "doc-small-10x200-p5",
+          "doc-small-10x200-p6",
+          "doc-small-10x200-p7",
+          "doc-small-10x200-p8",
+          "doc-small-10x200-p9"
+        ],
+        "readsY": 0,
+        "note": "Z: обновление затронутых страниц приходит синхронизацией (HTTP-чтений нет)"
+      }
+    },
+    {
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "F (Z): запрос страницы doc-small-10x200-p10 сделан за 443 мс ДО команды; команда (HTTP, второй участник) завершилась через 452 мс, а данные doc-small-10x200-p10 доставлены через 4205 мс — на 3753 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #19, срабатываний ?; страниц загружено к моменту команды: 0); готовность doc-small-10x200-p10: rev=1; итог doc-small-10x200-p10 rev=1, doc-small-10x200-inst-1-94=#112233; зонд 1046 опросов, без отката",
+      "durationMs": 4737,
+      "details": {
+        "summary": "F (Z): запрос страницы doc-small-10x200-p10 сделан за 443 мс ДО команды; команда (HTTP, второй участник) завершилась через 452 мс, а данные doc-small-10x200-p10 доставлены через 4205 мс — на 3753 мс ПОЗЖЕ команды (задержка трансформации synced query 1800 мс, правило #19, срабатываний ?; страниц загружено к моменту команды: 0); готовность doc-small-10x200-p10: rev=1; итог doc-small-10x200-p10 rev=1, doc-small-10x200-inst-1-94=#112233; зонд 1046 опросов, без отката",
+        "mechanism": "задержка POST /api/zero/query (ZERO_QUERY_URL, http://127.0.0.1:3000) на 1800 мс, окно 2400 мс; команда подана оболочкой по HTTP",
+        "page": "doc-small-10x200-p10",
+        "instance": "doc-small-10x200-inst-1-94",
+        "command": {
+          "opId": "stale-z-1789260487681",
+          "type": "setSourceFill",
+          "targetId": "doc-small-10x200-src-1",
+          "fill": "#112233",
+          "expectedRevision": 0,
+          "revision": 1,
+          "affectedPages": [
+            "doc-small-10x200-p10",
+            "doc-small-10x200-p2",
+            "doc-small-10x200-p3",
+            "doc-small-10x200-p4",
+            "doc-small-10x200-p5",
+            "doc-small-10x200-p6",
+            "doc-small-10x200-p7",
+            "doc-small-10x200-p8",
+            "doc-small-10x200-p9"
+          ],
+          "affectedShapes": 83
+        },
+        "timings": {
+          "requestedAtNode": 1789260487684,
+          "commandSentAtNode": 1789260488127,
+          "commandDoneAtNode": 1789260488136,
+          "deliveredAtNode": 1789260491889,
+          "lateByMs": 3753,
+          "pageReadyAtPage": 4197.299999999814,
+          "pageReadyRevisions": [
+            1
+          ]
+        },
+        "ruleHits": null,
+        "loadedAtCommand": [],
+        "probeRecords": [
+          {
+            "t": 106.1000000005588,
+            "size": null,
+            "revision": null,
+            "fill": null
+          },
+          {
+            "t": 4164.9000000003725,
+            "size": 200,
+            "revision": 1,
+            "fill": "#112233"
+          }
+        ]
+      }
+    },
+    {
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "Z А: офлайн 703 мс до отправки → доставлено после восстановления (.server через 732 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 728 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+      "durationMs": 2894,
+      "details": {
+        "summary": "Z А: офлайн 703 мс до отправки → доставлено после восстановления (.server через 732 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 728 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+        "opIds": [
+          "40396aa3-d588-4cff-af04-91f5909cc17e",
+          "98a238a4-c08f-4c28-aa54-07b4c6002f55"
+        ],
+        "timings": [
+          {
+            "opId": "40396aa3-d588-4cff-af04-91f5909cc17e",
+            "sentAt": 644.7000000001863,
+            "serverAt": 1376.9000000003725,
+            "source": "events"
+          },
+          {
+            "opId": "98a238a4-c08f-4c28-aa54-07b4c6002f55",
+            "sentAt": 1592.800000000745,
+            "serverAt": 2320.7000000001863,
+            "source": "events"
+          }
+        ],
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_00-47-small/artifacts/ZF1/6-retry-Z-compare-db.json"
+      }
+    },
+    {
+      "id": "S1-access",
+      "title": "Б1. Безопасность: чужой документ (HTTP и клиент)",
+      "status": "pass",
+      "message": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+      "durationMs": 1062,
+      "details": {
+        "summary": "HTTP: документ 403, страница 403, команда 403, кросс-документ 403, alice→bob 403, без токена 401; клиент bob на документе alice: state=error, 0 страниц, 1×403; bob на своём: ready (50 фигур)",
+        "http": {
+          "docAsBob": 403,
+          "pageAsBob": 403,
+          "commandAsBob": 403,
+          "commandCrossDoc": 403,
+          "bobDocAsAlice": 403,
+          "noToken": 401,
+          "badToken": 401
+        },
+        "errorsBob": [
+          {
+            "scope": "open",
+            "docId": "doc-small-10x200",
+            "message": "document belongs to another user"
+          }
+        ]
+      }
+    },
+    {
+      "id": "S2-logout",
+      "title": "Б2. Безопасность: выход (logout) очищает память и хранилища",
+      "status": "pass",
+      "message": "до выхода retained=8/1600, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+      "durationMs": 1220,
+      "details": {
+        "summary": "до выхода retained=8/1600, IDB до: 2; после: retained 0/0, loaded [], state idle, storage 0/0, IDB [], форма входа; runCommand отклонена (document is not open), запросов с токеном после выхода 0, прямой запрос 401 (Z: IDB kvStore удалён)",
+        "storageBefore": {
+          "localStorage": 1,
+          "sessionStorage": 0,
+          "indexedDb": [
+            "rep:zero-u-alice-1yn5xd0iwimoy:7:51.2s7c3ow8m36v3",
+            "replicache-dbs-v0"
+          ]
+        },
+        "storageAfter": {
+          "localStorage": 0,
+          "sessionStorage": 0,
+          "indexedDb": []
+        },
+        "commandError": "document is not open"
+      }
+    },
+    {
+      "id": "S3-zero-query",
+      "title": "Б3. Безопасность: Zero — чужие данные не приходят синхронизацией",
+      "status": "pass",
+      "message": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}} | page: zero query error: {\"error\":\"app\",\"id\":\"30woaxuoz7zlp\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+      "durationMs": 7561,
+      "details": {
+        "summary": "zero/query: bob → страница/метаданные alice = forbidden, своя страница = AST, без токена 401; клиент bob на документе alice: error, 0 фигур в хранилище; принудительная регистрация чужого запроса (подделан GET документа, запрос уже зарегистрирован alice): за 6000 мс 0 строк, loaded=[], снимок null, ошибки клиента: page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}} | page: zero query error: {\"error\":\"app\",\"id\":\"30woaxuoz7zlp\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}; прямой zero.run из клиента недоступен (реестр synced queries не опубликован клиентом (queries — модульный импорт)) — покрыто пунктом 3 (принудительная регистрация запроса)",
+        "queries": [
+          {
+            "error": "app",
+            "id": "q-alice",
+            "name": "shapesByPage",
+            "message": "forbidden",
+            "details": {
+              "code": "forbidden",
+              "status": 403,
+              "message": "document belongs to another user"
+            }
+          },
+          {
+            "error": "app",
+            "id": "q-alice-meta",
+            "name": "docMeta",
+            "message": "forbidden",
+            "details": {
+              "code": "forbidden",
+              "status": 403,
+              "message": "document belongs to another user"
+            }
+          },
+          {
+            "id": "q-bob",
+            "name": "shapesByPage",
+            "ast": {
+              "table": "shapes",
+              "where": {
+                "type": "and",
+                "conditions": [
+                  {
+                    "type": "simple",
+                    "left": {
+                      "type": "column",
+                      "name": "document_id"
+                    },
+                    "right": {
+                      "type": "literal",
+                      "value": "doc-bob-5x50"
+                    },
+                    "op": "="
+                  },
+                  {
+                    "type": "simple",
+                    "left": {
+                      "type": "column",
+                      "name": "page_id"
+                    },
+                    "right": {
+                      "type": "literal",
+                      "value": "doc-bob-5x50-p1"
+                    },
+                    "op": "="
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "forced": {
+          "state": "error",
+          "retained": {
+            "pages": 0,
+            "shapes": 0,
+            "bytesEstimate": 0
+          },
+          "loaded": [],
+          "snapshot": null,
+          "ready": 0,
+          "errors": [
+            "page: zero query error: {\"error\":\"app\",\"id\":\"49ssabdkddv4\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"30woaxuoz7zlp\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"3f4obw818ebvb\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"1jvi3mv36d5ss\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"1nlneug3fprd0\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"v7clf4etbnbd\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"3fs9s5xg0xtf7\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"hht0h7x0xjzm\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"142q095owi7nw\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}",
+            "page: zero query error: {\"error\":\"app\",\"id\":\"381l4ju22ddoe\",\"name\":\"shapesByPage\",\"message\":\"forbidden\",\"details\":{\"code\":\"forbidden\",\"status\":403,\"message\":\"document belongs to another user\"}}"
+          ],
+          "zeroRows": 0,
+          "requestedPages": [
+            "doc-small-10x200-p1",
+            "doc-small-10x200-p2",
+            "doc-small-10x200-p3",
+            "doc-small-10x200-p4",
+            "doc-small-10x200-p5",
+            "doc-small-10x200-p6",
+            "doc-small-10x200-p7",
+            "doc-small-10x200-p8",
+            "doc-small-10x200-p9",
+            "doc-small-10x200-p10"
+          ]
+        }
+      }
+    },
+    {
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "Z: все 10 страниц материализованы (2000 фигур), retained=10/2000",
+      "durationMs": 1137,
+      "details": {
+        "summary": "Z: все 10 страниц материализованы (2000 фигур), retained=10/2000"
+      }
+    },
+    {
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    }
+  ],
+  "passed": true,
+  "verdict": {
+    "verdict": "допуск",
+    "admitted": true,
+    "caveats": [],
+    "failed": [],
+    "skippedChecks": [],
+    "notApplicable": [
+      {
+        "id": "I2-window",
+        "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+      }
+    ]
+  }
+}

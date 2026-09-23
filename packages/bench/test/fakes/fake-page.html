@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>fake stand page</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 16px; }
+  nav button { margin: 2px; }
+  nav button[aria-current="page"] { font-weight: bold; }
+  #status { margin: 8px 0; color: #555; }
+</style>
+</head>
+<body>
+<h1>Fake editor (harness test double)</h1>
+<div id="status">idle</div>
+<nav id="pages"></nav>
+<canvas id="canvas" width="400" height="200"></canvas>
+<script>
+/*
+ * Имитация клиента стенда для тестов измерительной оболочки. Реализует контракт
+ * window.__stand (SPEC §4.2) с программируемыми задержками через query-параметры:
+ *   readyMs   — задержка первой готовности после загрузки (120)
+ *   navMs     — задержка перехода; список через запятую циклически (150)
+ *   ackMs     — команда → command-acked (80)
+ *   drawnMs   — команда → command-drawn (130)
+ *   hangAt    — стадия, на которой событие не приходит: first_ready | nav_<n> | cmd_ack | cmd_drawn
+ *   noWaitFor — не реализовывать waitFor (проверка страховочного опроса журнала)
+ *   noPageId  — не ставить data-page-id и не класть pageId в detail (проверка сопоставления по индексу)
+ *   pages     — число страниц (50)
+ *   fetchBytes — размер тела /api/pages/<k> (для трафика через шейпер), 0 — не ходить в сеть
+ */
+(() => {
+  const q = new URLSearchParams(location.search);
+  const num = (k, d) => (q.has(k) ? Number(q.get(k)) : d);
+  const list = (k, d) => (q.has(k) ? q.get(k).split(',').map(Number) : [d]);
+  const cfg = { adapter: q.get('adapter') || 'H', mode: q.get('mode') || 'P', cache: num('cache', 1), docId: q.get('doc') || 'doc-fake' };
+  const readyMs = num('readyMs', 120);
+  const navMsList = list('navMs', 150);
+  const ackMs = num('ackMs', 80);
+  const drawnMs = num('drawnMs', 130);
+  const hangAt = q.get('hangAt') || '';
+  const noWaitFor = q.has('noWaitFor');
+  const noPageId = q.has('noPageId');
+  const pageCount = num('pages', 50);
+  const fetchBytes = num('fetchBytes', 4096);
+  const SHAPES_PER_PAGE = 500;
+  const SOURCE_ID = 'S1';
+
+  const pageId = (k) => `p${k}`;
+  let navCount = 0;
+  let revision = 7;
+  let sourceFill = '#112233';
+  const visitedOrder = []; // порядок посещений для LRU
+  const loaded = new Set();
+  const listeners = [];
+  const stand = {
+    config: cfg,
+    state: 'idle',
+    activePageId: null,
+    activeRevision: null,
+    drawn: null,
+    pendingCommands: 0,
+    events: [],
+    transfer: { bytesIn: 0, bytesOut: 0 },
+  };
+  const emit = (type, detail) => {
+    const e = { t: performance.now(), type, detail };
+    stand.events.push(e);
+    for (const l of listeners.slice()) {
+      try { l(e); } catch {}
+    }
+    return e;
+  };
+  if (!noWaitFor) {
+    stand.waitFor = (type, predicate, timeoutMs = 10000) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { off(); reject(new Error(`waitFor(${type}) timeout`)); }, timeoutMs);
+      const l = (e) => {
+        if (e.type !== type) return;
+        if (predicate && !predicate(e)) return;
+        off(); clearTimeout(timer); resolve(e);
+      };
+      const off = () => { const i = listeners.indexOf(l); if (i >= 0) listeners.splice(i, 1); };
+      listeners.push(l);
+    });
+  }
+  const trafficFetch = async (url, init) => {
+    if (!fetchBytes) return;
+    try {
+      const r = await fetch(url, init);
+      const b = await r.arrayBuffer();
+      stand.transfer.bytesIn += b.byteLength;
+      stand.transfer.bytesOut += (init && init.body) ? init.body.length : 0;
+    } catch {}
+  };
+  const retain = (k) => {
+    loaded.add(pageId(k));
+    const i = visitedOrder.indexOf(k);
+    if (i >= 0) visitedOrder.splice(i, 1);
+    visitedOrder.push(k);
+    if (cfg.mode === 'P') {
+      // активная + окно cache недавно посещённых
+      while (visitedOrder.length > cfg.cache + 1) loaded.delete(pageId(visitedOrder.shift()));
+    } else {
+      for (let j = 1; j <= pageCount; j++) loaded.add(pageId(j));
+    }
+  };
+  const draw = (k) => {
+    const c = document.getElementById('canvas').getContext('2d');
+    c.fillStyle = sourceFill; c.fillRect(0, 0, 400, 200);
+    c.fillStyle = '#fff'; c.fillText(`page ${k} rev ${revision}`, 10, 20);
+  };
+  const detailFor = (k) => noPageId ? { pageIndex: k, revision } : { pageId: pageId(k), pageIndex: k, revision };
+  const ready = (k, stage) => {
+    if (hangAt === stage) return; // имитация зависания
+    retain(k);
+    stand.activePageId = pageId(k);
+    stand.activeRevision = revision;
+    stand.state = 'ready';
+    document.getElementById('status').textContent = `ready: page ${k}`;
+    draw(k);
+    requestAnimationFrame(() => {
+      stand.drawn = { pageId: pageId(k), revision, shapeCount: SHAPES_PER_PAGE, at: performance.now() };
+      emit('page-ready', detailFor(k));
+    });
+  };
+  const nav = document.getElementById('pages');
+  for (let k = 1; k <= pageCount; k++) {
+    const b = document.createElement('button');
+    b.textContent = String(k);
+    b.dataset.pageIndex = String(k);
+    if (!noPageId) b.dataset.pageId = pageId(k);
+    b.addEventListener('click', () => stand.selectPage(pageId(k)));
+    nav.appendChild(b);
+  }
+  stand.selectPage = (pid) => {
+    const k = Number(String(pid).replace(/^p/, ''));
+    navCount++;
+    const stepName = `nav_${navCount}`;
+    emit('page-select', detailFor(k));
+    stand.state = 'loading';
+    document.getElementById('status').textContent = `loading page ${k}`;
+    for (const b of nav.children) b.toggleAttribute('aria-current', b.dataset.pageIndex === String(k));
+    trafficFetch(`/api/pages/${k}?bytes=${fetchBytes}`);
+    const ms = navMsList[(navCount - 1) % navMsList.length];
+    setTimeout(() => ready(k, stepName), ms);
+  };
+  stand.runCommand = (cmd) => {
+    const opId = cmd.opId || crypto.randomUUID();
+    stand.pendingCommands++;
+    emit('command-sent', { opId, type: cmd.type, targetId: cmd.targetId, fill: cmd.fill });
+    trafficFetch(`/api/documents/${cfg.docId}/commands`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...cmd, opId, expectedRevision: revision }) });
+    return new Promise((resolve, reject) => {
+      if (cmd.type !== 'setSourceFill' && cmd.type !== 'setLocalFill') { stand.pendingCommands--; return reject(new Error('bad command')); }
+      setTimeout(() => {
+        if (hangAt === 'cmd_ack') return;
+        revision++;
+        const result = { opId, revision, affectedPages: ['p1', 'p2', 'p50'], affectedShapes: 100 };
+        emit('command-acked', { opId, revision });
+        setTimeout(() => {
+          if (hangAt === 'cmd_drawn') return;
+          sourceFill = cmd.fill;
+          stand.activeRevision = revision;
+          const k = Number(String(stand.activePageId).replace(/^p/, ''));
+          draw(k);
+          requestAnimationFrame(() => {
+            stand.drawn = { pageId: stand.activePageId, revision, shapeCount: SHAPES_PER_PAGE, at: performance.now() };
+            stand.pendingCommands--;
+            emit('command-drawn', { opId, revision });
+            resolve(result);
+          });
+        }, Math.max(0, drawnMs - ackMs));
+      }, ackMs);
+    });
+  };
+  stand.getRetained = () => ({ pages: loaded.size, shapes: loaded.size * SHAPES_PER_PAGE, bytesEstimate: loaded.size * SHAPES_PER_PAGE * 120 });
+  stand.getLoadedPages = () => [...loaded];
+  stand.getPageSnapshot = (pid) => {
+    if (!loaded.has(pid)) return null;
+    const k = Number(String(pid).replace(/^p/, ''));
+    const shapes = [];
+    for (let i = 0; i < 5; i++) shapes.push({ id: `${pid}-s${i}`, fill: '#aaaaaa', fillOverridden: false });
+    if (k === 50 || k === 1 || k === 2) {
+      shapes.push({ id: `${pid}-inst-a`, fill: sourceFill, fillOverridden: false });
+      shapes.push({ id: `${pid}-inst-b`, fill: sourceFill, fillOverridden: false });
+      shapes.push({ id: `${pid}-inst-ovr`, fill: '#00ff00', fillOverridden: true });
+    }
+    if (k === 1) shapes.push({ id: SOURCE_ID, fill: sourceFill, fillOverridden: false });
+    return { revision, shapes };
+  };
+  stand.logout = async () => { loaded.clear(); stand.state = 'idle'; emit('logout', {}); };
+  window.__stand = stand;
+
+  // открытие документа
+  emit('open', { docId: cfg.docId, adapter: cfg.adapter, mode: cfg.mode, cache: cfg.cache });
+  stand.state = 'loading';
+  trafficFetch(`/api/documents/${cfg.docId}`);
+  trafficFetch(`/api/pages/1?bytes=${fetchBytes}`);
+  setTimeout(() => ready(1, 'first_ready'), readyMs);
+})();
+</script>
+</body>
+</html>

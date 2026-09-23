@@ -1,0 +1,122 @@
+{
+  "config": {
+    "adapter": "H",
+    "mode": "F",
+    "cache": 1
+  },
+  "key": "HF1",
+  "label": "H/F",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 100 фигур, ревизия 0, зонд 34 опросов без частичных снимков; p2: 100 фигур, зонд 6 опросов; холст: 65 цветов",
+      "durationMs": 656,
+      "details": {
+        "summary": "p1: 100 фигур, ревизия 0, зонд 34 опросов без частичных снимков; p2: 100 фигур, зонд 6 опросов; холст: 65 цветов",
+        "probe1": {
+          "ticks": 34,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 6,
+          "records": 1,
+          "immediate": {
+            "state": "loading",
+            "snapNull": false
+          },
+          "dt": 27
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-small-5x100-src-1, #aa00aa) с активной doc-small-5x100-p2: affectedPages=4 (незагруженных до команды: 0), affectedShapes=81; compare-db + operations ok; снимок doc-small-5x100-p2 = эталон",
+      "durationMs": 1090,
+      "details": {
+        "summary": "setSourceFill(doc-small-5x100-src-1, #aa00aa) с активной doc-small-5x100-p2: affectedPages=4 (незагруженных до команды: 0), affectedShapes=81; compare-db + operations ok; снимок doc-small-5x100-p2 = эталон",
+        "source": "doc-small-5x100-src-1",
+        "activePage": "doc-small-5x100-p2",
+        "neverLoaded": [],
+        "result": {
+          "opId": "8fb67ec5-63b7-482b-82b1-20a56fd5c251",
+          "revision": 1,
+          "affectedPages": [
+            "doc-small-5x100-p2",
+            "doc-small-5x100-p3",
+            "doc-small-5x100-p4",
+            "doc-small-5x100-p5"
+          ],
+          "affectedShapes": 81
+        },
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_19-33-22-doc5x100/artifacts/HF1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-small-5x100-src-1) rev=1 открыта doc-small-5x100-p5: page-ready rev=1, снимок = эталон; F: все 4 затронутых страниц перечитаны, снимки всех 5 страниц = эталон",
+      "durationMs": 1183,
+      "details": {
+        "summary": "после setSourceFill(doc-small-5x100-src-1) rev=1 открыта doc-small-5x100-p5: page-ready rev=1, снимок = эталон; F: все 4 затронутых страниц перечитаны, снимки всех 5 страниц = эталон",
+        "source": "doc-small-5x100-src-1",
+        "activePage": "doc-small-5x100-p2",
+        "latePage": "doc-small-5x100-p5",
+        "affected": [
+          "doc-small-5x100-p2",
+          "doc-small-5x100-p3",
+          "doc-small-5x100-p4",
+          "doc-small-5x100-p5"
+        ],
+        "readsY": 0,
+        "refetched": 4,
+        "unaffectedRefetched": []
+      }
+    },
+    {
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "все 5 страниц загружены (500 фигур), 5 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+      "durationMs": 448,
+      "details": {
+        "summary": "все 5 страниц загружены (500 фигур), 5 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+        "maxConcurrent": 4
+      }
+    },
+    {
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    }
+  ],
+  "passed": true,
+  "verdict": {
+    "verdict": "допуск (частичный набор)",
+    "admitted": false,
+    "caveats": [
+      "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+    ],
+    "failed": [],
+    "skippedChecks": [],
+    "notApplicable": [
+      {
+        "id": "I2-window",
+        "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+      }
+    ]
+  }
+}

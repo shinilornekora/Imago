@@ -1,0 +1,56 @@
+=== pre-series checks: программа 2026-09-13_19-33-22, серии: main size-fraction-25x500 size-fraction-50x500 size-fraction-100x500 route-repeat command-shape route-full rtt150 doc50x1000 doc5x100 cache3 ===
+
+=== replication-check [before] (2026-09-13T19:33:23Z) ===
+база editor @ 127.0.0.1:5432 | app 'stand' → слот 'stand_0_a'
+пороги: задержка доставки ≤ 64 МиБ, удержанный WAL ≤ 4 ГиБ на слот, диск ≤ 32 ГиБ
+
+[1] Слоты репликации кластера
+  slot               database     type     active      WAL, GiB
+  stand_0_a          editor       logical  true            0.00
+  ✅ слот стенда 'stand_0_a' в базе editor присутствует
+
+[2] Задержка доставки (pg_stat_replication)
+  consumer                 state           sent, MiB   flush, MiB  replay, MiB
+  zero-replicator          streaming            0.00         0.00         0.00
+  ✅ отставание в пределах порога 64 МиБ
+
+[3] Журнал WAL и дисковый бюджет (§1.7, 80 % от 40 ГиБ = 32 ГиБ)
+  pg_wal: 0.97 ГиБ (/var/lib/postgresql/16/main/pg_wal)
+  /home/claude/stand/results/zero-replica            0.08 ГиБ
+  /var/lib/postgresql/16/main                        4.13 ГиБ
+  /home/claude/stand/results/logs                    0.02 ГиБ
+  ИТОГО: 4.23 ГиБ из бюджета 32 ГиБ
+  ✅ дисковый бюджет соблюдён
+  Filesystem      Size  Used Avail Use%
+  /dev/vda        252G   20G   23G  47%
+
+[4] zero-cache
+  ✅ zero-cache отвечает на http://127.0.0.1:4848/: HTTP 200
+  реплика: /home/claude/stand/results/zero-replica/zero.db, 58.0 МиБ
+
+ВЕРДИКТ [before]: ПРОЙДЕНА — слот активен, отставание и диск в пределах порогов.
+=== backup-restore-check (2026-09-13T19:33:23Z) ===
+источник: editor @ 127.0.0.1:5432 | проверочная база: editor_restore_check
+[19:33:23] pg_dump editor → /home/claude/stand/results/backup/editor-20260913T193323Z.dump
+дамп: 36815404 байт (35.1 МиБ) за 21786 мс, pg_dump 16.13
+[19:33:45] restore → editor_restore_check
+NOTICE:  database "editor_restore_check" does not exist, skipping
+восстановление: 101877 мс
+
+документ       ревизия страниц фигур переопр источн md5(страницы)              md5(фигуры)                 
+doc-acc-50x500                 0      50    25000       116       20 afe61458e94f1d13149367e551df9edb   2c144c17abf3c99fc0331cdda48e716a  
+doc-bob-5x50                   0       5      250         5        3 a2e73a6e2927bd1ce7edba2996edc798   1e9dd8d067cac5d4b1672bfe2d8c502f  
+doc-cmd-50x500                 0      50    25000       636       23 aa390ba1ad3b2373efbc74f3ad79e528   619f934d4f51d5a060fe63cb42aff7ec  
+doc-dense-50x1000              0      50    50000       352       40 df8a94f7c21fa3cacc99bb84f8daec8d   16a3f796c5ed86f39ce37b303ebded26  
+doc-frac-100x500               0     100    50000       102       20 113106e8bcae02c9c02eb7d8a4b809ec   20975ea94d3b73781e032e1da1087749  
+doc-frac-25x500                0      25    12500       105       20 d9b9e5b98c88ed279cd9d617c2378dc7   4825ff45ff005275277adf717129796a  
+doc-large-100x500              0     100    50000       202       30 b435ed5b7520ddef2e881256bf88e9f9   383cc4d266984f126b6b2330b07bb31f  
+doc-small-10x200               0      10     2000        38       10 1aa576200bd98a3fa6855185c46e405b   b6de8605a7d472c60328f1d7cf2ec353  
+doc-small-5x100                0       5      500        27        5 ea76376ec198d81d1598c9b24d9ae239   fc282d615e36177caf45168d0aede152  
+
+итоги таблиц (documents|pages|shapes|shapes_baseline|users):
+  источник:      9|395|215250|215250|2
+  восстановлено: 9|395|215250|215250|2
+
+ВЕРДИКТ: ПРОЙДЕНА — 9 документ(ов) восстановлены и совпали по ревизии, страницам, фигурам,
+         переопределениям, источникам и контрольным суммам состава; итоги таблиц совпали.

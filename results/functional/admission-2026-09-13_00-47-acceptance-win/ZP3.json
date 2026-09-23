@@ -1,0 +1,338 @@
+{
+  "config": {
+    "adapter": "Z",
+    "mode": "P",
+    "cache": 3
+  },
+  "key": "ZP3",
+  "label": "Z/P/cache=3",
+  "checks": [
+    {
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 2792,
+      "details": {
+        "summary": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+        "source": "doc-acc-50x500-src-1",
+        "page": "doc-acc-50x500-p2",
+        "instance": "doc-acc-50x500-inst-1-6",
+        "sibling": "doc-acc-50x500-inst-1-4",
+        "reads": {
+          "before": 0,
+          "after": 0
+        },
+        "revisions": [
+          1,
+          2,
+          3
+        ],
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_00-47-acceptance-win/artifacts/ZP3/2-local-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1342,
+      "details": {
+        "summary": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+        "source": "doc-acc-50x500-src-1",
+        "activePage": "doc-acc-50x500-p2",
+        "latePage": "doc-acc-50x500-p50",
+        "affected": [
+          "doc-acc-50x500-p12",
+          "doc-acc-50x500-p17",
+          "doc-acc-50x500-p2",
+          "doc-acc-50x500-p22",
+          "doc-acc-50x500-p28",
+          "doc-acc-50x500-p33",
+          "doc-acc-50x500-p38",
+          "doc-acc-50x500-p43",
+          "doc-acc-50x500-p50",
+          "doc-acc-50x500-p7"
+        ],
+        "readsY": 0
+      }
+    },
+    {
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=3) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 7 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+      "durationMs": 2308,
+      "details": {
+        "summary": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 4 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 7 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+        "steps": [
+          {
+            "target": "doc-acc-50x500-p2",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p3",
+            "retained": {
+              "pages": 3,
+              "shapes": 1500,
+              "bytesEstimate": 300000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p3"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p1",
+            "retained": {
+              "pages": 3,
+              "shapes": 1500,
+              "bytesEstimate": 300000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p3"
+            ],
+            "needsRead": false,
+            "allowed": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p2"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p4",
+            "retained": {
+              "pages": 4,
+              "shapes": 2000,
+              "bytesEstimate": 400000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p4"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p4",
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p2"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p2",
+            "retained": {
+              "pages": 4,
+              "shapes": 2000,
+              "bytesEstimate": 400000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p4"
+            ],
+            "needsRead": false,
+            "allowed": [
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p4",
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p3"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p5",
+            "retained": {
+              "pages": 4,
+              "shapes": 2000,
+              "bytesEstimate": 400000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p4",
+              "doc-acc-50x500-p5"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p5",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p4",
+              "doc-acc-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p1",
+            "retained": {
+              "pages": 4,
+              "shapes": 2000,
+              "bytesEstimate": 400000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p4",
+              "doc-acc-50x500-p5"
+            ],
+            "needsRead": false,
+            "allowed": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p5",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p4"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p6",
+            "retained": {
+              "pages": 4,
+              "shapes": 2000,
+              "bytesEstimate": 400000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p5",
+              "doc-acc-50x500-p6"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p6",
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p5",
+              "doc-acc-50x500-p2"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p3",
+            "retained": {
+              "pages": 4,
+              "shapes": 2000,
+              "bytesEstimate": 400000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p5",
+              "doc-acc-50x500-p6",
+              "doc-acc-50x500-p3"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p6",
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p5"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p50",
+            "retained": {
+              "pages": 4,
+              "shapes": 2000,
+              "bytesEstimate": 400000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p6",
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p50"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p50",
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p6",
+              "doc-acc-50x500-p1"
+            ]
+          }
+        ],
+        "expectedReads": {
+          "doc-acc-50x500-p1": 1,
+          "doc-acc-50x500-p2": 1,
+          "doc-acc-50x500-p3": 2,
+          "doc-acc-50x500-p4": 1,
+          "doc-acc-50x500-p5": 1,
+          "doc-acc-50x500-p6": 1,
+          "doc-acc-50x500-p7": 0,
+          "doc-acc-50x500-p8": 0,
+          "doc-acc-50x500-p9": 0,
+          "doc-acc-50x500-p10": 0,
+          "doc-acc-50x500-p11": 0,
+          "doc-acc-50x500-p12": 0,
+          "doc-acc-50x500-p13": 0,
+          "doc-acc-50x500-p14": 0,
+          "doc-acc-50x500-p15": 0,
+          "doc-acc-50x500-p16": 0,
+          "doc-acc-50x500-p17": 0,
+          "doc-acc-50x500-p18": 0,
+          "doc-acc-50x500-p19": 0,
+          "doc-acc-50x500-p20": 0,
+          "doc-acc-50x500-p21": 0,
+          "doc-acc-50x500-p22": 0,
+          "doc-acc-50x500-p23": 0,
+          "doc-acc-50x500-p24": 0,
+          "doc-acc-50x500-p25": 0,
+          "doc-acc-50x500-p26": 0,
+          "doc-acc-50x500-p27": 0,
+          "doc-acc-50x500-p28": 0,
+          "doc-acc-50x500-p29": 0,
+          "doc-acc-50x500-p30": 0,
+          "doc-acc-50x500-p31": 0,
+          "doc-acc-50x500-p32": 0,
+          "doc-acc-50x500-p33": 0,
+          "doc-acc-50x500-p34": 0,
+          "doc-acc-50x500-p35": 0,
+          "doc-acc-50x500-p36": 0,
+          "doc-acc-50x500-p37": 0,
+          "doc-acc-50x500-p38": 0,
+          "doc-acc-50x500-p39": 0,
+          "doc-acc-50x500-p40": 0,
+          "doc-acc-50x500-p41": 0,
+          "doc-acc-50x500-p42": 0,
+          "doc-acc-50x500-p43": 0,
+          "doc-acc-50x500-p44": 0,
+          "doc-acc-50x500-p45": 0,
+          "doc-acc-50x500-p46": 0,
+          "doc-acc-50x500-p47": 0,
+          "doc-acc-50x500-p48": 0,
+          "doc-acc-50x500-p49": 0,
+          "doc-acc-50x500-p50": 1
+        }
+      }
+    }
+  ],
+  "passed": true,
+  "verdict": {
+    "verdict": "допуск (частичный набор)",
+    "admitted": false,
+    "caveats": [
+      "набор сокращён: 2-local-fill, 4-late-nav, I2-window"
+    ],
+    "failed": [],
+    "skippedChecks": [],
+    "notApplicable": []
+  }
+}

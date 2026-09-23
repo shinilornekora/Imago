@@ -1,0 +1,201 @@
+# Стенд (SPEC §8): профили h / q / z. В песочнице без docker-демона не запускается —
+# файл должен быть валиден (`docker compose --profile z config`), процессы поднимаются через scripts/.
+#
+#   docker compose --profile h up          # api + postgres + caddy      (адаптер H)
+#   docker compose --profile q up          # то же                        (адаптер Q)
+#   docker compose --profile z up          # + zero-cache                 (адаптер Z)
+#
+# Образы закреплены по НЕИЗМЕНЯЕМЫМ идентификаторам (§1.9): тег + digest манифеста.
+# Digest'ы получены из публичного реестра БЕЗ docker-демона (в песочнице его нет) —
+# HTTP-запросом к Docker Registry v2, заголовок `Docker-Content-Digest`:
+#
+#   REPO=library/postgres; TAG=17-alpine
+#   T=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$REPO:pull" | jq -r .token)
+#   curl -sI -H "Authorization: Bearer $T" \
+#     -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+#     "https://registry-1.docker.io/v2/$REPO/manifests/$TAG" | grep -i docker-content-digest
+#
+# Дата фиксации: 2026-09-12. Digest указывает на мультиплатформенный индекс, поэтому
+# один и тот же идентификатор воспроизводится на amd64 и arm64. Тег оставлен рядом
+# как читаемая подпись: при расхождении тега и digest'а Docker использует digest.
+# Проверить, не «уехал» ли плавающий тег: повторить команду выше и сравнить.
+# Перезакрепление — только между сериями и с записью в docs/DEVIATIONS.md (§10 SPEC).
+
+name: stand
+
+x-postgres-image: &postgres-image postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+x-zero-image: &zero-image rocicorp/zero:1.9.0@sha256:f80683bf3ddf08be26c68ddd94589fada29a0b8a4597668b090006c09041d4cd
+x-caddy-image: &caddy-image caddy:2@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017
+
+# Серверный бюджет §1.2 — 4 vCPU, 8 ГиБ памяти, 40 ГиБ диска НА ВСЮ конфигурацию,
+# ВКЛЮЧАЯ zero-cache («дополнительный сервер нельзя исключать из бюджета при
+# сравнении с HTTP-вариантами»). Лимиты подобраны так, чтобы сумма не превышала
+# бюджет в самом тяжёлом профиле z:
+#
+#   postgres 2.0 vCPU / 4.0 ГиБ
+#   api      1.0      / 2.0
+#   zero     0.5      / 1.5      (только профиль z)
+#   caddy    0.5      / 0.5
+#   ─────────────────────────────
+#   профиль z:   4.0 vCPU / 8.0 ГиБ  — ровно бюджет
+#   профили h/q: 3.5 vCPU / 6.5 ГиБ  — с запасом (zero-cache не запускается)
+#
+# Лимиты одинаковы во всех профилях намеренно: если бы api в профилях h/q получал
+# больше ядер, чем в z, сравнение адаптеров измеряло бы разницу лимитов, а не
+# адаптеров (§1.7 «подмена механизма ради показателя»).
+#
+# `deploy.resources.limits` применяется `docker compose up` начиная с Compose v2
+# и без Swarm. Диск Compose квотировать не умеет: ограничение 40 ГиБ задаётся
+# драйвером тома — см. комментарий у `volumes:` в конце файла.
+
+services:
+  postgres:
+    image: *postgres-image
+    profiles: ["h", "q", "z"]
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_wal_senders=10", "-c", "max_replication_slots=10"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-editor}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-editor}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    image: stand/api:local
+    profiles: ["h", "q", "z"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STAND_DB_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-editor}
+      STAND_PORT: "3000"
+      # Внутри контейнера слушаем все интерфейсы сети Compose осознанно: порт не
+      # публикуется наружу (`expose`, а не `ports`), внешний вход — только через
+      # caddy. По умолчанию в коде `STAND_HOST=127.0.0.1` (packages/server/src/config.ts).
+      STAND_HOST: 0.0.0.0
+      # Хуки /api/test/* не требуют токена, поэтому в контуре, доступном не только
+      # с localhost, их закрывают общим секретом заголовка x-stand-test-secret.
+      # api слушает 0.0.0.0 (STAND_HOST выше), поэтому при STAND_TEST_HOOKS=1 и ПУСТОМ
+      # секрете он намеренно НЕ поднимается (packages/server/src/app.ts): открытые хуки на
+      # публикуемом порту — это сброс чужого документа без токена.
+      STAND_TEST_HOOKS_SECRET: ${STAND_TEST_HOOKS_SECRET:-}
+      STAND_JWT_SECRET: ${STAND_JWT_SECRET:?set STAND_JWT_SECRET in .env}
+      STAND_TEST_HOOKS: ${STAND_TEST_HOOKS:-0}
+      STAND_LOG_LEVEL: ${STAND_LOG_LEVEL:-info}
+      STAND_CLIENT_DIST: /app/packages/client/dist
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2g
+
+  zero-cache:
+    image: *zero-image
+    profiles: ["z"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      ZERO_UPSTREAM_DB: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-editor}
+      ZERO_REPLICA_FILE: /data/zero-replica.db
+      # zero-cache 1.9: MUTATE/QUERY (ZERO_PUSH_URL / ZERO_GET_QUERIES_URL — deprecated-алиасы); маршруты в packages/server/src/zero
+      ZERO_MUTATE_URL: http://api:3000/api/zero/mutate
+      ZERO_QUERY_URL: http://api:3000/api/zero/query
+      # deprecated, но работает: zero-cache сам проверяет JWT HS256 и sub === userID; API проверяет тем же секретом
+      ZERO_AUTH_SECRET: ${STAND_JWT_SECRET:?set STAND_JWT_SECRET in .env}
+      # Защищает /statz, /heapz и inspector (§1.6: административные интерфейсы
+      # zero-cache — только внутри контура). Значения по умолчанию НЕТ намеренно:
+      # с `stand-admin` в репозитории пароль не был секретом. Не задан в .env →
+      # `docker compose up` останавливается с этим сообщением.
+      ZERO_ADMIN_PASSWORD: ${ZERO_ADMIN_PASSWORD:?set ZERO_ADMIN_PASSWORD in infra/.env (no default on purpose)}
+      # app id → схемы stand_0, "stand_0/cvr", "stand_0/cdc", слот stand_0_a (как в scripts/start-zero.sh)
+      ZERO_APP_ID: ${ZERO_APP_ID:-stand}
+      # публикация только таблиц Zero-схемы (без users/operations/shapes_baseline); создать один раз в upstream:
+      #   CREATE PUBLICATION stand_zero FOR TABLE documents, pages, shapes;   (scripts/start-zero.sh делает это сам)
+      ZERO_APP_PUBLICATIONS: ${ZERO_APP_PUBLICATIONS:-stand_zero}
+      ZERO_NUM_SYNC_WORKERS: "1"
+      ZERO_ENABLE_CRUD_MUTATIONS: "false"
+      ZERO_PORT: "4848"
+      ZERO_LOG_LEVEL: ${ZERO_LOG_LEVEL:-warn}
+      ZERO_LOG_FORMAT: text
+      ZERO_ENABLE_TELEMETRY: "false"
+      DO_NOT_TRACK: "1"
+    volumes:
+      - zerodata:/data
+    expose:
+      - "4848"
+    # §1.9: «в профиль входят проверки готовности сервисов, запуск процесса ещё
+    # не означает готовности реплики обслуживать чтение». zero-cache отвечает на
+    # корневой путь только после того, как поднял реплику из upstream, поэтому
+    # start_period здесь длиннее, чем у api: первичная репликация документа
+    # 50×500 занимает ~10 с (docs/INTEGRATION.md).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4848/ >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 1536m
+
+  caddy:
+    image: *caddy-image
+    profiles: ["h", "q", "z"]
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # Единственный порт, публикуемый наружу. Привязка к 127.0.0.1 по умолчанию:
+      # стенд не предназначен для доступа из сети (§1.6). Для клиента на отдельном
+      # устройстве (§1.2) задайте STAND_PUBLIC_BIND=0.0.0.0 осознанно.
+      - "${STAND_PUBLIC_BIND:-127.0.0.1}:${STAND_PUBLIC_PORT:-8080}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    environment:
+      ZERO_UPSTREAM: ${ZERO_UPSTREAM:-zero-cache:4848}
+      # Путь, который прокси закрывает 403. По умолчанию — тестовые хуки /api/test/*
+      # (иначе они публикуются наружу вместе с /api/*). Публикация — только явной
+      # заменой значения на путь-заглушку, см. infra/.env.example.
+      STAND_CADDY_TEST_HOOKS_MATCH: ${STAND_CADDY_TEST_HOOKS_MATCH:-/api/test/*}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+
+# Дисковый бюджет §1.2 — 40 ГиБ на всю серверную конфигурацию. Compose не
+# квотирует тома; ограничение задаётся драйвером (или отдельным разделом):
+#
+#   docker volume create --driver local \
+#     --opt type=tmpfs --opt device=tmpfs --opt o=size=32g stand_pgdata   # для проверки
+#
+# В рабочем контуре под тома выделяется раздел ≤ 40 ГиБ, а серия останавливается
+# при занятости 80 % (§1.7) — процедура и команда проверки в docs/PASSPORT.md §9.
+volumes:
+  pgdata:
+  zerodata:

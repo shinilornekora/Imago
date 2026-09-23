@@ -1,0 +1,118 @@
+{
+  "config": {
+    "adapter": "Z",
+    "mode": "F",
+    "cache": 1
+  },
+  "key": "ZF1",
+  "label": "Z/F",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 126 опросов без частичных снимков; p2: 500 фигур, зонд 7 опросов; холст: 65 цветов",
+      "durationMs": 1451,
+      "details": {
+        "summary": "p1: 500 фигур, ревизия 0, зонд 126 опросов без частичных снимков; p2: 500 фигур, зонд 7 опросов; холст: 65 цветов",
+        "probe1": {
+          "ticks": 126,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 7,
+          "records": 1,
+          "immediate": {
+            "state": "loading",
+            "snapNull": false
+          },
+          "dt": 98
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at _C (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:19241) |     at yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22886) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:69180) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 6632,
+      "details": {
+        "stack": "page.evaluate: ApiHttpError: expected revision 1, current is 0\n    at _C (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:19241)\n    at yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22886)\n    at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:69180)\n    at async eval (eval at evaluate (:290:30), <anonymous>:4:22)\n    at async <anonymous>:316:30\n    at runCommand (/home/claude/stand/packages/bench/src/functional/lib/stand.mjs:265:15)\n    at Object.run (/home/claude/stand/packages/bench/src/functional/checks/03-source-fill.mjs:34:21)\n    at async Object.runConfig (/home/claude/stand/packages/bench/src/functional/lib/runner.mjs:81:29)\n    at async main (/home/claude/stand/packages/bench/src/functional/run.mjs:82:7)",
+        "partial": {}
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at _C (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:19241) |     at yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22886) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:69180) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 7723,
+      "details": {
+        "stack": "page.evaluate: ApiHttpError: expected revision 1, current is 0\n    at _C (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:19241)\n    at yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22886)\n    at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:69180)\n    at async eval (eval at evaluate (:290:30), <anonymous>:4:22)\n    at async <anonymous>:316:30\n    at runCommand (/home/claude/stand/packages/bench/src/functional/lib/stand.mjs:265:15)\n    at Object.run (/home/claude/stand/packages/bench/src/functional/checks/04-late-nav.mjs:38:21)\n    at async Object.runConfig (/home/claude/stand/packages/bench/src/functional/lib/runner.mjs:81:29)\n    at async main (/home/claude/stand/packages/bench/src/functional/run.mjs:82:7)",
+        "partial": {}
+      }
+    },
+    {
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "fail",
+      "message": "команда оболочки (HTTP, alice): 409 {\"error\":\"revision_mismatch\",\"message\":\"expected revision 0, current is 1\",\"currentRevision\":1} |  | 409 !== 200 | ",
+      "durationMs": 921,
+      "details": {
+        "stack": "AssertionError [ERR_ASSERTION]: команда оболочки (HTTP, alice): 409 {\"error\":\"revision_mismatch\",\"message\":\"expected revision 0, current is 1\",\"currentRevision\":1}\n\n409 !== 200\n\n    at runZ (file:///home/claude/stand/packages/bench/src/functional/checks/05-stale-read.mjs:224:12)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async Object.runConfig (file:///home/claude/stand/packages/bench/src/functional/lib/runner.mjs:81:29)\n    at async main (file:///home/claude/stand/packages/bench/src/functional/run.mjs:82:7)",
+        "partial": {}
+      }
+    },
+    {
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "Z А: офлайн 707 мс до отправки → доставлено после восстановления (.server через 1347 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 983 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+      "durationMs": 10068,
+      "details": {
+        "summary": "Z А: офлайн 707 мс до отправки → доставлено после восстановления (.server через 1347 мс), 1 строка, rev 0→1; Б: офлайн 700 мс после command-sent → .server через 983 мс, 1 строка, rev → 2; compare-db ok; retry-события: нет",
+        "opIds": [
+          "68dda0d1-fdba-4b47-8d48-fe0efd7149ea",
+          "19a48c7a-7e37-4066-a048-e7be4659e172"
+        ],
+        "timings": [
+          {
+            "opId": "68dda0d1-fdba-4b47-8d48-fe0efd7149ea",
+            "sentAt": 1522.2999999998137,
+            "serverAt": 2869.7000000001863,
+            "source": "events"
+          },
+          {
+            "opId": "19a48c7a-7e37-4066-a048-e7be4659e172",
+            "sentAt": 4336,
+            "serverAt": 5319,
+            "source": "events"
+          }
+        ],
+        "oracleReport": "/home/claude/stand/results/functional/2026-09-13_00-32-38/artifacts/ZF1/6-retry-Z-compare-db.json"
+      }
+    }
+  ],
+  "passed": false,
+  "verdict": {
+    "verdict": "не допущено",
+    "admitted": false,
+    "caveats": [
+      "провалы: 3-source-fill, 4-late-nav, 5-stale-read"
+    ],
+    "failed": [
+      "3-source-fill",
+      "4-late-nav",
+      "5-stale-read"
+    ],
+    "skippedChecks": [],
+    "notApplicable": []
+  }
+}

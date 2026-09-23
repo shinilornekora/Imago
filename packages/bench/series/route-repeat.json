@@ -1,0 +1,165 @@
+{
+  "name": "route-repeat",
+  "doc": "doc-acc-50x500",
+  "sourceId": "doc-acc-50x500-src-1",
+  "fill": "#1e90ff",
+  "docJson": "data/acceptance.json",
+  "configs": [
+    {
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1
+    },
+    {
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "H",
+      "mode": "P",
+      "cache": 3
+    },
+    {
+      "adapter": "H",
+      "mode": "P",
+      "cache": 10
+    },
+    {
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 3
+    },
+    {
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 10
+    },
+    {
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1
+    },
+    {
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 3
+    },
+    {
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 10
+    }
+  ],
+  "repetitions": 10,
+  "seed": 20260911,
+  "shaper": {
+    "delayMs": 25,
+    "bandwidthMbit": 20,
+    "handshakeRtt": true,
+    "statsUrl": "http://127.0.0.1:8081"
+  },
+  "baseUrl": "http://127.0.0.1:8080",
+  "api": {
+    "url": "http://127.0.0.1:3000",
+    "login": "alice"
+  },
+  "resetCommand": null,
+  "referenceCommand": "scripts/reference-check.sh",
+  "procGroups": [
+    {
+      "name": "api",
+      "pidFile": "results/logs/api.pid",
+      "exclude": [
+        "netshaper",
+        "zero-cache"
+      ]
+    },
+    {
+      "name": "pg",
+      "patterns": [
+        "(^|/)postgres .*16/main",
+        "^postgres: 16/main"
+      ],
+      "exclude": [
+        "zerospike",
+        "spike"
+      ]
+    },
+    {
+      "name": "zero",
+      "pidFile": "results/logs/zero.pid",
+      "patterns": [
+        "stand/node_modules/.*zero-cache",
+        "zero-cache.*results/zero-replica"
+      ],
+      "exclude": [
+        "spike-zero"
+      ],
+      "dir": "results/zero-replica",
+      "adapters": [
+        "Z"
+      ]
+    }
+  ],
+  "browser": {
+    "channel": "chromium",
+    "headless": true,
+    "args": [
+      "--disable-extensions"
+    ],
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "scenario": {
+    "route": [
+      2,
+      3,
+      4,
+      2,
+      5,
+      6,
+      7,
+      5,
+      2,
+      8,
+      9,
+      10,
+      8,
+      11,
+      12,
+      50,
+      4,
+      6
+    ],
+    "pauseMs": 1000,
+    "cmdAfterStep": 5,
+    "stepTimeoutMs": 20000,
+    "autologin": "alice",
+    "budgets": {
+      "scenarioMs": 40000
+    }
+  },
+  "docPages": 50,
+  "docShapesPerPage": 500,
+  "cooldownMs": 1000,
+  "maxConsecutiveErrors": 5,
+  "notes": "частые повторные переходы: 18 переходов, 13 разных страниц (окно 10 связывает), возвраты на расстоянии 1, 2 и 4-8; окна кеша 1/3/10 в режиме P И режим F (по одной ячейке на адаптер) — без F-плеча изменение метрики ВНУТРИ адаптера (P−F) по оси окна кеша невычислимо и порядок §1.8 на этой оси не выполняется (критик 2, дефект 7). Ячейка cache=10 здесь заменяет серию cache10: на приёмочном маршруте окно 10 не связывает (7 разных страниц), а на этом — связывает."
+}

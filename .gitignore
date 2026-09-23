@@ -1,0 +1,32 @@
+# зависимости и сборки
+node_modules/
+dist/
+*.tsbuildinfo
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# секреты и служебные файлы запуска
+results/logs/
+results/backup/
+results/zero-replica/
+results/progress.json
+results/archive/
+*.pid
+.env
+
+# сгенерированные документы стенда: детерминированы (scripts/gen-all.sh), в репозиторий не кладём —
+# контрольные суммы лежат рядом в data/*.sha256
+data/*.json
+
+# сырые записи прогонов: 58 тыс. файлов / ~2 ГБ. В репозиторий попадают сводные runs.csv,
+# паспорта серий и отчёты анализа (docs/results/**)
+results/*/runs/
+results/*/reference/
+results/*/snapshots/
+results/functional/*/artifacts/
+
+# временные файлы
+shot.mjs
+/tmp/

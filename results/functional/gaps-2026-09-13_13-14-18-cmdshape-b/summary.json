@@ -1,0 +1,269 @@
+{
+  "base": "http://127.0.0.1:3005",
+  "label": "command-shape-b",
+  "docId": "doc-cmd-50x500",
+  "docJson": "data/cmd-50x500.json",
+  "docPages": 50,
+  "docShapes": 25000,
+  "docProfile": "doc-cmd-50x500: 50 страниц × 500 фигур; источник проверок doc-cmd-50x500-src-23 (2500 экземпляров на 50 страницах, непереопределённые на 50); библиотечная страница doc-cmd-50x500-p50",
+  "bobDocId": "doc-bob-5x50",
+  "adapters": [
+    "H",
+    "Q",
+    "Z"
+  ],
+  "zeroUrl": "http://127.0.0.1:4848",
+  "zeroQueryApi": "http://127.0.0.1:3000",
+  "startedAt": "2026-09-13T13:15:19.478Z",
+  "finishedAt": "2026-09-13T13:15:31.137Z",
+  "checkSet": [
+    "4-late-nav"
+  ],
+  "partialCheckSet": true,
+  "totals": {
+    "pass": 4,
+    "fail": 0,
+    "skip": 0,
+    "na": 0,
+    "configs": 4,
+    "admitted": [],
+    "admittedPartial": [
+      "H/F",
+      "H/P/cache=1",
+      "Q/F",
+      "Q/P/cache=1"
+    ],
+    "admittedWithCaveat": [],
+    "notAdmitted": []
+  },
+  "verdicts": [
+    {
+      "label": "H/F",
+      "key": "HF1",
+      "config": {
+        "adapter": "H",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "H/P/cache=1",
+      "key": "HP1",
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Q/F",
+      "key": "QF1",
+      "config": {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Q/P/cache=1",
+      "key": "QP1",
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    }
+  ],
+  "configs": [
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "H/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+          "durationMs": 4243
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "H/P/cache=1",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 1591
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "Q/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+          "durationMs": 4234
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "Q/P/cache=1",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 1259
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+      "durationMs": 4243
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1591
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+      "durationMs": 4234
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1259
+    }
+  ]
+}

@@ -1,0 +1,463 @@
+{
+  "config": {
+    "adapter": "Q",
+    "mode": "P",
+    "cache": 1
+  },
+  "key": "QP1",
+  "label": "Q/P/cache=1",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 32 опросов без частичных снимков; p2: 500 фигур, зонд 183 опросов; P: снимок null во время задержанного чтения (753 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1283,
+      "details": {
+        "summary": "p1: 500 фигур, ревизия 0, зонд 32 опросов без частичных снимков; p2: 500 фигур, зонд 183 опросов; P: снимок null во время задержанного чтения (753 мс), state=loading; холст: 65 цветов",
+        "probe1": {
+          "ticks": 32,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 183,
+          "records": 2,
+          "immediate": {
+            "state": "loading",
+            "snapNull": true
+          },
+          "dt": 753
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "2-local-fill",
+      "title": "2. Локальная заливка",
+      "status": "pass",
+      "message": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+      "durationMs": 1793,
+      "details": {
+        "summary": "экземпляр doc-acc-50x500-inst-1-6 на doc-acc-50x500-p2: локальная #00aa00 сохранена после вытеснения и перечитывания, после setSourceFill(#00aa00) и setSourceFill(#0000aa); compare-db ok",
+        "source": "doc-acc-50x500-src-1",
+        "page": "doc-acc-50x500-p2",
+        "instance": "doc-acc-50x500-inst-1-6",
+        "sibling": "doc-acc-50x500-inst-1-4",
+        "reads": {
+          "before": 2,
+          "after": 3
+        },
+        "revisions": [
+          1,
+          2,
+          3
+        ],
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_19-07-40-acceptance/artifacts/QP1/2-local-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+      "durationMs": 1696,
+      "details": {
+        "summary": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+        "source": "doc-acc-50x500-src-1",
+        "activePage": "doc-acc-50x500-p2",
+        "neverLoaded": [
+          "doc-acc-50x500-p12",
+          "doc-acc-50x500-p17",
+          "doc-acc-50x500-p22",
+          "doc-acc-50x500-p28",
+          "doc-acc-50x500-p33",
+          "doc-acc-50x500-p38",
+          "doc-acc-50x500-p43",
+          "doc-acc-50x500-p50",
+          "doc-acc-50x500-p7"
+        ],
+        "result": {
+          "opId": "60b43fc3-1181-4131-ac1a-00ee5ca49eb7",
+          "revision": 1,
+          "affectedPages": [
+            "doc-acc-50x500-p12",
+            "doc-acc-50x500-p17",
+            "doc-acc-50x500-p2",
+            "doc-acc-50x500-p22",
+            "doc-acc-50x500-p28",
+            "doc-acc-50x500-p33",
+            "doc-acc-50x500-p38",
+            "doc-acc-50x500-p43",
+            "doc-acc-50x500-p50",
+            "doc-acc-50x500-p7"
+          ],
+          "affectedShapes": 81
+        },
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_19-07-40-acceptance/artifacts/QP1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1090,
+      "details": {
+        "summary": "после setSourceFill(doc-acc-50x500-src-1) rev=1 открыта doc-acc-50x500-p50: page-ready rev=1, снимок = эталон",
+        "source": "doc-acc-50x500-src-1",
+        "activePage": "doc-acc-50x500-p2",
+        "latePage": "doc-acc-50x500-p50",
+        "affected": [
+          "doc-acc-50x500-p12",
+          "doc-acc-50x500-p17",
+          "doc-acc-50x500-p2",
+          "doc-acc-50x500-p22",
+          "doc-acc-50x500-p28",
+          "doc-acc-50x500-p33",
+          "doc-acc-50x500-p38",
+          "doc-acc-50x500-p43",
+          "doc-acc-50x500-p50",
+          "doc-acc-50x500-p7"
+        ],
+        "readsY": 1
+      }
+    },
+    {
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "pass",
+      "message": "P: старое чтение: ответ 200 через 1513 мс, команда отправлена через 123 мс после его начала; чтений X: 2; итог doc-acc-50x500-p7 rev=1, doc-acc-50x500-inst-1-20=#112233; зонд 549 опросов, без отката",
+      "durationMs": 2655,
+      "details": {
+        "summary": "P: старое чтение: ответ 200 через 1513 мс, команда отправлена через 123 мс после его начала; чтений X: 2; итог doc-acc-50x500-p7 rev=1, doc-acc-50x500-inst-1-20=#112233; зонд 549 опросов, без отката",
+        "mechanism": "HTTP-хук POST /api/test/delay на чтение страницы X (onSend)",
+        "page": "doc-acc-50x500-p7",
+        "instance": "doc-acc-50x500-inst-1-20",
+        "firstRead": {
+          "id": 3,
+          "t": 1789326821138,
+          "endT": 1789326822651,
+          "method": "GET",
+          "url": "http://127.0.0.1:3005/api/documents/doc-acc-50x500/pages/doc-acc-50x500-p7",
+          "path": "/api/documents/doc-acc-50x500/pages/doc-acc-50x500-p7",
+          "hasAuth": true,
+          "status": 200,
+          "failed": null
+        },
+        "cmdPost": {
+          "id": 4,
+          "t": 1789326821261,
+          "endT": 1789326821272,
+          "method": "POST",
+          "url": "http://127.0.0.1:3005/api/documents/doc-acc-50x500/commands",
+          "path": "/api/documents/doc-acc-50x500/commands",
+          "hasAuth": true,
+          "status": 200,
+          "failed": null
+        },
+        "probeRecords": [
+          {
+            "t": 264,
+            "size": null,
+            "revision": null,
+            "fill": null
+          },
+          {
+            "t": 1796.8999999985099,
+            "size": 500,
+            "revision": 1,
+            "fill": "#112233"
+          }
+        ],
+        "readsX": 2
+      }
+    },
+    {
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "pass",
+      "message": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+      "durationMs": 2642,
+      "details": {
+        "summary": "А: ответ оборван после обработки → poll, 1 POST, 1 строка, rev 0→1; Б: запрос оборван до сервера → poll(404)+repost с тем же opId, 1 строка, rev → 2; повтор по HTTP replayed, конфликт параметров 409; compare-db ok",
+        "opIds": [
+          "9376e899-2923-4b77-bef4-516b7dae0a00",
+          "c79bfda1-4233-450a-9322-1af336c09a15"
+        ],
+        "retries": {
+          "A": [
+            "poll"
+          ],
+          "B": [
+            "poll",
+            "repost"
+          ]
+        },
+        "oracleReport": "/home/claude/stand/results/functional/admission-2026-09-13_19-07-40-acceptance/artifacts/QP1/6-retry-compare-db.json"
+      }
+    },
+    {
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+      "durationMs": 1437,
+      "details": {
+        "summary": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+        "steps": [
+          {
+            "target": "doc-acc-50x500-p2",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p2"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p3",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p3"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p2"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p1",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p1"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p3"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p4",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p4"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p4",
+              "doc-acc-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p2",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p4",
+              "doc-acc-50x500-p2"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p4"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p5",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p2",
+              "doc-acc-50x500-p5"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p5",
+              "doc-acc-50x500-p2"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p1",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p5",
+              "doc-acc-50x500-p1"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p5"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p6",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p1",
+              "doc-acc-50x500-p6"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p6",
+              "doc-acc-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p3",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p6",
+              "doc-acc-50x500-p3"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p6"
+            ]
+          },
+          {
+            "target": "doc-acc-50x500-p50",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-acc-50x500-p3",
+              "doc-acc-50x500-p50"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-acc-50x500-p50",
+              "doc-acc-50x500-p3"
+            ]
+          }
+        ],
+        "expectedReads": {
+          "doc-acc-50x500-p1": 3,
+          "doc-acc-50x500-p2": 2,
+          "doc-acc-50x500-p3": 2,
+          "doc-acc-50x500-p4": 1,
+          "doc-acc-50x500-p5": 1,
+          "doc-acc-50x500-p6": 1,
+          "doc-acc-50x500-p7": 0,
+          "doc-acc-50x500-p8": 0,
+          "doc-acc-50x500-p9": 0,
+          "doc-acc-50x500-p10": 0,
+          "doc-acc-50x500-p11": 0,
+          "doc-acc-50x500-p12": 0,
+          "doc-acc-50x500-p13": 0,
+          "doc-acc-50x500-p14": 0,
+          "doc-acc-50x500-p15": 0,
+          "doc-acc-50x500-p16": 0,
+          "doc-acc-50x500-p17": 0,
+          "doc-acc-50x500-p18": 0,
+          "doc-acc-50x500-p19": 0,
+          "doc-acc-50x500-p20": 0,
+          "doc-acc-50x500-p21": 0,
+          "doc-acc-50x500-p22": 0,
+          "doc-acc-50x500-p23": 0,
+          "doc-acc-50x500-p24": 0,
+          "doc-acc-50x500-p25": 0,
+          "doc-acc-50x500-p26": 0,
+          "doc-acc-50x500-p27": 0,
+          "doc-acc-50x500-p28": 0,
+          "doc-acc-50x500-p29": 0,
+          "doc-acc-50x500-p30": 0,
+          "doc-acc-50x500-p31": 0,
+          "doc-acc-50x500-p32": 0,
+          "doc-acc-50x500-p33": 0,
+          "doc-acc-50x500-p34": 0,
+          "doc-acc-50x500-p35": 0,
+          "doc-acc-50x500-p36": 0,
+          "doc-acc-50x500-p37": 0,
+          "doc-acc-50x500-p38": 0,
+          "doc-acc-50x500-p39": 0,
+          "doc-acc-50x500-p40": 0,
+          "doc-acc-50x500-p41": 0,
+          "doc-acc-50x500-p42": 0,
+          "doc-acc-50x500-p43": 0,
+          "doc-acc-50x500-p44": 0,
+          "doc-acc-50x500-p45": 0,
+          "doc-acc-50x500-p46": 0,
+          "doc-acc-50x500-p47": 0,
+          "doc-acc-50x500-p48": 0,
+          "doc-acc-50x500-p49": 0,
+          "doc-acc-50x500-p50": 1
+        }
+      }
+    }
+  ],
+  "passed": true,
+  "verdict": {
+    "verdict": "допуск (частичный набор)",
+    "admitted": false,
+    "caveats": [
+      "набор сокращён: 1-open, 2-local-fill, 3-source-fill, 4-late-nav, 5-stale-read, 6-retry, I1-full-load, I2-window"
+    ],
+    "failed": [],
+    "skippedChecks": [],
+    "notApplicable": [
+      {
+        "id": "I1-full-load",
+        "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+      }
+    ]
+  }
+}

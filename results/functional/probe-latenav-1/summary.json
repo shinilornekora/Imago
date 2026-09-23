@@ -1,0 +1,158 @@
+{
+  "base": "http://127.0.0.1:3005",
+  "label": "probe-latenav",
+  "docId": "doc-cmd-50x500",
+  "docJson": "data/cmd-50x500.json",
+  "docPages": 50,
+  "docShapes": 25000,
+  "docProfile": "doc-cmd-50x500: 50 страниц × 500 фигур; источник проверок doc-cmd-50x500-src-23 (2500 экземпляров на 50 страницах, непереопределённые на 50); библиотечная страница doc-cmd-50x500-p50",
+  "bobDocId": "doc-bob-5x50",
+  "adapters": [
+    "Z"
+  ],
+  "zeroUrl": "http://127.0.0.1:4848",
+  "zeroQueryApi": "http://127.0.0.1:3000",
+  "startedAt": "2026-09-13T13:06:51.955Z",
+  "finishedAt": "2026-09-13T13:07:03.617Z",
+  "checkSet": [
+    "4-late-nav"
+  ],
+  "partialCheckSet": true,
+  "totals": {
+    "pass": 1,
+    "fail": 1,
+    "skip": 0,
+    "na": 0,
+    "configs": 2,
+    "admitted": [],
+    "admittedPartial": [
+      "Z/F"
+    ],
+    "admittedWithCaveat": [],
+    "notAdmitted": [
+      "Z/P/cache=1"
+    ]
+  },
+  "verdicts": [
+    {
+      "label": "Z/F",
+      "key": "ZF1",
+      "config": {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": []
+    },
+    {
+      "label": "Z/P/cache=1",
+      "key": "ZP1",
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 4-late-nav"
+      ],
+      "failed": [
+        "4-late-nav"
+      ],
+      "skippedChecks": [],
+      "notApplicable": []
+    }
+  ],
+  "configs": [
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "Z/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 4-late-nav"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц обновлены синхронизацией, снимки всех 50 страниц = эталон",
+          "durationMs": 9265
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "Z/P/cache=1",
+      "passed": false,
+      "skipped": null,
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 4-late-nav"
+      ],
+      "failed": [
+        "4-late-nav"
+      ],
+      "skippedChecks": [],
+      "notApplicable": [],
+      "checks": [
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "fail",
+          "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541) |     at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266) |     at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+          "durationMs": 1241
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц обновлены синхронизацией, снимки всех 50 страниц = эталон",
+      "durationMs": 9265
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541) |     at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266) |     at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 1241
+    }
+  ]
+}

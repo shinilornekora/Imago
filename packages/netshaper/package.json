@@ -1,0 +1,24 @@
+{
+  "name": "@stand/netshaper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TCP/HTTP шейпер и маршрутизатор стенда: задержка + token-bucket полоса, подсчёт байтов (SPEC §7.1)",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "bin": {
+    "netshaper": "./bin/netshaper.mjs"
+  },
+  "scripts": {
+    "start": "node bin/netshaper.mjs",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.4",
+    "typescript": "5.9.3",
+    "ws": "8.21.3"
+  }
+}

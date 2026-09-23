@@ -1,0 +1,912 @@
+{
+  "base": "http://127.0.0.1:3005",
+  "label": "command-shape",
+  "docId": "doc-cmd-50x500",
+  "docJson": "data/cmd-50x500.json",
+  "docPages": 50,
+  "docShapes": 25000,
+  "docProfile": "doc-cmd-50x500: 50 страниц × 500 фигур; источник проверок doc-cmd-50x500-src-23 (2500 экземпляров на 50 страницах, непереопределённые на 50); библиотечная страница doc-cmd-50x500-p50",
+  "bobDocId": "doc-bob-5x50",
+  "adapters": [
+    "H",
+    "Q",
+    "Z"
+  ],
+  "zeroUrl": "http://127.0.0.1:4848",
+  "zeroQueryApi": "http://127.0.0.1:3000",
+  "startedAt": "2026-09-13T13:04:41.703Z",
+  "finishedAt": "2026-09-13T13:05:57.100Z",
+  "checkSet": [
+    "1-open",
+    "3-source-fill",
+    "4-late-nav",
+    "I1-full-load",
+    "I2-window"
+  ],
+  "partialCheckSet": true,
+  "totals": {
+    "pass": 22,
+    "fail": 2,
+    "skip": 0,
+    "na": 6,
+    "configs": 6,
+    "admitted": [],
+    "admittedPartial": [
+      "H/F",
+      "H/P/cache=1",
+      "Q/F",
+      "Q/P/cache=1"
+    ],
+    "admittedWithCaveat": [],
+    "notAdmitted": [
+      "Z/F",
+      "Z/P/cache=1"
+    ]
+  },
+  "verdicts": [
+    {
+      "label": "H/F",
+      "key": "HF1",
+      "config": {
+        "adapter": "H",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ]
+    },
+    {
+      "label": "H/P/cache=1",
+      "key": "HP1",
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "Q/F",
+      "key": "QF1",
+      "config": {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ]
+    },
+    {
+      "label": "Q/P/cache=1",
+      "key": "QP1",
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ]
+    },
+    {
+      "label": "Z/F",
+      "key": "ZF1",
+      "config": {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 4-late-nav"
+      ],
+      "failed": [
+        "4-late-nav"
+      ],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ]
+    },
+    {
+      "label": "Z/P/cache=1",
+      "key": "ZP1",
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      },
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 4-late-nav"
+      ],
+      "failed": [
+        "4-late-nav"
+      ],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ]
+    }
+  ],
+  "configs": [
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "H/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 500 фигур, ревизия 0, зонд 68 опросов без частичных снимков; p2: 500 фигур, зонд 6 опросов; холст: 65 цветов",
+          "durationMs": 931
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 0), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+          "durationMs": 2903
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+          "durationMs": 4594
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "pass",
+          "message": "все 50 страниц загружены (25000 фигур), 50 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+          "durationMs": 2232
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "na",
+          "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+          "durationMs": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "H",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "H/P/cache=1",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 500 фигур, ревизия 0, зонд 33 опросов без частичных снимков; p2: 500 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (745 мс), state=loading; холст: 65 цветов",
+          "durationMs": 1285
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 48), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+          "durationMs": 1988
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 1430
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+          "durationMs": 1899
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "Q/F",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 500 фигур, ревизия 0, зонд 44 опросов без частичных снимков; p2: 500 фигур, зонд 4 опросов; холст: 65 цветов",
+          "durationMs": 768
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 0), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+          "durationMs": 2913
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+          "durationMs": 4764
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "pass",
+          "message": "все 50 страниц загружены (25000 фигур), 50 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+          "durationMs": 2304
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "na",
+          "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+          "durationMs": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Q",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "Q/P/cache=1",
+      "passed": true,
+      "skipped": null,
+      "verdict": "допуск (частичный набор)",
+      "admitted": false,
+      "caveats": [
+        "набор сокращён: 1-open, 3-source-fill, 4-late-nav, I1-full-load, I2-window"
+      ],
+      "failed": [],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 500 фигур, ревизия 0, зонд 33 опросов без частичных снимков; p2: 500 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (753 мс), state=loading; холст: 65 цветов",
+          "durationMs": 1283
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 48), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+          "durationMs": 1859
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "pass",
+          "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон",
+          "durationMs": 1353
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+          "durationMs": 1502
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "F",
+        "cache": 1
+      },
+      "label": "Z/F",
+      "passed": false,
+      "skipped": null,
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 4-late-nav"
+      ],
+      "failed": [
+        "4-late-nav"
+      ],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I2-window",
+          "reason": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 500 фигур, ревизия 0, зонд 92 опросов без частичных снимков; p2: 500 фигур, зонд 7 опросов; холст: 65 цветов",
+          "durationMs": 1037
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 0), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+          "durationMs": 10701
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "fail",
+          "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541) |     at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266) |     at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+          "durationMs": 8632
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "pass",
+          "message": "Z: все 50 страниц материализованы (25000 фигур), retained=50/25000",
+          "durationMs": 9331
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "na",
+          "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+          "durationMs": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "adapter": "Z",
+        "mode": "P",
+        "cache": 1
+      },
+      "label": "Z/P/cache=1",
+      "passed": false,
+      "skipped": null,
+      "verdict": "не допущено",
+      "admitted": false,
+      "caveats": [
+        "провалы: 4-late-nav"
+      ],
+      "failed": [
+        "4-late-nav"
+      ],
+      "skippedChecks": [],
+      "notApplicable": [
+        {
+          "id": "I1-full-load",
+          "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+        }
+      ],
+      "checks": [
+        {
+          "id": "1-open",
+          "title": "1. Открытие страницы",
+          "status": "pass",
+          "message": "p1: 500 фигур, ревизия 0, зонд 61 опросов без частичных снимков; p2: 500 фигур, зонд 210 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 896 мс; холст: 65 цветов",
+          "durationMs": 1703
+        },
+        {
+          "id": "3-source-fill",
+          "title": "3. Общая заливка источника",
+          "status": "pass",
+          "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 48), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+          "durationMs": 3045
+        },
+        {
+          "id": "4-late-nav",
+          "title": "4. Поздний переход",
+          "status": "fail",
+          "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541) |     at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266) |     at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+          "durationMs": 1709
+        },
+        {
+          "id": "I1-full-load",
+          "title": "И1. Инвариант F: полная загрузка всех страниц",
+          "status": "na",
+          "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+          "durationMs": 0
+        },
+        {
+          "id": "I2-window",
+          "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+          "status": "pass",
+          "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 10 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+          "durationMs": 3494
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 68 опросов без частичных снимков; p2: 500 фигур, зонд 6 опросов; холст: 65 цветов",
+      "durationMs": 931
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 0), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+      "durationMs": 2903
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+      "durationMs": 4594
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "все 50 страниц загружены (25000 фигур), 50 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+      "durationMs": 2232
+    },
+    {
+      "config": "H/F",
+      "configKey": "HF1",
+      "adapter": "H",
+      "mode": "F",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 33 опросов без частичных снимков; p2: 500 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (745 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1285
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 48), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+      "durationMs": 1988
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1430
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "H/P/cache=1",
+      "configKey": "HP1",
+      "adapter": "H",
+      "mode": "P",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+      "durationMs": 1899
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 44 опросов без частичных снимков; p2: 500 фигур, зонд 4 опросов; холст: 65 цветов",
+      "durationMs": 768
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 0), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+      "durationMs": 2913
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон; F: все 50 затронутых страниц перечитаны, снимки всех 50 страниц = эталон",
+      "durationMs": 4764
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "все 50 страниц загружены (25000 фигур), 50 чтений (по одному на страницу), параллелизм ≤ 4 (max 4)",
+      "durationMs": 2304
+    },
+    {
+      "config": "Q/F",
+      "configKey": "QF1",
+      "adapter": "Q",
+      "mode": "F",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 33 опросов без частичных снимков; p2: 500 фигур, зонд 184 опросов; P: снимок null во время задержанного чтения (753 мс), state=loading; холст: 65 цветов",
+      "durationMs": 1283
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 48), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+      "durationMs": 1859
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "pass",
+      "message": "после setSourceFill(doc-cmd-50x500-src-23) rev=1 открыта doc-cmd-50x500-p50: page-ready rev=1, снимок = эталон",
+      "durationMs": 1353
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "Q/P/cache=1",
+      "configKey": "QP1",
+      "adapter": "Q",
+      "mode": "P",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, чтений 11 (по LRU-модели)",
+      "durationMs": 1502
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 92 опросов без частичных снимков; p2: 500 фигур, зонд 7 опросов; холст: 65 цветов",
+      "durationMs": 1037
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 0), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+      "durationMs": 10701
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541) |     at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266) |     at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 8632
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "pass",
+      "message": "Z: все 50 страниц материализованы (25000 фигур), retained=50/25000",
+      "durationMs": 9331
+    },
+    {
+      "config": "Z/F",
+      "configKey": "ZF1",
+      "adapter": "Z",
+      "mode": "F",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "na",
+      "message": "инвариант режима P (окно кеша); в режиме F вытеснения нет — проверяется инвариантом И1",
+      "durationMs": 0
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 61 опросов без частичных снимков; p2: 500 фигур, зонд 210 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 896 мс; холст: 65 цветов",
+      "durationMs": 1703
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 48), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+      "durationMs": 3045
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: expected revision 1, current is 0 |     at bC (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:19541) |     at SC.runCommand (http://127.0.0.1:3005/assets/z-BMiJL70h.js:8:23266) |     at async Ke.runCommand (http://127.0.0.1:3005/assets/index-DQWyxajl.js:10:69825) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22) |     at async <anonymous>:316:30",
+      "durationMs": 1709
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "config": "Z/P/cache=1",
+      "configKey": "ZP1",
+      "adapter": "Z",
+      "mode": "P",
+      "cache": 1,
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 10 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+      "durationMs": 3494
+    }
+  ]
+}

@@ -1,0 +1,418 @@
+{
+  "config": {
+    "adapter": "Z",
+    "mode": "P",
+    "cache": 1
+  },
+  "key": "ZP1",
+  "label": "Z/P/cache=1",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 49 опросов без частичных снимков; p2: 500 фигур, зонд 193 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 838 мс; холст: 65 цветов",
+      "durationMs": 1539,
+      "details": {
+        "summary": "p1: 500 фигур, ревизия 0, зонд 49 опросов без частичных снимков; p2: 500 фигур, зонд 193 опросов; P (Z): снимок null и state=loading во время задержанной (700 мс, срабатываний 1) регистрации synced query, готовность через 838 мс; холст: 65 цветов",
+        "probe1": {
+          "ticks": 49,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 193,
+          "records": 2,
+          "immediate": {
+            "state": "loading",
+            "snapNull": true
+          },
+          "dt": 838
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 48), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+      "durationMs": 2506,
+      "details": {
+        "summary": "setSourceFill(doc-cmd-50x500-src-23, #aa00aa) с активной doc-cmd-50x500-p2: affectedPages=50 (незагруженных до команды: 48), affectedShapes=2001; compare-db + operations ok; снимок doc-cmd-50x500-p2 = эталон",
+        "source": "doc-cmd-50x500-src-23",
+        "activePage": "doc-cmd-50x500-p2",
+        "neverLoaded": [
+          "doc-cmd-50x500-p10",
+          "doc-cmd-50x500-p11",
+          "doc-cmd-50x500-p12",
+          "doc-cmd-50x500-p13",
+          "doc-cmd-50x500-p14",
+          "doc-cmd-50x500-p15",
+          "doc-cmd-50x500-p16",
+          "doc-cmd-50x500-p17",
+          "doc-cmd-50x500-p18",
+          "doc-cmd-50x500-p19",
+          "doc-cmd-50x500-p20",
+          "doc-cmd-50x500-p21",
+          "doc-cmd-50x500-p22",
+          "doc-cmd-50x500-p23",
+          "doc-cmd-50x500-p24",
+          "doc-cmd-50x500-p25",
+          "doc-cmd-50x500-p26",
+          "doc-cmd-50x500-p27",
+          "doc-cmd-50x500-p28",
+          "doc-cmd-50x500-p29",
+          "doc-cmd-50x500-p3",
+          "doc-cmd-50x500-p30",
+          "doc-cmd-50x500-p31",
+          "doc-cmd-50x500-p32",
+          "doc-cmd-50x500-p33",
+          "doc-cmd-50x500-p34",
+          "doc-cmd-50x500-p35",
+          "doc-cmd-50x500-p36",
+          "doc-cmd-50x500-p37",
+          "doc-cmd-50x500-p38",
+          "doc-cmd-50x500-p39",
+          "doc-cmd-50x500-p4",
+          "doc-cmd-50x500-p40",
+          "doc-cmd-50x500-p41",
+          "doc-cmd-50x500-p42",
+          "doc-cmd-50x500-p43",
+          "doc-cmd-50x500-p44",
+          "doc-cmd-50x500-p45",
+          "doc-cmd-50x500-p46",
+          "doc-cmd-50x500-p47",
+          "doc-cmd-50x500-p48",
+          "doc-cmd-50x500-p49",
+          "doc-cmd-50x500-p5",
+          "doc-cmd-50x500-p50",
+          "doc-cmd-50x500-p6",
+          "doc-cmd-50x500-p7",
+          "doc-cmd-50x500-p8",
+          "doc-cmd-50x500-p9"
+        ],
+        "result": {
+          "opId": "10ff2043-7d83-42ab-a046-a6c57113e4e5",
+          "revision": 1,
+          "affectedPages": [
+            "doc-cmd-50x500-p1",
+            "doc-cmd-50x500-p10",
+            "doc-cmd-50x500-p11",
+            "doc-cmd-50x500-p12",
+            "doc-cmd-50x500-p13",
+            "doc-cmd-50x500-p14",
+            "doc-cmd-50x500-p15",
+            "doc-cmd-50x500-p16",
+            "doc-cmd-50x500-p17",
+            "doc-cmd-50x500-p18",
+            "doc-cmd-50x500-p19",
+            "doc-cmd-50x500-p2",
+            "doc-cmd-50x500-p20",
+            "doc-cmd-50x500-p21",
+            "doc-cmd-50x500-p22",
+            "doc-cmd-50x500-p23",
+            "doc-cmd-50x500-p24",
+            "doc-cmd-50x500-p25",
+            "doc-cmd-50x500-p26",
+            "doc-cmd-50x500-p27",
+            "doc-cmd-50x500-p28",
+            "doc-cmd-50x500-p29",
+            "doc-cmd-50x500-p3",
+            "doc-cmd-50x500-p30",
+            "doc-cmd-50x500-p31",
+            "doc-cmd-50x500-p32",
+            "doc-cmd-50x500-p33",
+            "doc-cmd-50x500-p34",
+            "doc-cmd-50x500-p35",
+            "doc-cmd-50x500-p36",
+            "doc-cmd-50x500-p37",
+            "doc-cmd-50x500-p38",
+            "doc-cmd-50x500-p39",
+            "doc-cmd-50x500-p4",
+            "doc-cmd-50x500-p40",
+            "doc-cmd-50x500-p41",
+            "doc-cmd-50x500-p42",
+            "doc-cmd-50x500-p43",
+            "doc-cmd-50x500-p44",
+            "doc-cmd-50x500-p45",
+            "doc-cmd-50x500-p46",
+            "doc-cmd-50x500-p47",
+            "doc-cmd-50x500-p48",
+            "doc-cmd-50x500-p49",
+            "doc-cmd-50x500-p5",
+            "doc-cmd-50x500-p50",
+            "doc-cmd-50x500-p6",
+            "doc-cmd-50x500-p7",
+            "doc-cmd-50x500-p8",
+            "doc-cmd-50x500-p9"
+          ],
+          "affectedShapes": 2001
+        },
+        "oracleReport": "/home/claude/stand/results/functional/gaps-2026-09-13_13-14-18-cmdshape-a/artifacts/ZP1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "I1-full-load",
+      "title": "И1. Инвариант F: полная загрузка всех страниц",
+      "status": "na",
+      "message": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2",
+      "durationMs": 0
+    },
+    {
+      "id": "I2-window",
+      "title": "И2. Инвариант P: окно кеша (cache=1) и повторная загрузка вытесненных",
+      "status": "pass",
+      "message": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 10 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+      "durationMs": 3066,
+      "details": {
+        "summary": "маршрут 2→3→1→4→2→5→1→6→3→50: retained.pages ≤ 2 на каждом шаге, окно LRU соблюдено, Z: повторная материализация 10 вытесненных страниц (по LRU-модели; HTTP-чтений нет)",
+        "steps": [
+          {
+            "target": "doc-cmd-50x500-p2",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p1",
+              "doc-cmd-50x500-p2"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p2",
+              "doc-cmd-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p3",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p2",
+              "doc-cmd-50x500-p3"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p3",
+              "doc-cmd-50x500-p2"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p1",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p3",
+              "doc-cmd-50x500-p1"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p1",
+              "doc-cmd-50x500-p3"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p4",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p1",
+              "doc-cmd-50x500-p4"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p4",
+              "doc-cmd-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p2",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p4",
+              "doc-cmd-50x500-p2"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p2",
+              "doc-cmd-50x500-p4"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p5",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p2",
+              "doc-cmd-50x500-p5"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p5",
+              "doc-cmd-50x500-p2"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p1",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p5",
+              "doc-cmd-50x500-p1"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p1",
+              "doc-cmd-50x500-p5"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p6",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p1",
+              "doc-cmd-50x500-p6"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p6",
+              "doc-cmd-50x500-p1"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p3",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p6",
+              "doc-cmd-50x500-p3"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p3",
+              "doc-cmd-50x500-p6"
+            ]
+          },
+          {
+            "target": "doc-cmd-50x500-p50",
+            "retained": {
+              "pages": 2,
+              "shapes": 1000,
+              "bytesEstimate": 200000
+            },
+            "loaded": [
+              "doc-cmd-50x500-p3",
+              "doc-cmd-50x500-p50"
+            ],
+            "needsRead": true,
+            "allowed": [
+              "doc-cmd-50x500-p50",
+              "doc-cmd-50x500-p3"
+            ]
+          }
+        ],
+        "expectedReads": {
+          "doc-cmd-50x500-p1": 3,
+          "doc-cmd-50x500-p2": 2,
+          "doc-cmd-50x500-p3": 2,
+          "doc-cmd-50x500-p4": 1,
+          "doc-cmd-50x500-p5": 1,
+          "doc-cmd-50x500-p6": 1,
+          "doc-cmd-50x500-p7": 0,
+          "doc-cmd-50x500-p8": 0,
+          "doc-cmd-50x500-p9": 0,
+          "doc-cmd-50x500-p10": 0,
+          "doc-cmd-50x500-p11": 0,
+          "doc-cmd-50x500-p12": 0,
+          "doc-cmd-50x500-p13": 0,
+          "doc-cmd-50x500-p14": 0,
+          "doc-cmd-50x500-p15": 0,
+          "doc-cmd-50x500-p16": 0,
+          "doc-cmd-50x500-p17": 0,
+          "doc-cmd-50x500-p18": 0,
+          "doc-cmd-50x500-p19": 0,
+          "doc-cmd-50x500-p20": 0,
+          "doc-cmd-50x500-p21": 0,
+          "doc-cmd-50x500-p22": 0,
+          "doc-cmd-50x500-p23": 0,
+          "doc-cmd-50x500-p24": 0,
+          "doc-cmd-50x500-p25": 0,
+          "doc-cmd-50x500-p26": 0,
+          "doc-cmd-50x500-p27": 0,
+          "doc-cmd-50x500-p28": 0,
+          "doc-cmd-50x500-p29": 0,
+          "doc-cmd-50x500-p30": 0,
+          "doc-cmd-50x500-p31": 0,
+          "doc-cmd-50x500-p32": 0,
+          "doc-cmd-50x500-p33": 0,
+          "doc-cmd-50x500-p34": 0,
+          "doc-cmd-50x500-p35": 0,
+          "doc-cmd-50x500-p36": 0,
+          "doc-cmd-50x500-p37": 0,
+          "doc-cmd-50x500-p38": 0,
+          "doc-cmd-50x500-p39": 0,
+          "doc-cmd-50x500-p40": 0,
+          "doc-cmd-50x500-p41": 0,
+          "doc-cmd-50x500-p42": 0,
+          "doc-cmd-50x500-p43": 0,
+          "doc-cmd-50x500-p44": 0,
+          "doc-cmd-50x500-p45": 0,
+          "doc-cmd-50x500-p46": 0,
+          "doc-cmd-50x500-p47": 0,
+          "doc-cmd-50x500-p48": 0,
+          "doc-cmd-50x500-p49": 0,
+          "doc-cmd-50x500-p50": 1
+        }
+      }
+    }
+  ],
+  "passed": true,
+  "verdict": {
+    "verdict": "допуск (частичный набор)",
+    "admitted": false,
+    "caveats": [
+      "набор сокращён: 1-open, 3-source-fill, I1-full-load, I2-window"
+    ],
+    "failed": [],
+    "skippedChecks": [],
+    "notApplicable": [
+      {
+        "id": "I1-full-load",
+        "reason": "инвариант режима F; конфигурация в режиме P (окно кеша 1) проверяется инвариантом И2"
+      }
+    ]
+  }
+}

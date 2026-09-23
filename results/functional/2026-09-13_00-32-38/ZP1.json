@@ -1,0 +1,130 @@
+{
+  "config": {
+    "adapter": "Z",
+    "mode": "P",
+    "cache": 1
+  },
+  "key": "ZP1",
+  "label": "Z/P/cache=1",
+  "checks": [
+    {
+      "id": "1-open",
+      "title": "1. Открытие страницы",
+      "status": "pass",
+      "message": "p1: 500 фигур, ревизия 0, зонд 107 опросов без частичных снимков; p2: 500 фигур, зонд 40 опросов; P (Z, WebSocket, без хука задержки): снимок null и state=loading до полного набора (266 мс); холст: 65 цветов",
+      "durationMs": 1291,
+      "details": {
+        "summary": "p1: 500 фигур, ревизия 0, зонд 107 опросов без частичных снимков; p2: 500 фигур, зонд 40 опросов; P (Z, WebSocket, без хука задержки): снимок null и state=loading до полного набора (266 мс); холст: 65 цветов",
+        "probe1": {
+          "ticks": 107,
+          "records": 2
+        },
+        "probe2": {
+          "ticks": 40,
+          "records": 2,
+          "immediate": {
+            "state": "loading",
+            "snapNull": true
+          },
+          "dt": 266
+        },
+        "canvas": {
+          "found": true,
+          "colors": 65,
+          "width": 1280,
+          "height": 720
+        },
+        "consoleErrors": []
+      }
+    },
+    {
+      "id": "3-source-fill",
+      "title": "3. Общая заливка источника",
+      "status": "pass",
+      "message": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+      "durationMs": 2202,
+      "details": {
+        "summary": "setSourceFill(doc-acc-50x500-src-1, #aa00aa) с активной doc-acc-50x500-p2: affectedPages=10 (незагруженных до команды: 9), affectedShapes=81; compare-db + operations ok; снимок doc-acc-50x500-p2 = эталон",
+        "source": "doc-acc-50x500-src-1",
+        "activePage": "doc-acc-50x500-p2",
+        "neverLoaded": [
+          "doc-acc-50x500-p12",
+          "doc-acc-50x500-p17",
+          "doc-acc-50x500-p22",
+          "doc-acc-50x500-p28",
+          "doc-acc-50x500-p33",
+          "doc-acc-50x500-p38",
+          "doc-acc-50x500-p43",
+          "doc-acc-50x500-p50",
+          "doc-acc-50x500-p7"
+        ],
+        "result": {
+          "opId": "3fa649c3-7a70-4ebe-b4ac-5e4ea01ddf64",
+          "revision": 1,
+          "affectedPages": [
+            "doc-acc-50x500-p12",
+            "doc-acc-50x500-p17",
+            "doc-acc-50x500-p2",
+            "doc-acc-50x500-p22",
+            "doc-acc-50x500-p28",
+            "doc-acc-50x500-p33",
+            "doc-acc-50x500-p38",
+            "doc-acc-50x500-p43",
+            "doc-acc-50x500-p50",
+            "doc-acc-50x500-p7"
+          ],
+          "affectedShapes": 81
+        },
+        "oracleReport": "/home/claude/stand/results/functional/2026-09-13_00-32-38/artifacts/ZP1/3-source-fill-compare-db.json"
+      }
+    },
+    {
+      "id": "4-late-nav",
+      "title": "4. Поздний переход",
+      "status": "fail",
+      "message": "page.evaluate: ApiHttpError: operation \"5023d030-668b-4659-8d09-eda4768eefa0\" not found |     at je (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:63790) |     at async yC.fetchOperationResult (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:29094) |     at async yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22971) |     at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:68975) |     at async eval (eval at evaluate (:290:30), <anonymous>:4:22)",
+      "durationMs": 3386,
+      "details": {
+        "stack": "page.evaluate: ApiHttpError: operation \"5023d030-668b-4659-8d09-eda4768eefa0\" not found\n    at je (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:63790)\n    at async yC.fetchOperationResult (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:29094)\n    at async yC.runCommand (http://127.0.0.1:3011/assets/z-D2vuQcXb.js:8:22971)\n    at async Ge.runCommand (http://127.0.0.1:3011/assets/index-Bcyc_g5P.js:10:68975)\n    at async eval (eval at evaluate (:290:30), <anonymous>:4:22)\n    at async <anonymous>:316:30\n    at runCommand (/home/claude/stand/packages/bench/src/functional/lib/stand.mjs:265:15)\n    at Object.run (/home/claude/stand/packages/bench/src/functional/checks/04-late-nav.mjs:38:21)\n    at async Object.runConfig (/home/claude/stand/packages/bench/src/functional/lib/runner.mjs:81:29)\n    at async main (/home/claude/stand/packages/bench/src/functional/run.mjs:82:7)",
+        "partial": {}
+      }
+    },
+    {
+      "id": "5-stale-read",
+      "title": "5. Ответ старого чтения",
+      "status": "fail",
+      "message": "к моменту команды doc-acc-50x500-p2 ещё не доставлена",
+      "durationMs": 1164,
+      "details": {
+        "stack": "AssertionError [ERR_ASSERTION]: к моменту команды doc-acc-50x500-p2 ещё не доставлена\n    at runZ (file:///home/claude/stand/packages/bench/src/functional/checks/05-stale-read.mjs:197:14)\n    at async Object.runConfig (file:///home/claude/stand/packages/bench/src/functional/lib/runner.mjs:81:29)\n    at async main (file:///home/claude/stand/packages/bench/src/functional/run.mjs:82:7)",
+        "partial": {}
+      }
+    },
+    {
+      "id": "6-retry",
+      "title": "6. Повтор команды",
+      "status": "fail",
+      "message": "журнал операций пуст после сброса |  | 3 !== 0 | ",
+      "durationMs": 1158,
+      "details": {
+        "stack": "AssertionError [ERR_ASSERTION]: журнал операций пуст после сброса\n\n3 !== 0\n\n    at Object.run (file:///home/claude/stand/packages/bench/src/functional/checks/06-retry.mjs:37:12)\n    at async Object.runConfig (file:///home/claude/stand/packages/bench/src/functional/lib/runner.mjs:81:29)\n    at async main (file:///home/claude/stand/packages/bench/src/functional/run.mjs:82:7)",
+        "partial": {}
+      }
+    }
+  ],
+  "passed": false,
+  "verdict": {
+    "verdict": "не допущено",
+    "admitted": false,
+    "caveats": [
+      "провалы: 4-late-nav, 5-stale-read, 6-retry"
+    ],
+    "failed": [
+      "4-late-nav",
+      "5-stale-read",
+      "6-retry"
+    ],
+    "skippedChecks": [],
+    "notApplicable": []
+  }
+}

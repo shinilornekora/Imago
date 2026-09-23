@@ -1,0 +1,23 @@
+{
+  "name": "@stand/bench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Измерительная оболочка стенда: приёмочный сценарий Playwright, сэмплеры /proc и Chromium, серии прогонов (SPEC §7.2–7.4)",
+  "type": "module",
+  "scripts": {
+    "series": "node src/series/run.mjs",
+    "scenario": "node src/scenario/cli.mjs",
+    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "playwright": "1.56.0"
+  },
+  "devDependencies": {
+    "@stand/netshaper": "0.1.0",
+    "@stand/shared": "0.1.0",
+    "@types/node": "24.13.4",
+    "typescript": "5.9.3",
+    "ws": "8.21.3"
+  }
+}
