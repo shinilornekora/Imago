@@ -1,0 +1,137 @@
+<title>Imago Studio</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap">
+<link rel="stylesheet" href="styles.css">
+
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="brand">
+      <button class="btn ghost icon rail-toggle" id="btn-rail" title="Слои (L)" aria-label="Слои" aria-expanded="true"><span class="i" data-icon="layers"></span></button>
+      <span class="wordmark">Imago</span>
+      <span class="mark" id="agent-dot" role="img" aria-label="Агент не подключён" title="Агент не подключён"></span>
+      <span class="brand-sep" aria-hidden="true"></span>
+      <span class="docname" id="docname" contenteditable="true" spellcheck="false">Без названия</span>
+    </div>
+
+    <div class="topbar-center" id="artboard-tabs"></div>
+
+    <div class="topbar-right">
+      <button class="btn ghost with-icon" id="btn-history" title="История правок (H)" aria-label="История правок"><span class="i" data-icon="history"></span><span class="btn-label">История</span></button>
+      <button class="btn ghost with-icon" id="btn-export" title="Экспорт" aria-label="Экспорт"><span class="i" data-icon="export"></span><span class="btn-label">Экспорт</span></button>
+      <button class="btn ghost icon" id="btn-theme" title="Тема интерфейса" aria-label="Тема интерфейса"><span class="i" data-icon="theme"></span></button>
+      <button class="btn ghost icon" id="btn-settings" title="Настройки агента" aria-label="Настройки агента"><span class="i" data-icon="settings"></span></button>
+    </div>
+  </header>
+
+  <div class="scrim" id="scrim" hidden></div>
+
+  <aside class="rail" id="rail">
+    <div class="rail-head">
+      <span class="rail-title">Слои</span>
+      <button class="btn ghost icon small" id="btn-rail-close" title="Свернуть панель" aria-label="Свернуть панель"><span class="i" data-icon="chevron-left"></span></button>
+    </div>
+    <div class="layers" id="layers" role="tree" aria-label="Слои документа"></div>
+    <div class="rail-foot">
+      <button class="btn subtle wide with-icon" id="btn-add-artboard"><span class="i" data-icon="artboard-add"></span><span>Новый артборд</span></button>
+    </div>
+  </aside>
+
+  <main class="canvas-wrap">
+    <div class="canvas" id="canvas"></div>
+
+    <div class="empty-state" id="empty-state" hidden>
+      <div class="empty-card" id="empty-card">
+        <p class="empty-title" id="empty-title">Скажите, что построить</p>
+        <p class="empty-sub" id="empty-sub">Агент соберёт макет и покажет, что сделал.</p>
+        <div class="empty-examples" id="empty-examples"></div>
+        <div class="empty-point" aria-hidden="true">
+          <span class="i" data-icon="arrow-down"></span>
+          <span class="empty-point-text">командная строка внизу</span>
+        </div>
+        <button class="btn ghost small with-icon" id="btn-empty-artboard"><span class="i" data-icon="plus"></span><span>Пустой артборд</span></button>
+      </div>
+    </div>
+
+    <div class="peekbar" id="peekbar" role="status" aria-live="polite" hidden>
+      <span class="i" data-icon="spark" aria-hidden="true"></span>
+      <span class="peekbar-text" id="peekbar-text"></span>
+    </div>
+
+    <div class="viewbar" id="viewbar">
+      <button class="btn ghost icon" id="btn-zoom-out" aria-label="Уменьшить">−</button>
+      <button class="btn ghost zoom" id="btn-zoom">100%</button>
+      <button class="btn ghost icon" id="btn-zoom-in" aria-label="Увеличить">+</button>
+      <span class="sep"></span>
+      <button class="btn ghost" id="btn-fit" title="Вписать в окно">Вписать</button>
+      <span class="sep"></span>
+      <button class="btn ghost icon" id="btn-new-artboard" title="Новый артборд" aria-label="Новый артборд"><span class="i" data-icon="artboard-add"></span></button>
+    </div>
+
+    <div class="dock" id="dock">
+      <div class="dockmsg" id="dockmsg" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <span class="dockmsg-mark" aria-hidden="true"></span>
+        <div class="dockmsg-body">
+          <span class="dockmsg-text" id="dockmsg-text"></span>
+          <!-- Жалоба на РЕЗУЛЬТАТ (нечитаемый текст, вылез за рамки) — отдельной строкой
+               сразу под заголовком и своим цветом: в общей приписке она уходила за
+               многоточие и читалась как успех (круг 16, п.2). -->
+          <span class="dockmsg-issue" id="dockmsg-issue" hidden></span>
+          <span class="dockmsg-note" id="dockmsg-note"></span>
+          <div class="dockmsg-chips" id="dockmsg-chips"></div>
+        </div>
+        <div class="dockmsg-actions" id="dockmsg-actions"></div>
+        <button type="button" class="btn ghost icon small" id="btn-msg-close" aria-label="Скрыть сообщение"><span class="i" data-icon="close"></span></button>
+      </div>
+
+      <div class="stagebar" id="stagebar" role="status" aria-live="polite" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="stage-body">
+          <span class="stage-label" id="stage-label">Агент думает</span>
+          <span class="stage-detail" id="stage-detail"></span>
+          <ol class="stage-steps" id="stage-steps" hidden></ol>
+        </span>
+        <button type="button" class="btn accent stop small stage-stop" id="btn-stage-stop" title="Остановить агента" hidden>Стоп</button>
+      </div>
+
+      <div class="hints" id="hints"></div>
+
+      <form class="commandbar" id="commandbar" autocomplete="off">
+        <button type="button" class="mic" id="btn-mic" title="Голосовая команда: нажмите или клавиша V" aria-label="Голосовая команда" aria-pressed="false">
+          <span class="i" data-icon="mic"></span>
+        </button>
+        <span class="mic-live" id="mic-live" role="status" hidden>Слушаю</span>
+        <input class="command-input" id="command" type="text" spellcheck="false"
+               aria-label="Команда агенту" placeholder="Что построить или изменить?">
+        <!-- Кнопки одной группой: на узком холсте вся группа переходит на вторую строку
+             командной строки, а поле остаётся полной ширины (круг 16, п.1). -->
+        <div class="cmd-actions">
+          <button type="button" class="btn subtle small" id="btn-variants" title="Три варианта одной командой">3 варианта</button>
+          <button type="button" class="btn accent" id="btn-run">Выполнить</button>
+        </div>
+      </form>
+
+    </div>
+  </main>
+
+  <aside class="variants" id="variants" hidden aria-label="Варианты решения"></aside>
+
+  <aside class="inspector" id="inspector" hidden>
+    <div class="insp-head">
+      <span class="insp-title" id="insp-title">Выделение</span>
+      <button class="btn ghost icon small" id="btn-insp-close" aria-label="Закрыть"><span class="i" data-icon="close"></span></button>
+    </div>
+    <div class="insp-body" id="insp-body"></div>
+  </aside>
+
+  <div class="sheet" id="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-head">
+      <h2 class="sheet-title" id="sheet-title">История</h2>
+      <button class="btn ghost icon small" id="btn-sheet-close" aria-label="Закрыть"><span class="i" data-icon="close"></span></button>
+    </div>
+    <div class="sheet-tabs" id="sheet-tabs" role="tablist" hidden></div>
+    <div class="sheet-body" id="sheet-body"></div>
+  </div>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+</div>
+
+<script type="module" src="app.js"></script>

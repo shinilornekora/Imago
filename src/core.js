@@ -1,0 +1,5545 @@
+/**
+ * Imago Studio — core.js
+ * Документ, операции, решатель геометрии, валидаторы, сцена (SVG + ввод).
+ * Один ES-модуль без зависимостей и сборки. Работает как <script type="module">.
+ *
+ * Экспортируемый контракт (SPEC §1.1):
+ *   createDoc, applyOps, invertOps, solve, validate, Stage, ops
+ * Дополнительно (нужно app.js / brain.js):
+ *   nodeById, ancestors, isArtboard, cloneSubtree, resolveTarget, hashGeometry,
+ *   artboards, resolveColor, resolveTextStyle, contrastRatio, NODE_TYPES, DEFAULT_TOKENS
+ *   resetMeasureCache, measureEpoch, onMeasureEpoch — кеш измерений текста:
+ *     ширины живут между вызовами solve, и без сброса первая раскладка, померенная
+ *     системным шрифтом, залипает навсегда. Модуль сбрасывает кеш сам по событиям
+ *     загрузки гарнитур; оболочке остаётся пересчитать геометрию — по своему
+ *     document.fonts.ready (наш сброс встаёт в очередь раньше) или по onMeasureEpoch.
+ */
+
+/* ------------------------------------------------------------------ *
+ * 0. Мелкие утилиты
+ * ------------------------------------------------------------------ */
+
+/** @type {Set<string>} */
+const NODE_TYPES = new Set(['page', 'frame', 'text', 'rect', 'ellipse', 'image']);
+const CONTAINER_TYPES = new Set(['page', 'frame']);
+/** Верхний уровень пути, который set никогда не меняет: на этом стоит дерево. */
+const PROTECTED_PATHS = new Set(['id', 'type', 'parent', 'children', '__proto__', 'prototype', 'constructor']);
+/** Ключи прототипа: запрещены на любом уровне пути — иначе у узла появляются свойства «из ниоткуда». */
+const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const LAYOUT_MODES = new Set(['none', 'row', 'column']);
+const ALIGNS = new Set(['start', 'center', 'end', 'stretch']);
+const JUSTIFIES = new Set(['start', 'center', 'end', 'between']);
+const SIZE_MODES = new Set(['fixed', 'hug', 'fill']);
+const MAX_SIZE = 100000;
+/** Предел глубины дерева: страховка от циклов и патологически глубоких документов. */
+const MAX_DEPTH = 256;
+
+let uidCounter = 0;
+/**
+ * Короткий уникальный идентификатор узла.
+ * @param {string} [prefix]
+ * @returns {string}
+ */
+function uid(prefix = 'n') {
+  uidCounter += 1;
+  return prefix + '_' + uidCounter.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+}
+
+/**
+ * Округление до сотых — держит решатель детерминированным.
+ * Нечисло и бесконечность превращаются в конечное значение: геометрия с NaN
+ * залипает навсегда (вид не восстановить из интерфейса), а ноль и предел видно
+ * глазами и можно исправить руками. Через r2 проходит каждое число геометрии.
+ */
+const r2 = (v) => {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return Number.isNaN(n) ? 0 : (n > 0 ? MAX_SIZE : -MAX_SIZE);
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+};
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+/** Зажим в границы. NaN даёт lo, ±Infinity — соответствующую границу: NaN наружу не уходит. */
+const clamp = (v, lo, hi) => {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (Number.isNaN(n)) return lo;
+  return n < lo ? lo : n > hi ? hi : n;
+};
+/** Число в границах либо `fb`: одна точка, где негодная величина становится безопасной. */
+const numIn = (v, lo, hi, fb) => (isNum(v) ? clamp(v, lo, hi) : fb);
+
+/**
+ * Максимум и минимум по списку — без spread. `Math.max(...arr)` раскладывает
+ * массив в аргументы и на длине от ~130 000 роняет стек («Maximum call stack size
+ * exceeded»): из интерфейса столько узлов в одной строке не набрать, но падать на
+ * чужом документе раскладке незачем. Пустой список даёт `seed`.
+ * @param {Array} list @param {Function} pick @param {number} seed
+ */
+function maxOf(list, pick, seed) {
+  let m = seed;
+  for (let i = 0; i < list.length; i++) {
+    const v = pick(list[i], i);
+    if (v > m) m = v;
+  }
+  return m;
+}
+/** Минимум по списку — зеркало maxOf. */
+function minOf(list, pick, seed) {
+  let m = seed;
+  for (let i = 0; i < list.length; i++) {
+    const v = pick(list[i], i);
+    if (v < m) m = v;
+  }
+  return m;
+}
+
+/** Глубокая копия простых данных (узлы — только JSON-совместимые значения). */
+function deepClone(value) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(deepClone);
+  const out = {};
+  // ключи прототипа в документе не бывают осмысленными, а JSON.parse делает их
+  // собственными свойствами — копировать их значит подменить прототип узла
+  for (const k of Object.keys(value)) {
+    if (UNSAFE_KEYS.has(k)) continue;
+    out[k] = deepClone(value[k]);
+  }
+  return out;
+}
+
+let loggedOnce = new Set();
+/** Предел памяти логгера: ключи включают id узлов, за долгую сессию их набегает сколько угодно. */
+const LOG_KEY_LIMIT = 400;
+/** Логируем каждую уникальную ошибку один раз — не глотаем и не спамим. */
+function logOnce(key, ...args) {
+  if (loggedOnce.has(key)) return;
+  // старые ключи вытесняются по одному: множество не растёт, а редкая повторная
+  // запись через сотни разных ошибок — меньшее зло, чем утечка на весь сеанс
+  while (loggedOnce.size >= LOG_KEY_LIMIT) {
+    const oldest = loggedOnce.values().next().value;
+    if (oldest === undefined) break;
+    loggedOnce.delete(oldest);
+  }
+  loggedOnce.add(key);
+  if (typeof console !== 'undefined' && console.warn) console.warn('[imago/core]', ...args);
+}
+
+/** Чтение значения по пути вида `style.fontSize`. */
+function getPath(obj, path) {
+  const parts = String(path).split('.');
+  let cur = obj;
+  for (const p of parts) {
+    if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+    cur = cur[p];
+  }
+  return cur;
+}
+
+/** Иммутабельная запись по пути; value === undefined удаляет ключ. */
+function setPath(obj, path, value) {
+  const parts = String(path).split('.');
+  const root = Array.isArray(obj) ? obj.slice() : { ...obj };
+  let cur = root;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i];
+    const next = cur[p];
+    cur[p] = next && typeof next === 'object'
+      ? (Array.isArray(next) ? next.slice() : { ...next })
+      : {};
+    cur = cur[p];
+  }
+  const last = parts[parts.length - 1];
+  if (value === undefined) delete cur[last];
+  else cur[last] = deepClone(value);
+  return root;
+}
+
+/* ------------------------------------------------------------------ *
+ * 1. Токены документа (SPEC §3): светлый холст, оранжевый акцент
+ * ------------------------------------------------------------------ */
+
+const DEFAULT_TOKENS = Object.freeze({
+  colors: {
+    canvas: '#F7F6F3',
+    surface: '#FFFFFF',
+    surfaceAlt: '#F2F0EC',
+    line: '#E2DED6',
+    text: '#14161C',
+    muted: '#5B6270',
+    accent: '#FF6B3D',
+    accentSoft: '#FFE7DE',
+    accentInk: '#B03A12',
+    onAccent: '#14161C',
+    agent: '#38D6B0',
+    good: '#1F7A5A',
+    warn: '#F0B429'
+  },
+  type: {
+    display: { font: 'IBM Plex Sans', fontSize: 34, fontWeight: 600, lineHeight: 40, letterSpacing: -0.4 },
+    title: { font: 'IBM Plex Sans', fontSize: 24, fontWeight: 600, lineHeight: 30, letterSpacing: -0.2 },
+    heading: { font: 'IBM Plex Sans', fontSize: 18, fontWeight: 600, lineHeight: 24 },
+    body: { font: 'IBM Plex Sans', fontSize: 15, fontWeight: 400, lineHeight: 22 },
+    caption: { font: 'IBM Plex Sans', fontSize: 13, fontWeight: 400, lineHeight: 18 },
+    mono: { font: 'IBM Plex Mono', fontSize: 13, fontWeight: 500, lineHeight: 18 },
+    monoLg: { font: 'IBM Plex Mono', fontSize: 15, fontWeight: 500, lineHeight: 20 }
+  },
+  spacing: [0, 2, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48, 64],
+  radii: [0, 4, 8, 12, 16, 20, 24, 999]
+});
+
+/* ------------------------------------------------------------------ *
+ * 2. Схема и нормализация узлов
+ * ------------------------------------------------------------------ */
+
+const DEFAULT_LAYOUT = Object.freeze({
+  mode: 'none', gap: 0, padding: { t: 0, r: 0, b: 0, l: 0 },
+  align: 'start', justify: 'start', wrap: false
+});
+
+/** @returns {{w:{mode:string,value?:number},h:{mode:string,value?:number}}} */
+function sizeSpec(w, h) {
+  const one = (v) => {
+    if (v === 'hug' || v === undefined || v === null) return { mode: 'hug' };
+    if (v === 'fill') return { mode: 'fill' };
+    if (isNum(v)) return { mode: 'fixed', value: v };
+    if (v && typeof v === 'object' && SIZE_MODES.has(v.mode)) return deepClone(v);
+    return { mode: 'hug' };
+  };
+  return { w: one(w), h: one(h) };
+}
+
+function normalizeLayout(l) {
+  const src = l && typeof l === 'object' ? l : {};
+  const p = src.padding;
+  let padding = { t: 0, r: 0, b: 0, l: 0 };
+  if (isNum(p)) padding = { t: p, r: p, b: p, l: p };
+  else if (Array.isArray(p)) {
+    if (p.length === 2) padding = { t: p[0], r: p[1], b: p[0], l: p[1] };
+    else if (p.length === 4) padding = { t: p[0], r: p[1], b: p[2], l: p[3] };
+    else if (p.length === 1) padding = { t: p[0], r: p[0], b: p[0], l: p[0] };
+  } else if (p && typeof p === 'object') {
+    padding = { t: p.t, r: p.r, b: p.b, l: p.l };
+  }
+  // отступы и зазор приводим к диапазону схемы (0..MAX_SIZE): NaN и 1e308
+  // здесь — вторая дверь в нечисловую геометрию, её закрываем на входе
+  for (const k of ['t', 'r', 'b', 'l']) padding[k] = numIn(padding[k], 0, MAX_SIZE, 0);
+  return {
+    mode: LAYOUT_MODES.has(src.mode) ? src.mode : 'none',
+    gap: numIn(src.gap, 0, MAX_SIZE, 0),
+    padding,
+    align: ALIGNS.has(src.align) ? src.align : 'start',
+    justify: JUSTIFIES.has(src.justify) ? src.justify : 'start',
+    wrap: !!src.wrap
+  };
+}
+
+/**
+ * Поля, которые узел хранит либо коротким именем токена, либо объектом-обёрткой:
+ * `style: 'display'` и `style: {token:'display'}` — одно и то же значение, как и
+ * `stroke: 'line'` и `stroke: {color:'line', width:1}`. Ключи перечислены в том
+ * порядке, в каком их читают resolveColor/resolveTextStyle.
+ */
+const WRAPPED_FIELDS = {
+  style: ['token'],
+  fill: ['token', 'color', 'value'],
+  color: ['token', 'color', 'value'],
+  stroke: ['color', 'token', 'value']
+};
+
+/** Имя токена внутри поля-обёртки (или сама строка). @returns {string|undefined} */
+function wrappedName(v, keys) {
+  if (typeof v === 'string') return v;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  for (const k of keys) if (typeof v[k] === 'string') return v[k];
+  return undefined;
+}
+
+/** Объект, который не несёт ничего сверх обёртки: {token:'x'} — да, {token:'x',fontSize:20} — нет. */
+function bareWrapper(v, keys) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  const own = Object.keys(v);
+  return own.length === 1 && keys.indexOf(own[0]) >= 0;
+}
+
+/**
+ * Круг 16, п.1: одно и то же значение хранилось в документе в двух видах.
+ * Модель и инспектор присылают короткое имя токена (`set style='display'`), а в
+ * узле значение живёт объектом (`{token:'display'}`) — и запись строки поверх
+ * объекта меняла ОТПЕЧАТОК документа там, где по смыслу не менялось ничего.
+ * Человек читал об этом две противоречащие строки разом: «Стиль текста display →
+ * крупный» и «„style“ уже „display“ — эта правка ничего не меняет».
+ *
+ * Правило одно и симметричное: если новое значение по смыслу равно текущему
+ * (то же имя токена), поле остаётся ровно таким, каким жило, — байт в байт.
+ * Настоящая смена значения идёт как раньше, поэтому инверсия любой операции
+ * по-прежнему возвращает исходное значение в исходной форме.
+ * @returns {any} значение, которое стоит записать
+ */
+function keepFieldForm(node, field, value) {
+  const keys = WRAPPED_FIELDS[field];
+  if (!keys || value === undefined) return value;
+  const cur = node[field];
+  const a = wrappedName(cur, keys);
+  if (a === undefined || a !== wrappedName(value, keys)) return value;
+  // строка поверх объекта: объект остаётся (соседние stroke.width, style.fontSize целы)
+  if (typeof value === 'string' && cur && typeof cur === 'object') return cur;
+  // объект поверх строки: только если объект — голая обёртка и сверх имени ничего не несёт
+  if (typeof cur === 'string' && bareWrapper(value, keys)) return cur;
+  return value;
+}
+
+/**
+ * Проверка узла по схеме. Возвращает строку с ошибкой или null.
+ * @param {any} node
+ * @param {object} [doc] — для проверки ссылок (необязательно)
+ * @returns {string|null}
+ */
+function checkNode(node, doc) {
+  if (!node || typeof node !== 'object') return 'узел должен быть объектом';
+  if (typeof node.id !== 'string' || !node.id) return 'нет id';
+  if (!NODE_TYPES.has(node.type)) return `неизвестный тип «${node.type}»`;
+  if (node.name !== undefined && typeof node.name !== 'string') return 'name должен быть строкой';
+  if (node.type === 'page') {
+    if (node.parent !== null && node.parent !== undefined) return 'page не может иметь родителя';
+  } else if (typeof node.parent !== 'string') return 'нет parent';
+  if (CONTAINER_TYPES.has(node.type)) {
+    if (!Array.isArray(node.children)) return 'children должен быть массивом';
+    if (node.children.some((c) => typeof c !== 'string')) return 'children: только id';
+  }
+  if (node.type !== 'page') {
+    const s = node.size;
+    if (!s || typeof s !== 'object') return 'нет size';
+    for (const ax of ['w', 'h']) {
+      const spec = s[ax];
+      if (!spec || !SIZE_MODES.has(spec.mode)) return `size.${ax}: неизвестный режим`;
+      if (spec.mode === 'fixed') {
+        if (!isNum(spec.value)) return `size.${ax}.value должен быть числом`;
+        if (spec.value < 0 || spec.value > MAX_SIZE) return `size.${ax}.value вне диапазона 0..${MAX_SIZE}`;
+      }
+    }
+  }
+  if (node.type === 'frame') {
+    const l = node.layout;
+    if (l !== undefined) {
+      if (!l || typeof l !== 'object') return 'layout должен быть объектом';
+      if (!LAYOUT_MODES.has(l.mode)) return `layout.mode: «${l.mode}»`;
+      if (l.gap !== undefined && (!isNum(l.gap) || l.gap < 0 || l.gap > MAX_SIZE)) return 'layout.gap вне диапазона';
+      if (l.align !== undefined && !ALIGNS.has(l.align)) return `layout.align: «${l.align}»`;
+      if (l.justify !== undefined && !JUSTIFIES.has(l.justify)) return `layout.justify: «${l.justify}»`;
+      if (l.padding !== undefined) {
+        if (!l.padding || typeof l.padding !== 'object') return 'layout.padding должен быть объектом';
+        for (const k of ['t', 'r', 'b', 'l']) {
+          const v = l.padding[k];
+          if (v !== undefined && (!isNum(v) || v < 0 || v > MAX_SIZE)) return `layout.padding.${k} вне диапазона`;
+        }
+      }
+    }
+  }
+  if (node.type === 'text') {
+    if (typeof node.characters !== 'string') return 'text: нет characters';
+    if (node.style !== undefined && typeof node.style !== 'string' && (typeof node.style !== 'object' || !node.style)) {
+      return 'text: style — имя токена или объект';
+    }
+    if (node.style && typeof node.style === 'object') {
+      for (const k of ['fontSize', 'lineHeight']) {
+        const v = node.style[k];
+        if (v !== undefined && (!isNum(v) || v <= 0 || v > 1000)) return `style.${k} вне диапазона`;
+      }
+      if (node.style.fontWeight !== undefined) {
+        const w = node.style.fontWeight;
+        if (!isNum(w) || w < 100 || w > 900) return 'style.fontWeight вне диапазона 100..900';
+      }
+    }
+    if (node.align !== undefined && !['left', 'center', 'right'].includes(node.align)) return 'text.align';
+  }
+  if (node.radius !== undefined && !isNum(node.radius) && !Array.isArray(node.radius)) return 'radius';
+  if (isNum(node.radius) && (node.radius < 0 || node.radius > MAX_SIZE)) return 'radius вне диапазона';
+  if (node.pos !== undefined) {
+    if (!node.pos || !isNum(node.pos.x) || !isNum(node.pos.y)) return 'pos: нужны числа x,y';
+    // без верхнего предела pos.x = 1e308 превращает геометрию в Infinity — тот же
+    // вход в «нечисловой вид», что и битый size.value
+    if (Math.abs(node.pos.x) > MAX_SIZE || Math.abs(node.pos.y) > MAX_SIZE) {
+      return `pos вне диапазона ±${MAX_SIZE}`;
+    }
+  }
+  if (node.override !== undefined && node.override !== null) {
+    const o = node.override;
+    if (!o || !isNum(o.x) || !isNum(o.y)) return 'override: нужны числа x,y';
+    if (Math.abs(o.x) > MAX_SIZE || Math.abs(o.y) > MAX_SIZE) return `override вне диапазона ±${MAX_SIZE}`;
+    if (o.w !== undefined && (!isNum(o.w) || o.w < 0 || o.w > MAX_SIZE)) return 'override.w';
+    if (o.h !== undefined && (!isNum(o.h) || o.h < 0 || o.h > MAX_SIZE)) return 'override.h';
+  }
+  if (node.opacity !== undefined && (!isNum(node.opacity) || node.opacity < 0 || node.opacity > 1)) return 'opacity вне 0..1';
+  if (doc && node.parent && !doc.nodes[node.parent]) return `родитель «${node.parent}» не найден`;
+  return null;
+}
+
+/* ------------------------------------------------------------------ *
+ * 3. Документ и утилиты обхода
+ * ------------------------------------------------------------------ */
+
+/**
+ * Дети узла всегда массивом. Документ мог прийти мимо checkNode (импорт, чужой
+ * JSON, черновик от агента), и тогда children бывает объектом или строкой —
+ * `for (const id of node.children)` на таком бросает «object is not iterable»,
+ * и человек видит сырой текст исключения вместо макета.
+ * @param {any} node
+ * @returns {string[]}
+ */
+const kidsOf = (node) => (node && Array.isArray(node.children) ? node.children : []);
+
+/** @param {object} doc @param {string} id @returns {object|undefined} */
+function nodeById(doc, id) {
+  return doc && doc.nodes ? doc.nodes[id] : undefined;
+}
+
+/**
+ * Цепочка предков от ближайшего к корню.
+ * @param {object} doc @param {string} id @returns {object[]}
+ */
+function ancestors(doc, id) {
+  const out = [];
+  let cur = nodeById(doc, id);
+  let guard = 0;
+  while (cur && cur.parent && guard++ < 512) {
+    const p = nodeById(doc, cur.parent);
+    if (!p) break;
+    out.push(p);
+    cur = p;
+  }
+  return out;
+}
+
+/** Артборд — фрейм, чей parent === doc.root. @returns {boolean} */
+function isArtboard(doc, idOrNode) {
+  const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  return !!(n && n.type === 'frame' && n.parent === doc.root);
+}
+
+/**
+ * Имя-заглушка для узла без имени. Одно на всех: холст подписывал безымянный
+ * артборд «Артборд», а оболочка в имени файла делала из того же узла «Группу» —
+ * человек видел два разных имени одного и того же. Артборд отличается от фрейма
+ * внутри макета, поэтому нужен документ.
+ * @param {object} doc @param {object|string} idOrNode
+ * @returns {string}
+ */
+function placeholderName(doc, idOrNode) {
+  const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  if (!n) return 'Узел';
+  if (doc && isArtboard(doc, n)) return 'Артборд';
+  return PLACEHOLDER_NAMES[n.type] || 'Узел';
+}
+const PLACEHOLDER_NAMES = {
+  frame: 'Группа', text: 'Текст', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка'
+};
+
+/**
+ * Имя узла для показа человеку: своё, а если его нет — заглушка. Этим подписан
+ * артборд на холсте, этим же стоит подписывать узел в рельсе слоёв, в имени
+ * файла и в подписи правки.
+ * @param {object} doc @param {object|string} idOrNode
+ * @returns {string}
+ */
+function displayName(doc, idOrNode) {
+  const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  const own = n && n.name !== undefined && n.name !== null ? String(n.name).trim() : '';
+  return own || placeholderName(doc, n);
+}
+
+/** Список артбордов в порядке детей корня. @returns {object[]} */
+function artboards(doc) {
+  const root = nodeById(doc, doc.root);
+  if (!root) return [];
+  return kidsOf(root).map((id) => nodeById(doc, id)).filter((n) => n && n.type === 'frame');
+}
+
+/** Все id поддерева, родитель раньше детей. Цикл и глубже MAX_DEPTH обходятся стороной. @returns {string[]} */
+function subtreeIds(doc, id) {
+  const out = [];
+  const seen = new Set();
+  const walk = (nid, depth) => {
+    const n = nodeById(doc, nid);
+    if (!n) return;
+    if (seen.has(nid)) { logOnce('subtree:cycle:' + nid, `subtreeIds: узел «${nid}» встречен дважды — ребро пропущено`); return; }
+    if (depth > MAX_DEPTH) { logOnce('subtree:deep:' + nid, `subtreeIds: глубже ${MAX_DEPTH} — обход остановлен на «${nid}»`); return; }
+    seen.add(nid);
+    out.push(nid);
+    for (const c of kidsOf(n)) walk(c, depth + 1);
+  };
+  walk(id, 0);
+  return out;
+}
+
+/**
+ * Копия поддерева с новыми идентификаторами.
+ * @param {object} doc @param {string} id
+ * @returns {{rootId:string, nodes:object[]}} узлы в порядке «родитель раньше детей»
+ */
+function cloneSubtree(doc, id) {
+  const src = nodeById(doc, id);
+  if (!src) return { rootId: null, nodes: [] };
+  const ids = subtreeIds(doc, id);
+  const map = new Map(ids.map((old) => [old, uid(src.type === 'frame' ? 'f' : 'n')]));
+  const nodes = ids.map((old) => {
+    const n = deepClone(nodeById(doc, old));
+    n.id = map.get(old);
+    if (old !== id && n.parent) n.parent = map.get(n.parent) || n.parent;
+    if (n.children) n.children = n.children.map((c) => map.get(c) || c);
+    return n;
+  });
+  return { rootId: map.get(id), nodes };
+}
+
+const ROLE_PATTERNS = [
+  ['button', /кнопк|button|cta|действие/i],
+  ['title', /заголов|title|heading|назван/i],
+  ['header', /шапк|header|хедер|верхн/i],
+  ['card', /карточк|card|плитк/i],
+  ['list', /список|list|перечен/i],
+  ['item', /пункт|item|строка|row|элемент/i],
+  ['table', /таблиц|table|сводк/i],
+  ['metric', /показател|метрик|metric|kpi|цифр/i],
+  ['caption', /подпис|caption|описан|мелк/i],
+  ['artboard', /артборд|экран|макет|artboard|screen|frame/i]
+];
+
+/** Единственный кандидат или null, если их несколько и они равновесны. */
+function onlyOne(list) {
+  return list.length === 1 ? list[0] : null;
+}
+
+/**
+ * Поиск узла по id, имени или роли (для точечных правок из brain.js).
+ * Порядок: id → точное имя → частичное имя (самое близкое) → роль → текст.
+ * Шаг, не давший ровно одного кандидата, поиск НЕ обрывает: пробуем следующий,
+ * и только исчерпав все шаги, возвращаем null — чтобы вызывающий предупредил
+ * пользователя, а не правил чужой узел.
+ * @param {object} doc @param {string} ref
+ * @returns {object|null}
+ */
+function resolveTarget(doc, ref) {
+  if (!doc || !doc.nodes || typeof ref !== 'string') return null;
+  const key = ref.trim();
+  if (!key) return null;
+  if (doc.nodes[key]) return doc.nodes[key];
+  const all = Object.values(doc.nodes);
+  const low = key.toLowerCase();
+  // роль учитываем только тогда, когда запрос указывает ровно на одну роль
+  const roles = ROLE_PATTERNS.filter(([role, re]) => role === low || re.test(key));
+  const role = roles.length === 1 ? roles[0] : null;
+
+  // Шаги по убыванию точности. Пустой или неоднозначный шаг — не повод
+  // возвращать null: неоднозначность роли не должна коротить поиск по тексту.
+  const steps = [
+    // 1. точное имя
+    () => all.filter((n) => (n.name || '').trim().toLowerCase() === low),
+    // 2. частичное имя: ближе тот, чьё имя короче (и тем более начинается с запроса)
+    () => {
+      const partial = all.filter((n) => (n.name || '').toLowerCase().includes(low));
+      if (!partial.length) return partial;
+      const score = (n) => {
+        const name = (n.name || '').toLowerCase();
+        return (name.startsWith(low) ? 0 : 1000) + name.length;
+      };
+      const best = minOf(partial, score, Infinity);
+      return partial.filter((n) => score(n) === best);
+    },
+    // 3. роль: сначала по полю role, затем по имени в духе роли
+    () => (role ? all.filter((n) => n.role === role[0]) : []),
+    () => (role ? all.filter((n) => role[1].test(n.name || '')) : []),
+    // 4. содержимое текста: точное совпадение важнее вхождения
+    () => all.filter((n) => n.type === 'text' && (n.characters || '').trim().toLowerCase() === low),
+    () => all.filter((n) => n.type === 'text' && (n.characters || '').toLowerCase().includes(low))
+  ];
+  for (const step of steps) {
+    const hit = onlyOne(step());
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ *
+ * 4. Операции
+ * ------------------------------------------------------------------ */
+
+/**
+ * Конструкторы операций (SPEC §1.3).
+ * create{node,index?} · remove{id} · set{id,path,value?} · move{id,parent,index} · setToken{path,value?}
+ */
+const ops = Object.freeze({
+  /** @param {object} node @param {number} [index] */
+  create: (node, index) => {
+    const n = node && typeof node === 'object' ? deepClone(node) : node;
+    // id выдаём здесь, а не при применении: иначе инверсию нечем адресовать
+    if (n && typeof n === 'object' && !n.id) n.id = uid(n.type === 'frame' ? 'f' : 'n');
+    return { op: 'create', node: n, ...(isNum(index) ? { index } : {}) };
+  },
+  /** @param {string} id */
+  remove: (id) => ({ op: 'remove', id }),
+  /** @param {string} id @param {string} path @param {any} [value] */
+  set: (id, path, value) => ({ op: 'set', id, path, value: deepClone(value) }),
+  /** @param {string} id @param {string} parent @param {number} index */
+  move: (id, parent, index) => ({ op: 'move', id, parent, index }),
+  /** @param {string} path @param {any} [value] */
+  setToken: (path, value) => ({ op: 'setToken', path, value: deepClone(value) })
+});
+
+/** Коды ошибок операций — публичный контракт applyOps, оболочка разбирает их по code. */
+const OP_ERRORS = new Set(['not-found', 'protected-path', 'bad-node', 'bad-parent', 'cycle', 'bad-op']);
+/** @param {string} code @param {string} message @returns {{code:string, message:string}} */
+function opErr(code, message) {
+  if (!OP_ERRORS.has(code)) logOnce('opErr:' + code, `код ошибки «${code}» вне контракта`);
+  return { code, message };
+}
+
+/** Цепочка предков узла в черновике — для проверки циклов. */
+function ancestorIds(draft, id) {
+  const out = new Set();
+  let cur = id ? draft.nodes[id] : null;
+  let guard = 0;
+  while (cur && guard++ < MAX_DEPTH) {
+    out.add(cur.id);
+    cur = cur.parent ? draft.nodes[cur.parent] : null;
+  }
+  return out;
+}
+
+/**
+ * Внутреннее применение одной операции к изменяемой копии документа.
+ * @returns {{code:string,message:string}|null}
+ */
+function applyOne(draft, op) {
+  if (!op || typeof op !== 'object') return opErr('bad-op', 'операция не объект');
+  switch (op.op) {
+    case 'create': {
+      const node = deepClone(op.node);
+      if (!node || typeof node !== 'object') return opErr('bad-node', 'create: нет узла');
+      if (!node.id) node.id = uid();
+      if (draft.nodes[node.id]) return opErr('bad-node', `create: id «${node.id}» уже занят`);
+      if (node.type === 'frame' || node.type === 'page') node.children = Array.isArray(node.children) ? node.children.slice() : [];
+      if (node.type !== 'page' && !node.size) node.size = sizeSpec('hug', 'hug');
+      // layout нормализуем и здесь: `set layout.*` это делал, а `create` — нет,
+      // поэтому сырая операция с layout:{padding:8} отклонялась («padding должен
+      // быть объектом»), а с {mode,gap} кладла в документ половину объекта.
+      // Отсутствующий layout не добавляем — он равносилен DEFAULT_LAYOUT.
+      if (node.type === 'frame' && node.layout !== undefined) node.layout = normalizeLayout(node.layout);
+      const parent = node.parent ? draft.nodes[node.parent] : null;
+      if (node.type !== 'page') {
+        if (!parent) return opErr('bad-parent', `create: родитель «${node.parent}» не найден`);
+        if (!CONTAINER_TYPES.has(parent.type)) return opErr('bad-parent', 'create: родитель не контейнер');
+      }
+      const err = checkNode(node, draft);
+      if (err) return opErr('bad-node', `create: ${err}`);
+
+      // заранее перечисленные дети: проверяем всё до единой записи в черновик
+      const kids = Array.isArray(node.children) ? node.children.slice() : [];
+      if (kids.length && !CONTAINER_TYPES.has(node.type)) return opErr('bad-node', 'create: дети бывают только у контейнера');
+      const chain = ancestorIds(draft, node.parent);
+      const kidSet = new Set();
+      for (const c of kids) {
+        if (kidSet.has(c)) return opErr('bad-node', `create: ребёнок «${c}» указан дважды`);
+        kidSet.add(c);
+        if (!draft.nodes[c]) return opErr('bad-node', `create: ребёнок «${c}» ещё не создан`);
+        if (c === node.id) return opErr('cycle', 'create: узел не может быть своим ребёнком');
+        if (chain.has(c)) return opErr('cycle', `create: «${c}» — предок нового узла, перевешивать нельзя`);
+        if (draft.nodes[c].type === 'page') return opErr('bad-node', `create: «${c}» — страница, её нельзя вложить`);
+      }
+
+      if (node.type !== 'page') {
+        const list = draft.nodes[parent.id].children.slice();
+        const idx = isNum(op.index) ? clamp(Math.round(op.index), 0, list.length) : list.length;
+        list.splice(idx, 0, node.id);
+        draft.nodes[parent.id] = { ...parent, children: list };
+      }
+      draft.nodes[node.id] = node;
+      // переезд детей: снимаем их с прежних родителей, иначе узел окажется в двух местах
+      for (const c of kids) {
+        const child = draft.nodes[c];
+        const oldParent = child.parent ? draft.nodes[child.parent] : null;
+        if (oldParent && Array.isArray(oldParent.children)) {
+          draft.nodes[oldParent.id] = { ...oldParent, children: oldParent.children.filter((x) => x !== c) };
+        }
+        draft.nodes[c] = { ...draft.nodes[c], parent: node.id };
+      }
+      return null;
+    }
+    case 'remove': {
+      const node = draft.nodes[op.id];
+      if (!node) return opErr('not-found', `remove: узел «${op.id}» не найден`);
+      if (node.id === draft.root) return opErr('protected-path', 'remove: нельзя удалить корень');
+      const ids = [];
+      const seen = new Set();
+      const walk = (nid, depth) => {
+        const n = draft.nodes[nid];
+        if (!n || seen.has(nid) || depth > MAX_DEPTH) return;
+        seen.add(nid);
+        ids.push(nid);
+        (n.children || []).forEach((c) => walk(c, depth + 1));
+      };
+      walk(op.id, 0);
+      const parent = draft.nodes[node.parent];
+      if (parent) {
+        draft.nodes[parent.id] = { ...parent, children: parent.children.filter((c) => c !== op.id) };
+      }
+      for (const nid of ids) delete draft.nodes[nid];
+      return null;
+    }
+    case 'set': {
+      const node = draft.nodes[op.id];
+      if (!node) return opErr('not-found', `set: узел «${op.id}» не найден`);
+      const path = String(op.path || '');
+      if (!path) return opErr('bad-op', 'set: пустой путь');
+      const parts = path.split('.');
+      if (PROTECTED_PATHS.has(parts[0])) return opErr('protected-path', `set: путь «${parts[0]}» защищён`);
+      // ключи прототипа — на любом уровне: set(id, 'style.__proto__') так же опасен
+      const unsafe = parts.find((p) => UNSAFE_KEYS.has(p));
+      if (unsafe) return opErr('protected-path', `set: путь «${unsafe}» защищён`);
+      // круг 16, п.1: строка поверх объекта-обёртки (style, stroke, fill, color) не
+      // должна плодить второй вид того же значения — см. keepFieldForm
+      const value = parts.length === 1 && !op.exact ? keepFieldForm(node, parts[0], op.value) : op.value;
+      let next = setPath(node, path, value);
+      // круг 16, п.3: раскладку нормализуем, только если поле осталось в узле.
+      // Раньше сюда попадала и инверсия «удалить ключ layout» ({op:'set',path:'layout'}
+      // без value) — и вместо удаления в узел ложился полный DEFAULT_LAYOUT: отмена
+      // возвращала документ ПОХОЖИМ на исходный, но не равным ему.
+      if (next.type === 'frame' && parts[0] === 'layout' && next.layout !== undefined) {
+        next = { ...next, layout: normalizeLayout(next.layout) };
+      }
+      const err = checkNode(next, draft);
+      if (err) return opErr('bad-node', `set ${path}: ${err}`);
+      draft.nodes[op.id] = next;
+      return null;
+    }
+    case 'move': {
+      const node = draft.nodes[op.id];
+      if (!node) return opErr('not-found', `move: узел «${op.id}» не найден`);
+      const parent = draft.nodes[op.parent];
+      if (!parent) return opErr('bad-parent', `move: родитель «${op.parent}» не найден`);
+      if (!CONTAINER_TYPES.has(parent.type)) return opErr('bad-parent', 'move: родитель не контейнер');
+      if (op.id === op.parent) return opErr('cycle', 'move: узел не может быть своим родителем');
+      let p = parent;
+      let guard = 0;
+      while (p && guard++ < MAX_DEPTH) {
+        if (p.id === op.id) return opErr('cycle', 'move: нельзя переместить узел внутрь себя');
+        p = p.parent ? draft.nodes[p.parent] : null;
+      }
+      const old = draft.nodes[node.parent];
+      if (old) draft.nodes[old.id] = { ...old, children: old.children.filter((c) => c !== op.id) };
+      const target = draft.nodes[op.parent];
+      const list = target.children.filter((c) => c !== op.id);
+      const idx = isNum(op.index) ? clamp(Math.round(op.index), 0, list.length) : list.length;
+      list.splice(idx, 0, op.id);
+      draft.nodes[target.id] = { ...target, children: list };
+      draft.nodes[op.id] = { ...node, parent: op.parent };
+      return null;
+    }
+    case 'setToken': {
+      const path = String(op.path || '');
+      if (!path) return opErr('bad-op', 'setToken: пустой путь');
+      const badKey = path.split('.').find((p) => UNSAFE_KEYS.has(p));
+      if (badKey) return opErr('protected-path', `setToken: путь «${badKey}» защищён`);
+      const next = setPath(draft.tokens, path, op.value);
+      if (!next.colors || !next.type || !Array.isArray(next.spacing) || !Array.isArray(next.radii)) {
+        return opErr('bad-op', 'setToken: нарушена структура токенов');
+      }
+      draft.tokens = next;
+      return null;
+    }
+    default:
+      return opErr('bad-op', `неизвестная операция «${op.op}»`);
+  }
+}
+
+/**
+ * Чеканит id у create-операций прямо в переданных объектах. Это часть контракта
+ * applyOps/invertOps: инверсию сырого {op:'create'} без id иначе нечем адресовать —
+ * применение и инверсия выдали бы разные id. Фабрика ops.create делает то же раньше.
+ * @param {object[]} list изменяется на месте
+ */
+function stampIds(list) {
+  for (const op of list) {
+    if (!op || typeof op !== 'object' || op.op !== 'create') continue;
+    const n = op.node;
+    if (!n || typeof n !== 'object' || n.id) continue;
+    try {
+      n.id = uid(n.type === 'frame' ? 'f' : 'n');
+    } catch (_) {
+      // операция заморожена — работаем как раньше, но предупреждаем: отмена будет неполной
+      logOnce('stamp:frozen', 'create-операция заморожена, id не проставить — её отмена будет неполной');
+    }
+  }
+}
+
+/**
+ * Иммутабельно применяет операции. Никогда не бросает.
+ * @param {object} doc
+ * @param {object[]} opList
+ * @returns {{doc: object, error?: {code:string, message:string}}} при ошибке возвращается исходный doc.
+ *   Коды: not-found · protected-path · bad-node · bad-parent · cycle · bad-op
+ */
+function applyOps(doc, opList) {
+  if (!doc || !doc.nodes) return { doc, error: opErr('not-found', 'нет документа') };
+  const list = Array.isArray(opList) ? opList : opList ? [opList] : [];
+  if (!list.length) return { doc };
+  stampIds(list);   // id создаваемых узлов фиксируем до применения — их увидит invertOps
+  const draft = { ...doc, nodes: { ...doc.nodes }, tokens: doc.tokens };
+  try {
+    for (let i = 0; i < list.length; i++) {
+      const err = applyOne(draft, list[i]);
+      if (err) {
+        logOnce('apply:' + err.message, `операция ${i} отклонена: ${err.message}`);
+        return { doc, error: opErr(err.code, `операция ${i} (${list[i] && list[i].op}): ${err.message}`) };
+      }
+    }
+  } catch (e) {
+    // круг 16, п.8: наружу — человеческая строка. Сырой текст исключения из движка
+    // доходил до экрана целиком («Converting circular structure to JSON --> star…»):
+    // вход был вне контракта, но читать это человеку незачем — техническая часть
+    // остаётся в консоли, в сообщении только то, что случилось с его правкой.
+    logOnce('apply:throw', 'исключение при применении операций', e);
+    return { doc, error: opErr('bad-op', 'правку не удалось применить: в операции негодное значение') };
+  }
+  draft.version = (doc.version || 0) + 1;
+  return { doc: draft };
+}
+
+/** Инверсия одной операции относительно состояния до неё. @returns {object[]} */
+function invertOne(doc, op) {
+  switch (op && op.op) {
+    case 'create': {
+      const node = op.node;
+      const id = node && node.id;
+      if (!id) return [];
+      // сначала возвращаем «усыновлённых» детей прежним родителям, потом убираем сам узел
+      const host = nodeById(doc, node.parent);
+      // место, которое займёт сам новый узел у своего родителя
+      const hostSlot = host && Array.isArray(host.children)
+        ? (isNum(op.index) ? clamp(Math.round(op.index), 0, host.children.length) : host.children.length)
+        : -1;
+      const moves = [];
+      // места у родителей считаем по одному разу на родителя: «сгруппировать»
+      // создаёт узел, усыновляя всё выделение, и indexOf на каждого ребёнка
+      // давал квадрат — на «выделить всё» в большом документе это секунды
+      const slots = new Map();
+      const slotsOf = (parent) => {
+        let idx = slots.get(parent.id);
+        if (!idx) {
+          idx = new Map();
+          for (let i = 0; i < parent.children.length; i++) {
+            if (!idx.has(parent.children[i])) idx.set(parent.children[i], i);
+          }
+          slots.set(parent.id, idx);
+        }
+        return idx;
+      };
+      for (const c of (node.children || [])) {
+        const child = nodeById(doc, c);
+        if (!child) continue;
+        const parent = nodeById(doc, child.parent);
+        if (!parent || !Array.isArray(parent.children)) continue;
+        const at = slotsOf(parent).has(c) ? slotsOf(parent).get(c) : -1;
+        const index = at < 0 ? parent.children.length : at;
+        // новый узел ещё стоит в списке, когда ребёнок возвращается — сдвигаем на него
+        const shift = host && parent.id === host.id && hostSlot >= 0 && hostSlot <= index ? 1 : 0;
+        moves.push({ id: c, parent: parent.id, index, insert: index + shift });
+      }
+      moves.sort((a, b) => a.index - b.index);
+      return [...moves.map((m) => ops.move(m.id, m.parent, m.insert)), ops.remove(id)];
+    }
+    case 'remove': {
+      const node = nodeById(doc, op.id);
+      if (!node) return [];
+      const ids = subtreeIds(doc, op.id);
+      const out = [];
+      // место каждого узла у родителя — по одному разу на родителя. indexOf на
+      // каждый узел давал квадрат: инверсия удаления фрейма со ста тысячами
+      // детей считалась 12 с, и всё это время интерфейс стоял
+      const slots = new Map();
+      const slotOf = (parent, nid) => {
+        let idx = slots.get(parent.id);
+        if (!idx) {
+          idx = new Map();
+          const kids = parent.children || [];
+          for (let i = 0; i < kids.length; i++) if (!idx.has(kids[i])) idx.set(kids[i], i);
+          slots.set(parent.id, idx);
+        }
+        const at = idx.get(nid);
+        return at === undefined ? -1 : at;
+      };
+      for (const nid of ids) {
+        const n = deepClone(nodeById(doc, nid));
+        const parent = nodeById(doc, n.parent);
+        const index = parent ? slotOf(parent, nid) : undefined;
+        // дети будут воссозданы своими операциями — создаём узел пустым
+        const node2 = { ...n, children: n.children ? [] : undefined };
+        if (node2.children === undefined) delete node2.children;
+        out.push(ops.create(node2, index));
+      }
+      return out;
+    }
+    case 'set': {
+      const node = nodeById(doc, op.id);
+      if (!node) return [];
+      // setPath переписывает весь первый сегмент пути (скаляр превращается в объект),
+      // поэтому снимаем и возвращаем именно его целиком
+      const head = String(op.path).split('.')[0];
+      const prev = getPath(node, head);
+      const back = ops.set(op.id, head, prev === undefined ? undefined : deepClone(prev));
+      // Круг 16, п.1: отмена возвращает значение ровно тем, чем оно было, — включая
+      // форму. Приведение формы (keepFieldForm) здесь молча оставило бы объект там,
+      // где до правки лежала строка: `set fill.token='accent'` поверх fill:'accent'
+      // делает {token:'accent'}, и обратная запись строки «совпала бы по смыслу».
+      back.exact = true;
+      return [back];
+    }
+    case 'move': {
+      const node = nodeById(doc, op.id);
+      if (!node) return [];
+      const parent = nodeById(doc, node.parent);
+      const index = parent ? parent.children.indexOf(op.id) : 0;
+      return [ops.move(op.id, node.parent, index < 0 ? 0 : index)];
+    }
+    case 'setToken': {
+      // восстанавливаем группу целиком — так не съезжает порядок ключей палитры
+      const head = String(op.path).split('.')[0];
+      const prev = getPath(doc.tokens, head);
+      return [ops.setToken(head, prev === undefined ? undefined : deepClone(prev))];
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * Операции отмены: инверсия каждой относительно состояния перед ней, в обратном порядке.
+ * Как и applyOps, проставляет id создаваемым узлам прямо в переданных операциях,
+ * поэтому порядок вызовов (сначала применить или сначала спросить отмену) не важен.
+ * @param {object} doc состояние ДО применения ops
+ * @param {object[]} opList
+ * @returns {object[]}
+ */
+function invertOps(doc, opList) {
+  const list = Array.isArray(opList) ? opList : opList ? [opList] : [];
+  stampIds(list);   // инверсию могут спросить до применения — id должен быть тот же
+  const chunks = [];
+  let cur = doc;
+  for (const op of list) {
+    chunks.push(invertOne(cur, op));
+    const res = applyOps(cur, [op]);
+    if (res.error) {
+      logOnce('invert:' + res.error.message, 'invertOps: операция не применилась, инверсия обрывается —', res.error.message);
+      break;
+    }
+    cur = res.doc;
+  }
+  const out = [];
+  // без spread: инверсия удаления фрейма — по create-операции на каждый узел
+  // поддерева, и `out.push(...chunk)` на сотне тысяч узлов роняет стек
+  // («Maximum call stack size exceeded») — вместе с возможностью отменить это
+  // удаление. Порядок обратный: последнюю операцию отменяем первой
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const chunk = chunks[i];
+    for (let j = 0; j < chunk.length; j++) out.push(chunk[j]);
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * 5. Измерение текста
+ * ------------------------------------------------------------------ */
+
+const FALLBACK_FONT = 'IBM Plex Sans, system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+const FALLBACK_MONO = 'IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace';
+
+/** Итоговый стиль текста: токен из tokens.type + точечные переопределения узла. */
+function resolveTextStyle(doc, node) {
+  const table = (doc && doc.tokens && doc.tokens.type) || DEFAULT_TOKENS.type;
+  const raw = node && node.style;
+  let base = table.body || DEFAULT_TOKENS.type.body;
+  let over = {};
+  if (typeof raw === 'string') base = table[raw] || base;
+  else if (raw && typeof raw === 'object') {
+    if (raw.token && table[raw.token]) base = table[raw.token];
+    over = raw;
+  }
+  const font = over.font || base.font || 'IBM Plex Sans';
+  const fontSize = isNum(over.fontSize) ? over.fontSize : (isNum(base.fontSize) ? base.fontSize : 15);
+  const fontWeight = isNum(over.fontWeight) ? over.fontWeight : (isNum(base.fontWeight) ? base.fontWeight : 400);
+  const lhRaw = isNum(over.lineHeight) ? over.lineHeight : base.lineHeight;
+  const lineHeight = isNum(lhRaw) ? (lhRaw <= 4 ? r2(lhRaw * fontSize) : lhRaw) : r2(fontSize * 1.4);
+  const letterSpacing = isNum(over.letterSpacing) ? over.letterSpacing
+    : (isNum(base.letterSpacing) ? base.letterSpacing : 0);
+  const mono = /mono/i.test(font);
+  return {
+    font, fontSize, fontWeight, lineHeight, letterSpacing, mono,
+    fontFamily: mono ? FALLBACK_MONO : (font + ', ' + FALLBACK_FONT)
+  };
+}
+
+/** Строка ключа кеша измерений: шрифт + размер + начертание + трекинг. */
+function styleKey(style) {
+  return style.font + '/' + style.fontSize + '/' + style.fontWeight + '/' + style.letterSpacing;
+}
+
+let sharedCanvasCtx;
+/** Измерение через offscreen canvas теми же шрифтами, что и отрисовка. */
+function canvasMeasure(text, style) {
+  if (sharedCanvasCtx === undefined) {
+    sharedCanvasCtx = null;
+    try {
+      if (typeof document !== 'undefined' && document.createElement) {
+        sharedCanvasCtx = document.createElement('canvas').getContext('2d');
+      } else if (typeof OffscreenCanvas !== 'undefined') {
+        sharedCanvasCtx = new OffscreenCanvas(8, 8).getContext('2d');
+      }
+    } catch (e) {
+      logOnce('canvas', 'canvas недоступен, ширина текста считается приближённо', e);
+      sharedCanvasCtx = null;
+    }
+  }
+  if (!sharedCanvasCtx) return approxMeasure(text, style);
+  sharedCanvasCtx.font = `${style.fontWeight} ${style.fontSize}px ${style.fontFamily}`;
+  const w = sharedCanvasCtx.measureText(text).width;
+  if (!Number.isFinite(w)) return approxMeasure(text, style);
+  return w + (style.letterSpacing || 0) * Math.max(0, text.length - 1);
+}
+
+/** Приближение на случай отсутствия canvas (SSR, тесты без заглушки). */
+function approxMeasure(text, style) {
+  const k = style.mono ? 0.6 : (style.fontWeight >= 600 ? 0.545 : 0.52);
+  let units = 0;
+  for (const ch of String(text)) units += /[ .,:;!|'’ilj]/.test(ch) ? 0.42 : /[MWmwШЩЮ]/.test(ch) ? 1.18 : 1;
+  return units * style.fontSize * k + (style.letterSpacing || 0) * Math.max(0, text.length - 1);
+}
+
+/* ------------------------------------------------------------------ *
+ * 5a. Эпоха измерений
+ * ------------------------------------------------------------------ */
+
+/**
+ * Кеш ширин живёт при функции измерения и переживает вызовы solve — иначе
+ * каждая раскладка мерила бы текст заново. Обратная сторона: первая раскладка
+ * страницы считается системным шрифтом (веб-гарнитуры приходят позже), и без
+ * сброса эти числа залипали бы навсегда — hug-текст на 10–20 % шире правды,
+ * бейдж выделения врёт, «hug → фикс.» пишет неверное значение.
+ *
+ * Поэтому у кеша есть эпоха: она входит в его состояние, и при её смене ширины
+ * забываются. Эпоху растит resetMeasureCache() — сам модуль зовёт его, когда
+ * браузер сообщает о загрузке шрифтов, так что первый визит чинится без участия
+ * оболочки; оболочка может позвать его сама и подписаться через onMeasureEpoch.
+ */
+let measureEpochValue = 0;
+/** Мерили ли что-нибудь после последнего сброса: если нет — сбрасывать нечего. */
+let measureDirty = false;
+const measureEpochSubs = new Set();
+/**
+ * Недавние функции измерения — для пробного замера перед сбросом; свежая идёт
+ * первой. Список короткий и затирается по кругу, чтобы чужая функция не жила
+ * вечно (WeakMap кешей держится за неё).
+ */
+const activeMeasurers = [];
+const PROBE_FN_LIMIT = 4;
+/** Сколько образцов на измеритель сверяем: хватает нескольких строк разных стилей. */
+const PROBE_SAMPLE_LIMIT = 12;
+
+/** Запомнить измеритель: без этого пробный замер не на чем сделать. */
+function rememberMeasurer(fn) {
+  const at = activeMeasurers.indexOf(fn);
+  if (at === 0) return;
+  if (at > 0) activeMeasurers.splice(at, 1);
+  activeMeasurers.unshift(fn);
+  if (activeMeasurers.length > PROBE_FN_LIMIT) activeMeasurers.length = PROBE_FN_LIMIT;
+}
+
+/**
+ * Пробный замер: перемерить несколько отложенных образцов теми же функциями и
+ * сравнить с тем, что лежит в кеше. Гарнитура может «догрузиться», не изменив
+ * ни одной ширины (второй начертание, подмена тем же метричным шрифтом) — тогда
+ * пересчитывать весь документ незачем.
+ * @returns {boolean} метрики изменились (или проверить нечем — считаем, что да)
+ */
+function measureMetricsChanged() {
+  const fn = activeMeasurers[0];   // тот, которым считают сейчас
+  const caches = fn ? measurerCaches.get(fn) : null;
+  const probes = caches && caches.probes;
+  if (!probes || !probes.length) return true;   // сверять нечем — сбрасываем, как раньше
+  for (const p of probes) {
+    let raw;
+    try { raw = fn(p.text, p.style); } catch (e) { return true; }
+    if (!Number.isFinite(raw)) return true;
+    if (Math.abs(r2(raw) - p.value) > 0.01) return true;
+  }
+  return false;
+}
+
+/** Текущая эпоха измерений. Растёт при каждом состоявшемся сбросе кеша. */
+function measureEpoch() {
+  return measureEpochValue;
+}
+
+/**
+ * Забыть измеренные ширины: следующий solve померит текст заново.
+ * Звать, когда изменились условия измерения — загрузились гарнитуры, сменился
+ * измеритель. Если после прошлого сброса никто ничего не мерил, эпоха не растёт
+ * (забывать нечего, и подписчиков незачем будить дважды).
+ * @param {string} [reason] попадает подписчикам — видно, кто разбудил пересчёт
+ * @returns {number} текущая эпоха
+ */
+function resetMeasureCache(reason) {
+  if (!measureDirty) return measureEpochValue;
+  // «умный» сброс: браузер шлёт loadingdone на каждую гарнитуру, и на документ
+  // с тремя начертаниями приходило три полных пересчёта подряд. Если пробный
+  // замер даёт прежние ширины — забывать нечего, подписчиков не будим
+  if (!measureMetricsChanged()) return measureEpochValue;
+  measureEpochValue += 1;
+  measureDirty = false;
+  const info = { epoch: measureEpochValue, reason: reason || 'reset' };
+  for (const cb of Array.from(measureEpochSubs)) {
+    try { cb(info); } catch (e) { logOnce('measure:sub', 'подписчик на эпоху измерений бросил исключение', e); }
+  }
+  return measureEpochValue;
+}
+
+/**
+ * Подписка на смену эпохи: оболочке — сигнал пересчитать геометрию и перерисовать.
+ * @param {(info:{epoch:number, reason:string})=>void} cb
+ * @returns {() => void} отписка — без неё слушатель живёт до конца страницы
+ */
+function onMeasureEpoch(cb) {
+  if (typeof cb !== 'function') return () => {};
+  measureEpochSubs.add(cb);
+  return () => { measureEpochSubs.delete(cb); };
+}
+
+/**
+ * Подписка на загрузку гарнитур. Делается один раз при загрузке модуля: наш
+ * обработчик fonts.ready встаёт в очередь раньше, чем такой же у оболочки,
+ * поэтому её пересчёт после шрифтов получает уже свежие ширины, даже если об
+ * эпохе она ничего не знает. loadingdone ловит и шрифты, пришедшие позже.
+ */
+function watchFontLoading() {
+  if (typeof document === 'undefined' || !document.fonts) return;
+  const fonts = document.fonts;
+  try {
+    if (fonts.ready && typeof fonts.ready.then === 'function') {
+      fonts.ready.then(() => resetMeasureCache('fonts-ready'), () => {});
+    }
+    if (typeof fonts.addEventListener === 'function') {
+      // слушатель модульный: он нужен всю жизнь страницы, снимать его некому
+      fonts.addEventListener('loadingdone', () => resetMeasureCache('fonts-loadingdone'));
+    }
+  } catch (e) {
+    logOnce('fonts:watch', 'не удалось подписаться на загрузку шрифтов — меряем тем, что есть', e);
+  }
+}
+watchFontLoading();
+
+/**
+ * Готовит измеритель с кешем (ключ: текст + стиль + ширина).
+ * Кеш общий для всех вызовов с одной и той же функцией измерения и живёт до
+ * смены эпохи измерений (см. resetMeasureCache).
+ * @param {{measureText?:(text:string, style:object)=>number}} [opts]
+ */
+const measurerCaches = new WeakMap();
+const MEASURE_CACHE_LIMIT = 20000;
+
+function makeMeasurer(opts) {
+  const fn = opts && typeof opts.measureText === 'function' ? opts.measureText : canvasMeasure;
+  // кеш живёт при функции измерения — переживает вызовы solve/validate
+  let caches = measurerCaches.get(fn);
+  if (!caches) { caches = { width: new Map(), wrap: new Map(), probes: [], epoch: measureEpochValue }; measurerCaches.set(fn, caches); }
+  rememberMeasurer(fn);
+  // эпоха сменилась — прежние ширины померены другими шрифтами, им верить нельзя
+  if (caches.epoch !== measureEpochValue) {
+    caches.width.clear();
+    caches.wrap.clear();
+    caches.probes = [];
+    caches.epoch = measureEpochValue;
+  }
+  if (caches.width.size > MEASURE_CACHE_LIMIT) caches.width.clear();
+  if (caches.wrap.size > MEASURE_CACHE_LIMIT) caches.wrap.clear();
+  const widthCache = caches.width;
+  const wrapCache = caches.wrap;
+  const width = (text, style) => {
+    const key = styleKey(style) + '\u0000' + text;
+    let v = widthCache.get(key);
+    if (v === undefined) {
+      let raw;
+      try { raw = fn(text, style); } catch (e) {
+        logOnce('measure:throw', 'measureText бросил исключение, беру приближение', e);
+        raw = approxMeasure(text, style);
+      }
+      v = r2(Number.isFinite(raw) ? raw : approxMeasure(text, style));
+      widthCache.set(key, v);
+      measureDirty = true;   // есть что забывать при смене гарнитур
+      // образец для пробного замера: по нему решаем, менялись ли метрики
+      if (caches.probes.length < PROBE_SAMPLE_LIMIT && text) caches.probes.push({ text, style, value: v });
+    }
+    return v;
+  };
+  /** Перенос по словам. maxWidth === null → без переноса. */
+  const wrap = (text, style, maxWidth) => {
+    const src = String(text === undefined || text === null ? '' : text);
+    const key = styleKey(style) + '\u0000' + (maxWidth === null || !Number.isFinite(maxWidth) ? '-' : r2(maxWidth)) + '\u0000' + src;
+    let cached = wrapCache.get(key);
+    if (cached) return cached;
+    const out = [];
+    for (const para of src.split('\n')) {
+      if (maxWidth === null || !Number.isFinite(maxWidth) || maxWidth <= 0) { out.push(para); continue; }
+      const words = para.split(/\s+/).filter((w, i, a) => w !== '' || a.length === 1);
+      if (!words.length) { out.push(''); continue; }
+      let line = '';
+      for (const word of words) {
+        const test = line ? line + ' ' + word : word;
+        if (!line || width(test, style) <= maxWidth + 0.01) line = test;
+        else { out.push(line); line = word; }
+      }
+      out.push(line);
+    }
+    // замораживаем: этот же массив уходит в geo.lines, и правка снаружи
+    // отравила бы кеш измерений на всю эпоху
+    const res = Object.freeze(out.length ? out : ['']);
+    wrapCache.set(key, res);
+    measureDirty = true;
+    return res;
+  };
+  const natural = (text, style) => {
+    let max = 0;
+    for (const para of String(text === undefined || text === null ? '' : text).split('\n')) {
+      max = Math.max(max, width(para, style));
+    }
+    return r2(max);
+  };
+  return { width, wrap, natural };
+}
+
+/* ------------------------------------------------------------------ *
+ * 6. Решатель
+ * ------------------------------------------------------------------ */
+
+const ZERO_BOX = Object.freeze({ w: 0, h: 0 });
+
+/**
+ * Заданный размер оси в границах схемы. Документ мог прийти мимо checkNode
+ * (импорт, чужой JSON), а NaN в size.value залипает в виде навсегда.
+ */
+const fixedSize = (spec) => numIn(spec && spec.value, 0, MAX_SIZE, 0);
+
+/** Позиция узла в границах ±MAX_SIZE: pos.x = 1e308 иначе уводит геометрию в Infinity. */
+const nodePos = (node) => {
+  const p = (node && node.pos) || null;
+  return {
+    x: numIn(p && p.x, -MAX_SIZE, MAX_SIZE, 0),
+    y: numIn(p && p.y, -MAX_SIZE, MAX_SIZE, 0)
+  };
+};
+
+/**
+ * Ширина, по которой переносить строки текста. `null` — без переноса.
+ *
+ * «По содержимому» (hug) переносить нечего, пока рамка не уже натуральной ширины:
+ * так в geo.lines остаются ровно те знаки, что набрал человек (переносчик
+ * склеивает слова через один обычный пробел и съел бы и двойной, и неразрывный).
+ * Но контейнер умеет задать hug-узлу ширину сам — колонка с align:'stretch'
+ * растягивает его во всю свою; тогда рамка главнее натуральной ширины, и
+ * переносим по ней. Без этого geo.rects и geo.lines расходились: прямоугольник
+ * во всю ширину, а строка одна, вылезает за кромку и срезается обрезкой —
+ * бейдж, рамка выделения, хит-тест, инспектор и экспорт врали все сразу.
+ * Одно правило на три места: measureNodeInner, placeNode и validate.
+ * @param {string} mode size.w.mode узла
+ * @param {number} w ширина рамки, которую узел получил
+ * @param {number} natural натуральная ширина текста (самый широкий абзац)
+ * @returns {number|null}
+ */
+function textWrapWidth(mode, w, natural) {
+  if (mode !== 'hug') return w;
+  return isNum(natural) && isNum(w) && w + 0.01 < natural ? w : null;
+}
+
+/**
+ * @param {'w'|'h'|null} [stretch] ось, которую контейнер растягивает по своей
+ *   рамке: hug по этой оси работает как fill (align:'stretch' у родителя).
+ */
+function measureNode(ctx, node, availW, availH, stretch) {
+  const key = node.id + '#' + (availW === null ? '-' : r2(availW)) + '#' + (availH === null ? '-' : r2(availH))
+    + '#' + (stretch || '-');
+  const hit = ctx.measCache.get(key);
+  if (hit) return hit;
+  // узел уже меряется выше по стеку (цикл) либо дерево слишком глубокое — не уходим в рекурсию
+  if (ctx.stack.has(node.id)) {
+    logOnce('solve:cycle:' + node.id, `solve: цикл в дереве на узле «${node.id}» — ветка пропущена`);
+    return ZERO_BOX;
+  }
+  if (ctx.stack.size > MAX_DEPTH) {
+    logOnce('solve:deep', `solve: глубже ${MAX_DEPTH} узлов — ветка на «${node.id}» пропущена`);
+    return ZERO_BOX;
+  }
+  ctx.stack.add(node.id);
+  try {
+    return measureNodeInner(ctx, node, availW, availH, key, stretch);
+  } finally {
+    ctx.stack.delete(node.id);
+  }
+}
+
+function measureNodeInner(ctx, node, availW, availH, key, stretch) {
+  const sw = (node.size && node.size.w) || { mode: 'hug' };
+  const sh = (node.size && node.size.h) || { mode: 'hug' };
+  // растянутую ось контейнер задаёт сам — по ней hug ведёт себя как fill.
+  // Меряем по той же ширине, какую узел получит в прямоугольнике: иначе
+  // измерение и расстановка расходятся (см. textWrapWidth)
+  const byBoxW = (sw.mode === 'fill' || stretch === 'w') && availW !== null;
+  const byBoxH = (sh.mode === 'fill' || stretch === 'h') && availH !== null;
+  let res;
+  if (node.type === 'frame' || node.type === 'page') {
+    const boxW = sw.mode === 'fixed' ? fixedSize(sw) : (byBoxW ? availW : null);
+    const boxH = sh.mode === 'fixed' ? fixedSize(sh) : (byBoxH ? availH : null);
+    const flow = flowLayout(ctx, node, boxW, boxH);
+    res = { w: flow.w, h: flow.h };
+  } else if (node.type === 'text') {
+    const style = resolveTextStyle(ctx.doc, node);
+    const natural = ctx.m.natural(node.characters, style);
+    let w;
+    if (sw.mode === 'fixed') w = fixedSize(sw);
+    else if (byBoxW) w = availW;
+    else w = natural;
+    const lines = ctx.m.wrap(node.characters, style, textWrapWidth(sw.mode, w, natural));
+    let h;
+    if (sh.mode === 'fixed') h = fixedSize(sh);
+    else if (byBoxH) h = availH;
+    else h = r2(lines.length * style.lineHeight);
+    res = { w: r2(Math.max(0, w)), h: r2(Math.max(0, h)) };
+  } else {
+    const w = sw.mode === 'fixed' ? fixedSize(sw) : (byBoxW ? availW : 0);
+    const h = sh.mode === 'fixed' ? fixedSize(sh) : (byBoxH ? availH : 0);
+    res = { w: r2(Math.max(0, w)), h: r2(Math.max(0, h)) };
+  }
+  ctx.measCache.set(key, res);
+  return res;
+}
+
+/**
+ * Раскладка детей фрейма. boxW/boxH === null означает «размер по содержимому».
+ * @returns {{w:number,h:number,items:Array,layout:object}}
+ */
+function flowLayout(ctx, node, boxW, boxH) {
+  const key = node.id + '@' + (boxW === null ? '-' : r2(boxW)) + '@' + (boxH === null ? '-' : r2(boxH));
+  const hit = ctx.flowCache.get(key);
+  if (hit) return hit;
+  const L = normalizeLayout(node.layout);
+  const pad = L.padding;
+  const kids = kidsOf(node).map((id) => ctx.doc.nodes[id]).filter((n) => n && n.visible !== false);
+  const flowKids = kids.filter((k) => !k.override);
+  const absKids = kids.filter((k) => k.override);
+  const innerW = boxW === null ? null : Math.max(0, r2(boxW - pad.l - pad.r));
+  const innerH = boxH === null ? null : Math.max(0, r2(boxH - pad.t - pad.b));
+  const items = [];
+  let contentW = 0;
+  let contentH = 0;
+
+  if (L.mode === 'row' || L.mode === 'column') {
+    const isRow = L.mode === 'row';
+    const mainInner = isRow ? innerW : innerH;
+    const crossInner = isRow ? innerH : innerW;
+    // Растягивая hug-ребёнка, контейнер задаёт ему поперечник — и мерить его
+    // надо по этому поперечнику, а не «по содержимому»: иначе текст меряется
+    // одной строкой в 630 px, а прямоугольник получает 350 и строку срезает.
+    // Подсказку даём, только когда поперечник строки точно придёт из рамки:
+    // при wrap строк может стать несколько, и тогда каждая живёт своей (ниже
+    // растянутых перемеряем ещё раз, когда поперечник строки уже известен).
+    const crossAxis = isRow ? 'h' : 'w';
+    // то же условие, что у crossFromBox ниже, но известное ДО разбиения на
+    // строки: без wrap (или когда главная ось не ограничена) строка заведомо одна
+    const crossFromBoxSure = crossInner !== null && (!L.wrap || mainInner === null);
+    const metas = flowKids.map((k) => {
+      const mainSpec = (isRow ? k.size && k.size.w : k.size && k.size.h) || { mode: 'hug' };
+      const crossSpec = (isRow ? k.size && k.size.h : k.size && k.size.w) || { mode: 'hug' };
+      const fillMain = mainSpec.mode === 'fill';
+      const crossStretch = L.align === 'stretch' && crossSpec.mode === 'hug';
+      const crossFill = crossSpec.mode === 'fill' || crossStretch;
+      const aW = isRow ? (fillMain ? null : innerW) : (crossFill ? innerW : null);
+      const aH = isRow ? (crossFill ? innerH : null) : (fillMain ? null : innerH);
+      const m = measureNode(ctx, k, aW, aH, crossStretch && crossFromBoxSure ? crossAxis : null);
+      return { node: k, fillMain, crossFill, crossStretch, main: isRow ? m.w : m.h, cross: isRow ? m.h : m.w };
+    });
+    // разбиение на строки (wrap)
+    const rows = [];
+    let cur = [];
+    let curMain = 0;
+    for (const meta of metas) {
+      const add = cur.length ? L.gap : 0;
+      if (L.wrap && mainInner !== null && cur.length && curMain + add + meta.main > mainInner + 0.01) {
+        rows.push({ metas: cur, main: curMain });
+        cur = [meta]; curMain = meta.main;
+      } else { cur.push(meta); curMain += add + meta.main; }
+    }
+    rows.push({ metas: cur, main: curMain });
+    // Поперечник строке задаёт контейнер только тогда, когда строка одна и её
+    // поперечник известен: там растянутый ребёнок получит crossInner целиком.
+    // Как только wrap разложил детей на несколько строк, каждая строка живёт
+    // своим поперечником — иначе растянутые дети схлопывались в нулевую высоту.
+    const crossFromBox = rows.length === 1 && crossInner !== null;
+    /**
+     * Поперечник, которым ребёнок задаёт высоту своей строки. Растянутого мерим
+     * «по содержимому»: size:fill по поперечнику иначе вернул бы весь innerCross
+     * и одна строка стала бы во весь фрейм.
+     */
+    const ownCross = (m) => {
+      if (!m.crossFill) return m.cross;
+      const m2 = measureNode(ctx, m.node, isRow ? m.main : null, isRow ? null : m.main);
+      return isRow ? m2.h : m2.w;
+    };
+    // распределение fill по главной оси + пересчёт поперечника
+    for (const row of rows) {
+      const gaps = L.gap * Math.max(0, row.metas.length - 1);
+      // поперечник строки теперь известен: растянутых перемеряем по нему. Для
+      // текста это меняет и главный размер — в рамке 350 вместо 630 строк
+      // становится больше, и высота растёт (при crossFromBoxSure это тот же
+      // замер, что выше, и он берётся из кеша)
+      if (crossFromBox) {
+        for (const m of row.metas) {
+          if (!m.crossStretch) continue;
+          const aMain = m.fillMain ? null : mainInner;
+          const m2 = measureNode(ctx, m.node,
+            isRow ? aMain : crossInner,
+            isRow ? crossInner : aMain, crossAxis);
+          m.main = isRow ? m2.w : m2.h;
+          m.cross = isRow ? m2.h : m2.w;
+        }
+      }
+      const fills = row.metas.filter((m) => m.fillMain);
+      if (fills.length && mainInner !== null) {
+        const used = row.metas.reduce((s, m) => s + m.main, 0) + gaps;
+        const extra = mainInner - used;
+        if (extra > 0) {
+          const share = extra / fills.length;
+          for (const m of fills) m.main = r2(m.main + share);
+        } else if (extra < 0) {
+          const totalFill = fills.reduce((s, m) => s + m.main, 0);
+          const scale = totalFill > 0 ? Math.max(0, (totalFill + extra) / totalFill) : 0;
+          for (const m of fills) m.main = r2(m.main * scale);
+        }
+        for (const m of fills) {
+          // поперечник берём тот же, каким ребёнок войдёт в строку: при нескольких
+          // строках растянутого меряем по содержимому (см. ownCross — попадёт в кеш)
+          const aCross = m.crossFill && crossFromBox ? crossInner : null;
+          const m2 = measureNode(ctx, m.node,
+            isRow ? m.main : aCross,
+            isRow ? aCross : m.main,
+            m.crossStretch && aCross !== null ? crossAxis : null);
+          m.cross = isRow ? m2.h : m2.w;
+        }
+      }
+      row.main = r2(row.metas.reduce((s, m) => s + m.main, 0) + gaps);
+      row.cross = crossFromBox
+        ? r2(crossInner)
+        : r2(row.metas.reduce((s, m) => Math.max(s, ownCross(m)), 0));
+    }
+    const mainMax = r2(maxOf(rows, (r) => r.main, 0));
+    contentW = isRow ? mainMax : 0;
+    contentH = isRow ? 0 : mainMax;
+    const crossTotal = r2(rows.reduce((s, r) => s + r.cross, 0) + L.gap * Math.max(0, rows.length - 1));
+    if (isRow) contentH = crossTotal; else contentW = crossTotal;
+    // расстановка
+    let crossCursor = 0;
+    for (const row of rows) {
+      const avail = mainInner !== null ? mainInner : row.main;
+      const free = r2(avail - row.main);
+      let cursor = 0;
+      let step = L.gap;
+      if (L.justify === 'center') cursor = free / 2;
+      else if (L.justify === 'end') cursor = free;
+      else if (L.justify === 'between') {
+        // при переполнении free отрицателен: шагу нельзя опускаться ниже gap,
+        // иначе «между» разводит блоки назад — второй уезжает в минус
+        if (row.metas.length > 1 && free > 0) step = r2(L.gap + free / (row.metas.length - 1));
+      }
+      for (const meta of row.metas) {
+        const itemCross = meta.crossFill ? row.cross : meta.cross;
+        let co = 0;
+        if (L.align === 'center') co = (row.cross - itemCross) / 2;
+        else if (L.align === 'end') co = row.cross - itemCross;
+        const mainPos = r2(cursor);
+        const crossPos = r2(crossCursor + co);
+        items.push({
+          node: meta.node,
+          x: r2(pad.l + (isRow ? mainPos : crossPos)),
+          y: r2(pad.t + (isRow ? crossPos : mainPos)),
+          w: r2(isRow ? meta.main : itemCross),
+          h: r2(isRow ? itemCross : meta.main)
+        });
+        cursor = r2(cursor + meta.main + step);
+      }
+      crossCursor = r2(crossCursor + row.cross + L.gap);
+    }
+  } else {
+    // свободное размещение
+    for (const k of flowKids) {
+      const m = measureNode(ctx, k, innerW, innerH);
+      const pos = nodePos(k);
+      const x = r2(pad.l + pos.x);
+      const y = r2(pad.t + pos.y);
+      items.push({ node: k, x, y, w: m.w, h: m.h });
+      contentW = Math.max(contentW, r2(pos.x + m.w));
+      contentH = Math.max(contentH, r2(pos.y + m.h));
+    }
+  }
+  // отсоединённые узлы: абсолютно внутри родителя, вне потока
+  for (const k of absKids) {
+    const o = k.override;
+    // переопределения приходят и мимо checkNode — держим их в границах схемы
+    const ow = isNum(o.w) ? clamp(o.w, 0, MAX_SIZE) : null;
+    const oh = isNum(o.h) ? clamp(o.h, 0, MAX_SIZE) : null;
+    // прикреплённый размер — такая же заданная рамка, как растяжение: текст
+    // «по содержимому» в ней переносится, и высота считается по переносам
+    // (override.w без override.h — «ширина моя, высота по тексту»)
+    const m = measureNode(ctx, k, ow === null ? innerW : ow, oh === null ? innerH : oh,
+      ow !== null ? 'w' : (oh !== null ? 'h' : null));
+    items.push({
+      node: k, x: r2(numIn(o.x, -MAX_SIZE, MAX_SIZE, 0)), y: r2(numIn(o.y, -MAX_SIZE, MAX_SIZE, 0)),
+      w: r2(ow === null ? m.w : ow), h: r2(oh === null ? m.h : oh), detached: true
+    });
+  }
+  const res = {
+    w: boxW === null ? r2(contentW + pad.l + pad.r) : r2(boxW),
+    h: boxH === null ? r2(contentH + pad.t + pad.b) : r2(boxH),
+    items, layout: L
+  };
+  ctx.flowCache.set(key, res);
+  return res;
+}
+
+function placeNode(ctx, node, x, y, w, h, depth) {
+  const d = depth || 0;
+  if (ctx.placed.has(node.id)) {
+    logOnce('place:twice:' + node.id, `solve: узел «${node.id}» встречен дважды — размещаем один раз`);
+    return;
+  }
+  if (d > MAX_DEPTH) {
+    logOnce('place:deep', `solve: глубже ${MAX_DEPTH} узлов — размещение ветки «${node.id}» остановлено`);
+    return;
+  }
+  ctx.placed.add(node.id);
+  ctx.rects[node.id] = { x: r2(x), y: r2(y), w: r2(w), h: r2(h) };
+  ctx.order.push(node.id);
+  if (node.type === 'text') {
+    const style = resolveTextStyle(ctx.doc, node);
+    const sw = (node.size && node.size.w) || { mode: 'hug' };
+    ctx.lines[node.id] = ctx.m.wrap(node.characters, style,
+      textWrapWidth(sw.mode, w, ctx.m.natural(node.characters, style)));
+  }
+  if (node.type === 'frame' || node.type === 'page') {
+    const flow = flowLayout(ctx, node, w, h);
+    for (const it of flow.items) placeNode(ctx, it.node, x + it.x, y + it.y, it.w, it.h, d + 1);
+  }
+}
+
+let selfTestState = 0; // 0 — не запускался, 1 — идёт, 2 — пройден
+/**
+ * Вычисляет геометрию документа. Чистая функция: одинаковый документ → одинаковая геометрия.
+ * @param {object} doc
+ * @param {{measureText?:Function, selfTest?:boolean}} [opts] measureText(text, style) -> ширина в px
+ * @returns {{rects:Record<string,{x:number,y:number,w:number,h:number}>, lines:Record<string,string[]>, order:string[]}}
+ */
+function solve(doc, opts) {
+  const options = opts || {};
+  const ctx = {
+    doc,
+    m: makeMeasurer(options),
+    measCache: new Map(),
+    flowCache: new Map(),
+    stack: new Set(),   // узлы, которые меряются прямо сейчас — ловит циклы
+    placed: new Set(),  // уже размещённые — ловит узел с двумя родителями
+    rects: {}, lines: {}, order: []
+  };
+  const geo = { rects: ctx.rects, lines: ctx.lines, order: ctx.order };
+  if (!doc || !doc.nodes || !doc.nodes[doc.root]) {
+    logOnce('solve:empty', 'solve: документ пуст или повреждён');
+    return geo;
+  }
+  const root = doc.nodes[doc.root];
+  ctx.rects[root.id] = { x: 0, y: 0, w: 0, h: 0 };
+  for (const id of kidsOf(root)) {
+    const child = doc.nodes[id];
+    if (!child) continue;
+    const pos = nodePos(child);
+    const m = measureNode(ctx, child, null, null);
+    placeNode(ctx, child, r2(pos.x), r2(pos.y), m.w, m.h);
+  }
+  const forced = options.selfTest === true;
+  if ((selfTestState === 0 || forced) && !options.__inSelfTest) {
+    const prev = selfTestState;
+    selfTestState = 1;
+    try {
+      const again = solve(doc, { ...options, __inSelfTest: true });
+      if (hashGeometry(again) !== hashGeometry(geo)) {
+        logOnce('solve:nondet', 'решатель недетерминирован: два прохода дали разную геометрию');
+        selfTestState = prev;
+      } else selfTestState = 2;
+    } catch (e) {
+      logOnce('solve:selftest', 'самотест решателя не выполнился', e);
+      selfTestState = prev;
+    }
+  }
+  return geo;
+}
+
+/**
+ * Устойчивый хэш геометрии (FNV-1a) — для тестов детерминированности и кеша отрисовки.
+ * @param {{rects:object, lines:object, order:string[]}} geo
+ * @returns {string}
+ */
+function hashGeometry(geo) {
+  if (!geo || !geo.rects) return '0';
+  let s = '';
+  for (const id of Object.keys(geo.rects).sort()) {
+    const r = geo.rects[id];
+    s += id + ':' + r2(r.x) + ',' + r2(r.y) + ',' + r2(r.w) + ',' + r2(r.h) + ';';
+  }
+  s += '|';
+  for (const id of Object.keys(geo.lines || {}).sort()) s += id + ':' + (geo.lines[id] || []).join('\u0001') + ';';
+  s += '|' + (geo.order || []).join(',');
+  /* Круг 16, п.8: два независимых счёта вместо одного — ключ 64 бита, а не 32.
+     На этом хэше держится вывод «геометрия не менялась»: совпадение у РАЗНЫХ
+     макетов означает молчаливое «ничего не изменилось» там, где изменилось всё.
+     Вероятность и на 32 битах ничтожна (2⁻³²), но цена второго счёта — один
+     умножитель на символ (на 40 477 узлах +20 мс к 90), а цена ошибки — молчание,
+     которого не объяснишь. Сама строка s уже собрана — она и есть дорогая часть. */
+  let h = 0x811c9dc5;
+  let g = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h ^= c;
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    g = Math.imul(g ^ c, 2246822519) >>> 0;
+  }
+  const hex = (v) => ('00000000' + v.toString(16)).slice(-8);
+  return hex(h) + hex(g) + '-' + s.length.toString(36);
+}
+
+/* ------------------------------------------------------------------ *
+ * 7. Цвет и контраст (WCAG 2.1)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Значение цвета → '#rrggbb'. Принимает имя токена, hex (#rgb/#rrggbb),
+ * а также формы {token}, {color} и {value} — оболочка пишет заливки как {token:'surface'}.
+ * @returns {string|null}
+ */
+function resolveColor(doc, value) {
+  let v = value;
+  if (v && typeof v === 'object') {
+    v = v.token !== undefined ? v.token : v.color !== undefined ? v.color : v.value;
+  }
+  if (typeof v !== 'string' || !v) return null;
+  const tokens = (doc && doc.tokens && doc.tokens.colors) || DEFAULT_TOKENS.colors;
+  if (tokens[v]) v = tokens[v];
+  if (v[0] !== '#') return null;
+  if (/^#[0-9a-fA-F]{3}$/.test(v)) return '#' + v.slice(1).split('').map((c) => c + c).join('').toLowerCase();
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) return v.toLowerCase();
+  if (/^#[0-9a-fA-F]{8}$/.test(v)) return v.slice(0, 7).toLowerCase();
+  return null;
+}
+
+function channelLum(c) {
+  const s = c / 255;
+  return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+
+function relativeLuminance(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return 0.2126 * channelLum(r) + 0.7152 * channelLum(g) + 0.0722 * channelLum(b);
+}
+
+/**
+ * Коэффициент контраста WCAG 2.1 между двумя цветами '#rrggbb'.
+ * @returns {number} 1..21
+ */
+function contrastRatio(hexA, hexB) {
+  if (!hexA || !hexB) return 21;
+  const a = relativeLuminance(hexA);
+  const b = relativeLuminance(hexB);
+  const hi = Math.max(a, b);
+  const lo = Math.min(a, b);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/* ------------------------------------------------------------------ *
+ * 8. Валидаторы
+ * ------------------------------------------------------------------ */
+
+const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'off-scale': 'info', 'empty-frame': 'info' };
+const SEV_RANK = { error: 0, warn: 1, info: 2 };
+
+function nearestFill(doc, node) {
+  let cur = node;
+  let guard = 0;
+  while (cur && guard++ < 512) {
+    const hex = resolveColor(doc, cur.fill);
+    if (hex) return hex;
+    cur = cur.parent ? doc.nodes[cur.parent] : null;
+  }
+  return resolveColor(doc, (doc.tokens && doc.tokens.colors && doc.tokens.colors.canvas) || '#ffffff');
+}
+
+/**
+ * Проверки макета: overflow, out-of-parent, padding-eaten, overlap, low-contrast, off-scale,
+ * empty-frame, zero-size, no-geometry.
+ * @param {object} doc
+ * @param {object} geo результат solve
+ * @param {{measureText?:Function}} [opts] тот же измеритель, что и у solve
+ * @returns {Array<{code:string,nodeId:string,message:string,severity:string}>}
+ */
+function validate(doc, geo, opts) {
+  const out = [];
+  if (!doc || !doc.nodes || !geo || !geo.rects) return out;
+  const m = makeMeasurer(opts || {});
+  const spacing = (doc.tokens && Array.isArray(doc.tokens.spacing) ? doc.tokens.spacing : DEFAULT_TOKENS.spacing);
+  const inScale = (v) => !isNum(v) || v === 0 || spacing.some((s) => Math.abs(s - v) < 0.01);
+  const add = (code, nodeId, message) => out.push({ code, nodeId, message, severity: SEVERITY[code] || 'warn' });
+  const ids = Object.keys(doc.nodes);
+
+  for (const id of ids) {
+    const node = doc.nodes[id];
+    const rect = geo.rects[id];
+    if (node.type === 'page') continue;
+    if (!rect) {
+      /* Круг 16, п.4: узел есть в документе, а геометрии у него нет — решатель
+       * оборвал ветку (глубже MAX_DEPTH) и сказал об этом только в консоль, а
+       * validate такие узлы пропускал целиком. Человек видел «узлов: 378» в
+       * отчёте об импорте и 334 на холсте, и ни одно нарушение про это не
+       * говорило. Говорим один раз на ветку — там, где родитель ещё размещён,
+       * а ребёнок уже нет: иначе на каждую обрезанную цепочку сыпались бы
+       * десятки одинаковых строк. Обычному пути это ничего не стоит: сюда
+       * попадают только узлы без прямоугольника, а их в норме нет. */
+      const up = node.parent ? doc.nodes[node.parent] : null;
+      if (!up || !geo.rects[up.id]) continue;              // не начало обрыва — о нём уже сказали
+      const chain = ancestors(doc, id);
+      const top = chain.length ? chain[chain.length - 1] : null;
+      if (!top || top.id !== doc.root) continue;           // узел вообще не на этом холсте
+      const lost = subtreeIds(doc, id).length;
+      const depth = chain.length;
+      add('no-geometry', id, `«${displayName(doc, node)}»${lost > 1 ? ` и его содержимое (всего ${lost} узлов)` : ''}`
+        + ` не попал${lost > 1 ? 'и' : ''} на холст: `
+        + (depth > MAX_DEPTH ? `вложенность ${depth} глубже предела ${MAX_DEPTH}` : 'решатель не дал геометрии'));
+      continue;
+    }
+
+    if (rect.w <= 0.5 || rect.h <= 0.5) {
+      add('zero-size', id, `«${displayName(doc, node)}»: нулевой размер (${r2(rect.w)}×${r2(rect.h)})`);
+    }
+
+    if (node.type === 'text') {
+      const style = resolveTextStyle(doc, node);
+      const mode = (node.size && node.size.w && node.size.w.mode) || 'hug';
+      const lines = (geo.lines && geo.lines[id])
+        || m.wrap(node.characters, style, textWrapWidth(mode, rect.w, m.natural(node.characters, style)));
+      const needH = r2(lines.length * style.lineHeight);
+      const widest = lines.reduce((s, l) => Math.max(s, m.width(l, style)), 0);
+      if (needH > rect.h + 0.5) {
+        add('overflow', id, `текст «${(node.characters || '').slice(0, 24)}…» не помещается по высоте: нужно ${needH}, есть ${r2(rect.h)}`);
+      } else if (widest > rect.w + 0.5) {
+        add('overflow', id, `текст «${(node.characters || '').slice(0, 24)}…» шире рамки: ${r2(widest)} > ${r2(rect.w)}`);
+      }
+      const fg = resolveColor(doc, node.color) || resolveColor(doc, 'text') || '#000000';
+      const parent = node.parent ? doc.nodes[node.parent] : null;
+      const bg = nearestFill(doc, parent || node);
+      const ratio = contrastRatio(fg, bg);
+      const large = style.fontSize >= 24 || (style.fontSize >= 18.66 && style.fontWeight >= 700);
+      const need = large ? 3 : 4.5;
+      if (ratio < need) {
+        add('low-contrast', id, `контраст ${ratio.toFixed(2)}:1 при норме ${need}:1 (${fg} на ${bg})`);
+      }
+    }
+
+    if (node.type === 'frame') {
+      const L = normalizeLayout(node.layout);
+      if (kidsOf(node).length === 0) {
+        add('empty-frame', id, `фрейм «${node.name || id}» пуст`);
+      }
+      const bad = [];
+      if (!inScale(L.gap)) bad.push('gap ' + L.gap);
+      for (const k of ['t', 'r', 'b', 'l']) if (!inScale(L.padding[k])) bad.push('padding.' + k + ' ' + L.padding[k]);
+      if (bad.length) add('off-scale', id, `вне шкалы отступов: ${bad.join(', ')}`);
+      if (L.mode === 'none') {
+        const kids = kidsOf(node).map((c) => doc.nodes[c]).filter(Boolean);
+        for (let i = 0; i < kids.length; i++) {
+          for (let j = i + 1; j < kids.length; j++) {
+            const a = geo.rects[kids[i].id];
+            const b = geo.rects[kids[j].id];
+            if (!a || !b) continue;
+            const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+            const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+            if (ox > 0.5 && oy > 0.5) {
+              add('overlap', kids[j].id, `«${kids[j].name || kids[j].id}» перекрывает «${kids[i].name || kids[i].id}» на ${r2(ox)}×${r2(oy)}`);
+            }
+          }
+        }
+      }
+    }
+
+    const parent = node.parent ? doc.nodes[node.parent] : null;
+    if (parent && parent.id !== doc.root) {
+      const pr = geo.rects[parent.id];
+      if (pr) {
+        const dx = Math.max(pr.x - rect.x, (rect.x + rect.w) - (pr.x + pr.w));
+        const dy = Math.max(pr.y - rect.y, (rect.y + rect.h) - (pr.y + pr.h));
+        if (dx > 0.5 || dy > 0.5) {
+          add('out-of-parent', id, `«${node.name || id}» выходит за «${parent.name || parent.id}» на ${r2(Math.max(0, dx))}×${r2(Math.max(0, dy))}`);
+        } else if (!node.override && CONTAINER_TYPES.has(parent.type)) {
+          /* Круг 16, п.2: ребёнок ПОТОКА, который съел отступ контейнера, не выходил
+           * за его бокс — и не давал ни одного нарушения: контейнер 100×100 с
+           * padding {r:20,b:20} и ребёнок 90×40 внутри читались как «всё в порядке».
+           * Считаем от ВНУТРЕННЕЙ области (бокс минус padding) и только для детей
+           * потока: у отсоединённого узла override по SPEC §1.2 отсчитывается от
+           * бокса родителя, и {x:0,y:0} в контейнере с отступом — законное место,
+           * а не нарушение. Отдельный код, а не расширение out-of-parent: «выходит
+           * за родителя» про такой узел было бы неправдой. */
+          const pad = normalizeLayout(parent.layout).padding;
+          const eats = [];
+          if (pad.l && pr.x + pad.l - rect.x > 0.5) eats.push(`слева на ${r2(pr.x + pad.l - rect.x)}`);
+          if (pad.t && pr.y + pad.t - rect.y > 0.5) eats.push(`сверху на ${r2(pr.y + pad.t - rect.y)}`);
+          if (pad.r && (rect.x + rect.w) - (pr.x + pr.w - pad.r) > 0.5) {
+            eats.push(`справа на ${r2((rect.x + rect.w) - (pr.x + pr.w - pad.r))}`);
+          }
+          if (pad.b && (rect.y + rect.h) - (pr.y + pr.h - pad.b) > 0.5) {
+            eats.push(`снизу на ${r2((rect.y + rect.h) - (pr.y + pr.h - pad.b))}`);
+          }
+          if (eats.length) {
+            add('padding-eaten', id, `«${displayName(doc, node)}» заходит на отступ «${displayName(doc, parent)}»: ${eats.join(', ')}`);
+          }
+        }
+      }
+    }
+  }
+  out.sort((a, b) => (SEV_RANK[a.severity] - SEV_RANK[b.severity])
+    || a.code.localeCompare(b.code) || a.nodeId.localeCompare(b.nodeId));
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * 9. Документ и стартовое содержимое
+ * ------------------------------------------------------------------ */
+
+function emptyDoc(name) {
+  const rootId = uid('page');
+  return {
+    id: uid('doc'),
+    version: 1,
+    root: rootId,
+    nodes: { [rootId]: { type: 'page', id: rootId, name: name || 'Страница', parent: null, children: [] } },
+    tokens: deepClone(DEFAULT_TOKENS),
+    meta: { name: name || 'Без названия', createdAt: new Date().toISOString() }
+  };
+}
+
+function buildDemo(doc) {
+  const nodes = doc.nodes;
+  const push = (n) => {
+    nodes[n.id] = n;
+    const p = nodes[n.parent];
+    if (p && p.children) p.children.push(n.id);
+    return n;
+  };
+  /** frame(parent, name, {layout,w,h,fill,stroke,radius,pos,role,clip}) */
+  const F = (parent, name, o = {}) => push({
+    type: 'frame', id: uid('f'), name, parent, children: [],
+    layout: normalizeLayout(o.layout || { mode: 'none' }),
+    size: sizeSpec(o.w, o.h),
+    ...(o.fill ? { fill: o.fill } : {}),
+    ...(o.stroke ? { stroke: o.stroke } : {}),
+    radius: o.radius || 0,
+    ...(o.pos ? { pos: o.pos } : {}),
+    ...(o.role ? { role: o.role } : {}),
+    ...(o.clip ? { clip: true } : {})
+  });
+  /** text(parent, name, characters, {style,color,align,w,h,role}) */
+  const T = (parent, name, characters, o = {}) => push({
+    type: 'text', id: uid('t'), name, parent, characters,
+    style: o.style || { token: 'body' },
+    color: o.color || 'text',
+    align: o.align || 'left',
+    size: sizeSpec(o.w === undefined ? 'hug' : o.w, o.h === undefined ? 'hug' : o.h),
+    ...(o.role ? { role: o.role } : {})
+  });
+  const E = (parent, name, o = {}) => push({
+    type: 'ellipse', id: uid('e'), name, parent, size: sizeSpec(o.w, o.h),
+    ...(o.fill ? { fill: o.fill } : {}), ...(o.stroke ? { stroke: o.stroke } : {}), radius: 999
+  });
+
+  /* ---------- Артборд 1: мобильный экран «Маршрут дня» ---------- */
+  const mob = F(doc.root, 'Маршрут дня', {
+    pos: { x: 0, y: 0 }, w: 390, h: 844, fill: 'surface', radius: 24, clip: true, role: 'artboard',
+    layout: { mode: 'column', gap: 20, padding: { t: 24, r: 20, b: 24, l: 20 }, align: 'stretch' }
+  });
+
+  const head = F(mob.id, 'Шапка', {
+    w: 'fill', h: 'hug', role: 'header',
+    layout: { mode: 'row', gap: 12, align: 'center', justify: 'between' }
+  });
+  const headText = F(head.id, 'Дата и заголовок', { w: 'hug', h: 'hug', layout: { mode: 'column', gap: 4 } });
+  T(headText.id, 'Дата', 'вторник, 23 сентября', { style: { token: 'caption' }, color: 'muted' });
+  T(headText.id, 'Заголовок экрана', 'Маршрут дня', { style: { token: 'title' }, role: 'title' });
+  E(head.id, 'Аватар', { w: 40, h: 40, fill: 'surfaceAlt', stroke: { color: 'line', width: 1 } });
+
+  const card = F(mob.id, 'Карточка встречи', {
+    w: 'fill', h: 'hug', fill: 'accentSoft', radius: 16, role: 'card',
+    layout: { mode: 'column', gap: 8, padding: { t: 16, r: 16, b: 16, l: 16 } }
+  });
+  const cardTop = F(card.id, 'Строка статуса', { w: 'fill', h: 'hug', layout: { mode: 'row', gap: 8, justify: 'between', align: 'center' } });
+  T(cardTop.id, 'Метка', 'БЛИЖАЙШАЯ ВСТРЕЧА', { style: { token: 'caption', fontWeight: 600, letterSpacing: 0.6 }, color: 'accentInk' });
+  T(cardTop.id, 'Обратный отсчёт', 'через 40 мин', { style: { token: 'mono' }, color: 'accentInk' });
+  T(card.id, 'Название встречи', 'Планёрка по редактору макетов', { style: { token: 'heading' }, w: 'fill' });
+  T(card.id, 'Время и место', '10:30 — 11:15 · переговорная «Север»', { style: { token: 'caption' }, color: 'muted', w: 'fill' });
+
+  T(mob.id, 'Подзаголовок списка', 'Дальше сегодня', { style: { token: 'caption', fontWeight: 600 }, color: 'muted' });
+
+  const list = F(mob.id, 'Список пунктов', {
+    w: 'fill', h: 'hug', role: 'list',
+    layout: { mode: 'column', gap: 8, align: 'stretch' }
+  });
+  const item = (time, title, place) => {
+    const it = F(list.id, 'Пункт · ' + title, {
+      w: 'fill', h: 'hug', fill: 'surfaceAlt', radius: 12, role: 'item',
+      layout: { mode: 'row', gap: 12, align: 'center', padding: { t: 12, r: 12, b: 12, l: 12 } }
+    });
+    T(it.id, 'Время', time, { style: { token: 'mono' }, color: 'muted', w: 48 });
+    const col = F(it.id, 'Текст пункта', { w: 'fill', h: 'hug', layout: { mode: 'column', gap: 2 } });
+    T(col.id, 'Название пункта', title, { style: { token: 'body', fontWeight: 600 }, w: 'fill' });
+    T(col.id, 'Место', place, { style: { token: 'caption' }, color: 'muted', w: 'fill' });
+    return it;
+  };
+  item('12:00', 'Обед с командой', 'кафе «Пироговая», 3 этаж');
+  item('15:30', 'Ревью макетов', 'созвон, ссылка в календаре');
+  item('18:40', 'Тренировка', 'зал на Лесной, 40 минут');
+
+  const btn = F(mob.id, 'Кнопка «Добавить пункт»', {
+    w: 'fill', h: 52, fill: 'accent', radius: 16, role: 'button',
+    layout: { mode: 'row', gap: 8, align: 'center', justify: 'center' }
+  });
+  T(btn.id, 'Подпись кнопки', 'Добавить пункт', { style: { token: 'body', fontWeight: 600 }, color: 'onAccent' });
+
+  /* ---------- Артборд 2: десктопный блок «Сводка недели» ---------- */
+  const desk = F(doc.root, 'Сводка недели', {
+    pos: { x: 470, y: 0 }, w: 960, h: 560, fill: 'surface', radius: 20, role: 'artboard',
+    layout: { mode: 'column', gap: 24, padding: { t: 32, r: 32, b: 32, l: 32 }, align: 'stretch' }
+  });
+
+  const dHead = F(desk.id, 'Шапка сводки', { w: 'fill', h: 'hug', layout: { mode: 'row', gap: 16, align: 'center', justify: 'between' } });
+  const dHeadCol = F(dHead.id, 'Заголовок и период', { w: 'hug', h: 'hug', layout: { mode: 'column', gap: 4 } });
+  T(dHeadCol.id, 'Заголовок сводки', 'Сводка недели', { style: { token: 'display' }, role: 'title' });
+  T(dHeadCol.id, 'Период', '22–28 сентября · команда редактора', { style: { token: 'caption' }, color: 'muted' });
+  T(dHead.id, 'Отметка обновления', 'обновлено 5 минут назад', { style: { token: 'mono' }, color: 'muted', align: 'right' });
+
+  const metrics = F(desk.id, 'Показатели', { w: 'fill', h: 'hug', role: 'metric', layout: { mode: 'row', gap: 16, align: 'stretch' } });
+  const metric = (label, value, delta, deltaColor) => {
+    const m = F(metrics.id, 'Показатель · ' + label, {
+      w: 'fill', h: 'hug', fill: 'surfaceAlt', radius: 16, role: 'metric',
+      layout: { mode: 'column', gap: 6, padding: { t: 20, r: 20, b: 20, l: 20 } }
+    });
+    T(m.id, 'Подпись показателя', label, { style: { token: 'caption' }, color: 'muted', w: 'fill' });
+    T(m.id, 'Значение показателя', value, { style: { token: 'display' }, w: 'fill' });
+    T(m.id, 'Изменение', delta, { style: { token: 'mono' }, color: deltaColor, w: 'fill' });
+  };
+  metric('Задач закрыто', '48', '+12% к прошлой неделе', 'good');
+  metric('Средний цикл', '2,4 дня', '−6 часов', 'good');
+  metric('Правок от агента', '312', '79% принято сразу', 'muted');
+
+  const table = F(desk.id, 'Таблица проектов', {
+    w: 'fill', h: 'hug', radius: 16, clip: true, role: 'table',
+    stroke: { color: 'line', width: 1 },
+    layout: { mode: 'column', gap: 0, align: 'stretch' }
+  });
+  const row = (cells, opts = {}) => {
+    const r = F(table.id, opts.head ? 'Заголовок таблицы' : 'Строка · ' + cells[0], {
+      w: 'fill', h: 'hug', role: 'item',
+      ...(opts.head ? { fill: 'surfaceAlt' } : {}),
+      layout: { mode: 'row', gap: 16, align: 'center', padding: { t: 12, r: 16, b: 12, l: 16 } }
+    });
+    const st = opts.head
+      ? { token: 'caption', fontWeight: 600 }
+      : { token: 'body' };
+    const color = opts.head ? 'muted' : 'text';
+    T(r.id, 'Проект', cells[0], { style: st, color, w: 'fill' });
+    T(r.id, 'Статус', cells[1], { style: st, color: opts.head ? 'muted' : 'muted', w: 140 });
+    T(r.id, 'Владелец', cells[2], { style: st, color, w: 180 });
+    T(r.id, 'Срок', cells[3], { style: opts.head ? st : { token: 'mono' }, color: 'muted', w: 90, align: 'right' });
+    return r;
+  };
+  row(['Проект', 'Статус', 'Владелец', 'Срок'], { head: true });
+  row(['Редактор макетов', 'в работе', 'Аня Ковалёва', '26 сен']);
+  row(['Голосовой ввод', 'на ревью', 'Пётр Гущин', '27 сен']);
+  row(['Экспорт в SVG', 'готово', 'Лиза Май', '24 сен']);
+  row(['Библиотека токенов', 'в плане', 'Марк Орлов', '1 окт']);
+
+  return doc;
+}
+
+/**
+ * Создаёт документ. Без аргументов — демо с двумя артбордами
+ * («Маршрут дня» — мобильный экран, «Сводка недели» — десктопный блок).
+ * @param {object|string} [seed] готовый документ (будет нормализован) либо {empty:true} / 'empty'
+ * @returns {object} Doc
+ */
+/**
+ * Приводит документ к дереву: разрывает рёбра, из-за которых он деревом не был
+ * (ребёнок, чей `parent` указывает в другое место, ребро, замыкающее цикл),
+ * и удаляет узлы, недостижимые из корня, вместе с их поддеревьями — такие
+ * висят в `doc.nodes` мёртвым грузом: их не видно и они не проходят checkNode.
+ * Делает это заметно, через logOnce.
+ * @param {object} doc изменяется на месте
+ */
+function pruneBrokenEdges(doc) {
+  const seen = new Set([doc.root]);
+  // Обход итеративный и без предела глубины: рекурсия кладёт стек на длинной
+  // цепочке, а прежняя страховка «глубже MAX_DEPTH — только помечаем живым»
+  // оставляла хвост поддерева с нечищеными рёбрами: его узлы считались
+  // недостижимыми и удалялись, а ребро у родителя оставалось — документ
+  // перестал быть деревом, и импорт такого файла ругался на «узел назван
+  // ребёнком, но не описан». Теперь каждое достижимое ребро проходит проверку.
+  const stack = [doc.root];
+  while (stack.length) {
+    const id = stack.pop();
+    const n = doc.nodes[id];
+    if (!n || !Array.isArray(n.children)) continue;
+    const kept = [];
+    for (const c of n.children) {
+      const child = doc.nodes[c];
+      if (!child) {
+        logOnce('prune:ghost:' + c, `createDoc: ребёнок «${c}» узла «${id}» не найден — ребро отброшено`);
+        continue;
+      }
+      if (child.parent !== id) {
+        logOnce('prune:parent:' + c, `createDoc: у «${c}» parent «${child.parent}», а числится в «${id}» — ребро отброшено`);
+        continue;
+      }
+      if (seen.has(c) || c === id) {
+        logOnce('prune:cycle:' + c, `createDoc: ребро «${id}» → «${c}» замыкает цикл — отброшено`);
+        continue;
+      }
+      kept.push(c);
+      seen.add(c);
+    }
+    n.children = kept;
+    // в обратном порядке: обход остаётся тем же, что у прежней рекурсии
+    for (let i = kept.length - 1; i >= 0; i--) stack.push(kept[i]);
+  }
+  // всё, что не достижимо из корня, не рисуется и не проверяется — убираем совсем
+  for (const id of Object.keys(doc.nodes)) {
+    if (seen.has(id)) continue;
+    const n = doc.nodes[id];
+    logOnce('prune:orphan:' + id, `createDoc: узел «${id}» (parent «${n && n.parent}») не достижим из корня — удалён вместе с поддеревом`);
+    delete doc.nodes[id];
+  }
+}
+
+/** Размер оси, приведённый к схеме: негодный становится hug — узел видно и его можно поправить. */
+function repairSizeSpec(spec) {
+  if (spec && SIZE_MODES.has(spec.mode)) {
+    if (spec.mode !== 'fixed') return { mode: spec.mode };
+    if (isNum(spec.value) && spec.value >= 0 && spec.value <= MAX_SIZE) return { mode: 'fixed', value: spec.value };
+    if (isNum(spec.value)) return { mode: 'fixed', value: clamp(spec.value, 0, MAX_SIZE) };
+  }
+  return { mode: 'hug' };
+}
+
+/**
+ * Приводит узел к схеме на месте: негодные поля сбрасываются к безопасным
+ * значениям (размер — hug, позиция — в границы, цвет и переопределение — прочь).
+ * Чего нельзя починить (тип, id, родитель), тут не трогается: такой узел
+ * выбрасывают вместе с поддеревом.
+ * @param {object} n изменяется на месте
+ * @returns {string[]} имена поправленных полей — для сообщения человеку
+ */
+function repairNode(n) {
+  const fixed = [];
+  const mark = (name) => { if (!fixed.includes(name)) fixed.push(name); };
+  if (n.name !== undefined && typeof n.name !== 'string') { delete n.name; mark('name'); }
+  if (CONTAINER_TYPES.has(n.type)) {
+    if (!Array.isArray(n.children)) { n.children = []; mark('children'); }
+    else if (n.children.some((c) => typeof c !== 'string')) {
+      n.children = n.children.filter((c) => typeof c === 'string');
+      mark('children');
+    }
+  }
+  if (n.type !== 'page') {
+    const src = n.size && typeof n.size === 'object' ? n.size : {};
+    const size = { w: repairSizeSpec(src.w), h: repairSizeSpec(src.h) };
+    for (const ax of ['w', 'h']) {
+      const a = src[ax];
+      const b = size[ax];
+      if (!a || a.mode !== b.mode || a.value !== b.value) mark('size.' + ax);
+    }
+    n.size = size;
+  }
+  if (n.type === 'frame') n.layout = normalizeLayout(n.layout);
+  if (n.pos !== undefined) {
+    const p = n.pos && typeof n.pos === 'object' ? n.pos : null;
+    const next = nodePos(n);
+    if (!p || p.x !== next.x || p.y !== next.y) { n.pos = next; mark('pos'); }
+  }
+  if (n.override !== undefined && n.override !== null) {
+    const o = n.override;
+    if (!o || typeof o !== 'object' || !isNum(o.x) || !isNum(o.y)) { delete n.override; mark('override'); }
+    else {
+      const next = { x: clamp(o.x, -MAX_SIZE, MAX_SIZE), y: clamp(o.y, -MAX_SIZE, MAX_SIZE) };
+      if (isNum(o.w)) next.w = clamp(o.w, 0, MAX_SIZE);
+      if (isNum(o.h)) next.h = clamp(o.h, 0, MAX_SIZE);
+      if (next.x !== o.x || next.y !== o.y || next.w !== o.w || next.h !== o.h) mark('override');
+      n.override = next;
+    }
+  }
+  if (n.opacity !== undefined && (!isNum(n.opacity) || n.opacity < 0 || n.opacity > 1)) {
+    delete n.opacity;   // прозрачность «из ниоткуда» — лучше её отсутствие
+    mark('opacity');
+  }
+  if (n.radius !== undefined) {
+    const bad = (!isNum(n.radius) && !Array.isArray(n.radius))
+      || (isNum(n.radius) && (n.radius < 0 || n.radius > MAX_SIZE));
+    if (bad) { delete n.radius; mark('radius'); }
+  }
+  if (n.type === 'text') {
+    if (typeof n.characters !== 'string') {
+      n.characters = n.characters === undefined || n.characters === null ? '' : String(n.characters);
+      mark('characters');
+    }
+    if (n.style !== undefined && typeof n.style !== 'string' && (typeof n.style !== 'object' || !n.style)) {
+      delete n.style; mark('style');
+    }
+    if (n.style && typeof n.style === 'object') {
+      for (const k of ['fontSize', 'lineHeight']) {
+        const v = n.style[k];
+        if (v !== undefined && (!isNum(v) || v <= 0 || v > 1000)) { delete n.style[k]; mark('style.' + k); }
+      }
+      const w = n.style.fontWeight;
+      if (w !== undefined && (!isNum(w) || w < 100 || w > 900)) { delete n.style.fontWeight; mark('style.fontWeight'); }
+    }
+    if (n.align !== undefined && !['left', 'center', 'right'].includes(n.align)) { delete n.align; mark('align'); }
+  }
+  // цвет: имя токена, строка или {token} — иначе честнее отсутствие цвета
+  for (const k of ['fill', 'color']) {
+    const v = n[k];
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string') continue;
+    if (typeof v === 'object' && typeof v.token === 'string') continue;
+    delete n[k]; mark(k);
+  }
+  return fixed;
+}
+
+/**
+ * Что не так с корнем документа. Мало проверить его по схеме: `rect`, чей
+ * `parent` указывает на себя, checkNode проходит (тип известен, parent —
+ * строка, ссылка разрешается), и «корень → страница» не срабатывало. Дальше
+ * solve спотыкался о `children: {mode:'fixed'}`, и человек видел сырой текст
+ * исключения JS. Корнем может быть только контейнер без родителя со children-массивом.
+ * @returns {string|null} причина или null, если корень годен
+ */
+function rootProblem(node, doc) {
+  if (!node || typeof node !== 'object') return 'корня нет';
+  if (!CONTAINER_TYPES.has(node.type)) return `корень типа «${node.type}» не контейнер`;
+  if (node.parent !== null && node.parent !== undefined) return `у корня есть родитель «${node.parent}»`;
+  if (!Array.isArray(node.children)) return 'children корня не массив';
+  return checkNode(node, doc);
+}
+
+/**
+ * Токены документа поверх умолчаний — ПО ГРУППАМ.
+ *
+ * Поверхностное слияние (`{...DEFAULT, ...doc.tokens}`) заменяло группу целиком:
+ * файл с `tokens.colors = {accent:'#…'}` терял остальные двенадцать цветов,
+ * resolveColor начинал отдавать null, и все заливки становились «нет». Внутрь
+ * тип-токена не заходим: там частичное слияние вреднее — свой fontSize 34 с
+ * доставшимся из умолчаний lineHeight 22 читается хуже, чем вычисленный.
+ * @param {any} raw doc.tokens как пришли (могут быть мусором)
+ * @returns {object}
+ */
+function mergeTokens(raw) {
+  const base = deepClone(DEFAULT_TOKENS);
+  const got = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const group = (name) => {
+    const src = got[name];
+    return src && typeof src === 'object' && !Array.isArray(src) ? { ...base[name], ...src } : base[name];
+  };
+  const scale = (name) => (Array.isArray(got[name]) && got[name].length ? got[name].slice() : base[name]);
+  return { ...got, colors: group('colors'), type: group('type'), spacing: scale('spacing'), radii: scale('radii') };
+}
+
+function createDoc(seed) {
+  if (seed && typeof seed === 'object' && seed.nodes && seed.root && seed.nodes[seed.root]) {
+    const doc = deepClone(seed);
+    doc.id = doc.id || uid('doc');
+    doc.version = isNum(doc.version) ? doc.version : 1;
+    doc.tokens = mergeTokens(doc.tokens);
+    doc.meta = { name: 'Импорт', createdAt: new Date().toISOString(), ...(doc.meta || {}) };
+    const drop = [];
+    for (const id of Object.keys(doc.nodes)) {
+      const n = doc.nodes[id];
+      if (!n || typeof n !== 'object') { drop.push(id); continue; }
+      // children нечитаемой формы: у контейнера её починит repairNode, у прочих
+      // типов это мусор, который иначе уедет в JSON и в выжимку для агента, а на
+      // `for (const c of node.children)` даст «object is not iterable»
+      if (n.children !== undefined && !Array.isArray(n.children) && !CONTAINER_TYPES.has(n.type)) {
+        delete n.children;
+        logOnce('createDoc:kids:' + id, `createDoc: у «${id}» children не массив — поле убрано`);
+      }
+      if (n.type === 'frame') n.layout = normalizeLayout(n.layout);
+      if (n.type !== 'page' && !n.size) n.size = sizeSpec('hug', 'hug');
+      let err = checkNode(n, doc);
+      if (!err) continue;
+      // узел не по схеме нельзя просто оставить: solve даст NaN и вид залипнет
+      const fixed = repairNode(n);
+      err = checkNode(n, doc);
+      if (err) {
+        // починить нечем (тип, id, родитель) — выбрасываем, как битое ребро
+        if (id === doc.root) continue;   // корень разбираем отдельно, ниже
+        drop.push(id);
+        logOnce('createDoc:drop:' + err, `createDoc: узел «${id}» не по схеме (${err}) — удалён вместе с поддеревом`);
+        continue;
+      }
+      logOnce('createDoc:fix:' + fixed.join(','), `createDoc: узел «${id}» не по схеме — поправлены поля: ${fixed.join(', ')}`);
+    }
+    for (const id of drop) delete doc.nodes[id];
+    // корень удалить некуда: приводим его к странице, иначе документ нечем открыть
+    const rootNode = doc.nodes[doc.root];
+    const rootErr = rootProblem(rootNode, doc);
+    if (rootErr) {
+      if (!rootNode || typeof rootNode !== 'object') {
+        logOnce('createDoc:noroot', 'createDoc: корня нет — начинаем с пустой страницы');
+        return emptyDoc((doc.meta && doc.meta.name) || 'Импорт');
+      }
+      rootNode.type = 'page';
+      rootNode.parent = null;
+      rootNode.id = doc.root;
+      if (!Array.isArray(rootNode.children)) rootNode.children = [];
+      repairNode(rootNode);   // children — только строки, остальное по схеме страницы
+      const left = checkNode(rootNode, doc);
+      if (left) {
+        logOnce('createDoc:root', `createDoc: корень не по схеме (${left}) — начинаем с пустой страницы`);
+        return emptyDoc((doc.meta && doc.meta.name) || 'Импорт');
+      }
+      logOnce('createDoc:rootfix', `createDoc: корень «${doc.root}» не по схеме (${rootErr}) — приведён к странице`);
+    }
+    pruneBrokenEdges(doc);
+    return doc;
+  }
+  const empty = seed === 'empty' || (seed && typeof seed === 'object' && seed.empty);
+  const doc = emptyDoc(empty ? 'Пустая страница' : 'Черновик');
+  if (empty) return doc;
+  doc.meta.name = 'Рабочая неделя';
+  return buildDemo(doc);
+}
+
+
+/* ------------------------------------------------------------------ *
+ * 10. Сцена: отрисовка в SVG + слой интерфейса
+ * ------------------------------------------------------------------ */
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const STAGE_STYLE_ID = 'imago-stage-style';
+const STAGE_CSS = `
+.imago-stage{position:relative;width:100%;height:100%;overflow:hidden;outline:none;
+  background:var(--canvas-bg,#F7F6F3);touch-action:none;cursor:default;user-select:none}
+/* Холст фокусируемый (tabindex=0). Акцентная рамка во весь экран спорит с рамкой
+   выделения — вместо неё двойная нейтральная кромка: 2 px тона --muted поверх
+   1 px светлой подложки. Такую видно на любом фоне, но за выделение её не примешь.
+   Клик мышью оставляем с тонкой кромкой: рамка нужна тому, кто пришёл с клавиатуры. */
+.imago-stage:focus{outline:none;box-shadow:inset 0 0 0 1px var(--line,#E2DED6)}
+.imago-stage:focus-visible{outline:none;
+  box-shadow:inset 0 0 0 2px var(--muted,#8A92A6),inset 0 0 0 4px var(--canvas-bg,#F7F6F3)}
+.imago-stage.is-panning{cursor:grabbing}
+.imago-stage.is-space{cursor:grab}
+.imago-svg{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;
+  font-family:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+.imago-ui{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.imago-ov{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.imago-box{position:absolute;border:1px solid var(--accent,#FF6B3D);pointer-events:none;box-sizing:border-box}
+.imago-box.is-hover{border-color:color-mix(in srgb,var(--accent,#FF6B3D) 55%,transparent);border-style:dashed}
+.imago-box.is-detached{border-style:dashed}
+/* Бейдж — мелкий текст (10px/500), значит норма контраста 4.5:1. Цвет текста берём
+   парой к фону из токенов оболочки: #fff на акценте давал 2.83:1 в тёмной теме.
+   Положение считает _badge(): под узлом бейдж накрывал соседнее содержимое. */
+.imago-badge{position:absolute;padding:2px 6px;border-radius:6px;
+  background:var(--accent,#FF6B3D);color:var(--accent-ink,#1A0B05);
+  font:500 10px/1.3 'IBM Plex Mono',ui-monospace,monospace;
+  white-space:nowrap;pointer-events:none}
+/* «отсоединён»: --warn — средний тон, на нём в светлой теме не набрать 4.5:1 ни
+   светлым, ни тёмным текстом, поэтому тёмная подложка и предупреждающий контур.
+   Цвета фиксированные: бейдж лежит на белом артборде в обеих темах. */
+.imago-badge.is-detached{background:#14161C;color:#F0B429;box-shadow:inset 0 0 0 1px #F0B429}
+/* Бейдж прижат к кромке узла (BADGE_GAP = 0). Уголки со стороны кромки — прямые:
+   так он читается как ярлык этого узла, а не как плашка, повисшая рядом. */
+.imago-badge.at-left{border-top-right-radius:0;border-bottom-right-radius:0}
+.imago-badge.at-right{border-top-left-radius:0;border-bottom-left-radius:0}
+.imago-badge.at-above{border-bottom-left-radius:0;border-bottom-right-radius:0}
+.imago-badge.at-below{border-top-left-radius:0;border-top-right-radius:0}
+/* Ручка ресайза: зона захвата 16×16 (прозрачная), сама ручка — 9×9 на кромке.
+   16, а не 9: по девяти пикселям мышь соскальзывает, а пальцем не попасть совсем.
+   Зона сдвинута НАРУЖУ узла — внутрь она заходит только на HANDLE_IN (3 px).
+   Пока она стояла по центру кромки (margin:-8px), вокруг выделения было восемь
+   невидимых пятен, которые вгрызались в содержимое на 8 px: по мелкому тексту
+   внутри выделенного фрейма нельзя было ни щёлкнуть, ни попасть двойным кликом.
+   Положение зоны и точки внутри неё (--hx/--hy) считает Stage._handles(). */
+/* z-index: элементы ручек живут между кадрами и лежат в слое раньше рамок и
+   бейджей — без него бейдж перекрывал бы точку ручки. */
+.imago-h{position:absolute;width:16px;height:16px;z-index:2;
+  background:none;border:0;pointer-events:auto;box-sizing:border-box}
+.imago-h::before{content:'';position:absolute;left:var(--hx,8px);top:var(--hy,8px);
+  transform:translate(-50%,-50%);
+  width:9px;height:9px;box-sizing:border-box;border:1px solid var(--accent,#FF6B3D);
+  background:#fff;border-radius:2px}
+.imago-h[data-handle="n"],.imago-h[data-handle="s"]{cursor:ns-resize}
+.imago-h[data-handle="e"],.imago-h[data-handle="w"]{cursor:ew-resize}
+.imago-h[data-handle="nw"],.imago-h[data-handle="se"]{cursor:nwse-resize}
+.imago-h[data-handle="ne"],.imago-h[data-handle="sw"]{cursor:nesw-resize}
+.imago-editor{position:absolute;pointer-events:auto;outline:2px solid var(--accent,#FF6B3D);
+  border-radius:3px;background:#fff;white-space:pre-wrap;overflow-wrap:break-word;z-index:5;margin:0;padding:0}
+/* Подсказка у редактора: что делают Enter и Esc. Тон нейтральный (не акцентный) —
+   рядом висит акцентный бейдж размера, и два оранжевых ярлыка спорили бы.
+   Контраст #F7F6F3 на #14161C — 15,7:1, с запасом для кегля 10.
+   Ставится над верхней кромкой (см. _positionEditor): вниз редактор растёт. */
+.imago-editor-hint{position:absolute;padding:2px 6px;border-radius:6px;
+  background:#14161C;color:#F7F6F3;
+  font:500 10px/1.3 'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  white-space:nowrap;pointer-events:none;z-index:6}
+/* Подпись артборда лежит на холсте (--canvas-bg), а не на панели, и кегль у неё 11 —
+   значит норма контраста 4,5:1. Жёстко зашитый #8A92A6 давал в светлой теме 2,11:1.
+   Тёмной теме хватает --muted (#8a92a6 на #0a0b0e = 6,32:1), светлой подставляем
+   тон темнее (#4A505C на #d9d4cb = 5,49:1; на токене холста #F7F6F3 — 7,52:1).
+   Оболочка может задать свой цвет через --imago-ab-label. */
+.imago-ab-label{fill:var(--imago-ab-label,var(--muted,#8A92A6))}
+:root[data-theme="light"] .imago-ab-label{fill:var(--imago-ab-label,#4A505C)}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]) .imago-ab-label{fill:var(--imago-ab-label,#4A505C)}
+}
+.imago-node{transform-box:fill-box}
+.imago-pulse{animation:imago-pulse 900ms ease-out forwards}
+@keyframes imago-pulse{0%{opacity:.95}70%{opacity:.5}100%{opacity:0}}
+@media (prefers-reduced-motion: reduce){.imago-pulse{animation:none;opacity:0}}
+`;
+
+function ensureStageStyles() {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById(STAGE_STYLE_ID)) return;
+  const st = document.createElement('style');
+  st.id = STAGE_STYLE_ID;
+  st.textContent = STAGE_CSS;
+  document.head.appendChild(st);
+}
+
+/**
+ * Префикс id обрезки. Два экспортированных SVG, вставленных инлайном в один
+ * документ, раньше перебивали обрезку друг другу: id шли с нуля на каждый вызов
+ * toSVG. Префикс случайный и свой на каждый документ разметки.
+ * @returns {string}
+ */
+let clipPrefixSeq = 0;
+function newClipPrefix() {
+  clipPrefixSeq = (clipPrefixSeq + 1) % 1000000;
+  const rnd = Math.random().toString(36).slice(2, 8);
+  return 'imago-clip-' + rnd + clipPrefixSeq.toString(36) + '-';
+}
+
+function svgEl(name, attrs) {
+  const el = document.createElementNS(SVG_NS, name);
+  if (attrs) for (const k of Object.keys(attrs)) {
+    const v = attrs[k];
+    if (v !== undefined && v !== null && v !== false) el.setAttribute(k, String(v));
+  }
+  return el;
+}
+
+function safeImageSrc(src) {
+  if (typeof src !== 'string') return null;
+  const v = src.trim();
+  if (/^data:image\//i.test(v)) return v;
+  if (/^https?:\/\//i.test(v)) return v;
+  return null;
+}
+
+/** Внешний ли это адрес: такие живут в SVG, но в PNG сами не попадают. */
+const isExternalSrc = (src) => typeof src === 'string' && /^https?:\/\//i.test(src);
+
+/** Байты в base64: btoa есть и в браузере, и в Node; режем кусками ради стека. */
+function bytesToBase64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 8192) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  }
+  return btoa(bin);
+}
+
+/**
+ * Внешняя картинка → data:-адрес.
+ *
+ * Зачем: снимок PNG сериализует сцену в SVG-blob и грузит его как <img>, а в
+ * этом режиме браузер внешние ресурсы не подгружает — на месте картинки
+ * оказывалась хромовская заглушка «битое изображение» во весь артборд, и это
+ * выдавалось за успех. Поэтому адреса подменяются заранее.
+ * @param {string} url
+ * @returns {Promise<string>} data:image/... ; бросает, если не вышло
+ */
+async function toDataUrl(url) {
+  if (typeof fetch !== 'function') throw new Error('fetch недоступен');
+  const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
+  if (!res || !res.ok) throw new Error(`ответ ${res ? res.status : '—'}`);
+  const blob = await res.blob();
+  const type = (blob && blob.type) || '';
+  if (type && !/^image\//i.test(type)) throw new Error(`это не картинка (${type})`);
+  if (typeof FileReader === 'function') {
+    return await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => {
+        const v = String(fr.result || '');
+        if (/^data:image\//i.test(v)) resolve(v);
+        else reject(new Error('получился не data:image'));
+      };
+      fr.onerror = () => reject(fr.error || new Error('картинку не прочитать'));
+      fr.readAsDataURL(blob);
+    });
+  }
+  const buf = await blob.arrayBuffer();
+  return 'data:' + (/^image\//i.test(type) ? type : 'image/png') + ';base64,' + bytesToBase64(new Uint8Array(buf));
+}
+
+/** Переведённые адреса: снимок одного и того же артборда не тянет картинки заново. */
+const dataUrlCache = new Map();
+const DATA_URL_CACHE_LIMIT = 24;
+
+/**
+ * Все внешние адреса разом. Отказ хотя бы по одному — отказ целиком: половина
+ * картинок и заглушка вместо второй половины хуже честного «сохраните SVG».
+ * @param {string[]} urls
+ * @returns {Promise<Map<string,string>>}
+ */
+async function inlineImageSrcs(urls) {
+  const map = new Map();
+  const fresh = [];
+  for (const url of urls) {
+    const hit = dataUrlCache.get(url);
+    if (hit) map.set(url, hit);
+    else if (!fresh.includes(url)) fresh.push(url);
+  }
+  const got = await Promise.all(fresh.map((u) => toDataUrl(u)));
+  // предел — не меньше, чем понадобилось этому снимку: на артборде с тремя
+  // десятками картинок жёсткие 24 вытесняли их одну за другой на каждом экспорте
+  const limit = Math.max(DATA_URL_CACHE_LIMIT, fresh.length * 2);
+  fresh.forEach((u, i) => {
+    cachePut(dataUrlCache, u, got[i], limit);
+    map.set(u, got[i]);
+  });
+  return map;
+}
+
+/* ----------------------- гарнитуры для экспорта ----------------------- */
+
+/**
+ * Зачем это здесь. Экспорт ссылается на гарнитуру по имени и ничего с собой не
+ * несёт. SVG внутри <img> (так снимается PNG) — изолированный документ: шрифты
+ * страницы туда не попадают, и браузер считает текст системным. Замер в Chrome:
+ * `600 18px "IBM Plex Sans"` — 283 px, тот же текст системным шрифтом — 343 px
+ * (+21 %). Подпись, помещавшаяся в карточку на экране, вылезала за её кромку в
+ * файле, и никто об этом не предупреждал. Лечится встраиванием начертаний:
+ * @font-face с src:url(data:font/woff2;base64,…) прямо в разметке.
+ */
+const FONT_CSS_ORIGIN = 'https://fonts.googleapis.com/css2';
+/** Семейства, которые незачем тянуть: их всё равно даёт система. */
+const GENERIC_FONTS = new Set([
+  'system-ui', 'ui-sans-serif', 'ui-serif', 'ui-monospace', 'ui-rounded',
+  'sans-serif', 'serif', 'monospace', 'cursive', 'fantasy', 'math', 'emoji'
+]);
+/** Стили Google Fonts по адресу запроса — рядом с dataUrlCache и по той же логике. */
+const fontCssCache = new Map();
+/** Файлы начертаний: адрес woff2 → data:. */
+const fontDataCache = new Map();
+/**
+ * Предел кеша — не число, а запас от размера самого запроса. С жёсткими 24 на
+ * девяти гарнитурах (9 × 3 поднабора = 27 файлов) вытеснение начиналось прямо во
+ * время загрузки: первые встроенные выпадали до того, как соберётся разметка, и
+ * экспорт честно, но напрасно сообщал `partial`. Тройной запас держит в кеше и
+ * текущий запрос, и предыдущий такой же, а на маленьких запросах кеш сам
+ * усыхает до минимума (cachePut вытесняет, пока не влезет).
+ */
+const FONT_CACHE_MIN = 24;
+const fontCacheLimit = (n) => Math.max(FONT_CACHE_MIN, Math.ceil(n) * 3);
+/** Запросы «в полёте»: два экспорта подряд не тянут одно и то же дважды. */
+const fontInFlight = new Map();
+
+/**
+ * Положить в кеш, вытеснив самое старое. Предел плавает (см. fontCacheLimit), и
+ * вытесняем не больше одной записи за раз: иначе маленький запрос, пришедший
+ * рядом с большим, разом выбросил бы то, что большой только что скачал. Кеш от
+ * этого усыхает постепенно, а не рывком.
+ */
+function cachePut(map, key, value, limit) {
+  if (map.has(key)) { map.set(key, value); return; }
+  if (map.size >= Math.max(1, isNum(limit) ? limit : 1)) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
+}
+
+/** Адрес стилей Google Fonts для семейства и набора начертаний. */
+function fontCssUrl(family, weights) {
+  const ws = [...new Set(weights)].filter((w) => isNum(w)).sort((a, b) => a - b).join(';');
+  return FONT_CSS_ORIGIN + '?family=' + encodeURIComponent(family).replace(/%20/g, '+')
+    + (ws ? ':wght@' + ws : '') + '&display=swap';
+}
+
+/** Разбор `unicode-range` в список пар [от, до]. */
+function parseUnicodeRange(text) {
+  const out = [];
+  for (const raw of String(text || '').split(',')) {
+    const m = /^u\+([0-9a-f?]{1,6})(?:-([0-9a-f]{1,6}))?$/i.exec(raw.trim());
+    if (!m) continue;
+    if (m[2]) { out.push([parseInt(m[1], 16), parseInt(m[2], 16)]); continue; }
+    if (m[1].indexOf('?') >= 0) {
+      out.push([parseInt(m[1].replace(/\?/g, '0'), 16), parseInt(m[1].replace(/\?/g, 'F'), 16)]);
+      continue;
+    }
+    const v = parseInt(m[1], 16);
+    out.push([v, v]);
+  }
+  return out;
+}
+
+/** Нужен ли этот поднабор: есть ли в тексте хоть один символ из его диапазона. */
+function rangeHits(range, codes) {
+  const pairs = parseUnicodeRange(range);
+  if (!pairs.length) return true;   // без указания диапазона поднабор общий
+  for (const c of codes) {
+    for (const [a, b] of pairs) if (c >= a && c <= b) return true;
+  }
+  return false;
+}
+
+/** Разбор @font-face из стилей Google Fonts (нас интересует только woff2). */
+function parseFontFaces(css) {
+  const out = [];
+  const re = /@font-face\s*\{([^}]*)\}/gi;
+  let m;
+  while ((m = re.exec(css))) {
+    const body = m[1];
+    const pick = (name) => {
+      const r = new RegExp(name + '\\s*:\\s*([^;]+)', 'i').exec(body);
+      return r ? r[1].trim() : '';
+    };
+    const src = /url\(\s*['"]?([^)'"]+)['"]?\s*\)\s*format\(\s*['"]?woff2['"]?\s*\)/i.exec(body);
+    if (!src) continue;
+    const family = pick('font-family').replace(/^['"]|['"]$/g, '');
+    if (!family) continue;
+    out.push({
+      family,
+      weight: pick('font-weight') || '400',
+      style: pick('font-style') || 'normal',
+      stretch: pick('font-stretch'),
+      range: pick('unicode-range'),
+      url: src[1].trim()
+    });
+  }
+  return out;
+}
+
+/** Правило @font-face со встроенным файлом. */
+function faceRule(face, dataUrl) {
+  return '@font-face{font-family:"' + face.family.replace(/["\\]/g, '') + '"'
+    + ';font-style:' + face.style
+    + ';font-weight:' + face.weight
+    + (face.stretch ? ';font-stretch:' + face.stretch : '')
+    + ';src:url(' + dataUrl + ') format("woff2")'
+    + (face.range ? ';unicode-range:' + face.range : '')
+    + ';}';
+}
+
+/** Текст по адресу (стили Google Fonts). */
+async function fetchOnce(url, read) {
+  let p = fontInFlight.get(url);
+  if (!p) {
+    p = (async () => {
+      if (typeof fetch !== 'function') throw new Error('fetch недоступен');
+      const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
+      if (!res || !res.ok) throw new Error(`ответ ${res ? res.status : '—'}`);
+      return await read(res);
+    })();
+    fontInFlight.set(url, p);
+    p.catch(() => {});   // необработанного отказа быть не должно
+  }
+  try { return await p; } finally { fontInFlight.delete(url); }
+}
+
+/**
+ * Собрать @font-face из того, что уже в кеше. Синхронно — этим пользуется toSVG,
+ * которому нельзя ждать сеть.
+ * @param {Map<string,{weights:Set<number>,codes:Set<number>}>} needs
+ * @returns {{css:string, done:string[], missing:string[]}}
+ */
+function fontCssFromCache(needs) {
+  let css = '';
+  const done = [];
+  const missing = [];
+  for (const [family, rec] of needs) {
+    const sheet = fontCssCache.get(fontCssUrl(family, [...rec.weights]));
+    if (!sheet) { missing.push(family); continue; }
+    const faces = parseFontFaces(sheet).filter((f) => rangeHits(f.range, rec.codes));
+    let whole = faces.length > 0;
+    let part = '';
+    for (const f of faces) {
+      const data = fontDataCache.get(f.url);
+      if (!data) { whole = false; continue; }
+      part += faceRule(f, data);
+    }
+    css += part;
+    (whole ? done : missing).push(family);
+  }
+  return { css, done, missing };
+}
+
+/**
+ * Одно слово о том, что вышло со встраиванием: `embedded` — всё на месте,
+ * `partial` — часть, `missing` — ничего. Оболочка по нему решает, предупреждать
+ * ли, что файл может разойтись с экраном.
+ * @param {{css:string, done:string[], missing:string[]}} res
+ * @returns {string}
+ */
+function fontState(res) {
+  if (!res || !res.missing || !res.missing.length) return 'embedded';
+  return res.css ? 'partial' : 'missing';
+}
+
+/**
+ * Дотянуть недостающие начертания и собрать разметку. Отказ по одному семейству
+ * не рушит остальные: половина встроенных гарнитур лучше, чем ни одной, — а о
+ * недостающих зовущий узнаёт из `missing`.
+ * @param {Map<string,{weights:Set<number>,codes:Set<number>}>} needs
+ * @returns {Promise<{css:string, done:string[], missing:string[]}>}
+ */
+async function loadFontCss(needs) {
+  // сколько файлов уже потребовал этот запрос: предел кеша растёт вместе с ним,
+  // поэтому вытеснить только что встроенное начертание он не может
+  let wanted = 0;
+  for (const [family, rec] of needs) {
+    const url = fontCssUrl(family, [...rec.weights]);
+    try {
+      let sheet = fontCssCache.get(url);
+      if (sheet === undefined) {
+        sheet = await fetchOnce(url, (r) => r.text());
+        cachePut(fontCssCache, url, sheet, fontCacheLimit(needs.size));
+      }
+      const faces = parseFontFaces(sheet).filter((f) => rangeHits(f.range, rec.codes));
+      wanted += faces.length;
+      const dataLimit = fontCacheLimit(wanted);
+      await Promise.all(faces.map(async (f) => {
+        if (fontDataCache.has(f.url)) return;
+        try {
+          const bytes = new Uint8Array(await fetchOnce(f.url, (r) => r.arrayBuffer()));
+          if (!bytes.length) throw new Error('пустой файл начертания');
+          cachePut(fontDataCache, f.url, 'data:font/woff2;base64,' + bytesToBase64(bytes), dataLimit);
+        } catch (e) {
+          logOnce('font:file:' + f.url, `начертание «${family}» не встроилось в экспорт`, e);
+        }
+      }));
+    } catch (e) {
+      logOnce('font:css:' + url, `стили гарнитуры «${family}» не получены — экспорт посчитает её системной`, e);
+    }
+  }
+  return fontCssFromCache(needs);
+}
+
+function prefersReducedMotion() {
+  try {
+    return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch (e) { return false; }
+}
+
+/**
+ * Пределы полотна для PNG. Chrome отказывается от canvas со стороной больше
+ * 65535 px и площадью больше 2^28 px: 1200×46000 при 2× (2400×92000) уже за
+ * стороной, и toBlob возвращает null. Замеры: 2400×60000 — 2,99 МБ,
+ * 1200×46000 — 1,25 МБ. Пределы можно передать в screenshot({maxSide,maxArea}).
+ */
+const CANVAS_MAX_SIDE = 65535;
+const CANVAS_MAX_AREA = 268435456;
+/** Ниже этого масштаба снимок бессмысленен — лучше честный отказ. */
+const SHOT_MIN_SCALE = 0.05;
+
+/**
+ * Наибольший масштаб не выше желаемого, при котором полотно ещё создаётся.
+ * Порядок: как просили → 1× → плавно вниз. null — не влезает даже в минимуме.
+ * @returns {number|null}
+ */
+function fitShotScale(w, h, want, maxSide, maxArea) {
+  const fits = (s) => {
+    const W = Math.max(1, Math.round(w * s));
+    const H = Math.max(1, Math.round(h * s));
+    return W <= maxSide && H <= maxSide && W * H <= maxArea;
+  };
+  if (fits(want)) return want;
+  if (want > 1 && fits(1)) return 1;
+  // предел по стороне и по площади сразу: дальше только уточняем вниз
+  const bySide = Math.min(maxSide / w, maxSide / h);
+  const byArea = Math.sqrt(maxArea / (w * h));
+  let s = Math.floor(Math.min(want, bySide, byArea) * 100) / 100;
+  for (let i = 0; i < 8 && s >= SHOT_MIN_SCALE; i++) {
+    if (fits(s)) return s;
+    s = Math.floor(s * 90) / 100;
+  }
+  return null;
+}
+
+const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+/** Зона захвата ручки на экране и то, насколько она заходит внутрь узла. */
+const HANDLE_SIZE = 16;
+const HANDLE_IN = 3;
+/** Видимая точка ручки — 9×9 (см. .imago-h::before в STAGE_CSS). */
+const HANDLE_DOT = 9;
+/**
+ * На сколько видимая точка отодвинута от кромки НАРУЖУ. Внутрь зона захвата
+ * заходит только на HANDLE_IN (глубже она съедает клики по содержимому узла —
+ * круг 9), а точка тянется внутрь на половину своего размера: её внутренняя
+ * полоска в 1.5 px оставалась вне зоны и ловилась обычным хит-тестом, который у
+ * угловых ручек попадал уже мимо узла — в артборд. Сдвигаем точку ровно
+ * настолько, чтобы она целиком легла в зону: её внутренняя кромка совпадает с
+ * внутренней кромкой зоны, а кромку узла она по-прежнему накрывает.
+ */
+const HANDLE_OUT = Math.max(0, HANDLE_DOT / 2 - HANDLE_IN);
+
+/**
+ * Какие ручки показывать у выделенного узла.
+ *
+ * Ряд из трёх ручек требует 3×16 px на экране. На узле высотой 10 px (текст при
+ * зуме 55 %) три ручки с каждой стороны перекрывались на 11 px и сливались в
+ * непрозрачный блок 26 px, который закрывал первый и последний символ —
+ * «Дальше сегодня» читалось как «альше сегодня». Поэтому: тесно по оси — убираем
+ * серединную ручку, совсем тесно — оставляем одну, у дальней кромки (туда узел
+ * и растят). У текста ручка одна: его размер задают содержимое и контейнер, а
+ * восемь ручек поверх строки — это только съеденные клики по самому тексту.
+ * @param {object} node
+ * @param {{w:number,h:number}} sr экранный прямоугольник узла
+ * @returns {string[]}
+ */
+function handleNames(node, sr) {
+  if (node && node.type === 'text') return ['se'];
+  const slots = (extent, lo, hi) => {
+    if (extent >= HANDLE_SIZE * 3) return [lo, '', hi];
+    if (extent >= HANDLE_SIZE * 2) return [lo, hi];
+    return [hi];
+  };
+  const rows = slots(sr.h, 'n', 's');
+  const cols = slots(sr.w, 'w', 'e');
+  const want = new Set();
+  for (const r of rows) for (const c of cols) if (r || c) want.add(r + c);
+  return HANDLES.filter((h) => want.has(h));
+}
+/** Высота бейджа на экране: 10px/1.3 + по 2px отбивки = 17. */
+const BADGE_H = 17;
+/**
+ * Отбивка бейджа от кромки узла — ноль: он прирастает к рамке выделения.
+ * С зазором в 4 px бейдж ресайза читался как отдельная плашка, повисшая рядом
+ * на тёмном холсте (у прижатого к левому краю артборда — вообще вне макета), и
+ * с узлом его связывала только близость. Прижатый к кромке, он делит с рамкой
+ * одну линию, а прямые уголки с этой стороны (см. класс at-* в CSS) дочитывают
+ * его как ярлык этого узла. Внутрь узла (последний вариант) бейдж по-прежнему
+ * кладётся с отступом — там он лежит на содержимом, и кромку дублировать нечем.
+ */
+const BADGE_GAP = 0;
+const BADGE_PAD = 4;
+/**
+ * Ширина бейджа: IBM Plex Mono 10px — ровно 6 px на знак (0,6 кегля), плюс
+ * отбивки 6+6. Считаем точно, а не с запасом: по этой ширине бейдж прижимается
+ * к левой кромке узла, и лишние 4 px запаса превращались в видимый зазор —
+ * ради которого всё и затевалось.
+ */
+const badgeWidth = (text) => Math.round(String(text).length * 6) + 12;
+
+/* Сравнения для точечного обновления сцены (Stage._patchSVG, круг 16, п.6).
+   Решатель на каждый вызов делает НОВЫЕ прямоугольники и строки, поэтому
+   сравнивать их приходится по значению; сами узлы applyOps пересоздаёт только
+   там, где они изменились, — их достаточно сравнить по ссылке. */
+/** @returns {boolean} */
+function sameIdList(a, b) {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+/** @returns {boolean} */
+function sameRect(a, b) {
+  return !!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+/** @returns {boolean} */
+function sameLines(a, b) {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Куда положить бейдж. Он не должен накрывать содержимое макета, поэтому ищем
+ * место ВНЕ узла, обходя края области просмотра:
+ *  1) слева от узла, по его нижней кромке — там поле артборда или холст;
+ *  2) справа от узла — когда узел прижат к левому краю (прошлый круг сдвинул
+ *     бейдж влево, и у левого края он снова лёг на содержимое: закрывал
+ *     «Купить» на кнопке и строку «10:30 — 11:15 · переговорная «Север»»);
+ *  3) над верхней кромкой — когда по бокам места нет;
+ *  4) под нижней кромкой — когда узел прижат к верхнему краю;
+ *  5) и только если снаружи места не осталось — внутрь узла, к нижней кромке.
+ * По горизонтали в вариантах 3–4 бейдж прижимается к области просмотра, чтобы
+ * не уехать за экран.
+ *
+ * Над верхней кромкой артборда лежит его имя — та же полоса, тот же уголок: у
+ * выделенного артборда «960 × 560» ложилось прямо на «Сводка недели». Занятую
+ * подписью полосу передают в `label`; бейдж тогда встаёт правее подписи, а если
+ * там уже нет места — уходит под нижнюю кромку.
+ * @param {{x:number,y:number,w:number,h:number}} sr экранный прямоугольник узла
+ * @param {string} text содержимое бейджа — по нему считается ширина
+ * @param {number} [slot] этаж: 0 — нижний, 1 — на строку выше
+ * @param {{w:number,h:number}} [view] размер области просмотра; без него считаем, что места хватает
+ * @param {{w:number,y1:number,y2:number}} [label] полоса, занятая подписью артборда (см. Stage._labelBand)
+ * @returns {{x:number, y:number, where:string}}
+ */
+function badgePlace(sr, text, slot, view, label) {
+  const step = BADGE_H + 3;
+  const floor = slot ? slot * step : 0;
+  const bw = badgeWidth(text);
+  const vw = view && isNum(view.w) ? view.w : Infinity;
+  const vh = view && isNum(view.h) ? view.h : Infinity;
+  const stacked = sr.y + sr.h - BADGE_H - floor;
+  /* Круг 16, п.8: у кромки узла второй ярлык («отсоединён») уходит к ВЕРХНЕЙ
+   * кромке, а не встаёт вплотную над первым. Две плашки подряд у одного угла
+   * читались как одна двухэтажная надпись поверх содержимого — на перетаскивании
+   * карточки размер и «отсоединён» сливались. Разводим их по разным кромкам
+   * узла; на низком узле (двум ярлыкам не разойтись) остаётся прежний этаж. */
+  const apart = slot > 0 && sr.h >= 2 * BADGE_H + 6;
+  const y = apart ? sr.y : stacked;
+  const left = sr.x - BADGE_GAP - bw;
+  if (left >= 2) return { x: left, y, where: 'left' };
+  const right = sr.x + sr.w + BADGE_GAP;
+  if (right + bw <= vw - 2) return { x: right, y, where: 'right' };
+  const alongX = clamp(sr.x, 2, Math.max(2, vw - bw - 2));
+  const above = sr.y - BADGE_GAP - BADGE_H - floor;
+  if (above >= 2) {
+    // подпись артборда мешает только если бейдж встаёт с ней на одну строку:
+    // второй этаж (slot) проходит выше неё и уступать никому не должен
+    const busy = label && isNum(label.w) && label.w > 0
+      && above + BADGE_H > label.y1 && above < label.y2 ? label.w + 6 : 0;
+    const x = clamp(sr.x + busy, 2, Math.max(2, vw - bw - 2));
+    // если вправо бейдж не влез и его прижало назад к подписи — идём под кромку
+    if (!busy || x >= sr.x + busy - 0.01) return { x, y: above, where: 'above' };
+  }
+  const below = sr.y + sr.h + BADGE_GAP + floor;
+  if (below + BADGE_H <= vh - 2) return { x: alongX, y: below, where: 'below' };
+  // последний вариант — внутрь узла: там этажи по-прежнему считаются от нижней кромки
+  return { x: sr.x + BADGE_PAD, y: stacked - BADGE_PAD, where: 'inside' };
+}
+/**
+ * Подпись у инлайн-редактора. Esc бросает набранное без следа в истории, и
+ * молчать об этом нельзя: два самых инстинктивных «готово» названы вслух.
+ */
+const EDIT_HINT = 'Enter — применить, Esc — отменить';
+/** Ширина подсказки: IBM Plex Sans 10px — 0,56 кегля на знак, плюс отбивки 6+6. */
+const editHintWidth = () => Math.round(EDIT_HINT.length * 5.6) + 14;
+
+/** Подпись артборда: кегль на экране и ширина, ниже которой подпись только мешает. */
+const AB_LABEL_SIZE = 11;
+const AB_LABEL_MIN_W = 80;
+/** Ширина знака IBM Plex Sans в среднем 0.56 кегля (замерено) — берём 0.6 с запасом. */
+const AB_LABEL_CHAR = 0.6;
+
+/**
+ * Сцена: рисует документ в SVG и обрабатывает ввод.
+ * Документ не меняет — все правки уходят наружу через opts.onCommit({ops,label}).
+ */
+class Stage {
+  /**
+   * @param {HTMLElement} host
+   * @param {{onSelect?:Function,onCommit?:Function,onHover?:Function,onUndo?:Function,onRedo?:Function,onView?:Function,onError?:Function,onDragCancel?:Function}} [opts]
+   *   onDragCancel({mode,id,reason}) — жест снят, потому что документ переехал под рукой.
+   */
+  constructor(host, opts = {}) {
+    ensureStageStyles();
+    this.opts = opts || {};
+    this.host = host;
+    this.doc = null;
+    this.geo = { rects: {}, lines: {}, order: [] };
+    this.state = { selection: [] };
+    this.view = { zoom: 1, pan: { x: 0, y: 0 } };
+    this.activeArtboard = null;
+
+    this.el = document.createElement('div');
+    this.el.className = 'imago-stage';
+    this.el.tabIndex = 0;
+    this.svg = svgEl('svg', { class: 'imago-svg', 'shape-rendering': 'geometricPrecision' });
+    this.ui = document.createElement('div');
+    this.ui.className = 'imago-ui';
+    this.ov = svgEl('svg', { class: 'imago-ov' });
+    this.ui.appendChild(this.ov);
+    this.el.appendChild(this.svg);
+    this.el.appendChild(this.ui);
+    host.appendChild(this.el);
+
+    this._nodeEls = new Map();
+    this._prevRects = {};   // геометрия прошлого кадра — для FLIP, см. render()
+    this._editing = null;
+    this._drag = null;
+    this._hover = null;
+    this._space = false;
+    this._guides = [];
+    this._marquee = null;
+    this._insertion = null;
+    this._preview = null;      // на сцене висит пересчитанный черновик жеста
+    this._previewFrame = null; // запланированный кадр предпросмотра
+    this._handleEls = new Map(); // ручки ресайза: элементы живут между кадрами
+    this._shifted = [];       // соседи, раздвинутые под место вставки
+    this._pulses = [];
+    this._touch = null;
+    this._srcMap = null;       // подмена адресов картинок на время сборки SVG (см. toSVG)
+    this._shotQueue = null;    // очередь снимков: screenshot() не идёт внахлёст сам с собой
+    this._clipSeq = 0;
+    this._clipPrefix = newClipPrefix();   // свой на сцену: две сцены на странице не столкнутся
+    this._fontWarm = null;      // отложенная подтяжка начертаний для экспорта
+    this._fontTried = null;     // набор, за которым уже ходили (и не дошли)
+    this._timers = new Set();   // отложенные вызовы FLIP — снимаются в destroy()
+    this._pulseTimer = null;
+    this._dead = false;
+    this._drawSeen = new Set();
+
+    this._vp = null;            // кеш размера вьюпорта, см. _viewport()
+    this._onResize = () => { this._vp = null; this._applyView(); this._paintUI(); };
+    if (typeof ResizeObserver !== 'undefined') {
+      this._ro = new ResizeObserver(this._onResize);
+      this._ro.observe(this.el);
+    } else if (typeof window !== 'undefined') {
+      window.addEventListener('resize', this._onResize);
+    }
+    this._bindEvents();
+  }
+
+  /** Снять отложенный вызов и забыть его id. */
+  _cancelLater(id) {
+    if (id === null || id === undefined) return;
+    clearTimeout(id);
+    this._timers.delete(id);
+  }
+
+  /** Отложенный вызов с учётом destroy(): таймер помнится и снимается. */
+  _later(fn, ms) {
+    const id = setTimeout(() => {
+      this._timers.delete(id);
+      if (!this._dead) fn();
+    }, ms);
+    this._timers.add(id);
+    return id;
+  }
+
+  /** Освободить слушатели, таймеры и DOM. */
+  destroy() {
+    this._dead = true;
+    this._cancelPreview();
+    if (this._ro) this._ro.disconnect();
+    else if (typeof window !== 'undefined') window.removeEventListener('resize', this._onResize);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('keydown', this._onWinKey, true);
+      window.removeEventListener('keyup', this._onWinKeyUp, true);
+      window.removeEventListener('blur', this._onWinBlur);
+    }
+    this._cancelLater(this._pulseTimer);
+    this._pulseTimer = null;
+    for (const id of this._timers) clearTimeout(id);
+    this._timers.clear();
+    this._pulses = [];
+    if (this.el.parentNode) this.el.parentNode.removeChild(this.el);
+  }
+
+  /* --------------------------- геометрия вида --------------------------- */
+
+  /* Размер вьюпорта. Кешируем: чтение clientWidth заставляет браузер пересчитать
+     раскладку всей страницы прямо сейчас, а _paintUI зовётся по нескольку раз на
+     одно действие человека (выделение, наведение, ручки). На документе в 40 477
+     узлов один такой пересчёт стоил ~250 мс, и клик по узлу платил их пять
+     (круг 16, п.6). Кеш сбрасывает ResizeObserver — размер сцены меняет только он.
+     Нулевой размер (сцена ещё не на экране) не кешируем: иначе он залипнет. */
+  _viewport() {
+    if (this._vp) return this._vp;
+    const w = this.el ? this.el.clientWidth : 0;
+    const h = this.el ? this.el.clientHeight : 0;
+    if (!w || !h) return { w: w || 1, h: h || 1 };
+    this._vp = { w, h };
+    return this._vp;
+  }
+
+  get vw() { return this._viewport().w; }
+  get vh() { return this._viewport().h; }
+
+  /** Экранные координаты события в координаты документа. */
+  toWorld(clientX, clientY) {
+    const b = this.el.getBoundingClientRect();
+    const z = this.view.zoom;
+    return { x: (clientX - b.left - this.view.pan.x) / z, y: (clientY - b.top - this.view.pan.y) / z };
+  }
+
+  /** Координаты документа в координаты слоя интерфейса. */
+  toScreen(x, y) {
+    const z = this.view.zoom;
+    return { x: x * z + this.view.pan.x, y: y * z + this.view.pan.y };
+  }
+
+  _applyView() {
+    const z = this.view.zoom;
+    const vx = -this.view.pan.x / z;
+    const vy = -this.view.pan.y / z;
+    const box = `${r2(vx)} ${r2(vy)} ${r2(this.vw / z)} ${r2(this.vh / z)}`;
+    // Круг 16, п.6: перезапись viewBox тем же значением всё равно роняет раскладку
+    // всего SVG — на 12 198 узлах это 134 мс на КАЖДОМ кадре, даже когда ни вид,
+    // ни сцена не менялись (рендер после правки, отмена, повторная отрисовка).
+    if (this._viewBox !== box) {
+      this._viewBox = box;
+      this.svg.setAttribute('viewBox', box);
+      this.svg.setAttribute('preserveAspectRatio', 'xMinYMin slice');
+    }
+    if (this._gridGroup) this._renderGrid();
+    this._updateLabels();
+  }
+
+  /**
+   * Подписи артбордов: кегль держим постоянным на экране, а на мелком зуме подпись
+   * прячем (на десятке артбордов они иначе сливаются в кашу) и обрезаем по ширине
+   * самого артборда.
+   */
+  _updateLabels() {
+    if (!this._labels || !this._labels.length) return;
+    const z = this.view.zoom;
+    for (const l of this._labels) {
+      l.el.setAttribute('font-size', r2(AB_LABEL_SIZE / z));
+      const screenW = l.w * z;
+      if (screenW < AB_LABEL_MIN_W) { l.el.setAttribute('display', 'none'); continue; }
+      l.el.removeAttribute('display');
+      const max = Math.floor(screenW / (AB_LABEL_SIZE * AB_LABEL_CHAR));
+      const text = l.text.length > max
+        ? l.text.slice(0, Math.max(1, max - 1)).replace(/\s+$/, '') + '…'
+        : l.text;
+      if (l.node.nodeValue !== text) l.node.nodeValue = text;
+    }
+  }
+
+  /** Установить зум к точке экрана (курсору). */
+  zoomAt(clientX, clientY, factor) {
+    const before = this.toWorld(clientX, clientY);
+    const next = clamp(this.view.zoom * factor, 0.1, 6);
+    if (Math.abs(next - this.view.zoom) < 1e-6) return;
+    this.view.zoom = next;
+    const b = this.el.getBoundingClientRect();
+    this.view.pan.x = (clientX - b.left) - before.x * next;
+    this.view.pan.y = (clientY - b.top) - before.y * next;
+    this._applyView();
+    this._paintUI();
+    if (this.opts.onView) this.opts.onView({ zoom: this.view.zoom, pan: { ...this.view.pan } });
+  }
+
+  /** Зум относительно центра вьюпорта. */
+  zoomBy(factor) {
+    const b = this.el.getBoundingClientRect();
+    this.zoomAt(b.left + this.vw / 2, b.top + this.vh / 2, factor);
+  }
+
+  /** Установить абсолютный зум, сохранив точку в центре вьюпорта. */
+  setZoom(zoom) {
+    const z = clamp(Number(zoom) || 1, 0.1, 6);
+    this.zoomBy(z / this.view.zoom);
+  }
+
+  /**
+   * Вписать узлы во вьюпорт (по умолчанию — все артборды).
+   * @param {string[]} [ids]
+   * @param {{padding?:number, inset?:{top?:number,right?:number,bottom?:number,left?:number}, maxZoom?:number}} [opts]
+   *   padding — отступ от края свободной области (48);
+   *   inset — поля, которые занимает оболочка (док снизу, панели по краям): они
+   *   вычитаются из вьюпорта, и макет центрируется по остатку;
+   *   maxZoom — потолок приближения (2), чтобы один мелкий узел не раздувался.
+   */
+  fitTo(ids, opts) {
+    const list = (ids && ids.length ? ids : (this.doc ? artboards(this.doc).map((a) => a.id) : []))
+      .map((id) => this.geo.rects[id]).filter(Boolean);
+    if (!list.length) return;
+    // границы одним проходом: списком может прийти весь документ (см. maxOf)
+    const x0 = minOf(list, (r) => r.x, Infinity);
+    const y0 = minOf(list, (r) => r.y, Infinity);
+    const x1 = maxOf(list, (r) => r.x + r.w, -Infinity);
+    const y1 = maxOf(list, (r) => r.y + r.h, -Infinity);
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const pad = isNum(o.padding) ? Math.max(0, o.padding) : 48;
+    const ins = o.inset && typeof o.inset === 'object' ? o.inset : {};
+    const side = (v) => (isNum(v) ? Math.max(0, v) : 0);
+    const top = side(ins.top);
+    const right = side(ins.right);
+    const bottom = side(ins.bottom);
+    const left = side(ins.left);
+    const maxZoom = isNum(o.maxZoom) ? clamp(o.maxZoom, 0.1, 6) : 2;
+    // свободная область — вьюпорт без полей оболочки; отступ снимаем с обеих сторон
+    const freeW = Math.max(1, this.vw - left - right);
+    const freeH = Math.max(1, this.vh - top - bottom);
+    const z = clamp(Math.min(
+      Math.max(1, freeW - pad * 2) / Math.max(1, x1 - x0),
+      Math.max(1, freeH - pad * 2) / Math.max(1, y1 - y0)
+    ), 0.1, maxZoom);
+    this.view.zoom = z;
+    // центрируем по середине свободной области, а не всего холста
+    this.view.pan.x = left + freeW / 2 - ((x0 + x1) / 2) * z;
+    this.view.pan.y = top + freeH / 2 - ((y0 + y1) / 2) * z;
+    this._applyView();
+    this._paintUI();
+    if (this.opts.onView) this.opts.onView({ zoom: this.view.zoom, pan: { ...this.view.pan } });
+  }
+
+  /**
+   * Видимая область холста в экранных координатах окна — оболочке, чтобы обрезать
+   * свои накладки (подсказки, ярлыки) по краю сцены: экранная точка узла равна
+   * viewportRect().x/y плюс toScreen(x, y).
+   * @returns {{x:number, y:number, w:number, h:number}}
+   */
+  viewportRect() {
+    const b = this.el && this.el.getBoundingClientRect ? this.el.getBoundingClientRect() : null;
+    const w = b && isNum(b.width) && b.width > 0 ? b.width : this.vw;
+    const h = b && isNum(b.height) && b.height > 0 ? b.height : this.vh;
+    return { x: r2(b ? b.left : 0), y: r2(b ? b.top : 0), w: r2(w), h: r2(h) };
+  }
+
+  /* ------------------------------ отрисовка ------------------------------ */
+
+  /**
+   * Полная перерисовка. Дёшево: один <svg>, группы по артбордам, текст — <text>/<tspan>.
+   * @param {object} doc
+   * @param {object} geo результат solve
+   * @param {{selection?:string[],hover?:string,preview?:object,diff?:{created:string[],changed:string[],removed:string[]},zoom?:number,pan?:{x:number,y:number}}} [state]
+   */
+  render(doc, geo, state = {}) {
+    try {
+      const next = geo && geo.rects ? geo : { rects: {}, lines: {}, order: [] };
+      // документ мог переехать посреди жеста и правки текста — сверяемся до отрисовки,
+      // пока на руках ещё старая геометрия и живой призрак
+      this._syncGesture(doc, next.rects);
+      this.doc = doc;
+      this.geo = next;
+      this.state = { selection: [], ...state };
+      if (isNum(state.zoom)) this.view.zoom = clamp(state.zoom, 0.1, 6);
+      if (state.pan && isNum(state.pan.x)) this.view.pan = { x: state.pan.x, y: state.pan.y };
+      const abs = artboards(doc);
+      if (!this.activeArtboard || !doc.nodes[this.activeArtboard]) {
+        this.activeArtboard = abs.length ? abs[0].id : null;
+      }
+      this._renderSVG();
+      this._applyView();
+      this._paintUI();
+      this._flip(state.diff);
+      // Круг 16, п.6: прежнюю геометрию держим ССЫЛКОЙ. solve на каждый вызов
+      // отдаёт новые прямоугольники и никто их не правит на месте, так что копия
+      // была лишней: на 40 477 узлах это 40 тысяч объектов на каждый кадр.
+      this._prevRects = this.geo.rects || {};
+      this._warmFonts();   // чтобы экспорт SVG (он синхронный) не остался без гарнитур
+    } catch (e) {
+      this._fail('render', e);
+    }
+  }
+
+  /**
+   * Дешёвая смена выделения: SVG не пересобираем, красим только слой интерфейса.
+   * @param {string[]} ids
+   * @returns {void}
+   */
+  setSelection(ids) {
+    this.state = { ...this.state, selection: Array.isArray(ids) ? ids.slice() : [] };
+    this._paintUI();
+  }
+
+  /**
+   * Жест и правка текста против свежего документа. Жест считался от прямоугольника,
+   * который человек видел в момент нажатия; если документ переехал под рукой
+   * (транзакция агента, отмена, импорт), доводить жест нельзя — он закоммитит
+   * координату от устаревшего rect0, и узел прыгнет. Отменяем жест целиком:
+   * это заметно сразу и ничего не портит, тогда как тихий пересчёт rect0 довёл бы
+   * до конца движение, которого человек уже не видел (цель, порядок в потоке и
+   * соседи стали другими). Панорама и рамка выделения от геометрии узлов не
+   * зависят — их не трогаем.
+   * @param {object} doc новый документ
+   * @param {Record<string,{x:number,y:number,w:number,h:number}>} rects новая геометрия
+   */
+  _syncGesture(doc, rects) {
+    const ed = this._editing;
+    if (ed && (!doc || !doc.nodes || !doc.nodes[ed.id])) {
+      // правка текста переживала удаление своего узла: редактор висел поверх пустоты,
+      // а _commitEdit потом упирался в «узел не найден»
+      logOnce('stage:edit-gone', `Stage: узел «${ed.id}» исчез из документа — правка текста закрыта`);
+      this._closeEditor();
+    }
+    const d = this._drag;
+    if (!d || !d.id || !d.rect0 || d.mode === 'pan' || d.mode === 'marquee') return;
+    const r = rects ? rects[d.id] : undefined;
+    const same = r && Math.abs(r.x - d.rect0.x) < 0.01 && Math.abs(r.y - d.rect0.y) < 0.01
+      && Math.abs(r.w - d.rect0.w) < 0.01 && Math.abs(r.h - d.rect0.h) < 0.01;
+    if (same) return;
+    this._cancelDrag(r ? 'геометрия узла изменилась' : 'узел исчез из документа');
+  }
+
+  /** Снять жест: призрак, направляющие и результат — чтобы pointerup ничего не коммитил. */
+  _cancelDrag(reason) {
+    const d = this._drag;
+    if (!d) return;
+    this._cancelPreview();
+    this._preview = null;   // сцену всё равно перерисует render(), который нас позвал
+    this._clearGhost();
+    this._clearShift();
+    this._drag = null;
+    this._guides = [];
+    this._insertion = null;
+    this._marquee = null;
+    if (this.el && this.el.classList) this.el.classList.remove('is-panning');
+    logOnce('stage:drag-cancel', `Stage: жест «${d.mode}» отменён — ${reason}`);
+    if (this.opts.onDragCancel) {
+      try { this.opts.onDragCancel({ mode: d.mode, id: d.id, reason }); } catch (e) { this._fail('onDragCancel', e); }
+    }
+  }
+
+  _fail(where, e) {
+    const key = 'stage:' + where + ':' + (e && e.message ? e.message : e);
+    logOnce(key, `Stage.${where}: ${e && e.message ? e.message : e}`, e);
+    // наружу тоже один раз: повторяющаяся ошибка отрисовки иначе даёт пачку
+    // одинаковых тостов на каждый кадр
+    if (!this._failSeen) this._failSeen = new Set();
+    if (this._failSeen.has(key)) return;
+    if (this._failSeen.size >= 200) this._failSeen.clear();
+    this._failSeen.add(key);
+    if (this.opts.onError) {
+      try { this.opts.onError({ where, error: e }); } catch (_) { /* уже залогировано */ }
+    }
+  }
+
+  /**
+   * Сцена в SVG.
+   *
+   * Круг 16, п.6: полная пересборка на каждый кадр стоила на 12 198 узлах 657 мс
+   * (196 мс — сборка DOM, остальное — раскладка браузером 45 тысяч элементов), и
+   * любая мелочь — сдвиг стрелкой, кадр перетаскивания — платила полную цену.
+   * Поэтому сначала пробуем обновить точечно: заменить фигуры у тех узлов, чья
+   * геометрия или содержимое изменились, и не трогать остальные (замер там же:
+   * лист меняется за 1 мс). Точечный путь отказывает при любом сомнении —
+   * сменились токены, список артбордов, состав детей, — и тогда собираем заново.
+   */
+  _renderSVG() {
+    if (this._patchSVG()) return;
+    const doc = this.doc;
+    const frag = document.createDocumentFragment();
+    this._nodeEls = new Map();
+    this._drawn = new Map();
+    this._abEls = new Map();
+    this._labels = [];
+    this._clipSeq = 0;
+    const defs = svgEl('defs');
+    frag.appendChild(defs);
+    this._defs = defs;
+    this._gridGroup = svgEl('g', { class: 'imago-grid' });
+    frag.appendChild(this._gridGroup);
+    this._drawSeen = new Set();
+    const abIds = [];
+    for (const ab of artboards(doc)) {
+      const rect = this.geo.rects[ab.id];
+      if (!rect) continue;
+      abIds.push(ab.id);
+      const g = svgEl('g', { class: 'imago-ab', 'data-id': ab.id });
+      // подложка: артборд без разрешимой заливки иначе выглядит как чёрный экран
+      const plate = resolveColor(doc, ab.fill);
+      const plateEl = svgEl('rect', {
+        class: 'imago-ab-plate', x: r2(rect.x), y: r2(rect.y),
+        width: r2(rect.w), height: r2(rect.h), rx: isNum(ab.radius) ? ab.radius : 0,
+        fill: plate || '#ffffff',
+        stroke: plate ? undefined : 'var(--line,#E2DED6)',
+        'stroke-width': plate ? undefined : 1
+      });
+      g.appendChild(plateEl);
+      // цвет подписи — из темы, через CSS: см. .imago-ab-label в STAGE_CSS
+      const label = svgEl('text', {
+        class: 'imago-ab-label', x: r2(rect.x), y: r2(rect.y - 6),
+        'font-size': AB_LABEL_SIZE, 'font-weight': 500
+      });
+      // имя-заглушка одно на сцену и на оболочку — см. displayName()
+      const shown = displayName(doc, ab);
+      const labelText = document.createTextNode(shown);
+      label.appendChild(labelText);
+      // ширину артборда помним здесь: _updateLabels решает по ней, прятать ли подпись
+      const rec = { el: label, node: labelText, text: shown, w: rect.w };
+      this._labels.push(rec);
+      g.appendChild(label);
+      this._abEls.set(ab.id, { el: g, plate: plateEl, node: ab, rect, label: rec });
+      this._drawNode(g, ab, 0, 0);
+      frag.appendChild(g);
+    }
+    // узлы, лежащие прямо на холсте вне артбордов
+    const root = doc.nodes[doc.root];
+    const loose = [];
+    for (const id of kidsOf(root)) {
+      const n = doc.nodes[id];
+      if (n && n.type !== 'frame' && this.geo.rects[id]) {
+        loose.push(id);
+        this._drawNode(frag, n, 0, 0);
+      }
+    }
+    while (this.svg.firstChild) this.svg.removeChild(this.svg.firstChild);
+    this.svg.appendChild(frag);
+    // слепок сцены: по нему следующий кадр решит, можно ли обойтись точечным обновлением
+    this._drawnState = { tokens: doc.tokens, abs: abIds, loose };
+    this._renderGrid();
+  }
+
+  /**
+   * Точечное обновление сцены вместо пересборки. Возвращает false, если сцену
+   * надо собрать заново (тогда вызывающий делает это сам). Сначала считаем план
+   * (ничего не трогая), потом применяем: так отказ на полпути не оставляет
+   * половину старой картинки.
+   * @returns {boolean} true — сцена обновлена
+   */
+  _patchSVG() {
+    const st = this._drawnState;
+    const doc = this.doc;
+    // srcMap — сборка снимка, она идёт мимо сцены и своего кеша не имеет
+    if (!st || !this.svg || this._srcMap || !doc || !doc.nodes || !this._drawn) return false;
+    if (doc.tokens !== st.tokens) return false;   // палитра и типографика красят всё
+    const abs = artboards(doc).filter((a) => this.geo.rects[a.id]);
+    if (!sameIdList(abs.map((a) => a.id), st.abs)) return false;
+    const root = doc.nodes[doc.root];
+    const loose = kidsOf(root).filter((id) => {
+      const n = doc.nodes[id];
+      return n && n.type !== 'frame' && this.geo.rects[id];
+    });
+    if (!sameIdList(loose, st.loose)) return false;
+
+    const plan = { shapes: [], rebuild: [], remove: [] };
+    for (const ab of abs) if (!this._planNode(ab.id, plan, 0)) return false;
+    for (const id of loose) if (!this._planNode(id, plan, 0)) return false;
+
+    try {
+      let labels = false;
+      for (const ab of abs) labels = this._patchArtboard(ab) || labels;
+      /* Сначала ЗАБЫВАЕМ все ветки, которые пойдут под нож, и только потом рисуем
+       * новые. Иначе перенос узла (move) съедал сам себя: у прежнего и у нового
+       * родителя изменился состав детей, обоих пересобираем, и если новый шёл
+       * первым — забывание старой ветки стирало уже СВЕЖУЮ запись переехавшего
+       * узла и уносило из defs его обрезку (узел оставался на экране без неё). */
+      const doomed = [];
+      for (const id of plan.remove.concat(plan.rebuild)) {
+        const c = this._drawn.get(id);
+        if (!c) continue;
+        doomed.push({ id, el: c.el, parentEl: c.el.parentNode, drop: plan.rebuild.indexOf(id) < 0 });
+        this._forgetSubtree(id);
+      }
+      for (const d of doomed) {
+        if (!d.parentEl) continue;
+        const fresh = d.drop ? null : this._redrawNode(d.id);
+        if (fresh) d.parentEl.replaceChild(fresh, d.el);
+        else d.parentEl.removeChild(d.el);
+      }
+      for (const id of plan.shapes) this._repaintShapes(id);
+      if (labels) this._updateLabels();
+      this._renderGrid();
+      return true;
+    } catch (e) {
+      // на полпути — не беда: вызывающий тут же соберёт сцену заново
+      this._fail('patchSVG', e);
+      this._drawnState = null;
+      return false;
+    }
+  }
+
+  /**
+   * План обновления поддерева: что перерисовать целиком, у чего заменить фигуры,
+   * что убрать. Ничего не меняет.
+   * @returns {boolean} false — точечным обновлением не обойтись
+   */
+  _planNode(id, plan, depth) {
+    if (depth > MAX_DEPTH) return false;
+    const c = this._drawn.get(id);
+    const node = this.doc.nodes[id];
+    const rect = this.geo.rects[id];
+    const drawNow = !!(node && rect && node.visible !== false);
+    if (!c) return !drawNow;            // узел не рисовался: если пора рисовать — только полной сборкой
+    if (!drawNow) { plan.remove.push(id); return true; }
+    const kids = kidsOf(node);
+    if (node !== c.node) {
+      // состав детей или обрезка изменились — пересобираем ветку целиком
+      const wantClip = !!(kids.length && node.clip);
+      if (wantClip !== !!c.clip || !sameIdList(kids, c.kids)) { plan.rebuild.push(id); return true; }
+    }
+    const lines = this.geo.lines && this.geo.lines[id];
+    if (node !== c.node || !sameRect(rect, c.rect) || !sameLines(lines, c.lines)) plan.shapes.push(id);
+    for (const kid of kids) if (!this._planNode(kid, plan, depth + 1)) return false;
+    return true;
+  }
+
+  /** Подложка и подпись артборда под свежую геометрию. @returns {boolean} подпись изменилась */
+  _patchArtboard(ab) {
+    const e = this._abEls.get(ab.id);
+    const rect = this.geo.rects[ab.id];
+    if (!e || !rect) return false;
+    if (e.node === ab && sameRect(rect, e.rect)) return false;
+    const plate = resolveColor(this.doc, ab.fill);
+    const attr = (el, k, v) => {
+      if (v === undefined || v === null) el.removeAttribute(k);
+      else el.setAttribute(k, v);
+    };
+    attr(e.plate, 'x', r2(rect.x));
+    attr(e.plate, 'y', r2(rect.y));
+    attr(e.plate, 'width', r2(rect.w));
+    attr(e.plate, 'height', r2(rect.h));
+    attr(e.plate, 'rx', isNum(ab.radius) ? ab.radius : 0);
+    attr(e.plate, 'fill', plate || '#ffffff');
+    attr(e.plate, 'stroke', plate ? undefined : 'var(--line,#E2DED6)');
+    attr(e.plate, 'stroke-width', plate ? undefined : 1);
+    attr(e.label.el, 'x', r2(rect.x));
+    attr(e.label.el, 'y', r2(rect.y - 6));
+    e.label.text = displayName(this.doc, ab);
+    e.label.w = rect.w;
+    e.node = ab;
+    e.rect = rect;
+    return true;
+  }
+
+  /** Заменить собственные фигуры узла (дети остаются на месте). */
+  _repaintShapes(id) {
+    const c = this._drawn.get(id);
+    const node = this.doc.nodes[id];
+    const rect = this.geo.rects[id];
+    if (!c || !node || !rect) return;
+    const shapes = this._nodeShapes(node, rect, 0, 0);
+    const anchor = c.shapes.length ? c.shapes[0] : c.el.firstChild;
+    for (const el of shapes) c.el.insertBefore(el, anchor || null);
+    for (const old of c.shapes) c.el.removeChild(old);
+    c.shapes = shapes;
+    const opacity = isNum(node.opacity) ? node.opacity : 1;
+    if (opacity !== 1) c.el.setAttribute('opacity', opacity);
+    else c.el.removeAttribute('opacity');
+    if (c.clip) {
+      const radius = isNum(node.radius) ? node.radius : 0;
+      c.clip.rect.setAttribute('x', r2(rect.x));
+      c.clip.rect.setAttribute('y', r2(rect.y));
+      c.clip.rect.setAttribute('width', r2(rect.w));
+      c.clip.rect.setAttribute('height', r2(rect.h));
+      c.clip.rect.setAttribute('rx', radius);
+    }
+    c.node = node;
+    c.rect = rect;
+    c.lines = this.geo.lines && this.geo.lines[id];
+  }
+
+  /**
+   * Нарисовать ветку заново (слепок прежней уже забыт — см. фазы в _patchSVG).
+   * Возвращает свежий элемент: на место старого его ставит вызывающий.
+   * @returns {Element|null}
+   */
+  _redrawNode(id) {
+    const node = this.doc.nodes[id];
+    if (!node) return null;
+    const seen = this._drawSeen;
+    this._drawSeen = new Set();
+    try {
+      return this._drawNode(svgEl('g'), node, 0, 0) || null;
+    } finally {
+      this._drawSeen = seen;
+    }
+  }
+
+  /** Забыть слепок ветки и убрать её обрезки из defs. */
+  _forgetSubtree(id) {
+    const c = this._drawn.get(id);
+    if (!c) return;
+    this._drawn.delete(id);
+    this._nodeEls.delete(id);
+    if (c.clip && c.clip.el && c.clip.el.parentNode) c.clip.el.parentNode.removeChild(c.clip.el);
+    for (const kid of c.kids) this._forgetSubtree(kid);
+  }
+
+  _renderGrid() {
+    const g = this._gridGroup;
+    if (!g) return;
+    while (g.firstChild) g.removeChild(g.firstChild);
+    const z = this.view.zoom;
+    if (z <= 1.5 || !this.doc) return;
+    const spacing = (this.doc.tokens && this.doc.tokens.spacing) || DEFAULT_TOKENS.spacing;
+    const step = spacing.filter((s) => s >= 4)[0] || 8;
+    for (const ab of artboards(this.doc)) {
+      const r = this.geo.rects[ab.id];
+      if (!r) continue;
+      const cols = Math.floor(r.w / step);
+      const rows = Math.floor(r.h / step);
+      if (cols + rows > 800) continue;
+      const path = [];
+      for (let i = 1; i <= cols; i++) path.push(`M${r2(r.x + i * step)} ${r2(r.y)}V${r2(r.y + r.h)}`);
+      for (let i = 1; i <= rows; i++) path.push(`M${r2(r.x)} ${r2(r.y + i * step)}H${r2(r.x + r.w)}`);
+      g.appendChild(svgEl('path', {
+        d: path.join(''), stroke: '#0D0E12', 'stroke-opacity': clamp((z - 1.5) / 2, 0.02, 0.07),
+        'stroke-width': r2(1 / z), fill: 'none'
+      }));
+    }
+  }
+
+  /**
+   * Собственные фигуры узла (без детей): прямоугольник/эллипс/текст/картинка.
+   * Вынесены из _drawNode отдельно, потому что точечное обновление сцены
+   * (см. _patchSVG, круг 16, п.6) перерисовывает у неизменившегося узла ровно
+   * их — и рисовать их обязан ТОТ ЖЕ код, что и полная сборка, иначе два пути
+   * разойдутся незаметно.
+   * @returns {Element[]} в порядке отрисовки
+   */
+  _nodeShapes(node, rect, dx, dy) {
+    const doc = this.doc;
+    const out = [];
+    const x = r2(rect.x + dx);
+    const y = r2(rect.y + dy);
+    const fill = resolveColor(doc, node.fill);
+    const stroke = node.stroke ? resolveColor(doc, node.stroke.color || node.stroke) : null;
+    const strokeW = node.stroke && isNum(node.stroke.width) ? node.stroke.width : 1;
+    const radius = isNum(node.radius) ? node.radius : 0;
+
+    if (node.type === 'ellipse') {
+      out.push(svgEl('ellipse', {
+        cx: r2(x + rect.w / 2), cy: r2(y + rect.h / 2), rx: r2(rect.w / 2), ry: r2(rect.h / 2),
+        fill: fill || 'none', stroke: stroke || undefined, 'stroke-width': stroke ? strokeW : undefined
+      }));
+    } else if (node.type === 'text') {
+      const style = resolveTextStyle(doc, node);
+      const lines = (this.geo.lines && this.geo.lines[node.id]) || [node.characters || ''];
+      const anchor = node.align === 'center' ? 'middle' : node.align === 'right' ? 'end' : 'start';
+      const tx = anchor === 'middle' ? r2(x + rect.w / 2) : anchor === 'end' ? r2(x + rect.w) : x;
+      const t = svgEl('text', {
+        x: tx, y: r2(y + (style.lineHeight - style.fontSize) / 2 + style.fontSize * 0.8),
+        fill: resolveColor(doc, node.color) || '#14161C',
+        'font-family': style.fontFamily, 'font-size': style.fontSize, 'font-weight': style.fontWeight,
+        'text-anchor': anchor,
+        'letter-spacing': style.letterSpacing ? style.letterSpacing : undefined,
+        'xml:space': 'preserve'
+      });
+      lines.forEach((line, i) => {
+        const ts = svgEl('tspan', { x: tx, dy: i === 0 ? 0 : r2(style.lineHeight) });
+        ts.appendChild(document.createTextNode(line));
+        t.appendChild(ts);
+      });
+      out.push(t);
+    } else if (node.type === 'image') {
+      let src = safeImageSrc(node.src);
+      // на время снимка внешние адреса подменены на data: — см. screenshot()
+      if (src && this._srcMap && this._srcMap.has(src)) src = this._srcMap.get(src);
+      if (fill || !src) {
+        out.push(svgEl('rect', { x, y, width: r2(rect.w), height: r2(rect.h), rx: radius, fill: fill || '#E2DED6' }));
+      }
+      if (src) {
+        const im = svgEl('image', {
+          x, y, width: r2(rect.w), height: r2(rect.h), preserveAspectRatio: 'xMidYMid slice'
+        });
+        im.setAttributeNS('http://www.w3.org/1999/xlink', 'href', src);
+        im.setAttribute('href', src);
+        out.push(im);
+      }
+    } else if (fill || stroke) {
+      // frame / rect / page
+      out.push(svgEl('rect', {
+        x, y, width: r2(rect.w), height: r2(rect.h), rx: radius,
+        fill: fill || 'none', stroke: stroke || undefined, 'stroke-width': stroke ? strokeW : undefined
+      }));
+    }
+    return out;
+  }
+
+  /** Рисует узел и его детей. dx/dy — сдвиг системы координат (для toSVG). */
+  _drawNode(parentEl, node, dx, dy, collect, depth) {
+    const rect = this.geo.rects[node.id];
+    if (!rect || node.visible === false) return;
+    const d = depth || 0;
+    if (!this._drawSeen) this._drawSeen = new Set();
+    if (this._drawSeen.has(node.id)) {
+      logOnce('draw:twice:' + node.id, `Stage: узел «${node.id}» встречен дважды — рисуем один раз`);
+      return;
+    }
+    if (d > MAX_DEPTH) {
+      logOnce('draw:deep', `Stage: глубже ${MAX_DEPTH} узлов — ветка «${node.id}» не рисуется`);
+      return;
+    }
+    this._drawSeen.add(node.id);
+    const doc = this.doc;
+    const g = svgEl('g', { class: 'imago-node', 'data-id': node.id });
+    const opacity = isNum(node.opacity) ? node.opacity : 1;
+    if (opacity !== 1) g.setAttribute('opacity', opacity);
+    const shapes = this._nodeShapes(node, rect, dx, dy);
+    for (const el of shapes) g.appendChild(el);
+
+    const kids = kidsOf(node);
+    let holder = g;
+    let clip = null;
+    if (kids.length) {
+      if (node.clip) {
+        const x = r2(rect.x + dx);
+        const y = r2(rect.y + dy);
+        const radius = isNum(node.radius) ? node.radius : 0;
+        const cid = (this._clipPrefix || 'imago-clip-') + (this._clipSeq++);
+        const cp = svgEl('clipPath', { id: cid });
+        const cr = svgEl('rect', { x, y, width: r2(rect.w), height: r2(rect.h), rx: radius });
+        cp.appendChild(cr);
+        (this._defs || parentEl).appendChild(cp);
+        holder = svgEl('g', { 'clip-path': `url(#${cid})` });
+        clip = { el: cp, rect: cr };
+        g.appendChild(holder);
+      }
+      for (const cid of kids) {
+        const child = doc.nodes[cid];
+        if (child) this._drawNode(holder, child, dx, dy, collect, d + 1);
+      }
+    }
+    parentEl.appendChild(g);
+    if (!collect) {
+      this._nodeEls.set(node.id, g);
+      // слепок для точечного обновления: по нему следующий кадр решает,
+      // что перерисовывать, а что оставить как есть (круг 16, п.6)
+      this._drawn.set(node.id, {
+        node, rect, lines: this.geo.lines && this.geo.lines[node.id],
+        kids: kids.slice(), el: g, shapes, holder, clip
+      });
+    }
+    return g;
+  }
+
+  /**
+   * Какие гарнитуры и какие символы нужны артборду. По этому списку в экспорт
+   * встраиваются начертания: тянуть весь набор поднаборов Google Fonts на
+   * каждый экспорт незачем — берём только те, чьи диапазоны действительно
+   * встречаются в тексте.
+   * @param {string} id
+   * @returns {Map<string,{weights:Set<number>,codes:Set<number>}>}
+   */
+  _fontNeeds(id) {
+    const out = new Map();
+    const doc = this.doc;
+    if (!doc || !doc.nodes || !doc.nodes[id]) return out;
+    for (const nid of subtreeIds(doc, id)) {
+      const n = doc.nodes[nid];
+      if (!n || n.type !== 'text' || n.visible === false) continue;
+      const chars = String(n.characters === undefined || n.characters === null ? '' : n.characters);
+      if (!chars) continue;
+      const style = resolveTextStyle(doc, n);
+      const family = String(style.font || '').trim().replace(/^['"]|['"]$/g, '');
+      // системные и мусорные имена не тянем: у первых нет файла, вторые сломают адрес
+      if (!family || GENERIC_FONTS.has(family.toLowerCase())) continue;
+      if (!/^[A-Za-z0-9][A-Za-z0-9 .'&+-]{0,48}$/.test(family)) continue;
+      let rec = out.get(family);
+      if (!rec) { rec = { weights: new Set(), codes: new Set() }; out.set(family, rec); }
+      rec.weights.add(isNum(style.fontWeight) ? style.fontWeight : 400);
+      for (const ch of chars) {
+        const c = ch.codePointAt(0);
+        if (c > 32) rec.codes.add(c);   // пробелы есть в любом поднаборе
+      }
+    }
+    // текст из одних пробелов ни одного поднабора не требует — и жаловаться не на что
+    for (const [family, rec] of [...out]) if (!rec.codes.size) out.delete(family);
+    return out;
+  }
+
+  /**
+   * Дотянуть и закешировать начертания артборда. Отдельный публичный вызов
+   * нужен оболочке: `toSVG` синхронный и ждать сеть не может, а `screenshot`
+   * зовёт это сам. Возвращает то же, что потом попадёт в `lastSVG.fonts`.
+   * @param {string} [artboardId]
+   * @returns {Promise<{state:string, families:string[], missing:string[]}>}
+   */
+  async prepareFonts(artboardId) {
+    const id = artboardId || this.activeArtboard;
+    const needs = this._fontNeeds(id);
+    if (!needs.size) return { state: 'none', families: [], missing: [] };
+    if (this.opts && this.opts.embedFonts === false) {
+      return { state: 'off', families: [...needs.keys()], missing: [] };
+    }
+    let res;
+    try { res = await loadFontCss(needs); }
+    catch (e) {
+      logOnce('fonts:prepare', 'начертания для экспорта не подготовились', e);
+      res = { css: '', done: [], missing: [...needs.keys()] };
+    }
+    return { state: fontState(res), families: [...needs.keys()], missing: res.missing };
+  }
+
+  /**
+   * Тихо дотянуть начертания активного артборда после отрисовки.
+   *
+   * Зачем: `toSVG()` синхронный и ждать сеть не может, а оболочка зовёт его
+   * прямо по нажатию «Экспорт SVG». Файлы те же, что страница уже скачала под
+   * свой <link> — почти всегда отдаются из кеша браузера. Повторно за тем же
+   * набором не ходим: не вышло — значит не вышло, состояние видно в `lastSVG`.
+   * Выключается `opts.embedFonts === false`.
+   * @returns {void}
+   */
+  _warmFonts() {
+    if (!this.opts || this.opts.embedFonts === false || typeof fetch !== 'function') return;
+    if (!this._timers) return;    // сцена без своего хозяйства таймеров — ждать нечему
+    if (this._fontWarm) return;   // уже запланировано
+    this._fontWarm = this._later(() => {
+      this._fontWarm = null;
+      if (this._dead) return;
+      // круг 16, п.6: документ и артборд те же — и набор гарнитур с символами тот же.
+      // Обход поддерева с перебором ВСЕХ символов стоил 39 мс на 40 477 узлах, и он
+      // случался после каждой отрисовки, хотя отвечал одно и то же.
+      if (this._fontDoc === this.doc && this._fontAb === this.activeArtboard) return;
+      this._fontDoc = this.doc;
+      this._fontAb = this.activeArtboard;
+      const needs = this._fontNeeds(this.activeArtboard);
+      if (!needs.size) return;
+      let miss;
+      try { miss = fontCssFromCache(needs).missing; } catch (e) { return; }
+      if (!miss.length) return;   // всё уже встроено
+      let key = '';
+      for (const [family, rec] of needs) {
+        let h = 0;
+        for (const c of rec.codes) h = (h * 31 + c) | 0;
+        key += family + ':' + [...rec.weights].sort().join(',') + ':' + rec.codes.size + ':' + h + '|';
+      }
+      if (this._fontTried === key) return;   // за этим набором уже ходили
+      this._fontTried = key;
+      loadFontCss(needs).catch(() => {});
+    }, 300);
+  }
+
+  /**
+   * Самодостаточный SVG-документ одного артборда (в его собственных координатах).
+   *
+   * Встраивает начертания использованных гарнитур (@font-face + data:woff2) из
+   * кеша: без них PNG и SVG считаются системным шрифтом и расходятся с экраном.
+   * Кеш наполняет `prepareFonts()` — `screenshot()` делает это сам, оболочке
+   * перед экспортом SVG стоит дождаться его же. Что получилось — в `lastSVG`.
+   *
+   * Разметка чужого документа (`docOverride`) шрифт с собой не несёт: так
+   * рисуются превью вариантов, а они живут прямо на странице, где гарнитуры и
+   * так есть — зато каждое начертание весит десятки килобайт. Понадобится
+   * иначе — `toSVG(id, doc, geo, { fonts: true })`.
+   * @param {string} [artboardId]
+   * @param {object} [docOverride]
+   * @param {object} [geoOverride]
+   * @param {{fonts?:boolean, srcMap?:Map<string,string>}} [opts] srcMap — подмена
+   *   внешних адресов картинок на data: ровно на эту сборку (см. screenshot)
+   * @returns {string}
+   */
+  toSVG(artboardId, docOverride, geoOverride, opts = {}) {
+    const docPrev = this.doc;
+    const geoPrev = this.geo;
+    const defsPrev = this._defs;
+    const seqPrev = this._clipSeq;
+    const prefixPrev = this._clipPrefix;
+    const seenPrev = this._drawSeen;
+    // подстановка картинок живёт ровно один синхронный вызов: в поле сцены она
+    // цеплялась за состояние и два снимка разом перетирали её друг другу
+    const mapPrev = this._srcMap;
+    this._srcMap = opts && opts.srcMap instanceof Map ? opts.srcMap : null;
+    if (docOverride && geoOverride && geoOverride.rects) {
+      this.doc = docOverride;
+      this.geo = geoOverride;
+    }
+    try {
+      const id = artboardId || this.activeArtboard;
+      const node = this.doc && this.doc.nodes[id];
+      const rect = node && this.geo.rects[id];
+      this.lastSVG = null;   // нечего сказать, пока разметка не собралась
+      if (!node || !rect) return '';
+      const svg = svgEl('svg', {
+        xmlns: SVG_NS, 'xmlns:xlink': 'http://www.w3.org/1999/xlink',
+        width: r2(rect.w), height: r2(rect.h), viewBox: `0 0 ${r2(rect.w)} ${r2(rect.h)}`,
+        'font-family': FALLBACK_FONT
+      });
+      this._clipPrefix = newClipPrefix();
+      const defs = svgEl('defs');
+      svg.appendChild(defs);
+      this._drawSeen = new Set();
+      this._defs = defs;
+      this._clipSeq = 0;
+      // гарнитуры — первыми: разметка должна нести шрифт с собой
+      const want = opts && opts.fonts !== undefined ? !!opts.fonts : !docOverride;
+      const fonts = want ? this._fontStyle(id) : { el: null, state: 'skipped', families: [], missing: [] };
+      if (fonts.el) defs.appendChild(fonts.el);
+      this.lastSVG = { artboard: id, fonts: fonts.state, families: fonts.families, missing: fonts.missing };
+      svg.appendChild(svgEl('rect', {
+        x: 0, y: 0, width: r2(rect.w), height: r2(rect.h),
+        fill: resolveColor(this.doc, node.fill) || resolveColor(this.doc, 'canvas') || '#ffffff'
+      }));
+      this._drawNode(svg, node, -rect.x, -rect.y, true);
+      const head = '<?xml version="1.0" encoding="UTF-8"?>\n';
+      const body = typeof XMLSerializer !== 'undefined'
+        ? new XMLSerializer().serializeToString(svg)
+        : svg.outerHTML;
+      return head + body;
+    } catch (e) {
+      this._fail('toSVG', e);
+      return '';
+    } finally {
+      this.doc = docPrev;
+      this.geo = geoPrev;
+      this._srcMap = mapPrev;
+      this._defs = defsPrev;
+      this._clipSeq = seqPrev;
+      this._clipPrefix = prefixPrev;
+      this._drawSeen = seenPrev;
+    }
+  }
+
+  /**
+   * Элемент <style> со встроенными начертаниями — из того, что уже в кеше.
+   * @param {string} id
+   * @returns {{el:Element|null, state:string, families:string[], missing:string[]}}
+   */
+  _fontStyle(id) {
+    const needs = this._fontNeeds(id);
+    const families = [...needs.keys()];
+    if (!needs.size) return { el: null, state: 'none', families, missing: [] };
+    if (this.opts && this.opts.embedFonts === false) return { el: null, state: 'off', families, missing: [] };
+    let res;
+    try { res = fontCssFromCache(needs); }
+    catch (e) {
+      logOnce('fonts:css', 'встроенные начертания не собрались', e);
+      res = { css: '', done: [], missing: families };
+    }
+    let el = null;
+    if (res.css) {
+      try {
+        el = svgEl('style', { type: 'text/css' });
+        el.appendChild(document.createTextNode(res.css));
+      } catch (e) {
+        // без <style> экспорт всё равно должен собраться — просто чужим шрифтом
+        logOnce('fonts:style', 'элемент <style> для экспорта не создался', e);
+        el = null;
+        res = { css: '', done: [], missing: families };
+      }
+    }
+    return { el, state: fontState(res), families, missing: res.missing };
+  }
+
+  /**
+   * PNG активного артборда: сериализация SVG → Image → canvas.
+   *
+   * Масштаб понижается сам, если полотно не влезает в пределы браузера: сначала
+   * до 1×, потом плавно. Если не выходит и так — обещание разрешается в `null`,
+   * и об этом всегда сообщается через `_fail`/`opts.onError`. Пустой файл за
+   * успех не выдаётся: раньше `toBlob` на артборде ~48 000 px возвращал null,
+   * а оболочка рапортовала «Сохранено» с нулём байт.
+   *
+   * Внешние (http/https) картинки в этот режим не попадают: <img> с blob-адресом
+   * чужие ресурсы не грузит. Поэтому перед снимком они переводятся в `data:`,
+   * а если не вышло — снимок отклоняется (`null`), а не сохраняется с
+   * заглушкой «битое изображение» во весь артборд. Подробности последнего
+   * снимка — в `stage.lastShot` (`ok`, а при отказе ещё и `blocked`).
+   *
+   * Гарнитуры встраиваются в разметку (см. `prepareFonts`): без этого SVG в
+   * <img> считает текст системным шрифтом и PNG расходится с экраном. Провал
+   * встраивания снимок не отменяет — он виден в `lastShot.fonts`
+   * (`embedded` | `partial` | `missing` | `none` | `off`) и `lastShot.fontsMissing`.
+   *
+   * Вызовы сериализуются: снимок держит отчёт `lastShot` и подстановку картинок,
+   * и два снимка разных артбордов внахлёст перетирали их друг другу. Из
+   * интерфейса так не сделать (экспорт идёт по одному), но публичный метод
+   * обещает это честно: второй вызов дожидается первого, а `lastShot` после
+   * своего `await` — всегда свой.
+   * @param {{scale?:number, artboardId?:string, timeoutMs?:number, maxSide?:number, maxArea?:number}} [opts]
+   * @returns {Promise<Blob|null>} PNG либо null, если снять не удалось
+   */
+  async screenshot(opts = {}) {
+    const prev = this._shotQueue;
+    let free;
+    this._shotQueue = new Promise((r) => { free = r; });
+    if (prev) { try { await prev; } catch (e) { /* чужой провал нас не касается */ } }
+    try {
+      return await this._shotOnce(opts || {});
+    } finally {
+      free();   // следующий в очереди пойдёт дальше — даже если у нас исключение
+    }
+  }
+
+  /** Один снимок. Всё состояние — местное, наружу уходит только `lastShot`. */
+  async _shotOnce(opts) {
+    const want = isNum(opts.scale) ? clamp(opts.scale, SHOT_MIN_SCALE, 4) : 2;
+    const id = opts.artboardId || this.activeArtboard;
+    const rect = (this.geo.rects && this.geo.rects[id]) || { w: 8, h: 8 };
+    // размер не зажимаем: масштаб подбирается пропорционально, иначе снимок сплющит
+    const rw = isNum(rect.w) && rect.w > 0 ? rect.w : 8;
+    const rh = isNum(rect.h) && rect.h > 0 ? rect.h : 8;
+    const maxSide = isNum(opts.maxSide) && opts.maxSide > 0 ? opts.maxSide : CANVAS_MAX_SIDE;
+    const maxArea = isNum(opts.maxArea) && opts.maxArea > 0 ? opts.maxArea : CANVAS_MAX_AREA;
+    const scale = fitShotScale(rw, rh, want, maxSide, maxArea);
+    // отчёт свой на вызов: раньше он лежал в поле сцены, и второй снимок
+    // забирал себе строки первого (гарнитуры, ok, blocked)
+    const shot = { requested: want, scale, w: 0, h: 0, ok: false };
+    this.lastShot = shot;
+    if (scale === null) {
+      this._fail('screenshot:size', new Error(
+        `артборд ${r2(rw)}×${r2(rh)} не влезает в полотно браузера даже в минимальном масштабе`
+      ));
+      return null;
+    }
+    const W = Math.max(1, Math.round(rw * scale));
+    const H = Math.max(1, Math.round(rh * scale));
+    shot.w = W;
+    shot.h = H;
+    if (scale < want) {
+      logOnce('shot:scale:' + W + 'x' + H,
+        `screenshot: масштаб понижен с ${want}× до ${scale}× — полотно ${W}×${H} иначе не создать`);
+    }
+    const finish = (canvas) => new Promise((resolve) => {
+      if (!canvas.toBlob) {
+        this._fail('screenshot:toBlob', new Error('canvas.toBlob недоступен'));
+        resolve(null);
+        return;
+      }
+      canvas.toBlob((b) => {
+        if (b && b.size > 0) { shot.ok = true; resolve(b); return; }
+        this._fail('screenshot:blob', new Error(
+          `полотно ${canvas.width}×${canvas.height} не превратилось в PNG — снимок не сохранён`
+        ));
+        resolve(null);
+      }, 'image/png');
+    });
+    // гарнитуры — в разметку: SVG внутри <img> шрифты страницы не видит и
+    // считает текст системным (у IBM Plex Sans это +21 % к ширине строки).
+    // Провал не отменяет снимок — но и молчать о нём нельзя: PNG тогда
+    // расходится с экраном, и оболочке есть о чём предупредить.
+    const fonts = await this.prepareFonts(id);
+    shot.fonts = fonts.state;
+    if (fonts.missing.length) shot.fontsMissing = fonts.missing.slice();
+    if (fonts.state === 'missing') {
+      this._fail('screenshot:fonts', new Error(
+        `начертания (${fonts.missing.join(', ')}) в PNG не встроились — текст будет посчитан системным шрифтом`
+      ));
+    }
+    // внешние картинки — в data:, иначе в PNG будет заглушка вместо них
+    const external = this._externalImages(id);
+    let srcMap = null;
+    if (external.length) {
+      try {
+        srcMap = await inlineImageSrcs(external);
+      } catch (e) {
+        shot.blocked = 'external-images';
+        this._fail('screenshot:external', new Error(
+          `PNG не может включить внешние картинки (${(e && e.message) || e}) — сохраните SVG`
+        ));
+        return null;
+      }
+    }
+    return new Promise((resolve) => {
+      let url = null;
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          this._fail('screenshot:ctx', new Error('2d-контекст полотна недоступен'));
+          resolve(null);
+          return;
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, W, H);
+        const source = this.toSVG(id, undefined, undefined, { srcMap });
+        if (!source) {
+          this._fail('screenshot:svg', new Error(`артборд «${id}» не собрался в SVG`));
+          resolve(null);
+          return;
+        }
+        const blob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' });
+        url = URL.createObjectURL(blob);
+        const img = new Image();
+        img.decoding = 'sync';
+        let settled = false;
+        let deadline = null;
+        // картинка может не выдать ни onload, ни onerror — дальше дедлайна не ждём
+        const done = () => {
+          if (deadline !== null) { clearTimeout(deadline); deadline = null; }
+          if (url) { URL.revokeObjectURL(url); url = null; }
+        };
+        const settle = (drawn) => {
+          if (settled) return;
+          settled = true;
+          if (!drawn) { done(); resolve(null); return; }   // провал, а не белый лист
+          let ok = true;
+          try { ctx.drawImage(img, 0, 0, W, H); } catch (e) { this._fail('screenshot:draw', e); ok = false; }
+          done();
+          resolve(ok ? finish(canvas) : null);
+        };
+        const wait = isNum(opts.timeoutMs) ? clamp(opts.timeoutMs, 1, 120000) : 8000;
+        deadline = setTimeout(() => {
+          this._fail('screenshot:timeout', new Error(`картинка не загрузилась за ${wait} мс`));
+          img.onload = null;
+          img.onerror = null;
+          img.src = '';
+          settle(false);
+        }, wait);
+        if (deadline && typeof deadline.unref === 'function') deadline.unref();
+        img.onload = () => settle(true);
+        img.onerror = (e) => {
+          this._fail('screenshot:image', e);
+          settle(false);
+        };
+        img.src = url;
+      } catch (e) {
+        this._fail('screenshot', e);
+        if (url) { try { URL.revokeObjectURL(url); } catch (_) { /* уже отпущено */ } }
+        resolve(null);
+      }
+    });
+  }
+
+  /**
+   * Внешние адреса картинок в поддереве артборда — те, что PNG сам не утащит.
+   * @param {string} id
+   * @returns {string[]}
+   */
+  _externalImages(id) {
+    const doc = this.doc;
+    if (!doc || !doc.nodes || !doc.nodes[id]) return [];
+    const out = [];
+    for (const nid of subtreeIds(doc, id)) {
+      const n = doc.nodes[nid];
+      if (!n || n.type !== 'image' || n.visible === false) continue;
+      const src = safeImageSrc(n.src);
+      if (isExternalSrc(src) && !out.includes(src)) out.push(src);
+    }
+    return out;
+  }
+
+  /* --------------------------- слой интерфейса --------------------------- */
+
+  _screenRect(id, override) {
+    const r = override || this.geo.rects[id];
+    if (!r) return null;
+    const z = this.view.zoom;
+    const p = this.toScreen(r.x, r.y);
+    return { x: p.x, y: p.y, w: r.w * z, h: r.h * z };
+  }
+
+  /**
+   * Прямоугольник, обрезанный предками, которые режут содержимое (`clip`) —
+   * теми же и по тому же правилу, что и отрисовка в SVG. Нужен рамкам слоя
+   * интерфейса: раньше предпросмотр растущего узла уезжал за край артборда и
+   * рисовался поверх соседнего, хотя сам узел был обрезан.
+   * @returns {{x:number,y:number,w:number,h:number}|null} null — видимого не осталось
+   */
+  _clipRect(id, rect) {
+    const doc = this.doc;
+    if (!doc || !rect) return rect || null;
+    let out = rect;
+    for (const a of ancestors(doc, id)) {
+      if (!a.clip) continue;
+      const r = this.geo.rects[a.id];
+      if (!r) continue;
+      const x1 = Math.max(out.x, r.x);
+      const y1 = Math.max(out.y, r.y);
+      const x2 = Math.min(out.x + out.w, r.x + r.w);
+      const y2 = Math.min(out.y + out.h, r.y + r.h);
+      if (x2 <= x1 || y2 <= y1) return null;
+      out = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+    }
+    return out;
+  }
+
+  _box(cls, sr, extra) {
+    const d = document.createElement('div');
+    d.className = 'imago-box' + (cls ? ' ' + cls : '');
+    d.style.left = r2(sr.x) + 'px';
+    d.style.top = r2(sr.y) + 'px';
+    d.style.width = r2(sr.w) + 'px';
+    d.style.height = r2(sr.h) + 'px';
+    if (extra) Object.assign(d.style, extra);
+    this.ui.appendChild(d);
+    return d;
+  }
+
+  /**
+   * Бейдж у выделения. Раньше он висел под нижней кромкой и накрывал то, что
+   * лежит ниже («390 × 844» поверх подписи соседнего блока). Теперь его кладёт
+   * badgePlace: слева от узла, а если там край экрана — внутрь него.
+   * @param {number} [slot] этаж, когда бейджей два
+   * @param {{w:number,y1:number,y2:number}} [label] полоса подписи артборда (Stage._labelBand)
+   */
+  _badge(text, sr, cls, slot, label) {
+    const b = document.createElement('div');
+    b.textContent = text;
+    // размер вьюпорта — из кеша (см. _viewport): прямое чтение clientWidth здесь
+    // роняло раскладку всей страницы на каждый бейдж, а бейджи рисуются на каждый
+    // кадр интерфейса (круг 16, п.6)
+    const view = this.el && (this._vp || isNum(this.el.clientWidth)) ? { w: this.vw, h: this.vh } : null;
+    const place = badgePlace(sr, text, slot, view, label);
+    // класс места: с той стороны, которой бейдж касается кромки, уголки прямые
+    b.className = 'imago-badge' + (cls ? ' ' + cls : '') + ' at-' + place.where;
+    b.style.left = r2(place.x) + 'px';
+    b.style.top = r2(place.y) + 'px';
+    this.ui.appendChild(b);
+    return b;
+  }
+
+  /**
+   * Полоса над верхней кромкой узла, занятая подписью артборда, — в экранных
+   * координатах того же прямоугольника, что уйдёт в бейдж. `null`, когда над
+   * кромкой свободно: узел не артборд или подпись спрятана мелким зумом.
+   * Ширину считаем ровно так, как её рисует _updateLabels (обрезка по ширине
+   * артборда), высоту — по кеглю: подпись сидит на 6 px над кромкой в координатах
+   * документа, то есть на 6·zoom на экране.
+   * @param {string} id @param {{x:number,y:number,w:number,h:number}} sr
+   * @returns {{w:number,y1:number,y2:number}|null}
+   */
+  _labelBand(id, sr) {
+    const doc = this.doc;
+    if (!doc || !sr || !isArtboard(doc, id)) return null;
+    const rect = this.geo.rects[id];
+    if (!rect) return null;
+    const z = this.view.zoom;
+    const screenW = rect.w * z;
+    if (screenW < AB_LABEL_MIN_W) return null;   // подпись не рисуется — полоса свободна
+    const max = Math.floor(screenW / (AB_LABEL_SIZE * AB_LABEL_CHAR));
+    const chars = Math.min(displayName(doc, id).length, Math.max(1, max));
+    const base = sr.y - 6 * z;   // базовая линия подписи
+    return {
+      w: Math.ceil(chars * AB_LABEL_SIZE * AB_LABEL_CHAR),
+      y1: base - AB_LABEL_SIZE,
+      y2: base + 3
+    };
+  }
+
+  _ovLine(x1, y1, x2, y2, attrs) {
+    this.ov.appendChild(svgEl('line', {
+      x1: r2(x1), y1: r2(y1), x2: r2(x2), y2: r2(y2),
+      stroke: 'var(--accent,#FF6B3D)', 'stroke-width': 1, ...attrs
+    }));
+  }
+
+  /**
+   * Ручки ресайза узла: имя, зона захвата на экране и место видимой точки внутри
+   * зоны. Зона сдвинута наружу узла (внутрь заходит на HANDLE_IN), а сама точка
+   * стоит ровно на кромке — см. .imago-h в STAGE_CSS и handleNames().
+   * @param {string} id
+   * @param {{x:number,y:number,w:number,h:number}} [srIn] готовый экранный прямоугольник
+   * @returns {{name:string,id:string,x:number,y:number,w:number,h:number,dx:number,dy:number}[]}
+   */
+  _handles(id, srIn) {
+    const node = this.doc && this.doc.nodes ? this.doc.nodes[id] : null;
+    const sr = srIn || this._screenRect(id);
+    if (!node || !sr) return [];
+    const out = [];
+    for (const name of handleNames(node, sr)) {
+      // 0 — кромка начала оси, 2 — кромка конца, 1 — середина
+      const ax = name.includes('w') ? 0 : name.includes('e') ? 2 : 1;
+      const ay = name.includes('n') ? 0 : name.includes('s') ? 2 : 1;
+      const px = sr.x + (ax === 0 ? 0 : ax === 2 ? sr.w : sr.w / 2);
+      const py = sr.y + (ay === 0 ? 0 : ay === 2 ? sr.h : sr.h / 2);
+      // где стоит зона: у кромки начала она уходит влево (вверх), у кромки конца —
+      // вправо (вниз), внутрь узла заходит на HANDLE_IN
+      const zx = ax === 0 ? HANDLE_SIZE - HANDLE_IN : ax === 2 ? HANDLE_IN : HANDLE_SIZE / 2;
+      const zy = ay === 0 ? HANDLE_SIZE - HANDLE_IN : ay === 2 ? HANDLE_IN : HANDLE_SIZE / 2;
+      // а где внутри зоны — видимая точка: на кромке, отодвинутая наружу ровно
+      // настолько, чтобы целиком поместиться в зону (см. HANDLE_OUT)
+      const dx = ax === 0 ? zx - HANDLE_OUT : ax === 2 ? zx + HANDLE_OUT : zx;
+      const dy = ay === 0 ? zy - HANDLE_OUT : ay === 2 ? zy + HANDLE_OUT : zy;
+      out.push({ name, id, x: px - zx, y: py - zy, w: HANDLE_SIZE, h: HANDLE_SIZE, dx, dy });
+    }
+    return out;
+  }
+
+  /**
+   * Разложить ручки по слою интерфейса. Элементы ПЕРЕИСПОЛЬЗУЮТСЯ: пока
+   * _paintUI пересоздавал их на каждом кадре, браузер терял двойной клик —
+   * цель второго нажатия была уже другим узлом DOM (а прежний снят со
+   * страницы), и событие dblclick просто не отправлялось. Из-за этого правка
+   * текста под ручкой не открывалась вообще.
+   * @param {object[]} list результат _handles()
+   */
+  _layoutHandles(list) {
+    if (!this._handleEls) this._handleEls = new Map();
+    const seen = new Set();
+    for (const h of list) {
+      seen.add(h.name);
+      let el = this._handleEls.get(h.name);
+      if (!el || el.parentNode !== this.ui) {
+        el = document.createElement('div');
+        el.className = 'imago-h';
+        el.dataset.handle = h.name;
+        this._handleEls.set(h.name, el);
+        this.ui.appendChild(el);
+      }
+      el.dataset.id = h.id;
+      el.style.left = r2(h.x) + 'px';
+      el.style.top = r2(h.y) + 'px';
+      el.style.setProperty('--hx', r2(h.dx) + 'px');
+      el.style.setProperty('--hy', r2(h.dy) + 'px');
+    }
+    for (const [name, el] of [...this._handleEls]) {
+      if (seen.has(name)) continue;
+      if (el.parentNode) el.parentNode.removeChild(el);
+      this._handleEls.delete(name);
+    }
+  }
+
+  /** Перерисовать слой интерфейса (выделение, наведение, направляющие, рамка выбора). */
+  _paintUI() {
+    if (!this.doc || this._dead) return;
+    try {
+      for (const child of Array.from(this.ui.children)) {
+        if (child === this.ov) continue;
+        if (this._editing && (child === this._editing.el || child === this._editing.hint)) continue;
+        // ручки не пересобираем — см. _layoutHandles
+        if (child.dataset && child.dataset.handle) continue;
+        this.ui.removeChild(child);
+      }
+      while (this.ov.firstChild) this.ov.removeChild(this.ov.firstChild);
+      this.ov.setAttribute('width', this.vw);
+      this.ov.setAttribute('height', this.vh);
+
+      // подсветка изменений агента (гаснет сама)
+      for (const p of this._pulses) {
+        const sr = this._screenRect(null, p.rect);
+        if (!sr) continue;
+        const el = svgEl('rect', {
+          x: r2(sr.x - 2), y: r2(sr.y - 2), width: r2(sr.w + 4), height: r2(sr.h + 4),
+          rx: 6, fill: 'none', stroke: 'var(--agent,#38D6B0)', 'stroke-width': 2, class: 'imago-pulse'
+        });
+        this.ov.appendChild(el);
+      }
+
+      // направляющие магнитов
+      for (const g of this._guides) {
+        const a = this.toScreen(g.x1, g.y1);
+        const b = this.toScreen(g.x2, g.y2);
+        this._ovLine(a.x, a.y, b.x, b.y, {
+          stroke: g.kind === 'gap' ? 'var(--agent,#38D6B0)' : 'var(--accent,#FF6B3D)',
+          'stroke-dasharray': '3 3', 'stroke-width': 1
+        });
+      }
+
+      // Место вставки при смене порядка. Линия лежит поверх сцены, но тонкая
+      // акцентная черта на карточке того же тона читалась плохо: даём светлую
+      // подложку и засечки по концам — так видно, что это именно щель.
+      if (this._insertion) {
+        const a = this.toScreen(this._insertion.x1, this._insertion.y1);
+        const b = this.toScreen(this._insertion.x2, this._insertion.y2);
+        this._ovLine(a.x, a.y, b.x, b.y, {
+          stroke: 'var(--canvas-bg,#F7F6F3)', 'stroke-width': 7,
+          'stroke-linecap': 'round', 'stroke-opacity': 0.85
+        });
+        this._ovLine(a.x, a.y, b.x, b.y, { 'stroke-width': 3, 'stroke-linecap': 'round' });
+        const horiz = Math.abs(b.x - a.x) >= Math.abs(b.y - a.y);
+        const tick = 5;
+        for (const p of [a, b]) {
+          if (horiz) this._ovLine(p.x, p.y - tick, p.x, p.y + tick, { 'stroke-width': 3, 'stroke-linecap': 'round' });
+          else this._ovLine(p.x - tick, p.y, p.x + tick, p.y, { 'stroke-width': 3, 'stroke-linecap': 'round' });
+        }
+      }
+
+      // рамка выбора
+      if (this._marquee) {
+        const m = this._marquee;
+        const a = this.toScreen(Math.min(m.x1, m.x2), Math.min(m.y1, m.y2));
+        const b = this.toScreen(Math.max(m.x1, m.x2), Math.max(m.y1, m.y2));
+        this.ov.appendChild(svgEl('rect', {
+          x: r2(a.x), y: r2(a.y), width: r2(b.x - a.x), height: r2(b.y - a.y),
+          fill: 'var(--accent,#FF6B3D)', 'fill-opacity': 0.08,
+          stroke: 'var(--accent,#FF6B3D)', 'stroke-width': 1
+        }));
+      }
+
+      const selection = (this.state.selection || []).filter((id) => this.geo.rects[id]);
+      if (this._hover && !selection.includes(this._hover)) {
+        const sr = this._screenRect(this._hover);
+        if (sr) this._box('is-hover', sr);
+      }
+
+      // предпросмотр ресайза: рамку режем артбордом ровно так же, как сам узел
+      if (this._drag && this._drag.mode === 'resize' && this._drag.preview) {
+        const p = this._drag.preview;
+        const vis = this._clipRect(this._drag.id, p);
+        const sr = this._screenRect(null, vis || p);
+        if (vis) this._box('', sr);
+        // размер на бейдже — настоящий, а стоит бейдж у видимой части
+        this._badge(`${Math.round(p.w)} × ${Math.round(p.h)}`, sr, '', 0,
+          this._labelBand(this._drag.id, sr));
+      }
+
+      // «ресайз» — только начавшийся жест (есть предпросмотр). Нажатие на ручку,
+      // которое ещё не сдвинулось, сцену не перестраивает: голый клик по ручке
+      // не должен ни мигать рамками, ни прятать ручки
+      const resizing = !!(this._drag && this._drag.mode === 'resize' && this._drag.preview);
+      // перетаскиваемый узел: рамка едет вместе с призраком. На своём прежнем
+      // месте она врала — при перестановке туда уже переехал раздвинутый сосед,
+      // и рамка выделения оказывалась вокруг чужой карточки
+      const moving = this._drag && this._drag.mode === 'move' && this._drag.ghostRect ? this._drag : null;
+      for (const id of selection) {
+        const node = this.doc.nodes[id];
+        // рамка выделения показывает НАСТОЯЩИЕ границы узла, даже если артборд
+        // его режет: иначе ручки ресайза оказались бы не на своих кромках
+        const sr = moving && moving.id === id
+          ? this._screenRect(null, moving.ghostRect) : this._screenRect(id);
+        if (!sr || !node) continue;
+        // узел, который тянут за ручку, рисует предпросмотр: иначе поверх нового
+        // размера остаётся рамка старого и непонятно, какой из них настоящий
+        if (resizing && this._drag.id === id) continue;
+        this._box(node.override ? 'is-detached' : '', sr);
+        if (resizing) continue;
+        const rect = this.geo.rects[id];
+        // полоса подписи артборда: бейджу нельзя ложиться на имя макета
+        const band = this._labelBand(id, sr);
+        this._badge(`${Math.round(rect.w)} × ${Math.round(rect.h)}`, sr, '', 0, band);
+        // «отсоединён» встаёт этажом выше размера, по той же кромке
+        if (node.override) this._badge('отсоединён', sr, 'is-detached', 1, band);
+      }
+
+      // ручки — у одиночного выделения
+      const showHandles = selection.length === 1 && !this._editing
+        && !(this._drag && (this._drag.mode === 'move' || resizing));
+      this._layoutHandles(showHandles ? this._handles(selection[0]) : []);
+      if (this._editing) this._positionEditor();
+    } catch (e) {
+      this._fail('paintUI', e);
+    }
+  }
+
+  /**
+   * FLIP-переезд изменённых узлов + подсветка цветом агента.
+   *
+   * Рендер без `diff` подсветку НЕ гасит: на ветке созданного узла оболочка
+   * рисует сцену ещё раз (выделение, пересчёт вида), и сброс здесь убивал
+   * подсветку через ~90 мс — на флагманском «построй мне экран» её просто не
+   * успевали увидеть. Гасит только свой таймер; прямоугольники при этом
+   * переносим на свежую геометрию, чтобы рамка не отставала от узла.
+   */
+  _flip(diff) {
+    if (this._dead) return;
+    const created = (diff && diff.created) || [];
+    const changed = (diff && diff.changed) || [];
+    const removed = (diff && diff.removed) || [];
+    // рендер без изменений (в том числе с пустым diff) подсветку не трогает
+    if (!created.length && !changed.length && !removed.length) { this._refreshPulses(); return; }
+    this._pulses = [];
+    const reduced = prefersReducedMotion();
+    for (const id of removed) {
+      const prev = this._prevRects[id];
+      if (prev) this._pulses.push({ rect: prev });   // узла уже нет — id помнить незачем
+    }
+    for (const id of created.concat(changed)) {
+      const next = this.geo.rects[id];
+      if (next) this._pulses.push({ id, rect: { ...next } });
+      const g = this._nodeEls.get(id);
+      if (!g || reduced) continue;
+      const prev = this._prevRects[id];
+      if (prev && next) {
+        const dx = r2(prev.x - next.x);
+        const dy = r2(prev.y - next.y);
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+          g.style.transition = 'none';
+          g.setAttribute('transform', `translate(${dx} ${dy})`);
+          const run = () => {
+            if (this._dead) return;   // сцену уже сняли — кадр рисовать некуда
+            g.style.transition = 'transform 220ms cubic-bezier(.2,.7,.2,1)';
+            g.setAttribute('transform', 'translate(0 0)');
+          };
+          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(run));
+          else run();
+          this._later(() => { g.style.transition = ''; g.removeAttribute('transform'); }, 280);
+        }
+      } else if (!prev) {
+        g.style.transition = 'none';
+        g.style.opacity = '0';
+        const run = () => {
+          if (this._dead) return;
+          g.style.transition = 'opacity 220ms ease-out';
+          g.style.opacity = '1';
+        };
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(run));
+        else run();
+        this._later(() => { g.style.transition = ''; g.style.opacity = ''; }, 280);
+      }
+    }
+    this._paintUI();
+    this._cancelLater(this._pulseTimer);
+    this._pulseTimer = this._later(() => { this._pulses = []; this._paintUI(); }, 950);
+  }
+
+  /**
+   * Перенести живую подсветку на текущую геометрию. Зовётся из рендера без
+   * `diff`: подсветка переживает лишний кадр, но рамка должна остаться на узле,
+   * а не там, где он лежал до пересчёта.
+   */
+  _refreshPulses() {
+    if (!this._pulses || !this._pulses.length) return;
+    const rects = (this.geo && this.geo.rects) || {};
+    this._pulses = this._pulses.map((p) => {
+      const r = p.id ? rects[p.id] : null;
+      return r ? { id: p.id, rect: { ...r } } : p;
+    });
+  }
+
+  /* ------------------------------ хит-тест ------------------------------ */
+
+  /**
+   * Самый верхний по отрисовке узел под точкой — то есть самый глубокий из
+   * нарисованных там. Ни выделение, ни уровни артборда не учитываются: это
+   * сырой ответ «что нарисовано под курсором».
+   * @param {{x:number,y:number}} world
+   * @returns {object|null}
+   */
+  _topUnder(world) {
+    const doc = this.doc;
+    if (!doc || !this.geo) return null;
+    // Круг 16, п.6: идём с КОНЦА порядка отрисовки и выходим на первом попадании.
+    // Верхний узел — последний подходящий в порядке, значит первый с конца: ответ
+    // тот же, а на большом документе не перебирается весь список на каждое
+    // движение мыши (40 477 узлов — 5 мс на проверку, и так на каждый кадр).
+    const order = this.geo.order || [];
+    for (let i = order.length - 1; i >= 0; i--) {
+      const n = doc.nodes[order[i]];
+      if (!n || n.visible === false || n.locked) continue;
+      const r = this.geo.rects[order[i]];
+      if (!r) continue;
+      if (world.x >= r.x && world.x <= r.x + r.w && world.y >= r.y && world.y <= r.y + r.h) return n;
+    }
+    return null;
+  }
+
+  /**
+   * Узел под курсором. deep — явное «углубись» (Alt, Cmd/Ctrl, двойной клик),
+   * иначе верхний уровень внутри артборда.
+   *
+   * Отдельное правило: если точка внутри уже выделенного узла, возвращаем его,
+   * а не ребёнка под курсором. Рамка с ручками обещает «двигаю вот это», и
+   * раньше нажатие внутри неё молча переключалось на дочернюю подпись и тащило
+   * её, вешая override. Углубление осталось, но по явному жесту — двойной клик
+   * или Cmd/Ctrl-клик.
+   *
+   * Углубление ПОШАГОВОЕ: каждый такой жест опускается на один уровень от
+   * текущего выделения. Раньше он прыгал сразу к самому глубокому узлу, и до
+   * промежуточного фрейма («Пункт · …») мышью было не добраться — только через
+   * рельс слоёв.
+   */
+  _hitTest(world, deep) {
+    const doc = this.doc;
+    if (!doc) return null;
+    const hit = this._topUnder(world);
+    if (!hit) return null;
+    const chain = [hit, ...ancestors(doc, hit.id)];
+    const abIdx = chain.findIndex((n) => isArtboard(doc, n));
+    if (abIdx <= 0) return hit;            // сам артборд либо узел вне артбордов
+    // путь от верхнего уровня артборда до узла под курсором
+    const path = chain.slice(0, abIdx).reverse();
+    const sel = this._selectionUnder(world);
+    if (!deep) return sel || path[0];
+    const at = sel ? path.findIndex((n) => n.id === sel.id) : -1;
+    return path[Math.min(at + 1, path.length - 1)];
+  }
+
+  /**
+   * Самый верхний по отрисовке выделенный узел под точкой. Артборды не считаем:
+   * артборд накрывает всё своё содержимое, и клик внутри него должен по-прежнему
+   * выбирать содержимое — иначе выделенный артборд запирает сцену.
+   * @returns {object|null}
+   */
+  _selectionUnder(world) {
+    const doc = this.doc;
+    const ids = this.state && this.state.selection ? this.state.selection : [];
+    if (!ids.length || !doc) return null;
+    let best = null;
+    let bestIdx = -1;
+    for (const id of ids) {
+      const n = doc.nodes[id];
+      if (!n || n.visible === false || n.locked) continue;
+      if (isArtboard(doc, n)) continue;
+      const r = this.geo.rects[id];
+      if (!r) continue;
+      if (world.x < r.x || world.x > r.x + r.w || world.y < r.y || world.y > r.y + r.h) continue;
+      const idx = this.geo.order.indexOf(id);
+      if (idx >= bestIdx) { bestIdx = idx; best = n; }
+    }
+    return best;
+  }
+
+  /**
+   * Кого берёт рамка выбора. Правило одно и читается вслух: узел, попавший в
+   * рамку ЦЕЛИКОМ, берётся сам, и внутрь него мы не идём — иначе в выделении
+   * оказались бы и предок, и его потомок. Узел, задетый рамкой лишь частью,
+   * уступает тем своим детям, что попали целиком; если внутри не поймали
+   * никого — берётся сам. Так рамкой выбирается и вложенный узел, а не только
+   * прямой ребёнок артборда.
+   *
+   * Сами артборды в кандидаты не идут: рамку начинают на пустом холсте и ведут
+   * поверх них, и артборд накрыл бы собой всё своё содержимое.
+   * @param {{x1:number,y1:number,x2:number,y2:number}} box мир, нормализованный
+   * @returns {string[]}
+   */
+  _marqueePick(box) {
+    const doc = this.doc;
+    if (!doc) return [];
+    const hits = (r) => r.x < box.x2 && r.x + r.w > box.x1 && r.y < box.y2 && r.y + r.h > box.y1;
+    const inside = (r) => r.x >= box.x1 && r.y >= box.y1 && r.x + r.w <= box.x2 && r.y + r.h <= box.y2;
+    const out = [];
+    const walk = (node, depth) => {
+      if (depth > MAX_DEPTH) return;
+      for (const cid of kidsOf(node)) {
+        const child = doc.nodes[cid];
+        if (!child || child.visible === false || child.locked) continue;
+        const r = this.geo.rects[cid];
+        if (!r || !hits(r)) continue;
+        if (inside(r)) { out.push(cid); continue; }
+        const before = out.length;
+        walk(child, depth + 1);
+        if (out.length === before) out.push(cid);   // внутри пусто — берём сам узел
+      }
+    };
+    for (const ab of artboards(doc)) walk(ab, 0);
+    return out;
+  }
+
+  _setActiveArtboardFor(id) {
+    const doc = this.doc;
+    const chain = [doc.nodes[id], ...ancestors(doc, id)].filter(Boolean);
+    const ab = chain.find((n) => isArtboard(doc, n));
+    if (ab) this.activeArtboard = ab.id;
+  }
+
+  _emitSelect(ids) {
+    this.state = { ...this.state, selection: ids.slice() };
+    if (this.opts.onSelect) {
+      try { this.opts.onSelect(ids.slice()); } catch (e) { this._fail('onSelect', e); }
+    }
+    this._paintUI();
+  }
+
+  _commit(list, label) {
+    const clean = (list || []).filter(Boolean);
+    if (!clean.length) return;
+    if (!this.opts.onCommit) { logOnce('stage:nocommit', 'Stage: opts.onCommit не задан, правка потеряна'); return; }
+    try { this.opts.onCommit({ ops: clean, label: label || 'Правка' }); } catch (e) { this._fail('onCommit', e); }
+  }
+
+  /* ------------------------------- магниты ------------------------------- */
+
+  _gridStep() {
+    const spacing = (this.doc && this.doc.tokens && this.doc.tokens.spacing) || DEFAULT_TOKENS.spacing;
+    return spacing.filter((s) => s >= 4)[0] || 8;
+  }
+
+  /**
+   * Магниты: края и центры соседей, зазоры между ними, шаг сетки.
+   * @returns {{x:number,y:number,guides:Array}}
+   */
+  _snap(rect, node) {
+    const doc = this.doc;
+    const out = { x: rect.x, y: rect.y, guides: [] };
+    const parent = doc.nodes[node.parent];
+    if (!parent) return out;
+    const pr = this.geo.rects[parent.id];
+    const thr = 6 / this.view.zoom;
+    const sibs = (parent.children || [])
+      .filter((id) => id !== node.id)
+      .map((id) => this.geo.rects[id])
+      .filter(Boolean);
+    const L = normalizeLayout(parent.layout);
+    const gapSet = new Set([L.gap].filter((g) => g > 0));
+    const sortedX = sibs.slice().sort((a, b) => a.x - b.x);
+    for (let i = 1; i < sortedX.length; i++) {
+      const g = r2(sortedX[i].x - (sortedX[i - 1].x + sortedX[i - 1].w));
+      if (g > 0) gapSet.add(g);
+    }
+    const gaps = [...gapSet];
+
+    const build = (axis) => {
+      const a = axis === 'x' ? 'x' : 'y';
+      const s = axis === 'x' ? 'w' : 'h';
+      const cands = [];
+      for (const t of sibs) {
+        cands.push({ v: t[a], ref: t }, { v: t[a] + t[s] / 2, ref: t }, { v: t[a] + t[s], ref: t });
+        for (const g of gaps) {
+          cands.push({ v: t[a] + t[s] + g, ref: t, kind: 'gap' });
+          cands.push({ v: t[a] - g - rect[s], ref: t, kind: 'gap', anchorIndex: 0 });
+        }
+      }
+      if (pr) {
+        const padA = axis === 'x' ? L.padding.l : L.padding.t;
+        const padB = axis === 'x' ? L.padding.r : L.padding.b;
+        cands.push({ v: pr[a] + padA, ref: pr }, { v: pr[a] + pr[s] / 2, ref: pr }, { v: pr[a] + pr[s] - padB, ref: pr });
+      }
+      const anchors = [{ v: rect[a], off: 0 }, { v: rect[a] + rect[s] / 2, off: rect[s] / 2 }, { v: rect[a] + rect[s], off: rect[s] }];
+      let best = null;
+      for (let ai = 0; ai < anchors.length; ai++) {
+        for (const c of cands) {
+          if (c.kind === 'gap' && c.anchorIndex !== undefined && ai !== c.anchorIndex) continue;
+          if (c.kind === 'gap' && c.anchorIndex === undefined && ai !== 0) continue;
+          const d = Math.abs(c.v - anchors[ai].v);
+          if (d <= thr && (!best || d < best.d)) best = { d, value: c.v - anchors[ai].off, line: c.v, ref: c.ref, kind: c.kind };
+        }
+      }
+      if (!best) {
+        const step = this._gridStep();
+        const snapped = Math.round(rect[a] / step) * step;
+        if (Math.abs(snapped - rect[a]) <= thr / 2) return { value: snapped, line: null };
+        return null;
+      }
+      return best;
+    };
+
+    const bx = build('x');
+    if (bx) {
+      out.x = r2(bx.value);
+      if (bx.line !== null && bx.line !== undefined) {
+        const y1 = Math.min(rect.y, bx.ref ? bx.ref.y : rect.y) - 12;
+        const y2 = Math.max(rect.y + rect.h, bx.ref ? bx.ref.y + bx.ref.h : rect.y + rect.h) + 12;
+        out.guides.push({ x1: bx.line, y1, x2: bx.line, y2, kind: bx.kind });
+      }
+    }
+    const by = build('y');
+    if (by) {
+      out.y = r2(by.value);
+      if (by.line !== null && by.line !== undefined) {
+        const x1 = Math.min(rect.x, by.ref ? by.ref.x : rect.x) - 12;
+        const x2 = Math.max(rect.x + rect.w, by.ref ? by.ref.x + by.ref.w : rect.x + rect.w) + 12;
+        out.guides.push({ x1, y1: by.line, x2, y2: by.line, kind: by.kind });
+      }
+    }
+    return out;
+  }
+
+  /* -------------------------------- ввод -------------------------------- */
+
+  _bindEvents() {
+    const el = this.el;
+    el.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
+    el.addEventListener('pointerdown', (e) => this._onPointerDown(e));
+    el.addEventListener('pointermove', (e) => this._onPointerMove(e));
+    el.addEventListener('pointerup', (e) => this._onPointerUp(e));
+    el.addEventListener('pointercancel', (e) => this._onPointerUp(e));
+    el.addEventListener('pointerleave', () => { if (!this._drag) this._setHover(null); });
+    el.addEventListener('dblclick', (e) => this._onDblClick(e));
+    el.addEventListener('touchstart', (e) => this._onTouch(e), { passive: false });
+    el.addEventListener('touchmove', (e) => this._onTouch(e), { passive: false });
+    el.addEventListener('touchend', () => { this._touch = null; });
+    this._onWinKey = (e) => {
+      const ae = typeof document !== 'undefined' ? document.activeElement : null;
+      if (ae && ae !== document.body && !this.el.contains(ae)) return;
+      this._onKey(e);
+    };
+    this._onWinKeyUp = (e) => {
+      if (e.code === 'Space') this._releaseSpace();
+    };
+    // Пробел «залипал»: зажали его на холсте, ушли по Alt+Tab — keyup достался
+    // уже другому окну, _space остался true, и холст навсегда оставался в режиме
+    // панорамы (клики не выделяли, а таскали сцену). Уход фокуса из окна
+    // равносилен отпусканию.
+    this._onWinBlur = () => this._releaseSpace();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('keydown', this._onWinKey, true);
+      window.addEventListener('keyup', this._onWinKeyUp, true);
+      window.addEventListener('blur', this._onWinBlur);
+    }
+  }
+
+  /** Снять режим панорамы по пробелу. */
+  _releaseSpace() {
+    this._space = false;
+    if (this.el && this.el.classList) this.el.classList.remove('is-space');
+  }
+
+  _onWheel(e) {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      this.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.01));
+    } else if (Math.abs(e.deltaX) > 0.5) {
+      this.view.pan.x -= e.deltaX;
+      this.view.pan.y -= e.deltaY;
+      this._applyView();
+      this._paintUI();
+    } else {
+      this.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0022));
+    }
+  }
+
+  _onTouch(e) {
+    if (e.touches.length !== 2) { this._touch = null; return; }
+    e.preventDefault();
+    const [a, b] = [e.touches[0], e.touches[1]];
+    const cx = (a.clientX + b.clientX) / 2;
+    const cy = (a.clientY + b.clientY) / 2;
+    const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    if (!this._touch) { this._touch = { cx, cy, dist }; return; }
+    this.view.pan.x += cx - this._touch.cx;
+    this.view.pan.y += cy - this._touch.cy;
+    this._applyView();
+    if (this._touch.dist > 0 && Math.abs(dist - this._touch.dist) > 1) {
+      this.zoomAt(cx, cy, dist / this._touch.dist);
+    } else {
+      this._paintUI();
+    }
+    this._touch = { cx, cy, dist };
+  }
+
+  _setHover(id) {
+    if (this._hover === id) return;
+    this._hover = id;
+    if (this.opts.onHover) {
+      try { this.opts.onHover(id); } catch (e) { this._fail('onHover', e); }
+    }
+    this._paintUI();
+  }
+
+  _onPointerDown(e) {
+    if (e.button === 2) return;
+    try {
+      const handle = e.target && e.target.dataset ? e.target.dataset.handle : null;
+      if (this._editing && e.target !== this._editing.el && !this._editing.el.contains(e.target)) {
+        this._commitEdit();
+      }
+      if (!handle) this.el.focus({ preventScroll: true });
+      if (e.button === 1 || this._space) {
+        this._drag = { mode: 'pan', sx: e.clientX, sy: e.clientY, pan: { ...this.view.pan } };
+        this.el.classList.add('is-panning');
+      } else if (handle) {
+        const id = e.target.dataset.id;
+        const rect = this.geo.rects[id];
+        if (!rect) return;
+        // preview НЕ ставим при нажатии: он появляется в _updateResize, когда
+        // жест реально сдвинулся. Иначе голый клик по ручке (а её зона выходит
+        // за кромку узла — там обычно щёлкают по соседу) молча коммитил
+        // fixed-размер: «fill → 350» у ребёнка артборда ломало раскладку, и
+        // обнаруживалось это много позже.
+        this._drag = { mode: 'resize', id, handle, start: this.toWorld(e.clientX, e.clientY), rect0: { ...rect } };
+      } else {
+        const w = this.toWorld(e.clientX, e.clientY);
+        // Alt и Cmd/Ctrl — явное «углубись до узла под курсором»
+        const hit = this._hitTest(w, e.altKey || e.metaKey || e.ctrlKey);
+        if (!hit) {
+          this._drag = { mode: 'marquee', start: w, base: e.shiftKey ? (this.state.selection || []).slice() : [] };
+          this._marquee = { x1: w.x, y1: w.y, x2: w.x, y2: w.y };
+          if (!e.shiftKey) this._emitSelect([]);
+        } else {
+          let sel = (this.state.selection || []).slice();
+          if (e.shiftKey) {
+            sel = sel.includes(hit.id) ? sel.filter((i) => i !== hit.id) : sel.concat(hit.id);
+            this._emitSelect(sel);
+          } else if (!sel.includes(hit.id)) {
+            sel = [hit.id];
+            this._emitSelect(sel);
+          }
+          this._setActiveArtboardFor(hit.id);
+          if (!isArtboard(this.doc, hit)) {
+            this._drag = { mode: 'maybe-move', id: hit.id, start: w, rect0: { ...this.geo.rects[hit.id] } };
+          } else {
+            this._drag = { mode: 'maybe-move', id: hit.id, start: w, rect0: { ...this.geo.rects[hit.id] }, artboard: true };
+          }
+        }
+      }
+      if (this.el.setPointerCapture) this.el.setPointerCapture(e.pointerId);
+    } catch (err) {
+      this._fail('pointerdown', err);
+    }
+  }
+
+  _onPointerMove(e) {
+    try {
+      const w = this.toWorld(e.clientX, e.clientY);
+      const d = this._drag;
+      if (!d) {
+        const hit = this._hitTest(w, e.altKey || e.metaKey || e.ctrlKey);
+        this._setHover(hit ? hit.id : null);
+        return;
+      }
+      if (d.mode === 'pan') {
+        this.view.pan.x = d.pan.x + (e.clientX - d.sx);
+        this.view.pan.y = d.pan.y + (e.clientY - d.sy);
+        this._applyView();
+        this._paintUI();
+        return;
+      }
+      if (d.mode === 'marquee') {
+        this._marquee = { x1: d.start.x, y1: d.start.y, x2: w.x, y2: w.y };
+        this._paintUI();
+        return;
+      }
+      if (d.mode === 'maybe-move') {
+        if (Math.hypot(w.x - d.start.x, w.y - d.start.y) * this.view.zoom < 3) return;
+        d.mode = 'move';
+      }
+      if (d.mode === 'move') this._updateMove(d, w, e);
+      if (d.mode === 'resize') {
+        // порог тот же, что у перетаскивания: пока рука не ушла на 3 экранных
+        // пикселя, ресайза нет — ни предпросмотра, ни коммита
+        if (!d.resized && Math.hypot(w.x - d.start.x, w.y - d.start.y) * this.view.zoom < 3) return;
+        this._updateResize(d, w, e);
+        this._schedulePreview();
+      }
+      this._paintUI();
+    } catch (err) {
+      this._fail('pointermove', err);
+    }
+  }
+
+  /**
+   * Потоковые соседи родителя: дети, которые участвуют в раскладке. Отсоединённые
+   * (с `override`) и те, у кого нет прямоугольника, в потоке не стоят.
+   *
+   * Это ОТДЕЛЬНОЕ пространство индексов: в нём считается место вставки при
+   * перестановке и рисуется маркер, а `ops.move` вставляет в полный `children`.
+   * Каждый отсоединённый ребёнок левее цели сдвигает номер на один, поэтому
+   * перевод одного в другое обязателен — им занят `_commitMove`.
+   * @param {object} parent
+   * @param {string|null} exceptId кого не считать соседом (обычно — перетаскиваемый)
+   * @returns {string[]}
+   */
+  _flowSiblings(parent, exceptId) {
+    const doc = this.doc;
+    if (!parent || !doc) return [];
+    return (parent.children || []).filter((id) => {
+      if (id === exceptId) return false;
+      const n = doc.nodes[id];
+      return n && !n.override && this.geo.rects[id];
+    });
+  }
+
+  _updateMove(d, w, e) {
+    const doc = this.doc;
+    const node = doc.nodes[d.id];
+    if (!node) return;
+    const dx = w.x - d.start.x;
+    const dy = w.y - d.start.y;
+    this._guides = [];
+    this._insertion = null;
+    this._clearShift();
+    const parent = doc.nodes[node.parent];
+    const isRoot = !parent || parent.id === doc.root;
+    const L = parent ? normalizeLayout(parent.layout) : DEFAULT_LAYOUT;
+    const flow = !isRoot && (L.mode === 'row' || L.mode === 'column') && !node.override;
+    const total = Math.hypot(dx, dy);
+    const main = L.mode === 'row' ? dx : dy;
+    if (flow && total > 0 && Math.abs(main) / total >= 0.7) {
+      // смена порядка в потоке: индекс считается среди потоковых соседей,
+      // перевод в полный children — в _commitMove (см. _flowSiblings)
+      const axis = L.mode === 'row' ? 'x' : 'y';
+      const ordered = this._flowSiblings(parent, d.id);
+      const slots = this._flowSlots(d, parent, L, ordered);
+      let index;
+      let ghostMain = main;
+      if (slots) {
+        // место вставки — слот, к началу которого ближе ведущая кромка призрака
+        const lead = d.rect0[axis] + main;
+        index = 0;
+        while (index + 1 < slots.length && lead >= (slots[index] + slots[index + 1]) / 2) index++;
+        // и сам призрак держим внутри потока: дальше крайнего слота вставать
+        // некуда, а уехавший туда призрак снова обгонял бы линию вставки
+        ghostMain = clamp(lead, slots[0], slots[slots.length - 1]) - d.rect0[axis];
+      } else {
+        index = this._pointerIndex(ordered, L, w);
+      }
+      d.result = { kind: 'move', parent: parent.id, index };
+      const at = ordered[Math.min(index, ordered.length - 1)];
+      const ar = at ? this.geo.rects[at] : this.geo.rects[parent.id];
+      const before = index < ordered.length;
+      if (ar) {
+        const pos = axis === 'x'
+          ? (before ? ar.x - L.gap / 2 : ar.x + ar.w + L.gap / 2)
+          : (before ? ar.y - L.gap / 2 : ar.y + ar.h + L.gap / 2);
+        this._insertion = axis === 'x'
+          ? { x1: pos, y1: ar.y, x2: pos, y2: ar.y + ar.h }
+          : { x1: ar.x, y1: pos, x2: ar.x + ar.w, y2: pos };
+      }
+      this._ghost(d.id, axis === 'x' ? ghostMain : dx, axis === 'y' ? ghostMain : dy);
+      this._shiftFlow(d, parent, L, ordered, index);
+      return;
+    }
+    // свободный сдвиг: override (или pos в режиме none / на холсте)
+    const target = { x: d.rect0.x + dx, y: d.rect0.y + dy, w: d.rect0.w, h: d.rect0.h };
+    const snapped = isRoot ? { x: target.x, y: target.y, guides: [] } : this._snap(target, node);
+    this._guides = snapped.guides;
+    d.result = {
+      kind: isRoot ? 'pos-canvas' : (L.mode === 'none' ? 'pos' : 'override'),
+      x: snapped.x, y: snapped.y
+    };
+    this._ghost(d.id, snapped.x - d.rect0.x, snapped.y - d.rect0.y);
+  }
+
+  /**
+   * Слоты потока — начала мест, куда может встать перетаскиваемый блок, в
+   * координатах документа. `null` для раскладок, где слоты не лежат подряд.
+   *
+   * Зачем. Раньше место вставки считалось по КУРСОРУ — пересёк ли он середину
+   * соседа. Курсор держит блок за ту точку, за которую взялись, и у высокого
+   * блока отстаёт от его кромки на всю высоту: «Список пунктов» (214 px) уезжал
+   * на 120 px мимо двух соседей, а линия вставки честно стояла на старом месте —
+   * перестановка начиналась только с dy ≈ 160. Призрак обгонял линию, а на
+   * отпускании блок молча возвращался: человек видел ровно противоположное тому,
+   * что произойдёт.
+   *
+   * Слоты раскладываем БЕЗ перетаскиваемого блока: соседи, стоявшие за ним,
+   * сдвигаются назад на его размер с зазором — ровно так же, как их двигает
+   * предпросмотр (_shiftFlow), поэтому линия вставки и выбранный слот совпадают.
+   *
+   * Перенос строк и justify не start сюда не годятся: там слоты не идут подряд
+   * и «ближайший» ничего не значит — для них остаётся правило по курсору
+   * (соседей в таких раскладках мы и не раздвигаем, см. _shiftFlow).
+   * @param {object} d жест @param {object} parent @param {object} L раскладка родителя
+   * @param {string[]} ordered потоковые соседи без перетаскиваемого
+   * @returns {number[]|null} начала слотов, по одному на каждое место вставки
+   */
+  _flowSlots(d, parent, L, ordered) {
+    if (L.wrap || L.justify !== 'start') return null;
+    const horiz = L.mode === 'row';
+    const axis = horiz ? 'x' : 'y';
+    const size = horiz ? 'w' : 'h';
+    const rect = this.geo.rects[d.id] || d.rect0;
+    const pr = this.geo.rects[parent.id];
+    const cur = this._flowSiblings(parent, null).indexOf(d.id);
+    const from = cur < 0 ? ordered.length : cur;   // блока в потоке нет — никто не съезжает
+    const step = rect[size] + L.gap;
+    const slots = [];
+    for (let j = 0; j < ordered.length; j++) {
+      const r = this.geo.rects[ordered[j]];
+      if (!r) return null;
+      slots.push(r[axis] - (j >= from ? step : 0));
+    }
+    // последний слот — за последним соседом; без соседей он же и единственный
+    const last = ordered.length ? this.geo.rects[ordered[ordered.length - 1]] : null;
+    slots.push(last
+      ? slots[slots.length - 1] + last[size] + L.gap
+      : (pr ? pr[axis] + (horiz ? L.padding.l : L.padding.t) : d.rect0[axis]));
+    return slots;
+  }
+
+  /** Место вставки по курсору: для раскладок, где слоты не выкладываются подряд. */
+  _pointerIndex(ordered, L, w) {
+    const horiz = L.mode === 'row';
+    const axis = horiz ? 'x' : 'y';
+    const size = horiz ? 'w' : 'h';
+    const pointer = horiz ? w.x : w.y;
+    let i = 0;
+    for (const id of ordered) {
+      const r = this.geo.rects[id];
+      if (r && pointer > r[axis] + r[size] / 2) i++;
+    }
+    return i;
+  }
+
+  _ghost(id, dx, dy) {
+    const g = this._nodeEls.get(id);
+    if (!g) return;
+    g.setAttribute('transform', `translate(${r2(dx)} ${r2(dy)})`);
+    this._ghostEl = g;
+    const r = this.geo.rects[id];
+    if (r) this._drag.ghostRect = { x: r.x + dx, y: r.y + dy, w: r.w, h: r.h };
+  }
+
+  _clearGhost() {
+    if (this._ghostEl) { this._ghostEl.removeAttribute('transform'); this._ghostEl = null; }
+  }
+
+  /**
+   * Раздвинуть поток под место вставки: соседи, которые при перестановке меняют
+   * место, съезжают на размер перетаскиваемого узла вместе с зазором.
+   *
+   * Без этого предпросмотр врал: карточка плыла ПОВЕРХ соседа (сосед оставался
+   * на y=336, а перетаскиваемое рисовалось на y=341 и накрывало его), и правду
+   * говорила только тонкая линия вставки. Смещение считаем сами, а не решателем:
+   * в потоке без переноса строк и с justify:start оно ровно ±(размер + зазор).
+   * Там, где это не так (wrap, justify не start), соседей не двигаем — остаётся
+   * линия вставки, она не соврёт.
+   * @param {object} d жест
+   * @param {object} parent родитель в потоке
+   * @param {object} L нормализованная раскладка родителя
+   * @param {string[]} ordered потоковые соседи без перетаскиваемого
+   * @param {number} index место вставки в пространстве `ordered`
+   */
+  _shiftFlow(d, parent, L, ordered, index) {
+    if (L.wrap || L.justify !== 'start') return;
+    const rect = this.geo.rects[d.id];
+    const pr = this.geo.rects[parent.id];
+    if (!rect) return;
+    const horiz = L.mode === 'row';
+    const step = (horiz ? rect.w : rect.h) + L.gap;
+    if (!(step > 0)) return;
+    // место самого перетаскиваемого узла в полном потоке
+    const cur = this._flowSiblings(parent, null).indexOf(d.id);
+    if (cur < 0) return;
+    // сосед уступает место (+шаг), если встаёт после вставки, и занимает
+    // освободившееся (−шаг), если перетаскиваемый ушёл из-под него
+    const shiftOf = (j) => ((index <= j && j < cur) ? step : (cur <= j && j < index) ? -step : 0);
+    const moved = [];
+    for (let j = 0; j < ordered.length; j++) {
+      const by = shiftOf(j);
+      if (!by) continue;
+      const el = this._nodeEls.get(ordered[j]);
+      if (!el) continue;
+      el.setAttribute('transform', horiz ? `translate(${r2(by)} 0)` : `translate(0 ${r2(by)})`);
+      moved.push(ordered[j]);
+    }
+    this._shifted = moved;
+    // Линия вставки — по кромке РАЗДВИНУТОЙ щели: считанная по неподвинутому
+    // соседу, она оказывалась под перетаскиваемой карточкой и читалась как
+    // «карточка легла поверх соседа».
+    const prev = index > 0 ? this.geo.rects[ordered[index - 1]] : null;
+    let pos;
+    if (prev) pos = (horiz ? prev.x + prev.w : prev.y + prev.h) + shiftOf(index - 1) + L.gap / 2;
+    else if (pr) pos = horiz ? pr.x + L.padding.l : pr.y + L.padding.t;
+    else return;
+    // поперёк — по содержимому родителя: щель открылась во всю его ширину
+    const c1 = pr ? (horiz ? pr.y + L.padding.t : pr.x + L.padding.l) : (horiz ? rect.y : rect.x);
+    const c2 = pr ? (horiz ? pr.y + pr.h - L.padding.b : pr.x + pr.w - L.padding.r)
+      : (horiz ? rect.y + rect.h : rect.x + rect.w);
+    this._insertion = horiz
+      ? { x1: pos, y1: c1, x2: pos, y2: c2 }
+      : { x1: c1, y1: pos, x2: c2, y2: pos };
+  }
+
+  /** Вернуть раздвинутых соседей на свои места. */
+  _clearShift() {
+    if (!this._shifted || !this._shifted.length) return;
+    for (const id of this._shifted) {
+      const el = this._nodeEls.get(id);
+      if (el) el.removeAttribute('transform');
+    }
+    this._shifted = [];
+  }
+
+  _updateResize(d, w, e) {
+    const r0 = d.rect0;
+    let ww = r0.w;
+    let hh = r0.h;
+    const dx = w.x - d.start.x;
+    const dy = w.y - d.start.y;
+    const h = d.handle;
+    const alt = e.altKey;
+    if (h.includes('e')) ww = r0.w + (alt ? dx * 2 : dx);
+    if (h.includes('w')) ww = r0.w - (alt ? dx * 2 : dx);
+    if (h.includes('s')) hh = r0.h + (alt ? dy * 2 : dy);
+    if (h.includes('n')) hh = r0.h - (alt ? dy * 2 : dy);
+    if (e.shiftKey && h.length === 2 && r0.h > 0) {
+      const ratio = r0.w / r0.h;
+      if (Math.abs(ww - r0.w) >= Math.abs(hh - r0.h)) hh = ww / ratio;
+      else ww = hh * ratio;
+    }
+    // Размер — целые пиксели: дробный уезжал в size.value и потом мозолил глаз
+    // в инспекторе («439.37 × 268.84») при целом числе на бейдже. Округляем сам
+    // размер, а координату выводим из него, чтобы неподвижная кромка (или центр
+    // при Alt) осталась точно на месте и узел не «плыл» на пиксель туда-сюда.
+    const W = Math.max(1, Math.round(ww));
+    const H = Math.max(1, Math.round(hh));
+    let x = r0.x;
+    let y = r0.y;
+    if (alt) {
+      if (h.includes('e') || h.includes('w')) x = r0.x + (r0.w - W) / 2;
+      if (h.includes('n') || h.includes('s')) y = r0.y + (r0.h - H) / 2;
+    } else {
+      if (h.includes('w')) x = r0.x + r0.w - W;
+      if (h.includes('n')) y = r0.y + r0.h - H;
+    }
+    d.preview = { x: r2(x), y: r2(y), w: W, h: H };
+    d.resized = true;   // жест состоялся — теперь его есть что коммитить
+  }
+
+  _onPointerUp(e) {
+    const d = this._drag;
+    this._drag = null;
+    this._cancelPreview();
+    this.el.classList.remove('is-panning');
+    this._guides = [];
+    this._insertion = null;
+    this._marquee = null;
+    try {
+      if (!d) { this._paintUI(); return; }
+      if (d.mode === 'pan') {
+        if (this.opts.onView) this.opts.onView({ zoom: this.view.zoom, pan: { ...this.view.pan } });
+      } else if (d.mode === 'marquee' && isNum(e.clientX)) {
+        const w = this.toWorld(e.clientX, e.clientY);
+        const box = {
+          x1: Math.min(d.start.x, w.x), y1: Math.min(d.start.y, w.y),
+          x2: Math.max(d.start.x, w.x), y2: Math.max(d.start.y, w.y)
+        };
+        const merged = [...new Set((d.base || []).concat(this._marqueePick(box)))];
+        if (merged.length || (d.base || []).length === 0) this._emitSelect(merged);
+      } else if (d.mode === 'move' && d.result) {
+        this._commitMove(d);
+      } else if (d.mode === 'resize' && d.resized && d.preview) {
+        this._dropPreview();   // коммит пойдёт от настоящего документа
+        this._commitResize(d);
+      } else if (d.mode === 'resize' && isNum(e.clientX)) {
+        // нажатие на ручку, не ставшее жестом, доводим как обычный клик: зона
+        // захвата выходит за кромку узла, и там может оказаться сосед. Но само
+        // выделение при этом не теряем — см. _clickThrough(e, id)
+        this._clickThrough(e, d.id);
+      }
+    } catch (err) {
+      this._fail('pointerup', err);
+    }
+    this._dropPreview();   // если предпросмотр остался на сцене — возвращаем настоящий документ
+    this._clearGhost();
+    this._clearShift();
+    this._paintUI();
+  }
+
+  /**
+   * Довести нажатие как обычный клик по холсту. Зовётся, когда жест не состоялся:
+   * нажали на ручку ресайза и отпустили, не сдвинувшись. Правило выбора — то же,
+   * что в _onPointerDown, иначе клик по ручке и клик рядом с ней вели бы себя
+   * по-разному.
+   *
+   * `keepId` — узел, за ручку которого держались. Зона захвата ручки выходит
+   * наружу узла на 13 px (внутрь — только на HANDLE_IN), и видимая точка ручки
+   * стоит ровно на кромке: три её четверти лежат ВНЕ узла. Пробрасывая клик
+   * как есть, мы выделяли то, что там нашлось, — а находился почти всегда
+   * предок (артборд) или пустой холст, и выделение уезжало с узла на «Маршрут
+   * дня» либо снималось совсем. Поэтому пустое место и ПРЕДКА считаем промахом
+   * по ручке и выделение сохраняем; настоящий сосед по-прежнему выделяется —
+   * ради него проброс и сделан.
+   * @param {PointerEvent} e
+   * @param {string} [keepId]
+   */
+  _clickThrough(e, keepId) {
+    // фокус холсту — как при обычном клике: нажатие на ручку его не забирало
+    if (this.el && this.el.focus) this.el.focus({ preventScroll: true });
+    const w = this.toWorld(e.clientX, e.clientY);
+    const hit = this._hitTest(w, e.altKey || e.metaKey || e.ctrlKey);
+    if (keepId && this._missedHandle(hit, keepId)) return;
+    if (!hit) { if (!e.shiftKey) this._emitSelect([]); return; }
+    const sel = (this.state.selection || []).slice();
+    if (e.shiftKey) {
+      this._emitSelect(sel.includes(hit.id) ? sel.filter((i) => i !== hit.id) : sel.concat(hit.id));
+    } else if (!sel.includes(hit.id)) {
+      this._emitSelect([hit.id]);
+    }
+    this._setActiveArtboardFor(hit.id);
+  }
+
+  /**
+   * Промах по ручке: под курсором либо ничего, либо сам узел, либо его предок —
+   * то есть ничего такого, за чем человек мог целиться, отпуская ручку.
+   * @param {object|null} hit @param {string} id
+   * @returns {boolean}
+   */
+  _missedHandle(hit, id) {
+    if (!hit || hit.id === id) return true;
+    for (const p of ancestors(this.doc, id)) if (p.id === hit.id) return true;
+    return false;
+  }
+
+  _commitMove(d) {
+    const doc = this.doc;
+    const node = doc.nodes[d.id];
+    if (!node) return;
+    const res = d.result;
+    const name = displayName(doc, node);
+    if (res.kind === 'move') {
+      const parentNode = doc.nodes[res.parent];
+      if (!parentNode) return;
+      // «порядок не изменился» сверяем в потоковом пространстве: в полном массиве
+      // индекс сдвинут на каждого отсоединённого ребёнка левее цели, и сравнение
+      // там то молча отменяло жест, то пропускало лишний
+      const cur = this._flowSiblings(parentNode, null).indexOf(d.id);
+      if (cur === res.index) { this._clearGhost(); return; }
+      // перевод в полное пространство: ops.move вставляет в children без самого
+      // узла — значит и место считаем в списке без него
+      const ordered = this._flowSiblings(parentNode, d.id);
+      const rest = (parentNode.children || []).filter((id) => id !== d.id);
+      const at = res.index >= ordered.length ? rest.length : rest.indexOf(ordered[res.index]);
+      this._commit([ops.move(d.id, res.parent, at < 0 ? rest.length : at)], `Переставить «${name}»`);
+      return;
+    }
+    if (res.kind === 'pos-canvas') {
+      this._commit([ops.set(d.id, 'pos', { x: r2(res.x), y: r2(res.y) })], `Сдвинуть «${name}»`);
+      return;
+    }
+    const parent = doc.nodes[node.parent];
+    const pr = this.geo.rects[parent.id];
+    if (!pr) return;
+    if (res.kind === 'pos') {
+      const L = normalizeLayout(parent.layout);
+      this._commit([ops.set(d.id, 'pos', {
+        x: r2(res.x - pr.x - L.padding.l), y: r2(res.y - pr.y - L.padding.t)
+      })], `Сдвинуть «${name}»`);
+    } else {
+      const rect = this.geo.rects[d.id];
+      this._commit([ops.set(d.id, 'override', {
+        x: r2(res.x - pr.x), y: r2(res.y - pr.y), w: r2(rect.w), h: r2(rect.h)
+      })], node.override ? `Сдвинуть «${name}»` : `Отсоединить «${name}»`);
+    }
+  }
+
+  /**
+   * Операции, которыми жест ресайза ложится в документ. Один код на предпросмотр
+   * и на коммит — иначе живой предпросмотр показывал бы не то, что получится.
+   * @returns {object[]}
+   */
+  _resizeOps(d) {
+    const doc = this.doc;
+    const node = doc && doc.nodes ? doc.nodes[d.id] : null;
+    if (!node || !d.preview) return [];
+    const p = d.preview;
+    const list = [];
+    if (node.override) {
+      const parent = doc.nodes[node.parent];
+      const pr = (parent && this.geo.rects[parent.id]) || { x: 0, y: 0 };
+      list.push(ops.set(d.id, 'override', { x: r2(p.x - pr.x), y: r2(p.y - pr.y), w: r2(p.w), h: r2(p.h) }));
+    } else {
+      // фиксируем только ту ось, за которую тянули. Раньше ставились обе, и жест
+      // за одну кромку молча превращал `fill`/`hug` второй оси в `fixed`: на экране
+      // в этот момент ничего не менялось, а макет ломался позже — при смене текста,
+      // ширины артборда или отступов. `_updateResize` нетронутую ось и так не меняет,
+      // так что писать её нечего. Углы (и Shift+угол) трогают обе — условия сойдутся сами.
+      const h = (typeof d.handle === 'string' && d.handle) || 'nwse';   // ручка неизвестна — как раньше, обе оси
+      if (h.includes('e') || h.includes('w')) list.push(ops.set(d.id, 'size.w', { mode: 'fixed', value: r2(p.w) }));
+      if (h.includes('n') || h.includes('s')) list.push(ops.set(d.id, 'size.h', { mode: 'fixed', value: r2(p.h) }));
+      const parent = doc.nodes[node.parent];
+      const moved = Math.abs(p.x - d.rect0.x) > 0.5 || Math.abs(p.y - d.rect0.y) > 0.5;
+      if (moved && parent) {
+        const pr = this.geo.rects[parent.id] || { x: 0, y: 0 };
+        const L = normalizeLayout(parent.layout);
+        if (parent.id === doc.root) list.push(ops.set(d.id, 'pos', { x: r2(p.x), y: r2(p.y) }));
+        else if (L.mode === 'none') {
+          list.push(ops.set(d.id, 'pos', { x: r2(p.x - pr.x - L.padding.l), y: r2(p.y - pr.y - L.padding.t) }));
+        }
+      }
+    }
+    return list;
+  }
+
+  _commitResize(d) {
+    const node = this.doc.nodes[d.id];
+    if (!node) return;
+    const list = this._resizeOps(d);
+    this._commit(list, `Размер «${displayName(this.doc, node)}»`);
+  }
+
+  /* --------------------- живой предпросмотр ресайза --------------------- */
+
+  /** Опции решателя: если оболочка дала свой измеритель, считаем им же. */
+  _solveOpts() {
+    return typeof this.opts.measureText === 'function' ? { measureText: this.opts.measureText } : undefined;
+  }
+
+  /**
+   * Пересчитать документ под текущий жест и перерисовать содержимое — один раз
+   * за кадр. Решатель чистый, документ не меняется: применяем те же операции,
+   * что уйдут в коммит, к копии и рисуем её. Так при растягивании фрейма
+   * содержимое переливается сразу, а не после отпускания.
+   */
+  _schedulePreview() {
+    if (this._dead || this._previewFrame) return;
+    const run = () => { this._previewFrame = null; this._paintPreview(); };
+    if (typeof requestAnimationFrame === 'function') this._previewFrame = requestAnimationFrame(run);
+    else run();
+  }
+
+  /** Снять запланированный кадр предпросмотра. */
+  _cancelPreview() {
+    if (this._previewFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._previewFrame);
+    this._previewFrame = null;
+  }
+
+  /** Вернуть на сцену настоящий документ, если на ней висит предпросмотр. */
+  _dropPreview() {
+    this._cancelPreview();
+    if (!this._preview) return;
+    this._preview = null;
+    // _renderSVG собирает подписи артбордов заново, с кеглем в мировых единицах;
+    // приводит их к экрану (и решает, прятать ли) только _applyView — без него
+    // font-size скакал 20,09 → 11 → 20,09 на каждом жесте
+    if (!this._dead && this.doc) { this._renderSVG(); this._applyView(); }
+  }
+
+  _paintPreview() {
+    const d = this._drag;
+    if (this._dead || !d || d.mode !== 'resize' || !this.doc) return;
+    try {
+      const list = this._resizeOps(d);
+      if (!list.length) return;
+      const res = applyOps(this.doc, list);
+      if (!res || res.error || res.doc === this.doc) return;
+      const geo = solve(res.doc, this._solveOpts());
+      // подменяем сцене документ только на время отрисовки: жест считается от
+      // настоящей геометрии, и _syncGesture не должен увидеть чужие числа
+      const realDoc = this.doc;
+      const realGeo = this.geo;
+      this.doc = res.doc;
+      this.geo = geo;
+      try { this._renderSVG(); } finally { this.doc = realDoc; this.geo = realGeo; }
+      this._applyView();   // подписи артбордов — в экранном кегле, см. _dropPreview
+      this._preview = { id: d.id, version: res.doc.version };
+    } catch (e) {
+      this._preview = null;
+      this._fail('preview', e);
+    }
+  }
+
+  /* --------------------------- инлайн-правка текста --------------------------- */
+
+  /**
+   * Двойной клик. SPEC §1.5 обещает «двойной клик по тексту — инлайн-правка»,
+   * поэтому сначала смотрим, текст ли под курсором самый глубокий узел: если да,
+   * правку открываем сразу. Раньше двойной клик просто опускался на один уровень
+   * за раз, и по замеру демо-документа с первого раза открывался один текст из
+   * 49, а 36 — только с третьего. Пошаговое углубление осталось за Alt и
+   * Cmd/Ctrl-кликом и за двойным кликом по нетекстовому узлу.
+   */
+  _onDblClick(e) {
+    const w = this.toWorld(e.clientX, e.clientY);
+    const deep = this._topUnder(w);
+    const hit = (deep && deep.type === 'text') ? deep : this._hitTest(w, true);
+    if (!hit) return;
+    this._emitSelect([hit.id]);
+    this._setActiveArtboardFor(hit.id);
+    if (hit.type === 'text') this._startEdit(hit);
+  }
+
+  _positionEditor() {
+    const ed = this._editing;
+    if (!ed) return;
+    const sr = this._screenRect(ed.id);
+    if (!sr) return;
+    if (ed.hint) {
+      // над верхней кромкой: редактор растёт вниз по мере набора и подсказку
+      // под собой похоронил бы. Если сверху нет места — уводим под нижнюю.
+      // Высота у подсказки та же, что у бейджа: 10px/1.3 плюс отбивки 2+2
+      const hw = editHintWidth();
+      const vw = this.el && (this._vp || isNum(this.el.clientWidth)) ? this.vw : Infinity;
+      const above = sr.y - BADGE_H - 3;
+      const y = above >= 2 ? above : sr.y + sr.h + 3;
+      ed.hint.style.left = r2(clamp(sr.x, 2, Math.max(2, vw - hw - 2))) + 'px';
+      ed.hint.style.top = r2(y) + 'px';
+    }
+    const node = this.doc.nodes[ed.id];
+    const style = resolveTextStyle(this.doc, node);
+    const z = this.view.zoom;
+    Object.assign(ed.el.style, {
+      left: r2(sr.x) + 'px', top: r2(sr.y) + 'px',
+      minWidth: r2(Math.max(24, sr.w)) + 'px', minHeight: r2(sr.h) + 'px',
+      fontFamily: style.fontFamily,
+      fontSize: r2(style.fontSize * z) + 'px',
+      fontWeight: String(style.fontWeight),
+      lineHeight: r2(style.lineHeight * z) + 'px',
+      letterSpacing: r2((style.letterSpacing || 0) * z) + 'px',
+      color: resolveColor(this.doc, node.color) || '#14161C',
+      textAlign: node.align === 'center' ? 'center' : node.align === 'right' ? 'right' : 'left'
+    });
+  }
+
+  /**
+   * Открыть правку текста поверх узла.
+   *
+   * «Готово» — это Enter: он применяет правку (Shift+Enter переносит строку,
+   * Ctrl/Cmd+Enter оставлен прошлым кругам). Esc отменяет и в историю не пишет —
+   * поэтому об обеих клавишах сказано заранее, подписью у редактора: раньше
+   * голый Enter не делал ничего, а Esc молча стирал набранное.
+   *
+   * Уход фокуса за пределы редактора — тоже «готово». Щёлкнув в командную
+   * строку, человек оставлял на макете висящее поле ввода, а правка ждала
+   * возврата на холст: коммит случался только по нажатию в самой сцене.
+   */
+  _startEdit(node) {
+    if (this._editing) this._commitEdit();
+    const el = document.createElement('div');
+    el.className = 'imago-editor';
+    el.contentEditable = 'true';
+    el.spellcheck = false;
+    el.textContent = node.characters || '';
+    el.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      // набор через IME: Enter подтверждает подсказку словаря, а не правку
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape') { e.preventDefault(); this._cancelEdit(); }
+      else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._commitEdit(); }
+    });
+    el.addEventListener('focusout', (e) => {
+      // редактор уже закрыт (или закрывается) — коммитить нечего
+      if (!this._editing || this._editing.el !== el) return;
+      const to = e && e.relatedTarget;
+      if (to && (to === el || (el.contains && el.contains(to)))) return;   // фокус остался внутри
+      this._commitEdit();
+    });
+    const hint = document.createElement('div');
+    hint.className = 'imago-editor-hint';
+    hint.textContent = EDIT_HINT;
+    this.ui.appendChild(el);
+    this.ui.appendChild(hint);
+    this._editing = { id: node.id, el, hint, original: node.characters || '' };
+    this._positionEditor();
+    el.focus();
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) { /* выделение не критично */ }
+  }
+
+  _closeEditor() {
+    const ed = this._editing;
+    this._editing = null;
+    if (ed && ed.el.parentNode) ed.el.parentNode.removeChild(ed.el);
+    if (ed && ed.hint && ed.hint.parentNode) ed.hint.parentNode.removeChild(ed.hint);
+    this.el.focus({ preventScroll: true });
+    return ed;
+  }
+
+  _cancelEdit() { this._closeEditor(); this._paintUI(); }
+
+  _commitEdit() {
+    const ed = this._editing;
+    if (!ed) return;
+    const raw = (ed.el.innerText || '').replace(/\r/g, '').replace(/\n+$/, '');
+    // Неразрывные пробелы. contenteditable ставит их сам — но только там, где
+    // обычный пробел схлопнулся бы: в конце строки и вторым подряд. Вот такие и
+    // возвращаем в обычные: человек набирал именно пробел. А стоящий между
+    // словами и цифрами оставляем как есть — там он осмысленный («1 240 ₽»),
+    // и правка съедала его молча: потерю замечали потом, по переносу строки в
+    // неудачном месте.
+    const value = raw.replace(/\u00a0/g, (m, i, str) => {
+      const prev = str[i - 1];
+      const next = str[i + 1];
+      const edge = prev === undefined || next === undefined || prev === '\n' || next === '\n';
+      const twin = prev === ' ' || next === ' ' || prev === '\u00a0' || next === '\u00a0';
+      return edge || twin ? ' ' : '\u00a0';
+    });
+    this._closeEditor();
+    const node = this.doc && this.doc.nodes ? this.doc.nodes[ed.id] : null;
+    if (!node) {
+      // узел исчез между открытием редактора и коммитом: писать некуда
+      logOnce('stage:edit-lost', `Stage: узел «${ed.id}» не найден — правка текста отброшена`);
+      this._paintUI();
+      return;
+    }
+    if (value !== ed.original) {
+      this._commit([ops.set(ed.id, 'characters', value)], `Текст «${displayName(this.doc, node)}»`);
+    }
+    this._paintUI();
+  }
+
+  /* ------------------------------ клавиатура ------------------------------ */
+
+  _onKey(e) {
+    const t = e.target;
+    const inEditor = this._editing && (t === this._editing.el || (this._editing.el.contains && this._editing.el.contains(t)));
+    if (!inEditor && t && t.closest && t.closest('input,textarea,select,[contenteditable="true"]')) return;
+    if (inEditor) return; // редактор обрабатывает свои клавиши сам
+    const meta = e.ctrlKey || e.metaKey;
+    const sel = (this.state.selection || []).filter((id) => this.doc && this.doc.nodes[id]);
+    if (e.code === 'Space' && !meta) {
+      this._space = true;
+      this.el.classList.add('is-space');
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'Escape') {
+      if (this._editing) this._cancelEdit();
+      else this._emitSelect([]);
+      return;
+    }
+    if (meta && (e.key === 'z' || e.key === 'Z' || e.code === 'KeyZ')) {
+      e.preventDefault();
+      const fn = e.shiftKey ? this.opts.onRedo : this.opts.onUndo;
+      if (fn) { try { fn(); } catch (err) { this._fail('undo', err); } }
+      else logOnce('stage:noundo', 'Stage: opts.onUndo/onRedo не заданы');
+      return;
+    }
+    if (meta && (e.key === 'd' || e.code === 'KeyD')) { e.preventDefault(); this._duplicate(sel); return; }
+    if (meta && (e.key === 'a' || e.code === 'KeyA')) {
+      e.preventDefault();
+      // тем же правилом, что и рамка: рамка «во весь мир». Так «выделить всё»
+      // и рамка выбора всегда дают согласованное множество — без предков
+      // вместе с потомками и без скрытых/запертых узлов
+      this._emitSelect(this._marqueePick({ x1: -Infinity, y1: -Infinity, x2: Infinity, y2: Infinity }));
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && sel.length) {
+      e.preventDefault();
+      const roots = sel.filter((id) => !ancestors(this.doc, id).some((a) => sel.includes(a.id)));
+      this._commit(roots.map((id) => ops.remove(id)), roots.length > 1 ? 'Удалить узлы' : 'Удалить узел');
+      this._emitSelect([]);
+      return;
+    }
+    if (e.key === 'Enter' && sel.length === 1) {
+      const node = this.doc.nodes[sel[0]];
+      if (node && node.type === 'text') { e.preventDefault(); this._startEdit(node); return; }
+    }
+    const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    if (arrows[e.key] && sel.length) {
+      e.preventDefault();
+      const k = e.shiftKey ? 10 : 1;
+      const dx = arrows[e.key][0] * k;
+      const dy = arrows[e.key][1] * k;
+      const list = [];
+      // без spread: он здесь короткий (операция на узел), но это та же привычка,
+      // которой мы уже роняли стек на большом выделении
+      for (const id of sel) for (const op of this._nudgeOps(id, dx, dy)) list.push(op);
+      this._commit(list, 'Сдвиг стрелками');
+    }
+  }
+
+  _nudgeOps(id, dx, dy) {
+    const doc = this.doc;
+    const node = doc.nodes[id];
+    if (!node) return [];
+    const parent = doc.nodes[node.parent];
+    if (!parent || parent.id === doc.root) {
+      const pos = nodePos(node);
+      return [ops.set(id, 'pos', { x: r2(pos.x + dx), y: r2(pos.y + dy) })];
+    }
+    if (node.override) {
+      const o = node.override;
+      return [ops.set(id, 'override', { ...o, x: r2(o.x + dx), y: r2(o.y + dy) })];
+    }
+    const L = normalizeLayout(parent.layout);
+    if (L.mode === 'none') {
+      const pos = nodePos(node);
+      return [ops.set(id, 'pos', { x: r2(pos.x + dx), y: r2(pos.y + dy) })];
+    }
+    const rect = this.geo.rects[id];
+    const pr = this.geo.rects[parent.id];
+    if (!rect || !pr) return [];
+    return [ops.set(id, 'override', {
+      x: r2(rect.x - pr.x + dx), y: r2(rect.y - pr.y + dy), w: r2(rect.w), h: r2(rect.h)
+    })];
+  }
+
+  _duplicate(sel) {
+    if (!sel.length) return;
+    const doc = this.doc;
+    const list = [];
+    const newIds = [];
+    // потомок выделенного узла копируется вместе с ним — отдельно его дублировать
+    // значит получить подпись дважды. Тот же отбор, что у удаления.
+    const roots = sel.filter((id) => !ancestors(doc, id).some((a) => sel.includes(a.id)));
+    for (const id of roots) {
+      const node = doc.nodes[id];
+      if (!node || !node.parent) continue;
+      const clone = cloneSubtree(doc, id);
+      if (!clone.rootId) continue;
+      const parent = doc.nodes[node.parent];
+      const index = (parent.children || []).indexOf(id) + 1;
+      clone.nodes.forEach((n, i) => {
+        const flat = { ...n };
+        if (flat.children) flat.children = [];
+        if (i === 0) {
+          flat.name = (flat.name || 'Узел') + ' копия';
+          const L = parent ? normalizeLayout(parent.layout) : DEFAULT_LAYOUT;
+          if (parent.id === doc.root || L.mode === 'none') {
+            const pos = flat.pos || { x: 0, y: 0 };
+            flat.pos = { x: r2(pos.x + 16), y: r2(pos.y + 16) };
+          } else if (flat.override) {
+            flat.override = { ...flat.override, x: r2(flat.override.x + 16), y: r2(flat.override.y + 16) };
+          }
+          list.push(ops.create(flat, index));
+          newIds.push(flat.id);
+        } else {
+          list.push(ops.create(flat));
+        }
+      });
+    }
+    this._commit(list, 'Дублировать');
+    if (newIds.length) this._emitSelect(newIds);
+  }
+}
+
+export {
+  createDoc, applyOps, invertOps, solve, validate, Stage, ops,
+  resetMeasureCache, measureEpoch, onMeasureEpoch,
+  hashGeometry, nodeById, ancestors, isArtboard, artboards, subtreeIds, cloneSubtree,
+  resolveTarget, resolveColor, resolveTextStyle, contrastRatio, sizeSpec, normalizeLayout,
+  placeholderName, displayName,
+  NODE_TYPES, DEFAULT_TOKENS
+};
