@@ -30,9 +30,13 @@
       <button class="btn ghost icon small" id="btn-rail-close" title="Свернуть панель" aria-label="Свернуть панель"><span class="i" data-icon="chevron-left"></span></button>
     </div>
     <div class="layers" id="layers" role="tree" aria-label="Слои документа"></div>
-    <div class="rail-foot">
-      <button class="btn subtle wide with-icon" id="btn-add-artboard"><span class="i" data-icon="artboard-add"></span><span>Новый артборд</span></button>
-    </div>
+    <!-- Круг 18, п.3. Правая кромка рельса — тяга: ширина меняется мышью и стрелками,
+         запоминается между сеансами. Это орган управления, поэтому role="separator"
+         с aria-valuenow, а не декоративная полоска. -->
+    <div class="rail-grip" id="rail-grip" role="separator" aria-orientation="vertical"
+         tabindex="0" aria-label="Ширина панели слоёв"
+         title="Потяните, чтобы изменить ширину панели слоёв. Стрелки — с клавиатуры, двойной щелчок — сброс"
+         aria-valuemin="168" aria-valuemax="420" aria-valuenow="208"></div>
   </aside>
 
   <main class="canvas-wrap">
@@ -47,7 +51,7 @@
           <span class="i" data-icon="arrow-down"></span>
           <span class="empty-point-text">командная строка внизу</span>
         </div>
-        <button class="btn ghost small with-icon" id="btn-empty-artboard"><span class="i" data-icon="plus"></span><span>Пустой артборд</span></button>
+        <button class="btn ghost small with-icon" id="btn-empty-artboard"><span class="i" data-icon="plus"></span><span>Пустая доска</span></button>
       </div>
     </div>
 
@@ -56,14 +60,25 @@
       <span class="peekbar-text" id="peekbar-text"></span>
     </div>
 
+    <!-- Круг 18, п.2. Ход работы уехал из зелёного блока в доке наверх справа:
+         пока агент работает, список живёт, по окончании гаснет сам. Итог правки
+         остался внизу карточкой — вместе с «Отменить». -->
+    <div class="worklog" id="worklog" role="status" aria-live="polite" hidden>
+      <div class="worklog-head">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="worklog-label" id="work-label">Агент работает</span>
+        <button type="button" class="btn accent stop small worklog-stop" id="btn-work-stop" title="Остановить агента" hidden>Стоп</button>
+      </div>
+      <p class="worklog-detail" id="work-detail"></p>
+      <ol class="worklog-steps" id="work-steps" hidden></ol>
+    </div>
+
     <div class="viewbar" id="viewbar">
       <button class="btn ghost icon" id="btn-zoom-out" aria-label="Уменьшить">−</button>
       <button class="btn ghost zoom" id="btn-zoom">100%</button>
       <button class="btn ghost icon" id="btn-zoom-in" aria-label="Увеличить">+</button>
       <span class="sep"></span>
       <button class="btn ghost" id="btn-fit" title="Вписать в окно">Вписать</button>
-      <span class="sep"></span>
-      <button class="btn ghost icon" id="btn-new-artboard" title="Новый артборд" aria-label="Новый артборд"><span class="i" data-icon="artboard-add"></span></button>
     </div>
 
     <div class="dock" id="dock">
@@ -76,20 +91,14 @@
                многоточие и читалась как успех (круг 16, п.2). -->
           <span class="dockmsg-issue" id="dockmsg-issue" hidden></span>
           <span class="dockmsg-note" id="dockmsg-note"></span>
+          <!-- Круг 18, п.1. Переспрос отвечается прямо здесь: три готовых команды
+               кнопками и четвёртая строка «свой вариант» — поле, в которое человек
+               печатает, не ища глазами командную строку. -->
+          <div class="dockmsg-ask" id="dockmsg-ask" hidden></div>
           <div class="dockmsg-chips" id="dockmsg-chips"></div>
         </div>
         <div class="dockmsg-actions" id="dockmsg-actions"></div>
         <button type="button" class="btn ghost icon small" id="btn-msg-close" aria-label="Скрыть сообщение"><span class="i" data-icon="close"></span></button>
-      </div>
-
-      <div class="stagebar" id="stagebar" role="status" aria-live="polite" hidden>
-        <span class="spinner" aria-hidden="true"></span>
-        <span class="stage-body">
-          <span class="stage-label" id="stage-label">Агент думает</span>
-          <span class="stage-detail" id="stage-detail"></span>
-          <ol class="stage-steps" id="stage-steps" hidden></ol>
-        </span>
-        <button type="button" class="btn accent stop small stage-stop" id="btn-stage-stop" title="Остановить агента" hidden>Стоп</button>
       </div>
 
       <div class="hints" id="hints"></div>
@@ -109,6 +118,18 @@
         </div>
       </form>
 
+      <!-- Круг 18, п.4. Голосовая сессия: командная строка и подсказки скрыты целиком,
+           на экране — значок включённого микрофона в правом нижнем углу и тихий текст
+           над ним. Блок лежит в доке, поэтому не спорит за место с карточкой итога и
+           не вылезает на рельс с инспектором. -->
+      <div class="voicebar" id="voicebar" hidden>
+        <p class="voice-said" id="voice-said" role="status" aria-live="polite"></p>
+        <button type="button" class="voice-mic" id="btn-voice-off"
+                aria-label="Микрофон включён. Нажмите, чтобы выключить и вернуться к печати"
+                title="Микрофон включён — нажмите, чтобы выключить (клавиша V или Esc)">
+          <span class="i" data-icon="mic"></span>
+        </button>
+      </div>
     </div>
   </main>
 

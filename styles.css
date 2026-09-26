@@ -257,6 +257,17 @@ button, input, textarea { font: inherit; color: inherit; }
   border: 1px solid var(--line); border-radius: 999px; padding: 0 5px;
 }
 .tab.pick .i { flex: none; color: var(--muted); }
+/* Круг 18, п.5. «Новую доску» человек искал и не находил: кнопка стояла в подвале
+   рельса (под прокручиваемым списком), в панели вида (а та на узком холсте прячет её
+   совсем) и в пустом состоянии. Теперь «+» стоит там, где человек и так переключает
+   доски, — в ряду вкладок. min-width у вкладок 72 px, у «+» его быть не должно. */
+.tab.add {
+  min-width: 0; max-width: none; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 26px; padding: 0; color: var(--muted);
+  border-color: var(--line-soft);
+}
+.tab.add:hover { color: var(--accent); border-color: var(--accent); background: var(--panel-2); }
 .tab:hover { color: var(--text); background: var(--panel-2); }
 .tab[aria-current="true"] { color: var(--text); border-color: var(--line); background: var(--panel-2); }
 
@@ -293,19 +304,45 @@ button, input, textarea { font: inherit; color: inherit; }
 
 .rail {
   grid-area: rail;
+  position: relative;   /* круг 18, п.3: в рельсе живёт ручка ширины */
   background: var(--panel-rail);
   border-right: 1px solid var(--line);
   display: flex; flex-direction: column; min-width: 0; overflow: hidden;
 }
 .app[data-rail="off"] .rail { border-right: none; }
+/* Правое поле в 12 px — место под ручку: полоса прокрутки слоёв не должна уходить
+   под неё, иначе за список нельзя взяться мышью (круг 18, п.3). */
 .rail-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 8px 6px 14px;
+  padding: 10px 20px 6px 14px;
 }
 .rail-title { font-size: var(--t-xs); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
-.layers { flex: 1; overflow: auto; padding: 2px 6px 8px; }
-.rail-foot { padding: 8px; border-top: 1px solid var(--line-soft); }
+.layers { flex: 1; overflow: auto; padding: 2px 6px 8px; margin-right: 12px; }
 .layers-empty { color: var(--muted); font-size: var(--t-sm); padding: 8px 10px; }
+
+/* Круг 18, п.3. Ширина рельса была прибита гвоздём (--rail-w: 208px), и длинные имена
+   слоёв — «Показатель · Правок от агента» — обрезались всегда: при 208 px из 39 строк
+   демо-документа резались 13, при 280 не резалась ни одна. Правая кромка стала тягой.
+   Пределы: 168 px — ниже рельс перестаёт называть сами доски («Маршрут дня» режется
+   уже на 140 px), 420 px — выше нечего показывать (на 280 px обрезанных имён не
+   остаётся) и холст начинает страдать; верх ещё раз ограничен окном в app.js, чтобы
+   бюджет колонок круга 16 остался верным. */
+.rail-grip {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 12px; z-index: 3;
+  cursor: col-resize; touch-action: none;
+  background: transparent;
+}
+.rail-grip::after {
+  content: ''; position: absolute; top: 0; bottom: 0; right: 5px; width: 2px;
+  border-radius: 2px; background: transparent; transition: background .12s ease;
+}
+.rail-grip:hover::after, .rail-grip[data-drag="on"]::after { background: var(--accent); }
+.rail-grip:focus-visible { outline: none; }
+.rail-grip:focus-visible::after { background: var(--accent); width: 3px; right: 4px; }
+/* Шторка едет поверх холста своей шириной, и тянуть её кромку нечего: бюджет колонок
+   в этом режиме рельс не занимает (круг 16, п.1). */
+.app[data-rail-mode="drawer"] .rail-grip,
+.app[data-rail="off"] .rail-grip { display: none; }
 
 /* Рельс — вспомогательный слой: приглушённый, без фоновой подсветки при наведении. */
 /* Круг 16, п.7. Две пилюли («вручную» + «!») занимали 78 из 195 px строки, и имени
@@ -396,37 +433,53 @@ button, input, textarea { font: inherit; color: inherit; }
 }
 .dock > * { pointer-events: auto; }
 
-/* Лента стадий и ответ агента живут там же, где человек печатал, и той же шириной. */
-.stagebar {
-  width: min(var(--dock-w), 100%);
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 14px; border-radius: 12px;
-  background: var(--panel);
+/* Круг 18, п.2. Ход работы уехал из дока наверх справа: пока агент работает, там
+   живёт список, и он гаснет сам, когда работа кончилась. Внизу остаётся только итог
+   правки — карточка с «Отменить», которая сама не исчезает. Блок стоит ПОД панелью
+   вида (та занимает верхние 34 px), поэтому масштаб и «Вписать» остаются доступны. */
+.worklog {
+  position: absolute; top: 54px; right: 12px; z-index: 7;
+  width: min(320px, calc(100% - 24px));
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
   border: 1px solid color-mix(in srgb, var(--agent) 45%, var(--line-strong));
   box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(8px);
+  animation: worklog-in .16s ease;
 }
-.stage-body { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1; flex-wrap: wrap; }
-.stage-label { font-size: var(--t-md); font-weight: 500; white-space: nowrap; }
-.stage-detail { font-size: var(--t-sm); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Шаги плана: что агент собирается сделать, видно, пока он это делает (круг 11, п.17). */
-.stage-steps {
-  flex: 1 0 100%; margin: 2px 0 0; padding: 0; list-style: none;
-  display: flex; flex-wrap: wrap; gap: 2px 12px;
-  font-size: var(--t-xs); color: var(--muted); min-width: 0;
+/* Список именно исчезающий: по окончании работы оболочка ставит data-done и блок
+   уходит сам — человеку не нужно его закрывать. */
+.worklog[data-done="on"] { animation: worklog-out .5s ease forwards; pointer-events: none; }
+@keyframes worklog-in { from { opacity: 0; transform: translateY(-6px); } }
+@keyframes worklog-out { to { opacity: 0; transform: translateY(-6px); } }
+.worklog-head { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.worklog-label { font-size: var(--t-md); font-weight: 500; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.worklog-stop { flex: none; align-self: flex-start; font-weight: 600; }
+.worklog-detail {
+  margin: 0; font-size: var(--t-sm); color: var(--muted); line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.stage-steps li {
-  display: flex; align-items: center; gap: 6px; min-width: 0;
+.worklog-detail:empty { display: none; }
+/* Шаги плана: каждый появляется своей строкой и гаснет вместе со всем списком. */
+.worklog-steps {
+  margin: 2px 0 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: var(--t-xs); color: var(--muted);
+}
+.worklog-steps li {
+  display: flex; align-items: baseline; gap: 7px; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  animation: worklog-step .2s ease;
 }
-.stage-steps li::before {
-  content: ''; width: 4px; height: 4px; border-radius: 50%;
+@keyframes worklog-step { from { opacity: 0; transform: translateX(4px); } }
+.worklog-steps li::before {
+  content: ''; width: 4px; height: 4px; border-radius: 50%; align-self: center;
   background: color-mix(in srgb, var(--agent) 70%, var(--line-strong)); flex: none;
 }
-/* «Стоп» живёт рядом со строкой состояния: главная кнопка теперь отправляет команду
-   даже во время работы агента (круг 11, п.6). Безрамочным и приглушённым он читался
-   как подпись рядом с текстом стадии, а не как единственный способ остановить агента, —
-   поэтому вид тот же красный, что у главной кнопки в режиме «Стоп» (круг 13, п.6). */
-.stage-stop { flex: none; margin-left: auto; align-self: center; font-weight: 600; }
+/* Шаг, до которого работа уже дошла, гаснет: список читается сверху вниз. */
+.worklog-steps li[data-done="on"] { opacity: .45; }
+.worklog-steps li[data-done="on"]::before { background: var(--agent); }
 
 /* Сообщение агента: результат, ошибка, ответ, переспрос. */
 .dockmsg {
@@ -498,6 +551,32 @@ button, input, textarea { font: inherit; color: inherit; }
 .dockmsg[data-kind="answer"] .dockmsg-text, .dockmsg[data-kind="question"] .dockmsg-text {
   font-family: var(--display); font-size: var(--t-xl); line-height: 1.25;
 }
+/* Круг 18, п.1. Ответ на переспрос: три готовых команды и четвёртая строка «свой
+   вариант». Столбцом, а не рядом: на 400 px четыре кнопки в ряд не встают, а готовая
+   команда — это фраза, а не ярлык, и обрезать её многоточием нельзя. */
+.dockmsg-ask { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.dockmsg-ask[hidden] { display: none; }
+.ask-option {
+  cursor: pointer; text-align: left; font: inherit; font-size: var(--t-md);
+  color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--line-strong); border-radius: 10px;
+  padding: 7px 11px; min-height: 34px; overflow-wrap: anywhere;
+}
+.ask-option:hover { border-color: var(--accent); color: var(--accent); }
+.ask-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* «Свой вариант» — не такая же команда, как три над ней: пунктир говорит, что здесь
+   отвечает человек, а не выбирает готовое. */
+.ask-own { border-style: dashed; color: var(--muted); }
+.ask-own:hover { color: var(--accent); }
+.ask-form { display: flex; gap: 6px; align-items: center; }
+.ask-input {
+  flex: 1; min-width: 0; font: inherit; font-size: var(--t-md); color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--accent); border-radius: 10px;
+  padding: 7px 11px; outline: none;
+}
+.ask-input::placeholder { color: var(--muted); }
+.ask-form .btn { flex: none; }
+
 .msg-chip {
   cursor: pointer; font-size: var(--t-sm); color: var(--text);
   background: var(--panel-2); border: 1px solid var(--line-strong);
@@ -660,6 +739,39 @@ button, input, textarea { font: inherit; color: inherit; }
   background: var(--agent); animation: pulse 1.1s ease-in-out infinite;
 }
 
+/* Круг 18, п.4. Смысл микрофона — не видеть окно ввода. Во время голосовой сессии
+   командная строка и подсказки скрыты целиком: на экране остаётся значок включённого
+   микрофона в правом нижнем углу и тихий текст над ним. Макет при этом ничем не
+   заслонён — ради этого всё и затевалось. */
+.app[data-voice="on"] .commandbar,
+.app[data-voice="on"] .hints { display: none; }
+/* Стрелка «командная строка внизу» на пустом холсте показывала бы на пустое место:
+   строки в голосовой сессии нет, и звать к ней нельзя (круг 18, п.4). */
+.app[data-voice="on"] .empty-point { display: none; }
+.voicebar {
+  align-self: flex-end;          /* правый нижний угол холста, а не центр дока */
+  display: flex; align-items: flex-end; gap: 10px;
+  max-width: min(var(--dock-w), 100%);
+}
+.voice-said {
+  margin: 0 0 6px; text-align: right; min-width: 0;
+  font-size: var(--t-md); line-height: 1.35; color: var(--muted);
+  /* тихий шрифт: наговариваемое читается, но не спорит с макетом */
+  text-shadow: 0 1px 8px var(--ink), 0 0 2px var(--ink);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.voice-said:empty { display: none; }
+.voice-mic {
+  width: 52px; height: 52px; flex: none; border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--agent); border: none; color: var(--agent-ink);
+  box-shadow: var(--shadow);
+  animation: mic-ring 1.5s ease-out infinite;
+}
+.voice-mic .i { width: 22px; height: 22px; animation: pulse 1.1s ease-in-out infinite; }
+.voice-mic:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
 .hints {
   display: flex; gap: 6px; justify-content: center; flex-wrap: wrap;
   width: min(var(--dock-w), 100%);
@@ -686,7 +798,7 @@ button, input, textarea { font: inherit; color: inherit; }
 }
 .empty-card > * { pointer-events: auto; }
 /* Подсказка пустого артборда лежит ПОВЕРХ белого листа макета, а красится цветами
-   интерфейса: в тёмной теме «Артборд пуст» давал 1.20:1 на белом. Поэтому у неё
+   интерфейса: в тёмной теме «Доска пуста» давала 1.20:1 на белом. Поэтому у неё
    своя плашка цвета панели — текст снова на своём фоне (15.0:1 и 5.8:1). */
 .empty-state[data-kind="artboard"] .empty-card {
   gap: 8px; padding: 14px 16px;
@@ -1025,7 +1137,7 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 @container canvas (max-width: 520px) {
   /* Панель вида шире холста лезла на рельс и накрывала «Свернуть»: оставляем масштаб
      и «Вписать» — то, без чего вид не вернуть. */
-  .viewbar #btn-zoom-in, .viewbar #btn-zoom-out, .viewbar #btn-new-artboard, .viewbar .sep { display: none; }
+  .viewbar #btn-zoom-in, .viewbar #btn-zoom-out, .viewbar .sep { display: none; }
   .viewbar .btn.zoom { min-width: 46px; }
 }
 @container canvas (max-width: 420px) {
@@ -1035,6 +1147,19 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 
 @media (max-width: 1100px) {
   .app { --insp-w: 252px; }
+}
+
+/* Круг 18, п.2. Тосты остаются там, где были (сверху по центру или у той панели, в
+   которой человек действовал, — решение круга 13, п.10): ход работы и тост говорят
+   о разном. Тост — про уже случившееся и живёт секунды; список — про то, что идёт
+   сейчас, и гаснет вместе с работой. Слить их значило бы дёргать живой список
+   чужими сообщениями. Но пересекаться они не должны: пока список виден, тост по
+   умолчанию сдвигается влево от него. */
+@media (min-width: 901px) {
+  .app[data-work="on"] .toasts { transform: translateX(-50%) translateX(-190px); }
+}
+@media (max-width: 900px) {
+  .app[data-work="on"] .toasts { top: 196px; }
 }
 
 /* узкий экран: рельс и инспектор — накладки поверх холста, холст занимает всю ширину */
@@ -1071,7 +1196,15 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
      Она неизбежно лежит на артборде, поэтому фон непрозрачный: фрост размывал
      текст макета под собой и читался как дефект макета, а не оболочки (п.13). */
   .viewbar { top: 8px; right: 8px; background: var(--panel); backdrop-filter: none; }
-  .viewbar #btn-zoom-in, .viewbar #btn-zoom-out, .viewbar #btn-new-artboard, .viewbar .sep { display: none; }
+  /* Панель вида на узком экране стоит на 8 px и высотой 34 px — список встаёт под ней.
+     Вкладки досок живут в шапке, поэтому список их не закрывает; фон непрозрачный,
+     чтобы текст макета под ним не читался дефектом макета (то же решение, что у
+     панели вида, круг 15, п.13). */
+  .worklog {
+    top: 46px; right: 8px; width: min(288px, calc(100% - 16px));
+    background: var(--panel); backdrop-filter: none;
+  }
+  .viewbar #btn-zoom-in, .viewbar #btn-zoom-out, .viewbar .sep { display: none; }
   .viewbar .btn.zoom { min-width: 46px; }
   .hints { display: none; }
   /* Варианты на узком экране — нижний лист, как инспектор: колонки тут нет. */

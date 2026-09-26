@@ -425,7 +425,9 @@ function isArtboard(doc, idOrNode) {
 function placeholderName(doc, idOrNode) {
   const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
   if (!n) return 'Узел';
-  if (doc && isArtboard(doc, n)) return 'Артборд';
+  // Круг 18: человек называет их досками, и весь интерфейс перешёл на это слово. Имя-заглушку
+  // рисует и холст, и рельс — расходиться им нельзя, поэтому слово меняется здесь, в одном месте.
+  if (doc && isArtboard(doc, n)) return 'Доска';
   return PLACEHOLDER_NAMES[n.type] || 'Узел';
 }
 const PLACEHOLDER_NAMES = {
@@ -499,7 +501,7 @@ const ROLE_PATTERNS = [
   ['table', /таблиц|table|сводк/i],
   ['metric', /показател|метрик|metric|kpi|цифр/i],
   ['caption', /подпис|caption|описан|мелк/i],
-  ['artboard', /артборд|экран|макет|artboard|screen|frame/i]
+  ['artboard', /артборд|доск|экран|макет|artboard|board|screen|frame/i]
 ];
 
 /** Единственный кандидат или null, если их несколько и они равновесны. */

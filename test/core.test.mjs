@@ -3268,11 +3268,12 @@ test('имя-заглушка узла одно на сцену и на обол
     ops.create(frame('grp', 'ab', {}, { w: { mode: 'hug' }, h: { mode: 'hug' } }, { name: '' })),
     ops.create(label('t', 'grp', 'Текст без имени', { name: '' }))
   ]);
-  assert.equal(placeholderName(doc, doc.nodes.ab), 'Артборд', 'артборд — «Артборд», а не «Группа»');
-  assert.equal(placeholderName(doc, doc.nodes.grp), 'Группа', 'фрейм внутри артборда — «Группа»');
+  // круг 18: человек называет их досками, и весь интерфейс перешёл на это слово
+  assert.equal(placeholderName(doc, doc.nodes.ab), 'Доска', 'доска — «Доска», а не «Группа»');
+  assert.equal(placeholderName(doc, doc.nodes.grp), 'Группа', 'фрейм внутри доски — «Группа»');
   assert.equal(placeholderName(doc, 'grp'), 'Группа', 'можно и по id');
   assert.equal(placeholderName(doc, doc.nodes.t), 'Текст');
-  assert.equal(displayName(doc, doc.nodes.ab), 'Артборд', 'без имени — заглушка');
+  assert.equal(displayName(doc, doc.nodes.ab), 'Доска', 'без имени — заглушка');
   assert.equal(displayName(doc, doc.nodes.grp), 'Группа');
   assert.equal(displayName(doc, { id: 'x', type: 'frame', name: 'Карточка встречи' }), 'Карточка встречи');
   assert.equal(placeholderName(null, null), 'Узел', 'мусор на входе не роняет');

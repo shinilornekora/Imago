@@ -19,7 +19,7 @@
  * Новое в контракте:
  *   history           — [{utterance, summary}], до 5 последних обменов (старые первыми);
  *   geo               — уже посчитанная геометрия текущего документа (solve(doc)), чтобы не считать заново;
- *   activeArtboardId  — активный артборд оболочки: область по умолчанию, когда нет выделения;
+ *   activeArtboardId  — активная доска оболочки: область по умолчанию, когда нет выделения;
  *   clarify           — строка-переспрос, когда команда не опознана (ops при этом пуст);
  *   action            — 'undo' | 'redo' | 'variants': это делает оболочка, модель не звалась;
  *   variantsOf        — команда, к которой просят варианты ('' — к предыдущей);
@@ -598,12 +598,14 @@ export const SCHEMAS = {
         steps: { type: 'array', items: { type: 'string' }, maxItems: 6 },
         targets: { type: 'array', items: { type: 'string' }, maxItems: 12 },
         clarify: { type: 'string' },
+        // круг 18: переспрос без вариантов заставлял человека переписывать команду заново
+        clarifyOptions: { type: 'array', items: { type: 'string' } },
         // круг 9, п.4: «в этой модели документа так нельзя» — это ответ, а не авария
         cannot: { type: 'string' },
       },
       required: ['intent', 'title', 'summary', 'steps'],
     },
-    hint: `{ intent: "create"|"edit"|"theme"|"ask"|"clarify"|"refuse", title: string (название работы, БЕЗ прошедшего времени), summary: string, steps: string[] (1-5), targets: string[], clarify?: string (русский переспрос, если intent="clarify"), cannot?: string (почему просьба невыполнима, если intent="refuse") }`,
+    hint: `{ intent: "create"|"edit"|"theme"|"ask"|"clarify"|"refuse", title: string (название работы, БЕЗ прошедшего времени), summary: string, steps: string[] (1-5), targets: string[], clarify?: string (русский переспрос, если intent="clarify"), clarifyOptions?: string[] (РОВНО 3 готовые команды-ответа, если intent="clarify"), cannot?: string (почему просьба невыполнима, если intent="refuse") }`,
     example: {
       intent: 'edit',
       title: 'Крупный заголовок карточки',
@@ -1270,7 +1272,7 @@ function header(ctx, role) {
   lines.push('ТОКЕНЫ ДОКУМЕНТА');
   lines.push(ctx.tokens);
   lines.push('');
-  lines.push(`ТЕКУЩИЙ ДОКУМЕНТ ЦЕЛИКОМ — все артборды. Область работы: ${ctx.scopeLabel}`);
+  lines.push(`ТЕКУЩИЙ ДОКУМЕНТ ЦЕЛИКОМ — все доски. Область работы: ${ctx.scopeLabel}`);
   lines.push(DIGEST_LEGEND);
   lines.push(ctx.digest);
   if (ctx.checks) {
@@ -1294,19 +1296,26 @@ export const PROMPTS = {
       header(ctx, 'Твоя роль сейчас — планировщик: коротко решить, что именно делать.'),
       '',
       `ВИДЫ ЗАДАЧ
-- create — нужно построить новое САМОСТОЯТЕЛЬНОЕ: экран, артборд, крупный блок целиком.
+- create — нужно построить новое САМОСТОЯТЕЛЬНОЕ: экран, доска, крупный блок целиком.
 - edit — нужно поправить то, что уже есть. Сюда же относится «добавь X в Y»: если новое надо
   ВЛОЖИТЬ в существующий узел («добавь в список пункт», «добавь в шапку кнопку», «добавь под
   заголовком плашку»), это edit с правкой {op:"create", parent:"<узел из выжимки>"} — так новое
   попадёт именно туда, куда просили, а не в конец экрана.
 - theme — нужно поменять оформление документа: цвета, типографику, шкалы (токены). Токены ОБЩИЕ ДЛЯ
-  ВСЕГО документа: это меняет разом ВСЕ артборды, а не тот, что назван в «РАБОТАЕМ С:». Если просят
+  ВСЕГО документа: это меняет разом ВСЕ доски, а не тот, что назван в «РАБОТАЕМ С:». Если просят
   оформление ОДНОГО экрана («сделай только этот экран тёмным»), theme не годится: это либо edit
   (fill и color у узлов этого экрана), либо refuse — реши по существу просьбы.
 - ask — у пользователя вопрос о макете, менять ничего не надо.
 - clarify — команда не опознаётся как осмысленная правка макета: недослышанная или оборванная фраза
   («ну это самое», «сделай», «а», «короче»), просьба не про макет, или непонятно, к чему её отнести.
-  Тогда положи в clarify короткий русский переспрос: чего именно не хватает («Что именно поменять — заголовок, кнопку?»).
+  Тогда положи в clarify короткий русский переспрос: чего именно не хватает («Что именно поменять — заголовок, кнопку?»),
+  а в clarifyOptions — РОВНО ТРИ готовых ответа. Требования к ним жёсткие, иначе они бесполезны:
+  • каждый — ЗАКОНЧЕННАЯ команда, которую можно выполнить как есть («сделай заголовок экрана крупнее»),
+    а не обрывок («заголовок») и не вопрос. Человек выберет один и не будет ничего дописывать;
+  • имена слоёв бери ИЗ ВЫЖИМКИ документа, дословно. Не выдумывай слоёв, которых в ней нет;
+  • три РАЗНЫХ толкования сказанного, а не три оттенка одного: если непонятно, о каком слое речь, —
+    три разных слоя; если непонятно, что с ним делать, — три разных правки;
+  • до 60 знаков, без кавычек по краям, строчными, как человек сказал бы вслух.
   Лучше переспросить, чем угадать и построить лишнее: команда пришла голосом и могла недослышаться.
 - refuse — команда ПОНЯТНА, но в этой модели документа невыполнима: просят поворот, тень, градиент,
   размытие, анимацию, ссылку, видимость, z-порядок — ничего такого у узлов нет. Тогда положи в cannot
@@ -1382,10 +1391,10 @@ export const PROMPTS = {
       ctx.placement ? `КУДА КЛАДЁМ НОВОЕ, ЕСЛИ ПРАВКА ЕГО СОЗДАЁТ (это посчитало приложение)\n${ctx.placement}\n` : '',
       `ПРАВИЛА ПРАВОК
 - Меняй только то, о чём просят. Ничего не переписывай «заодно».
-- Правь ТОЛЬКО область работы (строка «РАБОТАЕМ С:» в выжимке). Остальные артборды — источник образцов:
+- Правь ТОЛЬКО область работы (строка «РАБОТАЕМ С:» в выжимке). Остальные доски — источник образцов:
   по ним сверяй оформление и с них копируй («как в сводке недели», «повтори шапку со второго экрана»,
   «по ширине таблицы» — ширину бери из посчитанного «→ 896×128» нужного узла), но сами их не меняй,
-  пока не попросили. Если просят «во всех экранах» — сделай отдельную правку на каждый артборд.
+  пока не попросили. Если просят «во всех экранах» — сделай отдельную правку на каждую доску.
 - target — id из выжимки выше (вида #f3), точное имя слоя или "selection" (ВСЕ выделенные узлы: правка повторится для каждого).
 - Цель ищется сначала внутри выделенной области, потом по всему документу. Имя из выжимки надёжнее описания.
 - path — ТОЛЬКО эти корни: characters, style, align, color, fill, stroke, radius, size.w, size.h,
@@ -1438,12 +1447,12 @@ export const PROMPTS = {
       header(ctx, 'Твоя роль сейчас — тематизатор: поменять токены документа, не трогая структуру.'),
       '',
       `ПРАВИЛА ОФОРМЛЕНИЯ
-- ТОКЕНЫ ОБЩИЕ ДЛЯ ВСЕГО ДОКУМЕНТА. Они не принадлежат артборду: поменяв colors.bg, ты перекрасишь
-  ВСЕ экраны сразу, включая те, что в строке «РАБОТАЕМ С:» не названы. Отдельный артборд оформлением
+- ТОКЕНЫ ОБЩИЕ ДЛЯ ВСЕГО ДОКУМЕНТА. Они не принадлежат доске: поменяв colors.bg, ты перекрасишь
+  ВСЕ экраны сразу, включая те, что в строке «РАБОТАЕМ С:» не названы. Отдельная доска оформлением
   не перекрасить — этого в модели документа нет.
 - Поэтому «сделай ТОЛЬКО этот экран тёмным», «перекрась вот эту карточку, остальное не трогай» — это
   НЕ задача тематизатора. Верни {cannot: "<почему, по-русски>"}: скажи, что оформление документа общее
-  и так перекрасятся все артборды, и предложи, что можно вместо — поменять fill и color у узлов
+  и так перекрасятся все доски, и предложи, что можно вместо — поменять fill и color у узлов
   нужного экрана (это обычная правка) или перекрасить весь документ.
 - Меняй только токены. Структуру, тексты и размеры узлов не трогай.
 - Цвета — строго #rrggbb. Сохраняй имена существующих токенов; новые заводи только если без них никак.
@@ -1611,7 +1620,7 @@ const RE = {
   create: [
     rx('созда(й|ть|йте)'), rx('св[её]рстай'), rx('собери'), rx('построй'),
     rx('нарисуй'), rx('сгенерируй'), rx('придумай'), rx('напиши\\s+(экран|страниц|лендинг)'),
-    rx('нов(ый|ую|ое)\\s+(экран|артборд|макет|страниц|блок|секци|карточк|компонент)'),
+    rx('нов(ый|ую|ое|ая)\\s+(экран|артборд|доск|макет|страниц|блок|секци|карточк|компонент)'),
     rx('свёрстать|сверстать'),
   ],
   edit: [
@@ -2099,6 +2108,125 @@ function nodeOf(doc, id) {
   return doc && doc.nodes ? doc.nodes[id] : undefined;
 }
 
+/**
+ * Круг 18: переспрос без готовых ответов заставлял человека переписывать команду целиком.
+ * Здесь — ответы для ДВУХ переспросов, которые задаёт сама оболочка, без модели. Варианты
+ * собираются из настоящих имён слоёв документа: подставить выдуманное имя значит предложить
+ * команду, которая гарантированно не выполнится.
+ */
+function namedChildren(doc, rootId, limit = 24) {
+  const out = [];
+  const walk = (id, depth) => {
+    if (out.length >= limit || depth > 4) return;
+    const n = nodeOf(doc, id);
+    if (!n) return;
+    for (const kid of (Array.isArray(n.children) ? n.children : [])) {
+      const k = nodeOf(doc, kid);
+      if (!k) continue;
+      const name = String(k.name || '').trim();
+      if (name) out.push({ id: kid, name, type: k.type });
+      walk(kid, depth + 1);
+    }
+  };
+  walk(rootId, 0);
+  return out;
+}
+
+/** Куда смотреть за именами: активная доска, а если его нет — весь документ. */
+function scopeRoot(engine, doc, activeArtboardId) {
+  if (activeArtboardId && nodeOf(doc, activeArtboardId)) return activeArtboardId;
+  const root = doc && doc.root;
+  const kids = (nodeOf(doc, root) || {}).children || [];
+  for (const id of kids) if (isArtboardLocal(engine, doc, id)) return id;
+  return root;
+}
+
+/**
+ * Круг 18: текст переспроса. Раньше при intent="clarify" без поля clarify подставлялся
+ * plan.summary — а это ОПИСАНИЕ работы, не вопрос. На экране выходила карточка «Выберите
+ * готовый ответ», озаглавленная фразой, которая ни о чём не спрашивает (поймано на снимке).
+ * Summary берём, только если он и правда спрашивает; иначе — своя заготовка.
+ */
+function clarifyQuestion(plan) {
+  const own = String((plan && plan.clarify) || '').trim();
+  if (own) return own;
+  const summary = String((plan && plan.summary) || '').trim();
+  if (summary.endsWith('?')) return summary;
+  return 'Не разобрал команду. Что именно поменять — и где: заголовок, кнопка, карточка?';
+}
+
+/**
+ * Снять ОДНУ внешнюю пару кавычек — и только если кавычки в остатке сходятся. Снимать их
+ * подряд регуляркой нельзя: у ответа «убери «Аватар»» отрывалась закрывающая кавычка ИМЕНИ,
+ * и команда уходила с покалеченным именем слоя (круг 18, поймано на прогоне).
+ */
+function unwrapQuotes(v) {
+  let t = v;
+  for (let i = 0; i < 2; i += 1) {
+    const m = /^[«"'`]([\s\S]*)[»"'`]$/.exec(t);
+    if (!m) break;
+    const inner = m[1];
+    if ((inner.match(/«/g) || []).length !== (inner.match(/»/g) || []).length) break;
+    t = inner.trim();
+  }
+  return t;
+}
+
+/**
+ * Круг 18: три готовых ответа к переспросу. Берём то, что дала модель (она видела реплику и
+ * выжимку, её варианты точнее), но НЕ доверяем вслепую: имя слоя, которого в документе нет,
+ * дало бы команду, заведомо обречённую на «слой не найден». Чего не хватило — дополняем
+ * своими, собранными из настоящих имён.
+ */
+function clarifyChoices(plan, engine, doc, activeArtboardId) {
+  const fromModel = Array.isArray(plan && plan.clarifyOptions) ? plan.clarifyOptions : [];
+  const known = new Set(namedChildren(doc, scopeRoot(engine, doc, activeArtboardId), 200)
+    .map((n) => n.name.toLowerCase()));
+  const quoted = /[«"']([^«»"']{2,60})[»"']/g;
+  const ok = fromModel.filter((o) => {
+    quoted.lastIndex = 0;
+    let m; let good = true;
+    while ((m = quoted.exec(o))) if (!known.has(m[1].trim().toLowerCase())) good = false;
+    return good;
+  });
+  const out = ok.slice(0, 3);
+  if (out.length >= 3) return out;
+  const seen = new Set(out.map((o) => o.toLowerCase()));
+  for (const extra of starterOptions(engine, doc, activeArtboardId)) {
+    if (out.length >= 3) break;
+    if (seen.has(extra.toLowerCase())) continue;
+    seen.add(extra.toLowerCase());
+    out.push(extra);
+  }
+  return out;
+}
+
+/** Три готовых команды на «я не расслышал»: разные слои и разные по смыслу правки. */
+function starterOptions(engine, doc, activeArtboardId) {
+  const here = namedChildren(doc, scopeRoot(engine, doc, activeArtboardId));
+  const text = here.find((n) => n.type === 'text');
+  const frame = here.find((n) => n.type === 'frame');
+  const other = here.find((n) => n !== text && n !== frame);
+  const out = [];
+  if (text) out.push(`сделай «${text.name}» крупнее`);
+  if (frame) out.push(`сделай «${frame.name}» просторнее`);
+  if (other) out.push(`убери «${other.name}»`);
+  // документ пуст или слои без имён — предлагаем то, что выполнимо всегда
+  if (!out.length) return ['собери экран оплаты', 'добавь заголовок и кнопку', 'сделай тёмную тему'];
+  while (out.length < 3) out.push(out.length === 1 ? 'сделай тёмную тему' : 'добавь ещё один экран');
+  return out.slice(0, 3);
+}
+
+/** Два толкования «убери последнее» — каждое готовой командой, плюс третье про выбор руками. */
+function undoDoubtOptions(engine, doc, activeArtboardId) {
+  const here = namedChildren(doc, scopeRoot(engine, doc, activeArtboardId));
+  const last = here.length ? here[here.length - 1] : null;
+  const out = ['отмени последнюю правку'];
+  if (last) out.push(`удали «${last.name}»`);
+  out.push('покажи историю правок');
+  return out.slice(0, 3);
+}
+
 function isArtboardLocal(engine, doc, id) {
   if (engine && typeof engine.isArtboard === 'function') {
     try { return !!engine.isArtboard(doc, id); } catch { /* ниже */ }
@@ -2191,7 +2319,7 @@ export function resolveScope(doc, selection, engine, options = {}) {
   return { ids: [doc.root], containerId: doc.root, kind: 'document' };
 }
 
-const SCOPE_LABELS = { selection: 'выделенная область', artboard: 'активный артборд', document: 'весь документ' };
+const SCOPE_LABELS = { selection: 'выделенная область', artboard: 'активная доска', document: 'весь документ' };
 
 /** Компактная выжимка токенов документа. */
 export function describeTokens(doc) {
@@ -2230,10 +2358,10 @@ const TAIL_RESERVE = 80;
 
 /** Пояснение формата строки выжимки для модели (п.2 и круг 2, п.1). */
 export const DIGEST_LEGEND = [
-  'Ниже — ВЕСЬ документ: все артборды и все их узлы (вложенность передана отступом).',
+  'Ниже — ВЕСЬ документ: все доски и все их узлы (вложенность передана отступом).',
   'Формат строки: #id тип "имя" [раскладка] [w=/h= — ЗАДАННЫЕ спеки размера] → ширина×высота @x,y',
   '«→ 350×52 @20,742» — ПОСЧИТАННЫЙ решателем прямоугольник: это результат раскладки, а не то, что нужно задавать.',
-  'x,y здесь — АБСОЛЮТНЫЕ координаты холста (общие для всех артбордов), а НЕ смещение внутри родителя.',
+  'x,y здесь — АБСОЛЮТНЫЕ координаты холста (общие для всех досок), а НЕ смещение внутри родителя.',
   'Задать их правкой нельзя. Чтобы подвинуть узел, используй op:"nudge" со смещением dx/dy от текущего места.',
   'Опирайся на этот прямоугольник, когда просят «на 20 пикселей шире», «почему тесно», «выровняй по правому краю».',
   // круг 11, п.8: пометка override в строках была, а в легенде — нет; агент не понимал, что узел
@@ -2243,7 +2371,7 @@ export const DIGEST_LEGEND = [
   + ' просьбы и не «выравнивай обратно». Правь у такого узла что угодно другое, а подвинуть его можно'
   + ' только op:"nudge" — смещением ОТ нынешнего места.',
   `Пометки области работы: «${MARK_SELECTED}» — выделенный человеком узел, «${MARK_ACTIVE}» — экран, который человек сейчас видит.`,
-  'Последняя строка «РАБОТАЕМ С:» говорит, куда вносить правку по умолчанию. Остальные артборды даны для справки:',
+  'Последняя строка «РАБОТАЕМ С:» говорит, куда вносить правку по умолчанию. Остальные доски даны для справки:',
   'по ним можно СРАВНИВАТЬ и с них можно КОПИРОВАТЬ («как в сводке недели», «шапка со второго экрана»), но менять их без просьбы нельзя.',
 ].join('\n');
 
@@ -2341,15 +2469,15 @@ function workAreaLine(doc, work, activeArtboard, kind, brief = false) {
       + ' Прежде чем что-то менять, убедись, что понятно, какой именно узел имел в виду человек.';
   }
   if (kind === 'artboard' || (work.length === 1 && work[0] === activeArtboard)) {
-    if (brief) return `РАБОТАЕМ С: артборд ${nameOf(work[0])}.`;
-    return `РАБОТАЕМ С: артборд ${nameOf(work[0])} целиком — ничего не выделено.`
-      + ' Правку без явного указания места вноси ВНУТРЬ него; другие артборды не трогай.';
+    if (brief) return `РАБОТАЕМ С: доска ${nameOf(work[0])}.`;
+    return `РАБОТАЕМ С: доска ${nameOf(work[0])} целиком — ничего не выделено.`
+      + ' Правку без явного указания места вноси ВНУТРЬ него; другие доски не трогай.';
   }
   const list = work.slice(0, brief ? 3 : 8).map(nameOf).join(', ');
   const tail = work.length > (brief ? 3 : 8) ? ` и ещё ${work.length - (brief ? 3 : 8)}` : '';
   if (brief) return `РАБОТАЕМ С: ${list}${tail}.`;
   return `РАБОТАЕМ С: выделено узлов — ${work.length}: ${list}${tail}.${where}`
-    + ' Правку без явного указания места вноси в них (target:"selection"); другие артборды не трогай.';
+    + ' Правку без явного указания места вноси в них (target:"selection"); другие доски не трогай.';
 }
 
 /**
@@ -2439,7 +2567,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
   const markHidden = (entry) => { entry.hidden = true; entry.children.forEach(markHidden); };
   const overlaps = (entry, from, to) => (entry.collapsed || []).some((r) => from < r.to && r.from < to);
 
-  /* Обязательные строки: корень, сами артборды и выделенные узлы. Место под них бронируется,
+  /* Обязательные строки: корень, сами доски и выделенные узлы. Место под них бронируется,
    * иначе документ с тысячей уровней вложенности успевал израсходовать бюджет предками
    * раньше, чем доходил до второго артборда. */
   const forced = new Set([...roots, ...workSet]);
@@ -3254,7 +3382,7 @@ export function treeToOps({ doc, tree, parentId, index, engine, warn, persona, a
   if (!spec) throw ERR('schema', 'Модель не вернула ни одного пригодного узла');
 
   if (asArtboard && spec.type !== 'frame') {
-    note('Корень дерева не фрейм — завернул в артборд');
+    note('Корень дерева не фрейм — завернул в доску');
     spec = {
       type: 'frame', name: spec.name || 'Артборд',
       layout: { mode: 'column', gap: (persona && persona.defaults.gap) || 16, padding: { t: 24, r: 24, b: 24, l: 24 }, align: 'stretch', justify: 'start', wrap: false },
@@ -5046,8 +5174,8 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
  * Изменения токенов → операции setToken.
  *
  * Круг 11, п.3: токены ОБЩИЕ для всего документа, а в шапке промпта стоит «РАБОТАЕМ С: <экран>,
- * другие артборды не трогай» — и на «сделай только этот экран тёмным, сводку не трогай» тёмной
- * становилась и сводка, причём молча. Отдельный артборд оформлением перекрасить нельзя вовсе;
+ * другие доски не трогай» — и на «сделай только этот экран тёмным, сводку не трогай» тёмной
+ * становилась и сводка, причём молча. Отдельная доска оформлением перекрасить нельзя вовсе;
  * раз так, человек обязан узнать, что изменилось всё.
  */
 export function themeToOps({ doc, theme, engine, warn, scope = null }) {
@@ -5133,7 +5261,7 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
     /* Порядок слов такой, чтобы фраза была согласована при ЛЮБОМ наборе видов: «цвета»,
      * «шрифты и кегли» и «шкала отступов» стоят в скобках, а не подлежащим. */
     note('Оформление документа общее: поменялось то, что принадлежит документу, а не экрану'
-      + ` (${what.join(', ')}), — значит, поменялись ВСЕ артборды${list ? `, в том числе ${list}` : ''}.`
+      + ` (${what.join(', ')}), — значит, поменялись ВСЕ доски${list ? `, в том числе ${list}` : ''}.`
       + ` ${HOW[lead]}`);
   }
   return ops;
@@ -5321,7 +5449,7 @@ export async function runCommand(options = {}) {
   const {
     doc, selection, utterance, provider, onStage, signal,
     engine: engineOpt, persona = null, plan: presetPlan = null, modelTier,
-    // новое в контракте: активный артборд, память о разговоре, готовая геометрия, вариант
+    // новое в контракте: активная доска, память о разговоре, готовая геометрия, вариант
     activeArtboardId = null, history = null, geo: geoIn = null,
     // круг 9, п.5: кто выделил — человек или сам агент (оболочка выделяет задетое после правки)
     selectionBy = 'human',
@@ -5430,10 +5558,15 @@ export async function runCommand(options = {}) {
       const question = String(utterance == null ? '' : utterance).trim()
         ? 'Не разобрал команду — в ней нет ни одного слова. Что поменять: например «сделай заголовок крупнее»?'
         : 'Не услышал команду. Скажите, что поменять: например «сделай заголовок крупнее».';
+      const startOpts = starterOptions(engine, doc, activeArtboardId);
       emit('classify', 'clarify — в реплике нет ни одного слова');
-      emit('clarify', question);
+      emit('clarify', question, { options: startOpts });
       emit('done', 'Жду уточнения');
-      return { ops: [], preview: { doc, geo: geoIn || safeSolve(engine, doc) }, plan, clarify: question, warnings: sortWarnings(warnings), usage, stages };
+      return {
+        ops: [], preview: { doc, geo: geoIn || safeSolve(engine, doc) }, plan,
+        clarify: question, clarifyOptions: startOpts,
+        warnings: sortWarnings(warnings), usage, stages,
+      };
     }
     /* — 0a. Отмена и возврат: это делает оболочка, модель тут не нужна (новое в контракте) —
      * Голосом «отмени», «верни как было», «назад», «не так» обязаны откатывать последнюю
@@ -5466,11 +5599,13 @@ export async function runCommand(options = {}) {
      * отправлять реплику дальше — значит гарантированно угадать. Спрашиваем. */
     const doubt = recognizeUndoDoubt(utterance);
     if (doubt) {
+      const doubtOpts = undoDoubtOptions(engine, doc, activeArtboardId);
       emit('classify', 'clarify — «убрать последнее» значит и откат, и удаление');
-      emit('clarify', doubt);
+      emit('clarify', doubt, { options: doubtOpts });
       emit('done', 'Жду уточнения');
       return {
-        ops: [], preview: { doc, geo: geoIn || safeSolve(engine, doc) }, plan, clarify: doubt,
+        ops: [], preview: { doc, geo: geoIn || safeSolve(engine, doc) }, plan,
+        clarify: doubt, clarifyOptions: doubtOpts,
         warnings: sortWarnings(warnings), usage, stages,
       };
     }
@@ -5576,16 +5711,15 @@ export async function runCommand(options = {}) {
 
     /* — 2'. Круг 13, п.8: план готов, и это всё, о чём просили (общий план вариантов) — */
     if (planOnly) {
-      const question = intent === 'clarify'
-        ? (String((plan && (plan.clarify || plan.summary)) || '').trim()
-          || 'Не разобрал команду. Что именно поменять — и где: заголовок, кнопка, карточка?')
-        : null;
+      const question = intent === 'clarify' ? clarifyQuestion(plan) : null;
       const because = intent === 'refuse' ? cannotText(plan && plan.cannot) : null;
-      if (question) emit('clarify', question);
+      const qOpts = question ? clarifyChoices(plan, engine, doc, activeArtboardId) : [];
+      if (question) emit('clarify', question, { options: qOpts });
       if (because) emit('cannot', because);
       return {
         ops: [], planOnly: true, intent, plan, preview: { doc, geo: geoNow },
         ...(question ? { clarify: question } : {}),
+        ...(qOpts.length ? { clarifyOptions: qOpts } : {}),
         ...(because ? { cannot: because } : {}),
         warnings: sortWarnings(warnings), usage, stages,
       };
@@ -5593,11 +5727,15 @@ export async function runCommand(options = {}) {
 
     /* — 2a. Не понял (п.11): переспрашиваем, ничего не трогая — */
     if (intent === 'clarify') {
-      const question = String((plan && (plan.clarify || plan.summary)) || '').trim()
-        || 'Не разобрал команду. Что именно поменять — и где: заголовок, кнопка, карточка?';
-      emit('clarify', question);
+      const question = clarifyQuestion(plan);
+      const choices = clarifyChoices(plan, engine, doc, activeArtboardId);
+      emit('clarify', question, { options: choices });
       emit('done', 'Жду уточнения');
-      return { ops: [], preview: { doc, geo: geoNow }, plan, clarify: question, warnings: sortWarnings(warnings), usage, stages };
+      return {
+        ops: [], preview: { doc, geo: geoNow }, plan,
+        clarify: question, ...(choices.length ? { clarifyOptions: choices } : {}),
+        warnings: sortWarnings(warnings), usage, stages,
+      };
     }
 
     /* — 2b. Нельзя (круг 9, п.4): просьба понятна, но в модели документа её не выразить —
@@ -5843,6 +5981,18 @@ function normalizePlan(raw, guess) {
   };
   const clarify = String((raw && raw.clarify) || '').trim().slice(0, 300);
   if (clarify) plan.clarify = clarify;
+  /* Круг 18: три готовых ответа к переспросу. Чистим жёстко — человек их НАЖИМАЕТ, и то, что
+     нажалось, уходит командой как есть: обрывок или вопрос вместо команды стоил бы ему прогона. */
+  const opts = asArray(raw && raw.clarifyOptions)
+    .map((o) => unwrapQuotes(String(o == null ? '' : o).trim()))
+    .filter((o) => o && o.length <= 80 && !o.endsWith('?'));
+  const seenOpt = new Set();
+  const uniq = opts.filter((o) => {
+    const k = o.toLowerCase();
+    if (seenOpt.has(k)) return false;
+    seenOpt.add(k); return true;
+  }).slice(0, 3);
+  if (uniq.length) plan.clarifyOptions = uniq;
   // круг 9, п.4: отказ несёт объяснение; модель иногда кладёт его в summary — принимаем и так
   const cannot = String((raw && raw.cannot) || '').trim().slice(0, 400);
   if (cannot) plan.cannot = cannot;
@@ -5896,10 +6046,10 @@ function buildUserTurn(utterance, plan, persona) {
 }
 
 /** Явная просьба о новом экране: «новый экран», «ещё один экран», «отдельный артборд». */
-const RE_NEW_ARTBOARD = rx('(нов(ый|ую|ое)|ещ[её]\\s+од(ин|ну)|отдельн(ый|ую|ое)|втор(ой|ую)|друг(ой|ую))\\s+\\p{L}*\\s*(экран|артборд|макет|страниц)');
-const RE_ARTBOARD_WORD = rx('артборд', true);
+const RE_NEW_ARTBOARD = rx('(нов(ый|ую|ое|ая)|ещ[её]\\s+од(ин|ну)|отдельн(ый|ую|ое|ая)|втор(ой|ую|ая)|друг(ой|ую|ая))\\s+\\p{L}*\\s*(экран|артборд|доск|макет|страниц)');
+const RE_ARTBOARD_WORD = rx('(артборд|доск[аиуеой])', true);
 /** Просьба собрать экран целиком: «собери экран оформления», «свёрстай лендинг». */
-const RE_WHOLE_SCREEN = rx('(собери|создай|создать|св[её]рстай|сверстай|построй|нарисуй|сгенерируй)\\s+(\\p{L}+\\s+){0,2}?(экран|лендинг|страниц|артборд|макет)');
+const RE_WHOLE_SCREEN = rx('(собери|создай|создать|св[её]рстай|сверстай|построй|нарисуй|сгенерируй)\\s+(\\p{L}+\\s+){0,2}?(экран|лендинг|страниц|артборд|доск|макет)');
 
 /* — «добавь X в Y»: контейнер, названный в самой команде (круг 3, п.3) — */
 
@@ -6005,7 +6155,7 @@ function bestNodeForPhrase(doc, phrase, prefer, sameArtboard, needFrame, frameBo
  */
 /** Слова, которые называют сам редактор, а не слой в нём. */
 const CHROME_WORDS = new Set([
-  'экран', 'артборд', 'макет', 'слой', 'узел', 'страниц', 'документ', 'холст', 'полотн',
+  'экран', 'артборд', 'доска', 'доски', 'макет', 'слой', 'узел', 'страниц', 'документ', 'холст', 'полотн',
   'проект', 'файл', 'кадр', 'фрейм', 'элемент', 'блок',
 ]);
 
@@ -6193,7 +6343,7 @@ export function findInsertTarget(doc, utterance, scope, engine, geo = null) {
  * Куда кладём созданное (п.4, п.5). Новый артборд — только по явной просьбе
  * («новый экран», «ещё один экран», «отдельный артборд») или когда просят собрать
  * экран целиком и ничего не выделено. Иначе — в контейнер, названный в самой команде
- * (круг 3, п.3), а если он не назван — в активный артборд/выделенный фрейм:
+ * (круг 3, п.3), а если он не назван — в активная доска/выделенный фрейм:
  * «добавь снизу панель с тремя кнопками» обязано попасть в текущий экран, а не в сторону.
  */
 function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null) {
@@ -6219,7 +6369,7 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
   if (planOnlyNew && !asArtboard) {
     note(`План модели говорит про новый экран («${String((plan && plan.title) || '').slice(0, 60)}»),`
       + ` а в команде экран не назван — кладу внутрь текущего ${nameOrId(doc, insert ? insert.parentId : scope.containerId)}.`
-      + ' Нужен отдельный артборд — скажите «новый экран»');
+      + ' Нужна отдельная доска — скажите «новая доска»');
   }
 
   if (insert) {
@@ -6235,13 +6385,13 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
         + ` (раскладка: ${node && node.layout ? node.layout.mode : 'нет'}, ширина ${node && node.size && node.size.w ? sizeWord(node.size.w) : '?'}).${where}`
         + (wide ? ` Если твой корень шириной "fill" (во всю ширину), он ляжет уровнем выше — в #${insert.wide.parentId} «${wide.name || ''}»,`
           + ` потому что «${(node && node.name) || ''}» для блока во всю ширину слишком узок; хочешь остаться здесь — задай размер по содержимому.` : '')
-        + ' Корень ответа — ОДИН узел, который туда вложится: не повторяй артборд и не задавай позицию.'
+        + ' Корень ответа — ОДИН узел, который туда вложится: не повторяй доску и не задавай позицию.'
         + ' Если правишь патчем — это {op:"create", parent:"' + ((node && node.name) || insert.parentId) + '"}.',
     };
   }
 
   if (!asArtboard) {
-    const where = scope.kind === 'selection' ? 'выделенного фрейма' : 'активного артборда';
+    const where = scope.kind === 'selection' ? 'выделенного фрейма' : 'активной доски';
     return {
       asArtboard: false,
       insert: false,
@@ -6249,7 +6399,7 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
       parentId: scope.containerId,
       text: `Результат добавляется ВНУТРЬ ${where} #${scope.containerId} «${container.name || ''}» `
         + `(его раскладка: ${container.layout ? container.layout.mode : 'нет'}, ширина ${container.size && container.size.w ? sizeWord(container.size.w) : '?'}). `
-        + 'Корень ответа — ОДИН узел, который туда вложится: не повторяй артборд и не задавай ему позицию. '
+        + 'Корень ответа — ОДИН узел, который туда вложится: не повторяй доску и не задавай ему позицию. '
         + 'Новый экран здесь не нужен — человек просил добавить к тому, что уже на экране.',
     };
   }
@@ -6258,7 +6408,7 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
     insert: false,
     index: null,
     parentId: doc.root,
-    text: 'Результат становится НОВЫМ артбордом на холсте (об этом попросили явно). '
+    text: 'Результат становится НОВОЙ доской на холсте (об этом попросили явно). '
       + 'Корень ответа — frame с фиксированной шириной (мобильный экран 390, десктопный блок 1200) и высотой "hug".',
   };
 }
@@ -7021,6 +7171,7 @@ export async function runVariants(options = {}) {
         description: (head.plan && head.plan.summary) || '',
         ops: [], preview: head.preview, plan: head.plan,
         ...(head.clarify ? { clarify: head.clarify } : {}),
+        ...(head.clarifyOptions ? { clarifyOptions: head.clarifyOptions } : {}),
         ...(head.cannot ? { cannot: head.cannot } : {}),
         ...(head.action ? { action: head.action } : {}),
         ...(head.error ? { error: head.error } : {}),
@@ -7088,6 +7239,8 @@ export async function runVariants(options = {}) {
     plan: res.plan,
     answer: res.answer,
     clarify: res.clarify,
+    // круг 18: готовые ответы доходят и до варианта — иначе переспрос там снова стал бы тупиком
+    ...(res.clarifyOptions ? { clarifyOptions: res.clarifyOptions } : {}),
     // круг 9, п.4: отказ доходит и до варианта — иначе вариант выглядел бы пустым без объяснения
     ...(res.cannot ? { cannot: res.cannot } : {}),
     warnings: res.warnings,

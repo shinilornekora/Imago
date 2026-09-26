@@ -81,14 +81,14 @@ const settings = loadSettings();
 /* Сцена сообщает о сбое объектом {where, error}; бывает и голая ошибка, и строка. */
 const STAGE_WHERE = {
   render: 'Не удалось перерисовать холст',
-  'screenshot:size': 'Артборд слишком велик для PNG',
+  'screenshot:size': 'Доска слишком велика для PNG',
   'screenshot:external': 'В PNG не попадают внешние картинки',
-  'screenshot:image': 'Не удалось собрать картинку артборда',
-  'screenshot:timeout': 'Снимок артборда не успел собраться',
+  'screenshot:image': 'Не удалось собрать картинку доски',
+  'screenshot:timeout': 'Снимок доски не успел собраться',
   'screenshot:fonts': 'Шрифты в PNG не встроились',
-  'screenshot:toBlob': 'Браузер не отдал картинку артборда',
-  'screenshot:blob': 'Картинка артборда не сохранилась',
-  toSVG: 'Не удалось собрать SVG артборда',
+  'screenshot:toBlob': 'Браузер не отдал картинку доски',
+  'screenshot:blob': 'Картинка доски не сохранилась',
+  toSVG: 'Не удалось собрать SVG доски',
   undo: 'Отмена с холста не сработала',
 };
 
@@ -109,7 +109,12 @@ function stageErrorNote(e) {
 async function boot() {
   cacheDom();
   applyTheme(settings.theme);
+  /* Порядок важен: applyRail решает, открыт рельс или нет, и только потом имеет смысл
+     мерить его ширину. Наоборот — и шторка на узком экране открывалась сама
+     (syncPanelModes успевал переключить режим до того, как рельс получил состояние,
+     и ветка «сложить шторку» не срабатывала). */
   applyRail();
+  applyRailWidth(settings.railW);   // ручная ширина рельса (круг 18, п.3)
   syncPanelModes();
 
   state.doc = createDoc();
@@ -168,12 +173,17 @@ async function boot() {
     const rg = new ResizeObserver(() => syncDockGap());
     for (const n of [dom.dock, dom.inspector, dom.variants]) if (n) rg.observe(n);
   }
-  globalThis.addEventListener('resize', () => { syncPanelModes(); syncDockGap(); });
+  globalThis.addEventListener('resize', () => {
+    // потолок ручной ширины рельса считается от окна: окно сузилось — рельс уступает (круг 18, п.3)
+    if (settings.railW) applyRailWidth(settings.railW);
+    syncPanelModes(); syncDockGap();
+  });
   syncPanelModes();
   syncDockGap();
 
   hydrateIcons(document);
   bindUi();
+  initRailGrip();
   initLiveSize();
   initToastAnchor();
   applyCompact();
@@ -300,20 +310,21 @@ function iconEl(name) {
 function cacheDom() {
   for (const id of [
     'app', 'canvas', 'layers', 'rail', 'inspector', 'insp-body', 'insp-title',
-    'commandbar', 'command', 'btn-run', 'btn-variants', 'btn-mic', 'mic-live', 'stagebar',
-    'stage-label', 'stage-detail', 'stage-steps', 'btn-stage-stop', 'variants', 'hints', 'toasts',
+    'commandbar', 'command', 'btn-run', 'btn-variants', 'btn-mic', 'mic-live', 'worklog',
+    'work-label', 'work-detail', 'work-steps', 'btn-work-stop', 'variants', 'hints', 'toasts',
     'artboard-tabs', 'docname', 'sheet', 'sheet-body', 'sheet-title', 'sheet-tabs',
     'btn-zoom', 'btn-zoom-in', 'btn-zoom-out', 'btn-fit', 'btn-rail', 'btn-rail-close', 'scrim',
-    'btn-history', 'btn-export', 'btn-theme', 'btn-settings', 'btn-add-artboard',
-    'btn-insp-close', 'btn-sheet-close', 'btn-new-artboard', 'btn-empty-artboard',
-    'dockmsg', 'dockmsg-text', 'dockmsg-note', 'dockmsg-issue', 'dockmsg-chips', 'dockmsg-actions', 'btn-msg-close',
+    'btn-history', 'btn-export', 'btn-theme', 'btn-settings', 'rail-grip',
+    'btn-insp-close', 'btn-sheet-close', 'btn-empty-artboard',
+    'voicebar', 'voice-said', 'btn-voice-off',
+    'dockmsg', 'dockmsg-text', 'dockmsg-note', 'dockmsg-issue', 'dockmsg-ask', 'dockmsg-chips', 'dockmsg-actions', 'btn-msg-close',
     'empty-state', 'empty-title', 'empty-sub', 'empty-examples', 'dock', 'viewbar',
     'peekbar', 'peekbar-text', 'agent-dot',
   ]) dom[id] = el(id);
   dom.dockmsg.setAttribute('role', 'status');
   dom.dockmsg.setAttribute('aria-live', 'polite');
-  dom.stagebar.setAttribute('role', 'status');
-  dom.stagebar.setAttribute('aria-live', 'polite');
+  dom.worklog.setAttribute('role', 'status');
+  dom.worklog.setAttribute('aria-live', 'polite');
 }
 
 /* ------------------------------- способности --------------------------------- */
@@ -1362,22 +1373,22 @@ function updateFitButton() {
   if (scope) state.fitAll = scope === 'all';
   const short = isNarrow() || (dom.canvas && dom.canvas.clientWidth < 520);
   let label = 'Вписать';
-  if (many && scope === 'all' && !short) label = 'Вписать артборд';
+  if (many && scope === 'all' && !short) label = 'Вписать доску';
   else if (many && scope === 'one' && !short) label = 'Вписать всё';
   if (btn.textContent !== label) btn.textContent = label;
   btn.dataset.fit = scope ? (many ? scope : 'plain') : 'off';
   const name = act ? nodeTitleById(state.doc, act) : '';
   const now = scope === 'all'
-    ? 'Сейчас в кадре все артборды целиком.'
+    ? 'Сейчас в кадре все доски целиком.'
     : scope === 'one'
-      ? `Сейчас в кадре${name ? ` «${name}»` : ' активный артборд'} целиком.`
+      ? `Сейчас в кадре${name ? ` «${name}»` : ' активная доска'} целиком.`
       : 'Сейчас в кадр помещается не всё.';
   const next = !many
     ? 'Нажмите, чтобы вписать макет в свободную часть холста.'
     : scope === 'all'
-      ? `Нажмите, чтобы вписать${name ? ` «${name}»` : ' активный артборд'}.`
+      ? `Нажмите, чтобы вписать${name ? ` «${name}»` : ' активную доску'}.`
       : scope === 'one'
-        ? 'Нажмите, чтобы показать все артборды.'
+        ? 'Нажмите, чтобы показать все доски.'
         : 'Нажмите, чтобы вписать макет.';
   btn.title = `${now} ${next}`;
   btn.setAttribute('aria-label', btn.title);
@@ -1890,10 +1901,10 @@ function renderEmptyState() {
   if (!host.hidden && state.introOpen) hideMsg();
   if (host.hidden) return;
 
-  dom['empty-title'].textContent = empty ? 'Скажите, что построить' : 'Артборд пуст';
+  dom['empty-title'].textContent = empty ? 'Скажите, что построить' : 'Доска пуста';
   dom['empty-sub'].textContent = empty
     ? 'Агент соберёт макет и покажет, что сделал.'
-    : 'Скажите, что должно быть на нём.';
+    : 'Скажите, что должно быть на ней.';
   const list = empty ? EMPTY_EXAMPLES : ARTBOARD_EXAMPLES;
   const box = dom['empty-examples'];
   box.textContent = '';
@@ -1902,7 +1913,12 @@ function renderEmptyState() {
     b.type = 'button';
     b.className = 'empty-example';
     b.textContent = ex;
-    b.addEventListener('click', () => { dom.command.value = ex; dom.command.focus(); });
+    /* Круг 18, п.4. В голосовой сессии командной строки нет, и «подставить в строку»
+       было бы действием в никуда: пример просто выполняется — это и значит его нажать. */
+    b.addEventListener('click', () => {
+      if (dom.app.dataset.voice === 'on') { runUtterance(ex); return; }
+      dom.command.value = ex; dom.command.focus();
+    });
     box.appendChild(b);
   }
   dom['btn-empty-artboard'].hidden = !empty;
@@ -1952,24 +1968,44 @@ function placeOverArtboard(id) {
 
 const MAX_TABS = 7;
 
+/**
+ * Круг 18, п.5. «Непонятно, как создавать новые доски»: кнопка была в трёх местах и
+ * ни одно из них не оказалось тем самым. Теперь «+» стоит в ряду вкладок — там, где
+ * человек и так переключается между досками. Кнопка из подвала рельса и кнопка из
+ * панели вида убраны: подвал рельса лежит под прокручиваемым списком слоёв (на длинном
+ * документе его просто не видно), а панель вида прячет свои крайние кнопки, как только
+ * холст уже 520 px, — то есть ровно тогда, когда место дорого. В пустом состоянии
+ * кнопка осталась: там ей и место, и ряда вкладок ещё нет.
+ */
+function addTabPlus(host) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'tab add';
+  b.title = 'Новая доска';
+  b.setAttribute('aria-label', 'Новая доска');
+  b.appendChild(iconEl('plus'));
+  b.addEventListener('click', () => addArtboard());
+  host.appendChild(b);
+}
+
 function renderTabs() {
   const host = dom['artboard-tabs'];
   host.textContent = '';
   const list = artboards(state.doc);
   const activeId = activeArtboardId();
   host.dataset.mode = isNarrow() ? 'pick' : 'tabs';
-  if (!list.length) return;
+  if (!list.length) { addTabPlus(host); return; }
 
   // на узком экране ряд вкладок не помещается — но переключать экраны всё равно надо (п.6)
   if (isNarrow()) {
     const active = list.find((a) => a.id === activeId) || list[0];
     const b = document.createElement('button');
     b.className = 'tab pick';
-    b.title = 'Выбрать артборд';
+    b.title = 'Выбрать доску';
     b.setAttribute('aria-haspopup', 'dialog');
     const name = document.createElement('span');
     name.className = 'pick-name';
-    name.textContent = active.name || 'Артборд';
+    name.textContent = active.name || defaultName(active);
     b.appendChild(name);
     if (list.length > 1) {
       const count = document.createElement('span');
@@ -1980,6 +2016,7 @@ function renderTabs() {
     b.appendChild(iconEl('chevron-down'));
     b.addEventListener('click', () => openArtboardList(list));
     host.appendChild(b);
+    addTabPlus(host);
     return;
   }
 
@@ -1998,8 +2035,8 @@ function renderTabs() {
   for (const ab of shown) {
     const b = document.createElement('button');
     b.className = 'tab';
-    b.textContent = ab.name || 'Артборд';
-    b.title = ab.name || 'Артборд';
+    b.textContent = ab.name || defaultName(ab);
+    b.title = ab.name || defaultName(ab);
     b.setAttribute('aria-current', String(ab.id === activeId));
     b.addEventListener('click', () => { setSelection([ab.id]); fitView([ab.id]); });
     host.appendChild(b);
@@ -2008,22 +2045,23 @@ function renderTabs() {
     const more = document.createElement('button');
     more.className = 'tab more';
     more.textContent = `ещё ${rest.length}`;
-    more.title = 'Показать остальные артборды';
+    more.title = 'Показать остальные доски';
     more.addEventListener('click', () => openArtboardList(rest));
     host.appendChild(more);
   }
+  addTabPlus(host);
 }
 
-/** Список артбордов: и для не поместившихся вкладок, и для узкого экрана. */
+/** Список досок: и для не поместившихся вкладок, и для узкого экрана. */
 function openArtboardList(list) {
   const activeId = activeArtboardId();
-  openSheet('Артборды', (body) => {
+  openSheet('Доски', (body) => {
     for (const ab of list) {
       const b = document.createElement('button');
       b.className = 'btn subtle wide ablist';
       b.style.justifyContent = 'flex-start';
       b.setAttribute('aria-current', String(ab.id === activeId));
-      b.textContent = ab.name || 'Артборд';
+      b.textContent = ab.name || defaultName(ab);
       if (ab.id === activeId) {
         const now = document.createElement('span');
         now.className = 'ablist-now';
@@ -3452,24 +3490,112 @@ function showCannot(res, utterance) {
   });
 }
 
-/** Переспрос агента: вопрос попадает и в память разговора, и в ожидание ответа (п.10). */
+/**
+ * Переспрос агента: вопрос попадает и в память разговора, и в ожидание ответа (п.10).
+ *
+ * Круг 18, п.1. Раньше переспрос возвращал команду в строку и говорил «допишите» —
+ * то есть заставлял формулировать заново ту же мысль. Теперь brain присылает вместе с
+ * вопросом до трёх ГОТОВЫХ команд (res.clarifyOptions): имена слоёв в них сверены с
+ * документом на его стороне. Их и показываем кнопками, а четвёртой строкой — «свой
+ * вариант», поле прямо в карточке: печатать надо там, где спросили, а не искать
+ * глазами командную строку.
+ *
+ * Что стало с прежней склейкой. Готовый вариант — законченная команда, склеивать её
+ * с прежней репликой нельзя: «убери последнее» + «отмени последнюю правку» — это уже
+ * не команда. Поэтому нажатие варианта выполняет его КАК ЕСТЬ и гасит awaitingClarify.
+ * Для своего ответа склейка, наоборот, остаётся: человек отвечает на вопрос («шапку»),
+ * а не формулирует команду, и без прежней реплики такой ответ бессмыслен. Живёт она
+ * теперь в state.awaitingClarify.base, а не в тексте командной строки, — поэтому
+ * restoreCommand отсюда убран: возвращать текст, который человеку больше не нужно
+ * править, значит опять звать его вниз, в строку.
+ */
 function showClarify(res, utterance) {
   const q = typeof res.clarify === 'string'
     ? res.clarify
     : (res.clarify.question || res.clarify.message || 'Уточните, что нужно сделать.');
-  const options = (res.clarify && Array.isArray(res.clarify.options)) ? res.clarify.options : [];
+  // контракт: res.clarifyOptions; старую форму res.clarify.options тоже принимаем
+  const raw = Array.isArray(res.clarifyOptions)
+    ? res.clarifyOptions
+    : ((res.clarify && Array.isArray(res.clarify.options)) ? res.clarify.options : []);
+  const options = raw.map((o) => String(o || '').trim()).filter(Boolean).slice(0, 3);
   addChat('you', utterance);
   addChat('agent', q);
   // пара «вопрос агента → ответ человека» нужна модели: иначе ответ «сводку» ей не к чему привязать
   rememberPair(utterance, `переспросил: ${q}`);
   state.awaitingClarify = { question: q, base: utterance };
   renderHints();
-  restoreCommand(utterance, { focus: true });   // текст возвращаем — человеку есть что дописать
+  // поля с готовыми ответами нет — ведём себя как раньше: текст обратно в строку
+  if (!options.length) restoreCommand(utterance, { focus: true });
   showMsg('question', q, {
     role: 'clarify',
-    note: 'Допишите команду в строке внизу или скажите ответ голосом — я добавлю его к команде.',
-    chips: options.map((o) => ({ text: String(o), onClick: () => appendCommand(String(o)) })),
+    note: options.length
+      ? 'Выберите готовый ответ или напишите свой — команду заново набирать не нужно.'
+      : 'Допишите команду в строке внизу или скажите ответ голосом — я добавлю его к команде.',
+    ask: options,
   });
+}
+
+/**
+ * Ответы на переспрос внутри карточки (круг 18, п.1). Четвёртая строка — «свой
+ * вариант»: по нажатию она разворачивается в поле и сразу получает фокус, так что
+ * печатать человек начинает там же, куда смотрит.
+ */
+function renderAskOptions(host, options) {
+  host.textContent = '';
+  const list = (options || []).slice(0, 3);
+  host.hidden = !list.length;
+  if (!list.length) return;
+  for (const text of list) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ask-option';
+    b.textContent = human(text);
+    b.title = 'Выполнить эту команду';
+    // команда готовая: выполняем как есть, без склейки с прежней репликой
+    b.addEventListener('click', () => answerClarify(text, { glue: false }));
+    host.appendChild(b);
+  }
+
+  const own = document.createElement('button');
+  own.type = 'button';
+  own.className = 'ask-option ask-own';
+  own.textContent = 'Свой вариант…';
+  own.addEventListener('click', () => {
+    const form = document.createElement('form');
+    form.className = 'ask-form';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'ask-input';
+    input.spellcheck = false;
+    input.setAttribute('aria-label', 'Свой ответ на вопрос агента');
+    input.placeholder = 'Напишите ответ…';
+    const go = document.createElement('button');
+    go.type = 'submit';
+    go.className = 'btn accent small';
+    go.textContent = 'Ответить';
+    form.append(input, go);
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const said = input.value.trim();
+      // свой ответ — это ответ на вопрос, а не команда: его склеиваем с прежней репликой
+      if (said) answerClarify(said, { glue: true });
+    });
+    own.replaceWith(form);
+    input.focus();
+  });
+  host.appendChild(own);
+}
+
+/** Ответ на переспрос: закрыть вопрос и выполнить то, что получилось. */
+function answerClarify(text, { glue = false } = {}) {
+  const said = String(text || '').trim();
+  if (!said) return;
+  const base = glue && state.awaitingClarify ? String(state.awaitingClarify.base || '').trim() : '';
+  const full = base && !said.toLowerCase().includes(base.toLowerCase()) ? `${base} ${said}` : said;
+  state.awaitingClarify = null;
+  hideMsg();
+  dom.command.value = '';
+  runUtterance(full);
 }
 
 /**
@@ -3725,12 +3851,6 @@ function staleMsg(utterance) {
   });
 }
 
-function appendCommand(extra) {
-  const base = dom.command.value.trim();
-  dom.command.value = base ? `${base} ${extra}` : extra;
-  dom.command.focus();
-}
-
 function rememberPair(utterance, summary) {
   state.pairs.push({ utterance, summary: summary || '' });
   while (state.pairs.length > 5) state.pairs.shift();
@@ -3808,10 +3928,13 @@ function paintRunButton() {
     ? 'Остановить агента'
     : (state.busy ? 'Агент занят — спрошу, заменить команду или поставить в очередь' : 'Выполнить команду');
   run.disabled = state.busy ? false : !state.provider;
-  // двух «Стоп» на экране быть не должно: кнопка в строке состояния нужна ровно тогда,
-  // когда главная занята отправкой набранного (п.6)
-  const stageStop = dom['btn-stage-stop'];
-  if (stageStop) stageStop.hidden = !state.busy || stopping;
+  /* Двух «Стоп» на экране быть не должно: кнопка в блоке хода работы нужна ровно
+     тогда, когда главная занята отправкой набранного (п.6). Круг 18, п.2: блок
+     переехал наверх справа, но правило то же — и в голосовой сессии, где командной
+     строки не видно вовсе, «Стоп» остаётся единственным и потому виден всегда
+     (круг 18, п.4). */
+  const workStop = dom['btn-work-stop'];
+  if (workStop) workStop.hidden = !state.busy || (stopping && dom.app.dataset.voice !== 'on');
 }
 
 function setBusy(on) {
@@ -3917,9 +4040,22 @@ function cleanStage(s) {
   return human(parts.join(' — '));
 }
 
+/**
+ * Круг 18, п.2. Ход работы показывается наверху справа, а не зелёным блоком в доке.
+ * Причина простая: док — место, где человек печатает и читает итог правки, а стадии
+ * туда добавляли третий этаж и выдавливали макет вверх на каждую команду. Наверху
+ * справа список никому не мешает и, главное, сам исчезает, когда работа кончилась.
+ * Внизу остаётся ровно то, что должно жить до решения человека, — карточка итога
+ * с «Отменить».
+ */
+let workFadeTimer = null;
+
 function showStage(rec, variantsTotal = 0) {
-  dom.stagebar.hidden = false;
-  dom['stage-label'].textContent = human(state.stageGoal || 'Агент работает');
+  clearTimeout(workFadeTimer);
+  dom.worklog.hidden = false;
+  dom.worklog.dataset.done = '';
+  dom.app.dataset.work = 'on';   // по нему тосты уступают место списку (круг 18, п.2)
+  dom['work-label'].textContent = human(state.stageGoal || 'Агент работает');
   const parts = [];
   if (variantsTotal && state.variantSeen.length) {
     parts.push(`вариант ${Math.min(state.variantSeen.length, variantsTotal)} из ${variantsTotal}`);
@@ -3930,32 +4066,61 @@ function showStage(rec, variantsTotal = 0) {
     .filter((s, i, all) => all.indexOf(s) === i && (!goal || !String(s).includes(goal)))
     .join(' — ');
   if (step) parts.push(step);
-  dom['stage-detail'].textContent = parts.join(' · ');
-  renderStageSteps();
+  dom['work-detail'].textContent = parts.join(' · ');
+  renderStageSteps(rec);
 }
 
-/** Шаги плана: человек видит, что агент собирается сделать, пока он это делает (п.17). */
-function renderStageSteps() {
-  const host = dom['stage-steps'];
+/**
+ * Шаги плана: человек видит, что агент собирается сделать, пока он это делает (п.17).
+ * Круг 18: пройденные шаги гаснут — список читается сверху вниз и видно, где агент.
+ */
+function renderStageSteps(rec) {
+  const host = dom['work-steps'];
   if (!host) return;
   const list = (state.stageSteps || []).slice(0, 5);
   const sig = list.join('|');
-  if (host.dataset.sig === sig) return;
-  host.dataset.sig = sig;
-  host.textContent = '';
-  if (!list.length) { host.hidden = true; return; }
-  for (const st of list) {
-    const li = document.createElement('li');
-    li.textContent = human(st);
-    li.title = st;
-    host.appendChild(li);
+  if (host.dataset.sig !== sig) {
+    host.dataset.sig = sig;
+    host.textContent = '';
+    for (const st of list) {
+      const li = document.createElement('li');
+      li.textContent = human(st);
+      li.title = st;
+      host.appendChild(li);
+    }
+    host.hidden = !list.length;
   }
-  host.hidden = false;
+  markStepsDone(rec);
+}
+
+/* Стадии brain идут по порядку; на «generate» план уже разобран, на «verify» — сделан.
+   Точного соответствия «стадия → шаг» в контракте нет, поэтому не выдумываем его:
+   гасим ровно столько шагов, сколько стадий работы позади. */
+const STAGE_PROGRESS = { plan: 0, generate: 1, materialize: 2, solve: 3, verify: 4, repair: 4, done: 5 };
+
+function markStepsDone(rec) {
+  const host = dom['work-steps'];
+  if (!host || host.hidden) return;
+  const stage = rec && typeof rec.stage === 'string' ? rec.stage : '';
+  const done = STAGE_PROGRESS[stage];
+  if (done === undefined) return;
+  const rows = host.children;
+  for (let i = 0; i < rows.length; i++) rows[i].dataset.done = i < done ? 'on' : '';
 }
 
 function hideStage() {
-  dom.stagebar.hidden = true;
-  if (dom['stage-steps']) { dom['stage-steps'].hidden = true; dom['stage-steps'].dataset.sig = ''; }
+  dom.app.dataset.work = '';
+  const host = dom['work-steps'];
+  if (dom.worklog.hidden) return;
+  /* Исчезает сам: блок гаснет за 0.5 с и только потом прячется. Мгновенное
+     исчезновение читалось сбоем — «было и пропало», без ответа, чем кончилось. */
+  dom.worklog.dataset.done = 'on';
+  clearTimeout(workFadeTimer);
+  workFadeTimer = setTimeout(() => {
+    dom.worklog.hidden = true;
+    dom.worklog.dataset.done = '';
+    if (host) { host.hidden = true; host.dataset.sig = ''; host.textContent = ''; }
+  }, 500);
 }
 
 const MSG_ICON = {
@@ -4066,6 +4231,9 @@ function showMsg(kind, text, opts = {}) {
     d.append(sum, pre);
     bodyBox.appendChild(d);
   }
+
+  // готовые ответы на переспрос — выше чипов: это главное действие карточки (круг 18, п.1)
+  renderAskOptions(dom['dockmsg-ask'], opts.ask);
 
   const chips = dom['dockmsg-chips'];
   chips.textContent = '';
@@ -4705,7 +4873,8 @@ function stemWord(w) {
 const SAID_STOP = new Set([
   'на', 'в', 'к', 'по', 'для', 'и', 'а', 'с', 'со', 'у', 'из', 'от', 'до', 'же', 'мне',
   'это', 'этот', 'эта', 'эту', 'том', 'тот', 'пожалуйста', 'давай', 'теперь',
-  'артборд', 'артборде', 'артборда', 'экран', 'экране', 'экрана', 'экраном',
+  'артборд', 'артборде', 'артборда', 'доска', 'доски', 'доске', 'доску', 'доской',
+  'экран', 'экране', 'экрана', 'экраном',
   'макет', 'макете', 'макета', 'страницу', 'страница', 'странице', 'вкладку', 'вкладка',
   'слой', 'слоя', 'слое', 'узел', 'узла', 'элемент', 'элемента',
 ]);
@@ -4829,8 +4998,14 @@ const RE_THEME_UI = new RegExp(`^(?:переключи |переключить |
 const RE_THEME_ASK = /^(переключи тему|переключить тему|смени тему|сменить тему|поменяй тему|поменять тему|другая тема|другую тему|тема|тему)$/;
 const RE_SHOW = /^(?:покажи|покажите|показать|открой|открыть|перейди|перейти|переключись|переключить|переключи|включи|выведи|вернись|давай)\s+(?:мне\s+)?(?:на\s+|в\s+|к\s+)?(.+)$/;
 /** Слово-род артборда: «второй ЭКРАН», «следующую СТРАНИЦУ» — оно ничего не различает. */
-const AB_KIND = '(?:артборд[а-яё]*|экран[а-яё]*|макет[а-яё]*|страниц[а-яё]*|вкладк[а-яё]*|лист[а-яё]*)';
+/* Круг 18, п.5: «доска» — слово человека, и оно понимается наравне с прежними. */
+const AB_KIND = '(?:доск[а-яё]*|артборд[а-яё]*|экран[а-яё]*|макет[а-яё]*|страниц[а-яё]*|вкладк[а-яё]*|лист[а-яё]*)';
 const RE_PICK = /^(?:выдели|выделить|выделите|выбери|выбрать|укажи|отметь)\s+(?:слой\s+|узел\s+|элемент\s+)?(.+)$/;
+/* Круг 18, п.5. Раз интерфейс зовёт их досками, сказать «новая доска» человек вправе
+   ожидать. Модель этого слова не знает (её словарь — «экран», «артборд»), поэтому
+   пустую доску делает сама оболочка — как она уже делает отмену, масштаб и экспорт
+   (SPEC §4). Форма только целиковая: «собери доску оплаты» — работа для агента. */
+const RE_NEW_BOARD = /^(?:нов(?:ая|ую) доск[ау]|пуст(?:ая|ую) доск[ау]|созда(?:й|ть) доску|добав(?:ь|ить) доску|ещ[ёе] одн(?:а доска|у доску)|новый артборд|пустой артборд)$/;
 
 /**
  * Намерение, которое выполняет сама оболочка. null — значит это команда агенту.
@@ -4848,6 +5023,9 @@ function shellIntent(said) {
 
   // «закрой варианты» — до общего запрета на слово «вариант» ниже
   if (RE_VARIANTS_CLOSE.test(t)) return { kind: 'variants-close' };
+
+  // пустая доска — дело оболочки, модель для этого не нужна (круг 18, п.5)
+  if (RE_NEW_BOARD.test(t)) return { kind: 'new-board' };
 
   // варианты — дело brain: он один умеет отличить «два варианта шапки» от команды (п.2)
   if (/вариант/.test(t) && !RE_VARIANTS_BARE.test(t)) return null;
@@ -4880,7 +5058,7 @@ function shellIntent(said) {
   if (/^(вписать всё|вписать все|впиши всё|впиши все|покажи всё|покажи все|покажи весь макет|покажи целиком|целиком|общий вид|обзор)$/.test(t)) {
     return { kind: 'fit', all: true };
   }
-  if (/^(вписать экран|впиши экран|вписать артборд|впиши артборд|покажи этот экран|покажи активный экран)$/.test(t)) {
+  if (/^(вписать экран|впиши экран|вписать артборд|впиши артборд|вписать доску|впиши доску|покажи этот экран|покажи активный экран|покажи эту доску)$/.test(t)) {
     return { kind: 'fit', all: false };
   }
   if (/^(приблизь|приблизить|ближе|увеличь масштаб|увеличить масштаб|крупнее масштаб)$/.test(t)) return { kind: 'zoom', by: 1.25 };
@@ -4983,7 +5161,7 @@ function openArtboard(id, { say = true } = {}) {
   state.fitAll = false;
   fitAfterLayout([id]);
   if (say) {
-    showMsg('plain', `Активный артборд: «${nodeTitle(node)}»`, {
+    showMsg('plain', `Активная доска: «${nodeTitle(node)}»`, {
       note: 'Команды без выделения агент выполняет здесь.', ms: 5000,
     });
   }
@@ -4999,6 +5177,11 @@ function applyShellIntent(intent, said) {
     case 'stop': {
       if (state.running) stopAgent();
       else showMsg('plain', 'Агент сейчас ничего не делает.', { ms: 5000 });
+      return true;
+    }
+    case 'new-board': {
+      const r = addArtboard();
+      if (r && r.ok) showMsg('result', 'Новая доска готова', { note: 'Скажите, что на ней построить.', ms: 7000 });
       return true;
     }
     case 'variants-close': {
@@ -5066,7 +5249,7 @@ function applyShellIntent(intent, said) {
         fitView(intent.all || !act ? null : [act]);
       }
       updateFitButton();
-      toast(state.fitAll ? 'Вписаны все артборды' : 'Вписан активный артборд', 'plain', 3500);
+      toast(state.fitAll ? 'Вписаны все доски' : 'Вписана активная доска', 'plain', 3500);
       return true;
     }
     case 'zoom': {
@@ -5103,7 +5286,7 @@ function applyShellIntent(intent, said) {
     }
     case 'artboard': {
       const abs = artboards(state.doc);
-      if (!abs.length) { showMsg('plain', 'В документе нет артбордов.', { ms: 5000 }); return true; }
+      if (!abs.length) { showMsg('plain', 'В документе нет досок.', { ms: 5000 }); return true; }
       if (intent.id) return openArtboard(intent.id);
       if (Array.isArray(intent.list) && intent.list.length) {
         // имя подошло сразу нескольким: спрашиваем, а не выбираем за человека
@@ -5310,6 +5493,17 @@ function initVoice() {
   let silence = 0;        // подряд идущие «ничего не услышал»
   let toldOnce = false;   // про «одна команда за нажатие» говорим один раз за сеанс работы
 
+  /* Круг 18, п.4. Наговариваемое тихим шрифтом над микрофоном. Буфером по-прежнему
+     служит dom.command (на нём держатся отправка, склейка с переспросом и разбор
+     команд оболочки), но во время сессии строки не видно — текст человек читает
+     здесь. */
+  const paintSaid = () => {
+    const box = dom['voice-said'];
+    if (!box) return;
+    const text = wanted ? String(dom.command.value || '').trim() : '';
+    box.textContent = text;
+  };
+
   const paint = () => {
     const always = !!settings.voiceAlways;
     btn.dataset.state = wanted ? 'on' : 'off';
@@ -5322,6 +5516,14 @@ function initVoice() {
       dom['mic-live'].hidden = !wanted;
       dom['mic-live'].textContent = always ? 'Слушаю' : 'Слушаю команду';
     }
+    /* Смысл микрофона — не видеть окна ввода: на время сессии командная строка,
+       подсказки и чипы уходят целиком, а в правом нижнем углу остаётся значок
+       включённого микрофона (круг 18, п.4). Макет при этом ничем не заслонён. */
+    dom.app.dataset.voice = wanted ? 'on' : '';
+    if (dom.voicebar) dom.voicebar.hidden = !wanted;
+    paintSaid();
+    renderHints();      // подсказки уходят вместе со строкой и возвращаются с ней
+    paintRunButton();   // «Стоп» остаётся доступен: главной кнопки сейчас не видно
     if (wanted) dom.command.placeholder = 'Говорите — я слушаю';
     else setRunnable(!!state.provider);
     btn.title = wanted
@@ -5346,6 +5548,7 @@ function initVoice() {
     settled = '';
     if (!said) return;
     handleVoiceUtterance(said);
+    paintSaid();
     if (!auto || !wanted || settings.voiceAlways) return;
     stop({ send: false });
     if (toldOnce) return;
@@ -5382,6 +5585,7 @@ function initVoice() {
       // переспрос: к возвращённому тексту дописываем, а не затираем его (п.10)
       const base = state.awaitingClarify ? String(state.awaitingClarify.base || '').trim() : '';
       dom.command.value = [base, settled, interim].filter(Boolean).join(' ');
+      paintSaid();   // то же самое, но тихим шрифтом над микрофоном (круг 18, п.4)
       silence = 0;
       armPause();
       armIdle();
@@ -5460,6 +5664,17 @@ function initVoice() {
     stop();
   });
   btn.addEventListener('click', () => { if (!keyHold) toggleVoice(); });
+
+  /* Значок в правом нижнем углу — он же способ выйти обратно к печати: нажатие гасит
+     микрофон и возвращает командную строку с фокусом (круг 18, п.4). */
+  const off = dom['btn-voice-off'];
+  if (off) {
+    off.addEventListener('click', () => {
+      if (!wanted) return;
+      stop();
+      dom.command.focus();
+    });
+  }
 }
 
 /* -------------------------------- интерфейс ---------------------------------- */
@@ -5514,13 +5729,12 @@ function bindUi() {
     if (state.running && !dom.command.value.trim()) { stopAgent(); return; }
     submitOnce();
   });
-  dom['btn-stage-stop'].addEventListener('click', () => stopAgent());
+  dom['btn-work-stop'].addEventListener('click', () => stopAgent());
   // надпись на главной кнопке зависит от того, есть ли в строке текст
   dom.command.addEventListener('input', () => { if (state.busy) paintRunButton(); });
   dom['btn-variants'].addEventListener('click', () => submitCommand({ variants: true }));
   bindRunHold();
   dom['btn-msg-close'].addEventListener('click', hideMsg);
-  dom['btn-new-artboard'].addEventListener('click', addArtboard);
   dom['btn-empty-artboard'].addEventListener('click', addArtboard);
 
   dom['btn-zoom-in'].addEventListener('click', () => stage.zoomBy(1.2));
@@ -5572,7 +5786,6 @@ function bindUi() {
   dom['btn-settings'].addEventListener('click', openSettings);
   // три состояния темы: тёмная, светлая и «как в системе» (п.13)
   dom['btn-theme'].addEventListener('click', () => cycleTheme());
-  dom['btn-add-artboard'].addEventListener('click', addArtboard);
 
   dom.docname.addEventListener('blur', () => {
     const name = dom.docname.textContent.trim() || 'Без названия';
@@ -5607,6 +5820,16 @@ function bindUi() {
     // срабатывали с любой кнопки, по которой человек только что щёлкнул (круг 9, п.15)
     const bare = !typing && bareKeyOk();
     if (e.key === '/' && !typing) { e.preventDefault(); dom.command.focus(); }
+    /* Круг 18, п.4. Во время голосовой сессии командной строки не видно, и Escape —
+       самый короткий путь обратно к печати: он гасит микрофон, а строка возвращается
+       вместе с фокусом. Стоит раньше прочих Escape нарочно: шторки в этот момент
+       обычно закрыты, а «выйти из голоса» — то, чего человек хочет первым делом. */
+    if (e.key === 'Escape' && dom.app.dataset.voice === 'on') {
+      e.preventDefault();
+      if (typeof toggleVoice === 'function') toggleVoice();
+      dom.command.focus();
+      return;
+    }
     if (e.key === 'Escape' && !dom.sheet.hidden) { e.preventDefault(); closeSheet(); return; }
     // шторка слоёв закрывалась только кликом по затемнению (п.17)
     if (e.key === 'Escape' && railIsDrawer() && dom.app.dataset.rail === 'on') {
@@ -5727,13 +5950,13 @@ function addArtboard() {
   const at = nextArtboardPos(abs);
   const id = `ab_${Date.now().toString(36)}`;
   const node = {
-    id, type: 'frame', name: `Артборд ${abs.length + 1}`, parent: state.doc.root, children: [],
+    id, type: 'frame', name: `Доска ${abs.length + 1}`, parent: state.doc.root, children: [],
     pos: { x: at.x, y: at.y },
     size: { w: { mode: 'fixed', value: ARTBOARD_W }, h: { mode: 'fixed', value: ARTBOARD_H } },
     layout: { mode: 'column', gap: 16, padding: { t: 24, r: 20, b: 24, l: 20 }, align: 'stretch', justify: 'start', wrap: false },
     fill: { token: 'surface' }, radius: 16,
   };
-  const r = commit([OPS.create(node)], 'Новый артборд');
+  const r = commit([OPS.create(node)], 'Новая доска');
   if (r.ok) { setSelection([id]); fitAfterLayout([id]); }
   return r;
 }
@@ -6016,7 +6239,7 @@ const PNG_SCALE = 2;
 /** Картинка активного артборда. Возвращает true, если файл предложен человеку. */
 async function exportPng() {
   const { id, rect, ok } = exportTarget();
-  if (!ok) { toast('Картинку снимают с артборда, а его в документе нет.', 'error', 8000); return false; }
+  if (!ok) { toast('Картинку снимают с доски, а её в документе нет.', 'error', 8000); return false; }
   const huge = rect.w * PNG_SCALE > 16384 || rect.h * PNG_SCALE > 16384
     || rect.w * rect.h * PNG_SCALE * PNG_SCALE > 1e8;
   try {
@@ -6049,7 +6272,7 @@ async function exportPng() {
 /** Вектор активного артборда. */
 async function exportSvg() {
   const { id, ok } = exportTarget();
-  if (!ok) { toast('Вектор снимают с артборда, а его в документе нет.', 'error', 8000); return false; }
+  if (!ok) { toast('Вектор снимают с доски, а её в документе нет.', 'error', 8000); return false; }
   /* `toSVG` синхронный и берёт начертания только из кеша, а наполняет его отложенный
      `_warmFonts` (300 мс плюс сеть). Нажатие «Экспорт → SVG» через секунду после
      открытия отдавало файл без единого @font-face: строки в нём считаны системным
@@ -6069,7 +6292,7 @@ async function exportSvg() {
   try { markup = stage.toSVG(id) || ''; }
   catch (e) { toast(`Вектор не получился: ${humanError(e)}`, 'error', 9000); return false; }
   if (dataIsEmpty(markup)) {
-    toast('Вектор не получился: сцена не отдала разметку артборда.', 'error', 9000);
+    toast('Вектор не получился: сцена не отдала разметку доски.', 'error', 9000);
     return false;
   }
   // предупреждение — ДО того, как файл отдан: после него оно уже бесполезно
@@ -6119,11 +6342,11 @@ function fillExport(body) {
   const png = document.createElement('button');
   png.className = hasBoard ? 'btn accent wide lg' : 'btn subtle wide lg';
   if (!hasBoard) {
-    png.textContent = 'PNG — нет артборда';
+    png.textContent = 'PNG — нет доски';
     png.disabled = true;
-    png.title = 'Картинку снимают с артборда, а его в документе нет';
+    png.title = 'Картинку снимают с доски, а её в документе нет';
   } else {
-    png.textContent = abName ? `PNG · ${abName}` : 'PNG активного артборда';
+    png.textContent = abName ? `PNG · ${abName}` : 'PNG активной доски';
     // на кнопке — имя файла, которое получится: раньше обещание и файл расходились (п.7)
     png.title = `Сохранить как ${exportName('png', abId)}`;
     png.addEventListener('click', async () => {
@@ -6141,10 +6364,10 @@ function fillExport(body) {
     if (off) b.disabled = true; else b.addEventListener('click', fn);
     rest.appendChild(b);
   };
-  mk(hasBoard ? 'SVG' : 'SVG — нет артборда',
-    hasBoard ? `Вектор активного артборда — ${exportName('svg', abId)}` : '',
+  mk(hasBoard ? 'SVG' : 'SVG — нет доски',
+    hasBoard ? `Вектор активной доски — ${exportName('svg', abId)}` : '',
     () => exportSvg(),
-    hasBoard ? '' : 'Вектор снимают с артборда, а его в документе нет');
+    hasBoard ? '' : 'Вектор снимают с доски, а её в документе нет');
   mk('JSON', `Весь документ — ${exportName('json', null)}, его можно вернуть импортом`, () => exportJson());
   body.appendChild(rest);
 
@@ -6154,7 +6377,7 @@ function fillExport(body) {
     ? (huge
       ? `Артборд ${Math.round(rect.w)}×${Math.round(rect.h)} px крупный: PNG выйдет в уменьшенном масштабе или не выйдет вовсе — вектор надёжнее.`
       : `PNG — картинка ${Math.round(rect.w * wantScale)}×${Math.round(rect.h * wantScale)} px, SVG — вектор, JSON — весь документ целиком.`)
-    : 'Картинка и вектор снимаются с артборда. Пока его нет, можно сохранить только JSON документа.';
+    : 'Картинка и вектор снимаются с доски. Пока её нет, можно сохранить только JSON документа.';
   body.appendChild(hint);
 
   // импорт жил в «Настройках агента», а искать его человек идёт туда, где экспорт (п.21)
@@ -6455,7 +6678,7 @@ function importJson() {
         bits.push(`не сохранил ${taken.lostEdges} `
           + `${plural(taken.lostEdges, 'связь', 'связи', 'связей')} между узлами — вложение выпрямлено`);
       }
-      if (blank) bits.push('артбордов в файле не оказалось — холст пуст');
+      if (blank) bits.push('досок в файле не оказалось — холст пуст');
       /* Круг 16, п.13(б). На таком документе правка и отмена занимают заметное время, и
          честнее сказать об этом заранее, чем оставлять человека гадать, не завис ли
          редактор: во время самой правки поток занят и нарисовать предупреждение нечем. */
@@ -6523,11 +6746,40 @@ function renderHints() {
  * Вложенные кавычки: «Кнопка «Добавить пункт»» читается как опечатка.
  * Внутренний уровень — лапки „…“ (п.23).
  */
+/* Круг 18, п.5. Человек называет их досками, и оболочка говорит так же. Но часть
+   слов приходит из brain.js, а он — не наш файл: «завернул в артборд», «поменялись
+   ВСЕ артборды», «нужен отдельный артборд». Переводим их здесь, на самой границе
+   показа, и только целыми фразами: словарь по корню дал бы «Нужен отдельный доска» —
+   род у слов разный. Внутри «…» не трогаем ничего: там имя слоя, а имя принадлежит
+   документу, а не словарю оболочки. В отчёте это записано как просьба к brain.js
+   говорить «доска» самому. */
+const BOARD_PHRASES = [
+  [/завернул в артборд/g, 'завернул в доску'],
+  [/Нужен отдельный артборд/g, 'Нужна отдельная доска'],
+  [/нужен отдельный артборд/g, 'нужна отдельная доска'],
+  [/поменялись ВСЕ артборды/g, 'поменялись ВСЕ доски'],
+  [/все артборды/g, 'все доски'],
+  [/артборды/g, 'доски'],
+  [/артбордов/g, 'досок'],
+];
+
+/** Перевод вне кавычек: имя слоя «Артборд 2» должно остаться собой. */
+function boardWords(text) {
+  const s = String(text == null ? '' : text);
+  if (!/артборд/i.test(s)) return s;
+  return s.split(/(«[^»]*»)/).map((part) => {
+    if (part.startsWith('«')) return part;
+    let out = part;
+    for (const [re, to] of BOARD_PHRASES) out = out.replace(re, to);
+    return out;
+  }).join('');
+}
+
 function human(text) {
   let depth = 0;
   let out = '';
   // технические пути → слова инспектора: «layout.gap» человеку ничего не говорит (п.9)
-  for (const ch of humanizePaths(text)) {
+  for (const ch of boardWords(humanizePaths(text))) {
     if (ch === '«') { out += depth ? '„' : '«'; depth += 1; }
     else if (ch === '»') { depth = Math.max(0, depth - 1); out += depth ? '“' : '»'; }
     else out += ch;
@@ -6979,6 +7231,7 @@ function loadSettings() {
     // приложение при первом запуске (круг 9, п.13)
     theme: 'auto',
     rail: 'auto',
+    railW: 0,             // круг 18, п.3: ручная ширина рельса, 0 — значение по умолчанию
     introSeen: false,
     voiceAlways: false,   // «слушать постоянно» — по выбору человека, не по умолчанию (п.9)
     ...dflt,
@@ -7088,6 +7341,97 @@ function setRail(value, remember = false) {
   // рельс освободил или занял колонку — бюджет холста изменился (круг 16, п.1)
   syncPanelModes();
 }
+/* ---- ширина рельса: правая кромка — тяга (круг 18, п.3) ----------------------
+   Пределы замерены на демо-документе (39 строк слоёв, вложенность до 4):
+     140 px — режется уже имя самой доски («Маршрут дня»), рельс перестаёт называть
+              то единственное, ради чего он открыт;
+     152 px — обрезано 30 имён из 39, глубокие — больше чем наполовину;
+     168 px — обрезано 28, но доски и первый уровень целы: это и есть разумный низ;
+     208 px — прежняя жёсткая ширина, обрезано 13 из 39;
+     280 px — не обрезано ни одного имени.
+   Выше 280 читаемость уже не растёт, поэтому потолок 420 px — это запас на длинные
+   имена и глубокую вложенность, а не бесконечная растяжка за счёт холста. Сверху
+   ширину ещё раз ограничивает окно: холсту гарантирован CANVAS_MIN, иначе ручная
+   ширина ломала бы бюджет колонок круга 16. */
+const RAIL_MIN = 168;
+const RAIL_MAX = 420;
+
+function railLimit() {
+  const w = globalThis.innerWidth || 0;
+  return Math.max(RAIL_MIN, Math.min(RAIL_MAX, w ? w - CANVAS_MIN : RAIL_MAX));
+}
+
+function railWidthNow() {
+  const set = Number(settings.railW) || 0;
+  return set ? Math.max(RAIL_MIN, Math.min(railLimit(), Math.round(set))) : 208;
+}
+
+/**
+ * Ставит ширину рельса переменной --rail-w на .app. Именно переменной, а не свойством
+ * .rail: по --rail-w syncPanelModes считает, сколько места рельс попросит, и весь
+ * бюджет колонок круга 16 остаётся верным без единой правки в нём.
+ */
+function applyRailWidth(px, remember = false) {
+  const set = Number(px) || 0;
+  const w = set ? Math.max(RAIL_MIN, Math.min(railLimit(), Math.round(set))) : 0;
+  if (w) dom.app.style.setProperty('--rail-w', `${w}px`);
+  else dom.app.style.removeProperty('--rail-w');
+  const grip = dom['rail-grip'];
+  if (grip) {
+    grip.setAttribute('aria-valuenow', String(w || 208));
+    grip.setAttribute('aria-valuemin', String(RAIL_MIN));
+    grip.setAttribute('aria-valuemax', String(railLimit()));
+    grip.setAttribute('aria-valuetext', `${w || 208} пикселей`);
+  }
+  if (remember) { settings.railW = w; saveSettings(); }
+  syncPanelModes();        // рельс стал шире или уже — бюджет колонок изменился (круг 16, п.1)
+  scheduleViewRecheck(240);
+}
+
+/** Тяга: мышью, пальцем и с клавиатуры — это орган управления, а не полоска. */
+function initRailGrip() {
+  const grip = dom['rail-grip'];
+  if (!grip) return;
+  let from = 0;
+  let base = 0;
+
+  const move = (e) => {
+    applyRailWidth(base + (e.clientX - from));
+  };
+  const up = (e) => {
+    grip.dataset.drag = '';
+    globalThis.removeEventListener('pointermove', move);
+    globalThis.removeEventListener('pointerup', up);
+    try { grip.releasePointerCapture(e.pointerId); } catch { /* захвата и не было */ }
+    applyRailWidth(base + (e.clientX - from), true);   // запоминаем только итог жеста
+  };
+  grip.addEventListener('pointerdown', (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault();
+    from = e.clientX;
+    base = railWidthNow();
+    grip.dataset.drag = 'on';
+    grip.focus();
+    try { grip.setPointerCapture(e.pointerId); } catch { /* без захвата тоже работает */ }
+    globalThis.addEventListener('pointermove', move);
+    globalThis.addEventListener('pointerup', up);
+  });
+  // двойной щелчок по кромке — обратно к ширине по умолчанию
+  grip.addEventListener('dblclick', () => { applyRailWidth(0, true); toast('Ширина панели слоёв сброшена', 'plain', 3000); });
+  grip.addEventListener('keydown', (e) => {
+    const cur = railWidthNow();
+    let next = null;
+    if (e.key === 'ArrowLeft') next = cur - (e.shiftKey ? 48 : 16);
+    else if (e.key === 'ArrowRight') next = cur + (e.shiftKey ? 48 : 16);
+    else if (e.key === 'Home') next = RAIL_MIN;
+    else if (e.key === 'End') next = railLimit();
+    else if (e.key === 'Enter' || e.key === ' ') next = 0;   // к значению по умолчанию
+    else return;
+    e.preventDefault();
+    applyRailWidth(next, true);
+  });
+}
+
 const THEME_WORDS = { dark: 'Тема: тёмная', light: 'Тема: светлая', auto: 'Тема: как в системе' };
 
 /** Тема интерфейса по кругу: как в системе → светлая → тёмная. */
