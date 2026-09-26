@@ -3098,7 +3098,9 @@ async function runUtterance(text, { variants = false, toModel = false } = {}) {
        не доводит. «Я не расслышал команду» в ответ на клик по «Выполнить» — неправда,
        а в артефакте микрофона нет вовсе (круг 11, п.5). */
     const examples = (docIsEmpty() ? EMPTY_EXAMPLES : ARTBOARD_EXAMPLES).slice(0, 2);
-    const voice = dom['btn-mic'] && !dom['btn-mic'].disabled;
+    // круг 17: недоступный голос помечен data-unavailable, а не disabled (объяснение по нажатию)
+    const voice = !!dom['btn-mic'] && !dom['btn-mic'].disabled
+      && dom['btn-mic'].dataset.unavailable !== 'on';
     showMsg('question', 'Напишите, что построить или изменить', {
       note: voice
         ? 'Строка внизу пуста. Можно и голосом — кнопка с микрофоном слева от строки.'
@@ -5134,10 +5136,32 @@ function applyShellIntent(intent, said) {
  * Ошибки распознавания — по-русски: код «no-speech» или «not-allowed» человеку
  * не говорит ничего (п.13).
  */
+/**
+ * Круг 17: артефакт отдаёт страницу в рамке, у которой в `allow` микрофона нет вовсе
+ * (`translator; language-detector; fullscreen; clipboard-write; gamepad`). Конструктор
+ * `webkitSpeechRecognition` при этом на месте, поэтому кнопка включалась, распознавание
+ * падало с кодом `not-allowed`, и человек читал «разрешите его для этой страницы» — совет,
+ * который в артефакте выполнить НЕЛЬЗЯ ничем: разрешения у этой рамки нет и взяться ему
+ * неоткуда. Спрашиваем саму страницу, позволена ли ей эта возможность, и говорим правду.
+ * Неизвестный ответ считаем «позволено»: лучше попробовать и показать настоящую ошибку,
+ * чем заранее отнять голос там, где он работает.
+ */
+function micBlockedByPage() {
+  try {
+    const pol = document.permissionsPolicy || document.featurePolicy;
+    if (!pol || typeof pol.allowsFeature !== 'function') return false;
+    return pol.allowsFeature('microphone') === false;
+  } catch { return false; }
+}
+
+/** Что сказать про голос там, где его не может быть в принципе. */
+const VOICE_NO_MIC = 'Микрофон в этой рамке заблокирован платформой — разрешить его нельзя. '
+  + 'Голос работает в локальной сборке: запустите START.cmd.';
+
 const VOICE_ERRORS = {
   'no-speech': 'Я ничего не услышал — скажите ещё раз.',
   'audio-capture': 'Микрофон не найден: проверьте, что он подключён и выбран в системе.',
-  'not-allowed': 'Браузер не дал доступ к микрофону — разрешите его для этой страницы.',
+  'not-allowed': 'Браузер не дал доступ к микрофону — разрешите его значком слева в адресной строке и нажмите ещё раз.',
   'service-not-allowed': 'Распознавание речи заблокировано настройками браузера.',
   network: 'Распознавание речи не дошло до сервиса браузера — проверьте связь.',
   'bad-grammar': 'Речь не разобрать — скажите короче.',
@@ -5253,9 +5277,27 @@ let toggleVoice = null;
 function initVoice() {
   const SR = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
   const btn = dom['btn-mic'];
-  if (!SR) {
-    btn.disabled = true;
-    btn.title = 'Голос доступен в локальной сборке (Chrome). В артефакте микрофон заблокирован платформой.';
+  /* Круг 17: кнопку гасим не только когда распознавания нет в браузере, но и когда странице
+     запрещён микрофон (артефакт). Кнопку НЕ делаем `disabled`: по нажатой кнопке человек
+     получает объяснение, а мёртвая кнопка молчит и человек жмёт её снова и снова — именно
+     так и вышло. Поэтому: вид «недоступна», подсказка в title, объяснение по нажатию. */
+  const blocked = !SR || micBlockedByPage();
+  if (blocked) {
+    btn.dataset.state = 'off';
+    btn.dataset.unavailable = 'on';
+    /* aria-disabled тут был бы неправдой: кнопка ДЕЙСТВУЕТ — объясняет, почему голоса нет.
+       С этим признаком её не нажать ни с клавиатуры вспомогательными средствами, ни
+       автоматикой, и человек снова остался бы без ответа (круг 17). */
+    btn.setAttribute('aria-label', 'Голос недоступен — почему');
+    btn.title = SR
+      ? VOICE_NO_MIC
+      : 'Этот браузер не умеет распознавать речь. Голос работает в Chrome — в локальной сборке.';
+    const say = () => showMsg('warn', 'Голос здесь недоступен', {
+      note: btn.title,
+      actions: [{ label: 'Набрать текстом', onClick: () => dom.command.focus() }],
+    });
+    btn.addEventListener('click', say);
+    toggleVoice = say;
     return;
   }
 
@@ -6236,7 +6278,9 @@ function fillSettings(body) {
   body.appendChild(group('Локальная модель (LM Studio)', lmRows));
 
   // микрофон-переключатель раньше слушал комнату без конца, хотя об этом нигде не сказано (п.9)
-  const micOff = dom['btn-mic'] && dom['btn-mic'].disabled;
+  // круг 17: голос недоступен и когда кнопка не disabled, а помечена data-unavailable
+  const micOff = !!dom['btn-mic']
+    && (dom['btn-mic'].disabled || dom['btn-mic'].dataset.unavailable === 'on');
   /* Нативный чекбокс был единственным на всё приложение, где выбор живёт в пилюлях
      и сегментах (круг 11, п.16). Тот же выбор — тем же органом управления. */
   const always = row('Микрофон', segField(
@@ -6260,7 +6304,7 @@ function fillSettings(body) {
   const voiceNote = document.createElement('div');
   voiceNote.className = 'note';
   voiceNote.textContent = micOff
-    ? 'Микрофон в артефакте заблокирован платформой — голос работает в локальной сборке.'
+    ? VOICE_NO_MIC
     : '«Одна команда»: микрофон выключается сам — после отправки и после десяти секунд тишины. '
       + '«Слушать постоянно»: слышит всё, что говорят рядом, пока его не выключить.';
   body.appendChild(group('Голос', [always, voiceNote]));

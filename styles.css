@@ -1110,3 +1110,15 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 
 /* элементы, скрытые через el.hidden, скрыты всегда */
 [hidden] { display: none !important; }
+
+/* Круг 17: голос, которого на этой странице быть не может (артефакт: у рамки нет
+   разрешения на микрофон). Кнопку не выключаем — по нажатию она объясняет почему,
+   поэтому нужен вид «недоступна», отличный и от «выключена», и от «слушаю». */
+.mic[data-unavailable="on"] {
+  opacity: .45;
+  cursor: help;
+}
+.mic[data-unavailable="on"]:hover,
+.mic[data-unavailable="on"]:focus-visible {
+  opacity: .7;
+}
