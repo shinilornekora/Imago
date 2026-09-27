@@ -4,7 +4,11 @@ import {
   createDoc, applyOps, invertOps, solve, validate, ops, hashGeometry,
   nodeById, ancestors, isArtboard, artboards, cloneSubtree, resolveTarget,
   contrastRatio, resolveTextStyle, resolveColor, subtreeIds, Stage,
-  resetMeasureCache, measureEpoch, onMeasureEpoch, placeholderName, displayName
+  resetMeasureCache, measureEpoch, onMeasureEpoch, placeholderName, displayName,
+  isLibrary, libraryId, libraryNode, ensureLibrary, ensureLibraryOps,
+  components, componentSignature, instanceSummary, isMaster, masterOf,
+  canMakeComponent, makeComponentOps, instanceOps, detachInstanceOps,
+  expandInstance, MAX_INSTANCE_DEPTH
 } from '../src/core.js';
 
 /* Заглушка измерителя: ширина символа = 0.5 кегля (0.6 для моноширинного). */
@@ -3968,4 +3972,768 @@ test('круг16 п.6: точечное обновление не трогает
     paint();
     assert.notEqual(st._nodeEls.get(untouched), before.keep, 'после смены палитры сцена собрана заново');
   });
+});
+
+/* ================================================================== *
+ * Круг 19: компоненты (SPEC §5)
+ * ================================================================== */
+
+/**
+ * Сцена с библиотекой и одним компонентом «Кнопка»:
+ * мастер btn (фрейм с подписью lab), пропсы «текст» и «вид».
+ * @returns {object} Doc
+ */
+function libScene(extra) {
+  let doc = createDoc('empty');
+  const push = (list) => {
+    const res = applyOps(doc, list);
+    assert.equal(res.error, undefined, 'операции должны применяться: ' + JSON.stringify(res.error));
+    doc = res.doc;
+  };
+  push([ops.create({
+    type: 'frame', id: 'ab', name: 'Доска', parent: doc.root, children: [],
+    pos: { x: 0, y: 0 }, radius: 0, fill: '#ffffff',
+    size: { w: { mode: 'fixed', value: 400 }, h: { mode: 'fixed', value: 300 } },
+    layout: { mode: 'column', gap: 10, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false }
+  })]);
+  doc = ensureLibrary(doc);
+  const lib = libraryId(doc);
+  push([
+    ops.create(frame('btn', lib, { mode: 'row', padding: { t: 8, r: 16, b: 8, l: 16 } },
+      { w: { mode: 'hug' }, h: { mode: 'hug' } }, { name: 'Кнопка', fill: 'accent', radius: 8 })),
+    ops.create(label('lab', 'btn', 'Кнопка', { color: 'onAccent' })),
+    ops.set('btn', 'component', {
+      name: 'Кнопка',
+      props: [
+        { name: 'текст', kind: 'text', target: 'lab', path: 'characters' },
+        { name: 'вид', kind: 'enum', target: 'btn', path: 'fill', values: ['accent', 'surface'] }
+      ]
+    })
+  ]);
+  if (extra) push(extra(doc, lib));
+  return doc;
+}
+
+/** Экземпляр мастера `of` на доске. */
+const inst = (id, parent, of, props, extra = {}) => ({
+  type: 'instance', id, name: id, parent, of, props: { ...props }, ...extra
+});
+
+test('круг19 п.1: библиотека — потомок корня, но не доска; ensureLibrary идемпотентен', () => {
+  const doc = libScene();
+  const lib = libraryNode(doc);
+  assert.ok(lib, 'библиотека есть');
+  assert.equal(lib.type, 'page');
+  assert.equal(lib.role, 'library');
+  assert.equal(lib.parent, doc.root, 'лежит прямо в корне');
+  assert.ok(nodeById(doc, doc.root).children.includes(lib.id), 'и числится его ребёнком');
+
+  // не доска — ни по isArtboard, ни в списке досок
+  assert.equal(isArtboard(doc, lib), false);
+  assert.equal(isArtboard(doc, lib.id), false);
+  assert.ok(isLibrary(doc, lib.id));
+  assert.deepEqual(artboards(doc).map((a) => a.id), ['ab'], 'в досках только доска');
+  assert.equal(libraryId(doc), lib.id);
+
+  // второй вызов ничего не делает и отдаёт ТОТ ЖЕ документ
+  assert.equal(ensureLibrary(doc), doc, 'миграция идемпотентна');
+  assert.deepEqual(ensureLibraryOps(doc), []);
+
+  // и подпись-заглушка у неё своя
+  assert.equal(placeholderName(doc, lib.id), 'Библиотека');
+});
+
+test('круг19 п.1: миграция старого документа — ensureLibrary одним вызовом', () => {
+  // документ «до компонентов»: библиотеки нет вовсе
+  const old = createDoc(JSON.parse(JSON.stringify(scene(() => [ops.create(box('a', 'ab', 40, 40))]))));
+  assert.equal(libraryNode(old), null, 'у старого документа библиотеки нет');
+  // и он при этом полностью рабочий: решатель, валидатор и словарь молчат
+  const geoBefore = solve(old, M);
+  assert.ok(geoBefore.rects.a, 'старый документ считается');
+  assert.deepEqual(validate(old, geoBefore, M).filter((v) => v.code.includes('instance')), []);
+  assert.deepEqual(components(old), [], 'компонентов нет — словарь пуст, а не сломан');
+
+  // тот же результат транзакцией — её можно отменить (одни и те же операции!)
+  const migrate = ensureLibraryOps(old);
+  const undo = invertOps(old, migrate);
+  const staged = applyOps(old, migrate);
+  assert.equal(staged.error, undefined, JSON.stringify(staged.error));
+  assert.ok(libraryNode(staged.doc), 'библиотека появилась и так');
+  const back = applyOps(staged.doc, undo);
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.deepStrictEqual(back.doc.nodes, old.nodes, 'отмена миграции возвращает исходный документ');
+
+  const next = ensureLibrary(old);
+  assert.notEqual(next, old, 'вернулся новый документ');
+  assert.ok(libraryNode(next), 'библиотека появилась');
+  assert.deepEqual(old, JSON.parse(JSON.stringify(old)), 'вход не тронут');
+  // доски не поехали: у самой библиотеки прямоугольник свой (пустой), а всё
+  // прежнее содержимое стоит там же, где стояло
+  const geoAfter = solve(next, M);
+  for (const id of Object.keys(geoBefore.rects)) {
+    assert.deepEqual(geoAfter.rects[id], geoBefore.rects[id], 'прямоугольник не поехал: ' + id);
+  }
+  assert.deepEqual(artboards(next).map((a) => a.name), artboards(old).map((a) => a.name));
+  assert.equal(geoAfter.order.length, Object.keys(next.nodes).length - 1, 'порядок покрывает узлы документа');
+});
+
+test('круг19 п.2: схема мастера — что не по SPEC §5.4, то негодная операция', () => {
+  const doc = libScene();
+  const bad = (value, why) => {
+    const res = applyOps(doc, [ops.set('btn', 'component', value)]);
+    assert.ok(res.error, 'должно быть отклонено: ' + why);
+    assert.equal(res.error.code, 'bad-node', why + ' → ' + JSON.stringify(res.error));
+    assert.equal(res.doc, doc, 'документ не изменился');
+  };
+  bad('строка', 'component не объект');
+  bad({ props: [] }, 'нет имени');
+  bad({ name: '   ' }, 'пустое имя');
+  bad({ name: 'К', props: {} }, 'props не массив');
+  bad({ name: 'К', props: [{ name: 'т', kind: 'wat', target: 'lab', path: 'characters' }] }, 'неизвестный kind');
+  bad({ name: 'К', props: [{ name: 'т', kind: 'text', path: 'characters' }] }, 'нет target');
+  bad({ name: 'К', props: [{ name: 'т', kind: 'text', target: 'lab' }] }, 'нет path');
+  bad({ name: 'К', props: [{ name: 'т', kind: 'text', target: 'ab', path: 'characters' }] }, 'target вне мастера');
+  bad({ name: 'К', props: [{ name: 'т', kind: 'text', target: 'нет-такого', path: 'characters' }] }, 'target не найден');
+  bad({ name: 'К', props: [{ name: 'т', kind: 'text', target: 'lab', path: 'parent' }] }, 'защищённый путь');
+  bad({ name: 'К', props: [{ name: 'т', kind: 'text', target: 'lab', path: 'style.__proto__' }] }, 'ключ прототипа');
+  bad({ name: 'К', props: [{ name: 'в', kind: 'enum', target: 'btn', path: 'fill' }] }, 'enum без values');
+  bad({ name: 'К', props: [{ name: 'в', kind: 'enum', target: 'btn', path: 'fill', values: [] }] }, 'enum с пустым values');
+  bad({
+    name: 'К',
+    props: [{ name: 'т', kind: 'text', target: 'lab', path: 'characters' },
+      { name: 'т', kind: 'text', target: 'lab', path: 'name' }]
+  }, 'два пропса с одним именем');
+
+  // а годная схема применяется, и target разрешён на сам мастер
+  const ok = applyOps(doc, [ops.set('btn', 'component', {
+    name: 'Кнопка', props: [{ name: 'вид', kind: 'enum', target: 'btn', path: 'fill', values: ['accent'] }]
+  })]);
+  assert.equal(ok.error, undefined, JSON.stringify(ok.error));
+});
+
+test('круг19 п.3: экземпляр — of, пропсы по схеме, детей нет', () => {
+  const doc = libScene();
+  const ok = applyOps(doc, [ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить', 'вид': 'accent' }))]);
+  assert.equal(ok.error, undefined, JSON.stringify(ok.error));
+  assert.equal(ok.doc.nodes.i1.type, 'instance');
+  assert.equal(ok.doc.nodes.i1.size, undefined, 'размер не достроен — берётся у мастера');
+
+  const bad = (node, code, why) => {
+    const res = applyOps(doc, [ops.create(node)]);
+    assert.ok(res.error, 'должно быть отклонено: ' + why);
+    assert.equal(res.error.code, code, why + ' → ' + JSON.stringify(res.error));
+  };
+  bad(inst('x', 'ab', '', {}), 'bad-node', 'нет of');
+  bad({ type: 'instance', id: 'x', parent: 'ab', of: 'x' }, 'bad-node', 'of на себя');
+  bad(inst('x', 'ab', 'btn', { 'выдумка': 'ой' }), 'bad-node', 'неизвестное имя пропса');
+  bad(inst('x', 'ab', 'btn', { 'вид': 'radioactive' }), 'bad-node', 'значение вне enum');
+  bad(inst('x', 'ab', 'btn', { 'текст': 42 }), 'bad-node', 'не строка для text');
+  bad({ ...inst('x', 'ab', 'btn', {}), children: ['lab'] }, 'bad-node', 'у экземпляра детей не бывает');
+  bad({ ...inst('x', 'ab', 'btn', {}), size: { w: { mode: 'fixed', value: -5 } } }, 'bad-node', 'негодный размер');
+
+  // одна ось размера — законно: ресайз одной кромкой пишет только её
+  const oneAxis = applyOps(doc, [ops.create({ ...inst('x', 'ab', 'btn', {}), size: { w: { mode: 'fixed', value: 200 } } })]);
+  assert.equal(oneAxis.error, undefined, JSON.stringify(oneAxis.error));
+});
+
+test('круг19 п.4: solve раскрывает экземпляр под синтетическими id и детерминирован', () => {
+  const doc = libScene((d, lib) => [
+    ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить' })),
+    ops.create(inst('i2', 'ab', 'btn', { 'текст': 'Отменить', 'вид': 'surface' }))
+  ]);
+  const geo = solve(doc, M);
+
+  // корень мастера лёг под id самого экземпляра, потомки — под «<экз>/<узел мастера>»
+  assert.ok(geo.rects.i1, 'у экземпляра есть прямоугольник');
+  assert.ok(geo.rects['i1/lab'], 'подпись внутри экземпляра раскрыта: i1/lab');
+  assert.ok(geo.rects['i2/lab'], 'и у второго экземпляра своя');
+  assert.equal(doc.nodes['i1/lab'], undefined, 'в doc.nodes синтетических узлов нет');
+  assert.deepEqual(geo.lines['i1/lab'], ['Оплатить'], 'пропс «текст» применён');
+  assert.deepEqual(geo.lines['i2/lab'], ['Отменить']);
+  assert.equal(geo.expanded['i2'].fill, 'surface', 'пропс «вид» применён к корню мастера');
+  assert.equal(geo.expanded['i1'].fill, 'accent', 'а у соседа — значение мастера');
+  assert.equal(geo.expanded['i1/lab'].synthetic, true, 'раскрытый узел помечен');
+  assert.equal(geo.expanded['i1/lab'].instance, 'i1', 'и знает, чей он');
+  assert.equal(geo.expanded['i1/lab'].master, 'lab', 'и из какого узла мастера сделан');
+
+  // размер экземпляра — размер мастера (hug по содержимому подписи + отступы)
+  assert.ok(geo.rects.i1.w > 32, 'экземпляр не нулевой: ' + JSON.stringify(geo.rects.i1));
+  assert.equal(geo.rects.i1.h, geo.rects['i1/lab'].h + 16, 'высота = подпись + отступы мастера');
+  assert.equal(geo.rects.i1.w, geo.rects['i1/lab'].w + 32, 'ширина = подпись + отступы мастера');
+
+  // порядок отрисовки — только настоящие узлы документа
+  assert.ok(!geo.order.some((id) => id.includes('/')), 'синтетических id в order нет: ' + geo.order.join(','));
+  assert.ok(geo.order.includes('i1'), 'а сам экземпляр в порядке есть');
+
+  // детерминированность
+  assert.equal(hashGeometry(solve(doc, M)), hashGeometry(geo), 'два прохода дают одну геометрию');
+  assert.equal(hashGeometry(solve(createDoc(JSON.parse(JSON.stringify(doc))), M)), hashGeometry(geo),
+    'и после сериализации тоже');
+  resetMeasureCache('тест');
+  assert.equal(hashGeometry(solve(doc, M)), hashGeometry(geo), 'сброс кеша измерений геометрию не меняет');
+});
+
+test('круг19 п.3: неизвестное имя пропса в документе не применяется', () => {
+  // такой документ нельзя СОЗДАТЬ операциями, но он приходит из файла или
+  // остаётся после того, как мастер перестал объявлять пропс
+  const doc = libScene(() => [ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить' }))]);
+  const sneaky = JSON.parse(JSON.stringify(doc));
+  sneaky.nodes.i1.props['выдумка'] = 'ой';
+  const geo = solve(sneaky, M);
+  assert.deepEqual(geo.lines['i1/lab'], ['Оплатить'], 'известный пропс применён');
+  assert.equal(JSON.stringify(geo.expanded.i1).includes('выдумка'), false, 'выдуманный — нет');
+  // и валидатор об этом говорит
+  const v = validate(sneaky, geo, M).filter((x) => x.code === 'unknown-prop');
+  assert.equal(v.length, 1, JSON.stringify(v));
+  assert.equal(v[0].severity, 'error');
+  assert.equal(v[0].nodeId, 'i1');
+});
+
+test('круг19 п.4: вложенные экземпляры, предел глубины и самовключение не вешают solve', () => {
+  // мастер «Полоса» содержит экземпляр «Кнопки» — законная вложенность
+  let doc = libScene();
+  const lib = libraryId(doc);
+  let res = applyOps(doc, [
+    ops.create(frame('bar', lib, { mode: 'row', gap: 8 }, { w: { mode: 'hug' }, h: { mode: 'hug' } }, { name: 'Полоса' })),
+    ops.create(inst('bar-i', 'bar', 'btn', { 'текст': 'Внутри' })),
+    ops.set('bar', 'component', { name: 'Полоса', props: [] }),
+    ops.create(inst('top', 'ab', 'bar', {}))
+  ]);
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  doc = res.doc;
+  const geo = solve(doc, M);
+  assert.ok(geo.rects['top/bar-i'], 'вложенный экземпляр раскрыт');
+  assert.ok(geo.rects['top/bar-i/lab'], 'и его собственное содержимое: ' + Object.keys(geo.rects).join(','));
+  assert.deepEqual(geo.lines['top/bar-i/lab'], ['Внутри']);
+  assert.deepEqual(validate(doc, geo, M).filter((v) => v.severity === 'error'), [], 'законная вложенность — не нарушение');
+
+  // составной компонент остаётся настраиваемым: пропс внешнего мастера целится в
+  // `props.<имя>` вложенного экземпляра и пробрасывается внутрь
+  const through = applyOps(doc, [ops.set('bar', 'component', {
+    name: 'Полоса',
+    props: [{ name: 'подпись', kind: 'text', target: 'bar-i', path: 'props.текст' }]
+  })]);
+  assert.equal(through.error, undefined, JSON.stringify(through.error));
+  const withProp = applyOps(through.doc, [ops.set('top', 'props', { 'подпись': 'Проброшено' })]);
+  assert.equal(withProp.error, undefined, JSON.stringify(withProp.error));
+  assert.deepEqual(solve(withProp.doc, M).lines['top/bar-i/lab'], ['Проброшено'],
+    'значение дошло до текста внутри вложенного экземпляра');
+  assert.deepEqual(validate(withProp.doc, solve(withProp.doc, M), M).filter((v) => v.severity === 'error'), []);
+
+  // самовключение: «Полоса» содержит экземпляр самой себя
+  const cyc = applyOps(doc, [ops.create(inst('self', 'bar', 'bar', {}))]);
+  assert.equal(cyc.error, undefined, JSON.stringify(cyc.error));
+  const cgeo = solve(cyc.doc, M);   // не вешается и не бросает
+  const cv = validate(cyc.doc, cgeo, M).filter((v) => v.code === 'component-cycle');
+  assert.equal(cv.length, 1, JSON.stringify(cv));
+  assert.equal(cv[0].severity, 'error');
+  assert.equal(cv[0].nodeId, 'bar');
+  assert.equal(hashGeometry(solve(cyc.doc, M)), hashGeometry(cgeo), 'и остаётся детерминированным');
+
+  // предел вложенности: цепочка мастеров длиннее MAX_INSTANCE_DEPTH
+  let deep = libScene();
+  const dlib = libraryId(deep);
+  let prev = 'btn';
+  for (let i = 0; i < MAX_INSTANCE_DEPTH + 2; i++) {
+    const mid = 'm' + i;
+    const r = applyOps(deep, [
+      ops.create(frame(mid, dlib, { mode: 'row' }, { w: { mode: 'hug' }, h: { mode: 'hug' } }, { name: 'Слой ' + i })),
+      ops.create(inst(mid + '-i', mid, prev, {})),
+      ops.set(mid, 'component', { name: 'Слой ' + i, props: [] })
+    ]);
+    assert.equal(r.error, undefined, JSON.stringify(r.error));
+    deep = r.doc;
+    prev = mid;
+  }
+  const dr = applyOps(deep, [ops.create(inst('deep', 'ab', prev, {}))]);
+  assert.equal(dr.error, undefined, JSON.stringify(dr.error));
+  const dgeo = solve(dr.doc, M);
+  const dv = validate(dr.doc, dgeo, M).filter((v) => v.code === 'instance-too-deep');
+  assert.ok(dv.length >= 1, 'о переборе вложенности сказано: ' + JSON.stringify(dv));
+  assert.equal(dv[0].severity, 'warn', 'и это предупреждение, а не ошибка');
+  assert.ok(dv.some((v) => v.nodeId === 'deep'), 'в том числе про самый верхний экземпляр');
+  // раскрытие обрывается на пределе, а не уходит в бесконечность
+  const depths = Object.keys(dgeo.rects).map((id) => id.split('/').length);
+  assert.ok(Math.max(...depths) <= MAX_INSTANCE_DEPTH + 1,
+    'глубже предела ничего не раскрыто: ' + Math.max(...depths));
+});
+
+test('круг19 п.7: dead-instance — ссылка в никуда и мастер вне библиотеки', () => {
+  const doc = libScene(() => [ops.create(inst('i1', 'ab', 'btn', {}))]);
+  // ссылка в никуда
+  const ghost = JSON.parse(JSON.stringify(doc));
+  ghost.nodes.i2 = { type: 'instance', id: 'i2', name: 'Сирота', parent: 'ab', of: 'нет-такого', props: {} };
+  ghost.nodes.ab.children.push('i2');
+  let v = validate(ghost, solve(ghost, M), M).filter((x) => x.code === 'dead-instance');
+  assert.equal(v.length, 1, JSON.stringify(v));
+  assert.equal(v[0].severity, 'error');
+  assert.equal(v[0].nodeId, 'i2');
+
+  // мастер вынесли из библиотеки — он перестал быть компонентом
+  const moved = applyOps(doc, [ops.move('btn', 'ab', 0)]);
+  assert.equal(moved.error, undefined, JSON.stringify(moved.error));
+  assert.deepEqual(components(moved.doc), [], 'в словаре его больше нет');
+  v = validate(moved.doc, solve(moved.doc, M), M).filter((x) => x.code === 'dead-instance');
+  assert.equal(v.length, 1, 'экземпляр остался без компонента: ' + JSON.stringify(v));
+  assert.equal(v[0].nodeId, 'i1');
+  // и раскрывать нечего — экземпляр виден как нулевой узел, а не как пропавший
+  assert.ok(solve(moved.doc, M).rects.i1, 'прямоугольник у него всё равно есть');
+});
+
+test('круг19: правка мастера меняет ВСЕ экземпляры разом и отменяется одной отменой', () => {
+  const doc = libScene(() => [
+    ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Раз' })),
+    ops.create(inst('i2', 'ab', 'btn', { 'текст': 'Два' })),
+    ops.create(inst('i3', 'ab', 'btn', { 'текст': 'Три' }))
+  ]);
+  const before = solve(doc, M);
+  const h0 = [before.rects.i1.h, before.rects.i2.h, before.rects.i3.h];
+  assert.equal(new Set(h0).size, 1, 'все три одной высоты: ' + h0.join(','));
+
+  // ОДНА правка мастера: отступы вдвое больше
+  const edit = [ops.set('btn', 'layout.padding', { t: 24, r: 32, b: 24, l: 32 })];
+  const undo = invertOps(doc, edit);
+  const after = applyOps(doc, edit);
+  assert.equal(after.error, undefined, JSON.stringify(after.error));
+  const geo2 = solve(after.doc, M);
+  for (const id of ['i1', 'i2', 'i3']) {
+    assert.ok(geo2.rects[id].h > before.rects[id].h + 15,
+      `экземпляр ${id} вырос: ${before.rects[id].h} → ${geo2.rects[id].h}`);
+    assert.ok(geo2.rects[id].w > before.rects[id].w + 15, `и в ширину: ${id}`);
+  }
+  // а сам документ не вырос ни на один узел: содержимое экземпляров не в нём
+  assert.equal(Object.keys(after.doc.nodes).length, Object.keys(doc.nodes).length);
+
+  // одна отмена возвращает ровно исходное состояние
+  const back = applyOps(after.doc, undo);
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.deepStrictEqual(back.doc.nodes, doc.nodes, 'документ восстановлен байт в байт');
+  assert.equal(hashGeometry(solve(back.doc, M)), hashGeometry(before), 'и геометрия тоже');
+});
+
+test('круг19 п.6: отсоединение — настоящая копия поддерева одной отменяемой транзакцией', () => {
+  const doc = libScene(() => [
+    ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить', 'вид': 'surface' })),
+    ops.create(inst('i2', 'ab', 'btn', { 'текст': 'Рядом' }))
+  ]);
+  const before = solve(doc, M);
+  const list = detachInstanceOps(doc, 'i1');
+  assert.ok(list.length >= 3, 'remove + create на каждый узел: ' + list.length);
+  assert.equal(list[0].op, 'remove');
+  assert.equal(list[0].id, 'i1');
+  // функция ничего не мутирует
+  assert.deepEqual(doc, JSON.parse(JSON.stringify(doc)), 'документ не тронут');
+
+  const undo = invertOps(doc, list);
+  const res = applyOps(doc, list);
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  const next = res.doc;
+  assert.equal(next.nodes.i1, undefined, 'экземпляра больше нет');
+  // на его месте — настоящие узлы с настоящим содержимым
+  const kids = nodeById(next, 'ab').children;
+  const copyId = kids[0];
+  assert.notEqual(copyId, 'i1');
+  const copy = nodeById(next, copyId);
+  assert.equal(copy.type, 'frame', 'копия — обычный фрейм, а не экземпляр');
+  assert.equal(copy.component, undefined, 'и не мастер');
+  assert.equal(copy.fill, 'surface', 'пропс «вид» въелся в копию');
+  assert.equal(copy.synthetic, undefined, 'служебных полей раскрытия в документе нет');
+  assert.equal(copy.instance, undefined);
+  assert.equal(copy.master, undefined);
+  const labId = copy.children[0];
+  assert.equal(nodeById(next, labId).characters, 'Оплатить', 'пропс «текст» тоже');
+  assert.equal(kids.indexOf(copyId), 0, 'копия встала на место экземпляра');
+  assert.equal(kids[1], 'i2', 'сосед на месте');
+
+  // геометрия ровно та же, что была у экземпляра
+  const geo2 = solve(next, M);
+  assert.deepEqual(geo2.rects[copyId], before.rects.i1, 'отсоединение вида не меняет');
+  assert.deepEqual(geo2.lines[labId], before.lines['i1/lab']);
+  // второй экземпляр по-прежнему связан с мастером, а копия уже нет
+  const edited = applyOps(next, [ops.set('btn', 'fill', '#123456')]);
+  assert.equal(edited.error, undefined, JSON.stringify(edited.error));
+  assert.equal(solve(edited.doc, M).expanded.i2.fill, '#123456', 'экземпляр слушает мастера');
+  assert.equal(nodeById(edited.doc, copyId).fill, 'surface', 'а копия живёт своей жизнью');
+  // и наоборот: правка копии мастера не касается
+  const edited2 = applyOps(next, [ops.set(labId, 'characters', 'Своё')]);
+  assert.equal(edited2.error, undefined, JSON.stringify(edited2.error));
+  assert.deepEqual(solve(edited2.doc, M).lines['i2/lab'], ['Рядом'], 'экземпляр не поехал');
+
+  // одна отмена
+  const back = applyOps(next, undo);
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.deepStrictEqual(back.doc.nodes, doc.nodes, 'отмена возвращает исходный документ');
+  assert.equal(hashGeometry(solve(back.doc, M)), hashGeometry(before));
+
+  // не экземпляр отсоединить нельзя
+  assert.deepEqual(detachInstanceOps(doc, 'ab'), []);
+  assert.deepEqual(detachInstanceOps(doc, 'нет-такого'), []);
+});
+
+test('круг19 п.8: экспорты для соседей — словарь, проверка и создание компонента', () => {
+  const doc = libScene(() => [ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить', 'вид': 'accent' }))]);
+  const list = components(doc);
+  assert.equal(list.length, 1);
+  assert.deepEqual(Object.keys(list[0]).sort(), ['id', 'instances', 'name', 'props']);
+  assert.equal(list[0].id, 'btn');
+  assert.equal(list[0].name, 'Кнопка');
+  assert.equal(list[0].instances, 1, 'сколько экземпляров стоит');
+  assert.deepEqual(list[0].props.map((p) => p.name), ['текст', 'вид']);
+  assert.deepEqual(list[0].props[1].values, ['accent', 'surface']);
+  assert.equal(list[0].props[0].target, 'lab');
+  assert.equal(list[0].props[0].path, 'characters');
+  // строка словаря ровно как в SPEC §5.9
+  assert.equal(componentSignature(list[0]), 'Кнопка(текст, вид: accent|surface)');
+  assert.equal(instanceSummary(doc, 'i1'), 'Кнопка "Оплатить" вид=accent');
+  assert.equal(masterOf(doc, 'i1').id, 'btn');
+  assert.ok(isMaster(doc, 'btn'));
+  assert.equal(isMaster(doc, 'ab'), false);
+
+  // можно ли сделать компонентом
+  assert.deepEqual(canMakeComponent(doc, 'ab'), { ok: false, reason: 'доска компонентом не станет' });
+  assert.equal(canMakeComponent(doc, doc.root).ok, false);
+  assert.equal(canMakeComponent(doc, 'btn').ok, false, 'уже компонент');
+  assert.equal(canMakeComponent(doc, 'lab').ok, false, 'внутри компонента');
+  assert.equal(canMakeComponent(doc, 'i1').ok, false, 'уже экземпляр');
+  assert.equal(canMakeComponent(doc, 'нет-такого').ok, false);
+
+  // сделать компонентом обычный узел
+  let d2 = applyOps(doc, [ops.create(frame('card', 'ab', { mode: 'column', gap: 4 },
+    { w: { mode: 'fixed', value: 120 }, h: { mode: 'hug' } }, { name: 'Карточка', fill: 'surfaceAlt' }))]).doc;
+  d2 = applyOps(d2, [ops.create(label('ctext', 'card', 'Внутри'))]).doc;
+  assert.deepEqual(canMakeComponent(d2, 'card'), { ok: true });
+  const mk = makeComponentOps(d2, 'card', {
+    name: 'Карточка', props: [{ name: 'текст', kind: 'text', target: 'ctext', path: 'characters' }]
+  });
+  assert.ok(mk.length, 'операции есть');
+  const undo = invertOps(d2, mk);
+  const made = applyOps(d2, mk);
+  assert.equal(made.error, undefined, JSON.stringify(made.error));
+  assert.equal(nodeById(made.doc, 'card').parent, libraryId(made.doc), 'мастер переехал в библиотеку');
+  assert.equal(componentSignature(components(made.doc).find((c) => c.id === 'card')), 'Карточка(текст)');
+  const newInst = Object.values(made.doc.nodes).find((n) => n.type === 'instance' && n.of === 'card');
+  assert.ok(newInst, 'на прежнем месте встал экземпляр');
+  assert.equal(newInst.parent, 'ab');
+  assert.equal(nodeById(made.doc, 'ab').children.indexOf(newInst.id),
+    nodeById(d2, 'ab').children.indexOf('card'), 'на то же место');
+  const g = solve(made.doc, M);
+  assert.deepEqual(g.rects[newInst.id], solve(d2, M).rects.card, 'вид не изменился');
+  assert.deepEqual(validate(made.doc, g, M).filter((v) => v.severity === 'error'), []);
+  const back = applyOps(made.doc, undo);
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.deepStrictEqual(back.doc.nodes, d2.nodes, 'одна отмена возвращает как было');
+
+  // instanceOps
+  const io = instanceOps(doc, { of: 'btn', parent: 'ab', props: { 'текст': 'Ещё' } });
+  const placed = applyOps(doc, io);
+  assert.equal(placed.error, undefined, JSON.stringify(placed.error));
+  assert.equal(components(placed.doc)[0].instances, 2);
+  assert.deepEqual(instanceOps(doc, { of: 'lab', parent: 'ab' }), [], 'не мастер — нет операций');
+  assert.deepEqual(instanceOps(doc, { of: 'btn', parent: 'lab' }), [], 'родитель не контейнер');
+
+  // раскрытие одного экземпляра — для превью
+  const ex = expandInstance(doc, 'i1');
+  assert.ok(ex && ex.root, 'раскрытие есть');
+  assert.equal(ex.root.id, 'i1');
+  assert.equal(ex.root.type, 'frame');
+  assert.deepEqual(Object.keys(ex.nodes).sort(), ['i1', 'i1/lab']);
+  assert.equal(expandInstance(doc, 'ab'), null, 'не экземпляр — нечего раскрывать');
+});
+
+test('круг19 п.5: экземпляр выделяется и таскается как ОДИН узел', () => {
+  const doc = libScene(() => [ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить' }))]);
+  const geo = solve(doc, M);
+  const r = geo.rects.i1;
+  const inner = geo.rects['i1/lab'];
+
+  // клик по любой точке экземпляра (в том числе по его подписи) выбирает экземпляр
+  const st = gestureStage(doc, geo);
+  const hit = st._hitTest({ x: inner.x + inner.w / 2, y: inner.y + inner.h / 2 }, false);
+  assert.ok(hit, 'узел под курсором есть');
+  assert.equal(hit.id, 'i1', 'выбран экземпляр, а не его внутренность');
+  // и явное углубление тоже не пускает внутрь
+  st.state = { selection: ['i1'] };
+  assert.equal(st._hitTest({ x: inner.x + 1, y: inner.y + 1 }, true).id, 'i1',
+    'внутренние узлы экземпляра по клику не выделяются');
+  // рамка выбора берёт его целиком
+  assert.deepEqual(st._marqueePick({ x1: r.x - 5, y1: r.y - 5, x2: r.x + r.w + 5, y2: r.y + r.h + 5 }), ['i1']);
+  // двойной клик по подписи внутри экземпляра правку текста НЕ открывает
+  const st2 = gestureStage(doc, geo);
+  st2.editing = null;
+  st2._startEdit = (n) => { st2.editing = n.id; };
+  st2._setActiveArtboardFor = () => {};
+  st2._onDblClick(pev(inner.x + inner.w / 2, inner.y + inner.h / 2));
+  assert.equal(st2.editing, null, 'текст мастера правят через пропс или отсоединение');
+
+  // перетаскивание кладёт override/pos на сам экземпляр, а не на его внутренности
+  const st3 = gestureStage(doc, geo, ['i1']);
+  st3._onPointerDown(pev(r.x + 2, r.y + 2));
+  st3._onPointerMove(pev(r.x + 60, r.y + 40));
+  st3._onPointerUp(pev(r.x + 60, r.y + 40));
+  assert.equal(st3.commits.length, 1, 'одна правка: ' + JSON.stringify(st3.commits));
+  for (const op of st3.commits[0].ops) {
+    assert.equal(op.id, 'i1', 'правка адресована экземпляру: ' + JSON.stringify(op));
+  }
+  const moved = applyOps(doc, st3.commits[0].ops);
+  assert.equal(moved.error, undefined, JSON.stringify(moved.error));
+  const mg = solve(moved.doc, M);
+  assert.ok(mg.rects['i1/lab'], 'после сдвига содержимое экземпляра на месте');
+  assert.ok(Math.abs(mg.rects['i1/lab'].x - mg.rects.i1.x) < 0.01 + 16,
+    'и переехало вместе с ним');
+
+  // ресайз за одну кромку пишет ТОЛЬКО потянутую ось (регрессия круга 17):
+  // вторая у экземпляра остаётся «как у мастера», а не застывает числом
+  const st4 = gestureStage(doc, geo, ['i1']);
+  const list = st4._resizeOps({
+    id: 'i1', handle: 'e', rect0: r, preview: { x: r.x, y: r.y, w: r.w + 40, h: r.h }
+  });
+  assert.deepEqual(list.map((o) => o.path), ['size.w'], 'записана одна ось: ' + JSON.stringify(list));
+  const sized = applyOps(doc, list);
+  assert.equal(sized.error, undefined, JSON.stringify(sized.error));
+  assert.equal(nodeById(sized.doc, 'i1').size.h, undefined, 'высота по-прежнему от мастера');
+  const sg = solve(sized.doc, M);
+  assert.equal(sg.rects.i1.w, r.w + 40, 'ширина стала своей');
+  assert.equal(sg.rects.i1.h, r.h, 'а высота — прежней, мастерской');
+});
+
+test('круг19 п.5: приметы экземпляра на слое интерфейса не спорят с бейджем и «отсоединён»', () => {
+  const had = globalThis.document;
+  const made = [];
+  globalThis.document = {
+    createElement: () => {
+      const el = { style: {}, textContent: '', className: '', dataset: {}, parentNode: null };
+      made.push(el);
+      return el;
+    },
+    createElementNS: () => ({
+      attrs: {}, children: [], style: {},
+      setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; },
+      appendChild(c) { this.children.push(c); return c; }
+    })
+  };
+  try {
+    const doc = libScene(() => [
+      ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить' })),
+      ops.create(inst('i2', 'ab', 'btn', { 'текст': 'Отсоединённый' }, { override: { x: 10, y: 120, w: 120, h: 40 } })),
+      ops.create(box('plain', 'ab', 40, 40))
+    ]);
+    const geo = solve(doc, M);
+    const paint = (sel) => {
+      made.length = 0;
+      const st = gestureStage(doc, geo, sel);
+      st.ui = { children: [], appendChild(el) { el.parentNode = st.ui; this.children.push(el); }, removeChild(el) { el.parentNode = null; } };
+      st.ov = { firstChild: null, setAttribute() {}, appendChild() {}, removeChild() {} };
+      st._vp = { w: 1000, h: 800 };
+      st._handleEls = new Map();
+      st._layoutHandles = () => {};
+      st._paintUI = Stage.prototype._paintUI;
+      st._paintUI();
+      return made;
+    };
+    const plain = paint(['plain']);
+    assert.ok(plain.some((e) => e.className.startsWith('imago-box') && !e.className.includes('is-instance')),
+      'у обычного узла рамка обычная');
+    assert.ok(plain.every((e) => !String(e.textContent).includes('◇')), 'и ромба в бейдже нет');
+
+    const one = paint(['i1']);
+    const boxes = one.filter((e) => e.className.startsWith('imago-box'));
+    assert.equal(boxes.length, 1);
+    assert.ok(boxes[0].className.includes('is-instance'), 'рамка экземпляра помечена: ' + boxes[0].className);
+    assert.ok(!boxes[0].className.includes('is-detached'), 'но не как отсоединённая');
+    const badges = one.filter((e) => e.className.startsWith('imago-badge'));
+    assert.equal(badges.length, 1, 'бейдж один, третьего этажа у кромки не появилось');
+    assert.match(badges[0].textContent, /^◇ Кнопка · \d+ × \d+$/, badges[0].textContent);
+
+    const both = paint(['i2']);
+    const box2 = both.filter((e) => e.className.startsWith('imago-box'))[0];
+    assert.ok(box2.className.includes('is-instance') && box2.className.includes('is-detached'),
+      'экземпляр можно и отсоединить: ' + box2.className);
+    const b2 = both.filter((e) => e.className.startsWith('imago-badge'));
+    assert.equal(b2.length, 2, 'размер и «отсоединён» — как их развёл круг 16');
+    assert.match(b2[0].textContent, /^◇ Кнопка · /);
+    assert.equal(b2[1].textContent, 'отсоединён');
+  } finally { globalThis.document = had; }
+});
+
+test('круг19 п.4: точечная отрисовка держит экземпляры и перерисовывает их на правку мастера', () => {
+  withStageDom(() => {
+    const st = bareStage({});
+    st.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    st.opts = { measureText };
+    st.view = { zoom: 1, pan: { x: 0, y: 0 } };
+    st._applyView = () => {};
+    st._paintUI = () => {};
+    st._warmFonts = () => {};
+    st._clipPrefix = 'clip-';
+    let doc = libScene(() => [
+      ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Раз' })),
+      ops.create(inst('i2', 'ab', 'btn', { 'текст': 'Два' })),
+      ops.create(box('plain', 'ab', 40, 40))
+    ]);
+    const paint = () => { st.doc = doc; st.geo = solve(doc, M); st._renderSVG(); };
+    paint();
+    // экземпляр нарисован своим раскрытым поддеревом
+    assert.ok(st._nodeEls.get('i1'), 'экземпляр на сцене');
+    assert.ok(st._nodeEls.get('i1/lab'), 'и его подпись: ' + [...st._nodeEls.keys()].join(','));
+    assert.match(st._nodeEls.get('i1').outerHTML, /Раз/);
+    assert.match(st._nodeEls.get('i2').outerHTML, /Два/);
+
+    // чужая правка экземпляры не пересобирает: ссылки раскрытых узлов те же
+    const keep = { i1: st._nodeEls.get('i1'), lab: st._nodeEls.get('i1/lab'), svg: st.svg.children[0] };
+    doc = applyOps(doc, [ops.set('plain', 'fill', '#00ff00')]).doc;
+    paint();
+    assert.equal(st.svg.children[0], keep.svg, 'сцена не пересобрана целиком');
+    assert.equal(st._nodeEls.get('i1'), keep.i1, 'элемент экземпляра тот же');
+    assert.equal(st._nodeEls.get('i1/lab'), keep.lab, 'и его раскрытой подписи тоже');
+
+    // правка мастера перекрашивает ОБА экземпляра — точечно, без полной пересборки
+    doc = applyOps(doc, [ops.set('btn', 'fill', '#123456')]).doc;
+    paint();
+    assert.equal(st.svg.children[0], keep.svg, 'и это по-прежнему не полная пересборка');
+    assert.match(st._nodeEls.get('i1').outerHTML, /#123456/i, st._nodeEls.get('i1').outerHTML);
+    assert.match(st._nodeEls.get('i2').outerHTML, /#123456/i);
+
+    // и правка текста мастера доходит до обоих
+    doc = applyOps(doc, [ops.set('lab', 'style.fontSize', 30)]).doc;
+    paint();
+    assert.match(st._nodeEls.get('i1/lab').outerHTML, /font-size="30"/);
+    assert.match(st._nodeEls.get('i2/lab').outerHTML, /font-size="30"/);
+
+    // точечный путь даёт то же, что полная пересборка
+    const got = st.svg.outerHTML.replace(/id="[^"]*"/g, '').replace(/url\(#[^)]*\)/g, '');
+    st._drawnState = null;
+    st._clipSeq = 0;
+    st._renderSVG();
+    assert.equal(got, st.svg.outerHTML.replace(/id="[^"]*"/g, '').replace(/url\(#[^)]*\)/g, ''),
+      'точечная отрисовка и полная сборка совпадают');
+  });
+});
+
+test('круг19 п.5: экспорт SVG включает экземпляры', () => {
+  withStageDom(() => {
+    const st = bareStage({});
+    st.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    st.opts = { measureText, embedFonts: false };
+    st.view = { zoom: 1, pan: { x: 0, y: 0 } };
+    st._applyView = () => {};
+    st._paintUI = () => {};
+    st._warmFonts = () => {};
+    st._clipPrefix = 'clip-';
+    const doc = libScene(() => [ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить' }))]);
+    st.doc = doc;
+    st.geo = solve(doc, M);
+    st._renderSVG();
+    const svg = st.toSVG('ab');
+    assert.ok(svg, 'разметка собралась');
+    assert.match(svg, /Оплатить/, 'текст экземпляра в экспорте');
+    assert.match(svg, /data-id="i1"/, 'и сам экземпляр');
+    assert.match(svg, /data-id="i1\/lab"/, 'и его раскрытая подпись');
+    // мастера в экспорте доски быть не должно: он лежит в библиотеке
+    assert.ok(!svg.includes('data-id="btn"'), 'мастер сам по себе в доску не попал');
+    // экспорт самого экземпляра — превью компонента
+    const one = st.toSVG('i1');
+    assert.match(one, /Оплатить/);
+  });
+});
+
+test('круг19 п.9: демо-документ — живая библиотека и экземпляры на доске', () => {
+  const doc = createDoc();
+  const list = components(doc);
+  assert.ok(list.length >= 2 && list.length <= 3, 'два-три компонента: ' + list.length);
+  assert.deepEqual(list.map((c) => c.name), ['Кнопка', 'Метка', 'Карточка показателя']);
+  assert.equal(componentSignature(list[0]), 'Кнопка(текст, вид: accent|surface)');
+  assert.ok(list[0].props.some((p) => p.kind === 'text'), 'у кнопки есть пропс текста');
+  assert.ok(list[0].props.some((p) => p.kind === 'enum'), 'и пропс вида');
+
+  // экземпляры стоят НА ДОСКЕ
+  const instances = Object.values(doc.nodes).filter((n) => n.type === 'instance');
+  assert.ok(instances.length >= 1, 'экземпляры есть: ' + instances.length);
+  const abs = artboards(doc);
+  for (const n of instances) {
+    const top = [n, ...ancestors(doc, n.id)].find((a) => isArtboard(doc, a));
+    assert.ok(top, `экземпляр «${displayName(doc, n)}» стоит на доске`);
+  }
+  assert.ok(instances.some((n) => masterOf(doc, n).component.name === 'Кнопка'), 'кнопка среди них');
+
+  // прежние доски целы: две, те же, 49 текстов на них
+  assert.equal(abs.length, 2);
+  assert.deepEqual(abs.map((a) => a.name), ['Маршрут дня', 'Сводка недели']);
+  const libIds = new Set(subtreeIds(doc, libraryId(doc)));
+  const boardTexts = Object.values(doc.nodes).filter((n) => n.type === 'text' && !libIds.has(n.id));
+  assert.equal(boardTexts.length, 49, 'на досках по-прежнему 49 текстов');
+  assert.ok(boardTexts.some((t) => t.characters === 'Добавить пункт'), 'прежняя кнопка на месте');
+
+  // библиотека — не доска и в экспорт «всё» не идёт
+  assert.equal(isArtboard(doc, libraryId(doc)), false);
+  assert.ok(!abs.some((a) => a.id === libraryId(doc)));
+
+  // здоровый документ: решатель считает всё, валидатор молчит
+  const geo = solve(doc, M);
+  for (const id of Object.keys(doc.nodes)) {
+    if (id === doc.root) continue;
+    assert.ok(geo.rects[id], 'у каждого узла есть прямоугольник: ' + id);
+  }
+  assert.deepEqual(validate(doc, geo, M).filter((v) => v.severity === 'error'), [], 'ошибок нет');
+  assert.deepEqual(validate(doc, geo, M).filter((v) => v.code.startsWith('instance') || v.code === 'unknown-prop'
+    || v.code === 'dead-instance' || v.code === 'component-cycle'), [], 'и про компоненты тоже');
+  assert.equal(hashGeometry(solve(doc, M)), hashGeometry(geo));
+
+  // документ переживает сериализацию вместе с библиотекой
+  const round = createDoc(JSON.parse(JSON.stringify(doc)));
+  assert.equal(components(round).length, list.length, 'компоненты уцелели');
+  assert.equal(hashGeometry(solve(round, M)), hashGeometry(geo), 'и геометрия та же');
+  // импорт не придумывает узлов: adoptDoc в оболочке сверяет их поштучно
+  assert.deepEqual(Object.keys(round.nodes).filter((id) => !doc.nodes[id]), [],
+    'createDoc не добавил ни одного узла от себя');
+});
+
+test('круг19: импорт чинит битые компоненты, а не выбрасывает мастер', () => {
+  const doc = libScene(() => [ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить' }))]);
+  const raw = JSON.parse(JSON.stringify(doc));
+  // пропс целится в узел, которого нет; в экземпляре — выдуманное имя
+  raw.nodes.btn.component.props.push({ name: 'призрак', kind: 'text', target: 'нет-такого', path: 'characters' });
+  raw.nodes.i1.props['выдумка'] = 'ой';
+  const fixed = createDoc(raw);
+  assert.ok(nodeById(fixed, 'btn'), 'мастер уцелел');
+  assert.ok(nodeById(fixed, 'i1'), 'экземпляр уцелел');
+  assert.deepEqual(components(fixed)[0].props.map((p) => p.name), ['текст', 'вид'], 'битый пропс убран');
+  assert.equal(nodeById(fixed, 'i1').props['выдумка'], undefined, 'выдуманное имя убрано');
+  const geo = solve(fixed, M);
+  assert.deepEqual(geo.lines['i1/lab'], ['Оплатить'], 'а живой пропс работает');
+  assert.deepEqual(validate(fixed, geo, M).filter((v) => v.severity === 'error'), []);
+});
+
+test('круг19: цена раскрытия — сотни экземпляров остаются отзывчивыми', () => {
+  const N = 300;
+  let doc = libScene();
+  const build = [];
+  for (let i = 0; i < N; i++) {
+    build.push(ops.create(inst('i' + i, 'ab', 'btn', { 'текст': 'Кнопка ' + i })));
+  }
+  const res = applyOps(doc, build);
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  doc = res.doc;
+
+  const t0 = Date.now();
+  const geo = solve(doc, M);
+  const tSolve = Date.now() - t0;
+  const t1 = Date.now();
+  validate(doc, geo, M);
+  const tValidate = Date.now() - t1;
+  assert.equal(Object.keys(geo.rects).length, Object.keys(doc.nodes).length + N,
+    'раскрытых узлов ровно по одному на экземпляр (подпись)');
+  assert.ok(tSolve < 2000, `solve на ${N} экземплярах: ${tSolve} мс`);
+  assert.ok(tValidate < 2000, `validate: ${tValidate} мс`);
+  if (process.env.IMAGO_PERF) console.log(`  [перф] ${N} экземпляров: solve ${tSolve} мс, validate ${tValidate} мс`);
+
+  // второй solve того же документа переиспользует раскрытие: узлы — те же объекты
+  const geo2 = solve(doc, M);
+  assert.equal(geo2.expanded['i7/lab'], geo.expanded['i7/lab'], 'раскрытие переиспользовано по ссылке');
+  assert.equal(hashGeometry(geo2), hashGeometry(geo));
+  // чужая правка ссылки не рвёт
+  const after = applyOps(doc, [ops.set('ab', 'fill', '#eeeeee')]).doc;
+  assert.equal(solve(after, M).expanded['i7/lab'], geo.expanded['i7/lab'], 'и чужая правка тоже');
+  // а правка мастера — рвёт, и все экземпляры перерисуются
+  const master = applyOps(doc, [ops.set('btn', 'radius', 4)]).doc;
+  assert.notEqual(solve(master, M).expanded['i7/lab'], geo.expanded['i7/lab'], 'правка мастера обновляет раскрытие');
 });

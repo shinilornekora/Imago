@@ -22,6 +22,8 @@ import {
   UNSET,
   // круг 16: человеческие названия полей и токенов, служебная запись без совета
   ruPath, ruPathGen, ruToken, ruEnum, factOnly,
+  // круг 19: библиотека как словарь агента
+  describeLibrary, recognizeComponentIntent,
   // круг 16, п.1: сравнение форм значения — сверяется с настоящим core.applyOps
   sameAsNow,
 } from '../src/brain.js';
@@ -5111,4 +5113,712 @@ test('круг16 п.1: sameAsNow совпадает с настоящим applyO
     }
   }
   assert.deepEqual(wrong, [], 'расхождения с ядром:\n' + wrong.join('\n'));
+});
+
+/* ── 19. Компоненты: библиотека как словарь агента (круг 19, SPEC §5) ──────────
+ *
+ * Здесь тесты идут на НАСТОЯЩЕМ ядре, а не на заглушке: компоненты — это его функции
+ * (components, instanceSummary, makeComponentOps, detachInstanceOps) и его проверки схемы.
+ * Заглушка их не знает, и проверять на ней было бы нечего: мозг нарочно работает без них
+ * как до круга 19 (движок без компонентов остаётся законным, см. componentList).
+ */
+
+let _core = null;
+const realCore = async () => (_core || (_core = await import('../src/core.js')));
+const nameOf = (doc, name) => Object.keys(doc.nodes).find((id) => doc.nodes[id].name === name);
+const instIds = (doc) => Object.keys(doc.nodes).filter((id) => doc.nodes[id].type === 'instance');
+const instOfComp = (core, doc, comp) => instIds(doc).find((id) => core.instanceSummary(doc, id).startsWith(comp));
+const PLAN19 = { intent: 'edit', title: 'Правка', summary: 'Правлю.', steps: ['раз'], targets: [] };
+
+/** Прогон одной команды на настоящем ядре с заранее записанным ответом модели. */
+async function run19(core, utterance, patch, opts = {}) {
+  const doc = opts.doc || core.createDoc();
+  const provider = makeFakeProvider({ plan: opts.plan || PLAN19, patch: [patch, patch], tree: opts.tree });
+  const res = await runCommand({
+    doc, selection: opts.selection || [], utterance, provider, engine: core,
+    activeArtboardId: opts.activeArtboardId === undefined ? nameOf(doc, 'Маршрут дня') : opts.activeArtboardId,
+  });
+  return { doc, res, provider };
+}
+
+/** Тот же документ, но собранный БЕЗ компонентов: экземпляры отсоединены, библиотеки нет. */
+function flatten19(core, doc) {
+  let d = doc;
+  for (;;) {
+    const inst = instIds(d)[0];
+    if (!inst) break;
+    const got = core.applyOps(d, core.detachInstanceOps(d, inst));
+    assert.equal(got.error, undefined, JSON.stringify(got.error));
+    d = got.doc;
+  }
+  const lib = core.libraryNode(d);
+  if (lib) d = core.applyOps(d, [core.ops.remove(lib.id)]).doc;
+  return d;
+}
+
+test('круг19 п.1: библиотека — отдельный блок ПЕРЕД документом, узлов библиотеки в выжимке нет', async () => {
+  const core = await realCore();
+  const doc = core.createDoc();
+  const scope = resolveScope(doc, [], core, {});
+  const block = describeLibrary(doc, core, { selected: scope.ids });
+  assert.match(block, /^БИБЛИОТЕКА ПРОДУКТА/, 'блок начинается словарём');
+  for (const info of core.components(doc)) {
+    assert.ok(block.includes(core.componentSignature(info)), `в словаре нет «${info.name}»`);
+  }
+  const digest = describeDoc(doc, scope.ids, { engine: core, geo: core.solve(doc), scopeKind: scope.kind });
+  const lib = core.libraryNode(doc);
+  assert.ok(!digest.includes(`#${lib.id}`), 'страница библиотеки попала в выжимку документа');
+  for (const info of core.components(doc)) {
+    assert.ok(!digest.includes(`#${info.id}`), `мастер «${info.name}» попал в выжимку документа`);
+    for (const p of info.props) assert.ok(!digest.includes(`#${p.target}`), 'внутренность мастера попала в выжимку');
+  }
+  // и наоборот: доски и их узлы на месте
+  assert.ok(digest.includes(`#${nameOf(doc, 'Маршрут дня')}`) && digest.includes('"Шапка"'));
+});
+
+test('круг19 п.1: экземпляр в выжимке — одна строка со свойствами, без внутренностей', async () => {
+  const core = await realCore();
+  const doc = core.createDoc();
+  const digest = describeDoc(doc, [], { engine: core, geo: core.solve(doc) });
+  for (const id of instIds(doc)) {
+    const line = digest.split('\n').find((l) => l.includes(`#${id} `));
+    assert.ok(line, `экземпляра ${id} нет в выжимке`);
+    assert.ok(line.includes('экземпляр'), `строка без слова «экземпляр»: ${line}`);
+    assert.ok(line.includes(core.instanceSummary(doc, id)), `строка без подписи экземпляра: ${line}`);
+    // раскрытое содержимое живёт в решателе — в выжимке его нет
+    const ex = core.expandInstance(doc, id);
+    for (const sid of Object.keys(ex.nodes)) {
+      if (sid === id) continue;
+      assert.ok(!digest.includes(`#${sid}`), `внутренность экземпляра в выжимке: ${sid}`);
+    }
+  }
+});
+
+test('круг19 п.1: выжимка усыхает — тот же макет без компонентов длиннее', async () => {
+  const core = await realCore();
+  const doc = core.createDoc();
+  const stat = core.components(doc).find((c) => c.name === 'Карточка показателя');
+  // доска-каталог: сто экземпляров одного компонента
+  const board = {
+    type: 'frame', id: 'board100', name: 'Каталог', parent: doc.root, children: [],
+    layout: { mode: 'row', gap: 12, padding: { t: 24, r: 24, b: 24, l: 24 }, align: 'start', justify: 'start', wrap: true },
+    size: { w: { mode: 'fixed', value: 1200 }, h: { mode: 'hug' } }, fill: 'surface', radius: 20, pos: { x: 2000, y: 0 },
+  };
+  let big = core.applyOps(doc, [core.ops.create(board)]).doc;
+  const ops = [];
+  for (let i = 0; i < 100; i++) {
+    ops.push(...core.instanceOps(big, {
+      of: stat.id, parent: board.id,
+      props: { 'заголовок': `Показатель ${i + 1}`, 'значение': String(i) },
+    }));
+  }
+  const grown = core.applyOps(big, ops);
+  assert.equal(grown.error, undefined, JSON.stringify(grown.error));
+  big = grown.doc;
+
+  const size = (d) => {
+    const body = describeDoc(d, [], { engine: core, geo: core.solve(d), limit: 1e9 });
+    const head = describeLibrary(d, core, {});
+    return (head ? head.length + 2 : 0) + body.length;
+  };
+  const withComp = size(big);
+  const flat = size(flatten19(core, big));
+  assert.ok(withComp < flat * 0.6, `усыхания нет: ${withComp} против ${flat}`);
+  // и главное: без компонентов документ в бюджет выжимки не влезает, а с ними влезает
+  const seen = (d) => describeDoc(d, [], { engine: core, geo: core.solve(d) });
+  assert.ok(!/скрыто|свёрнуто/.test(seen(big)), 'с компонентами выжимка что-то прячет');
+  assert.match(seen(flatten19(core, big)), /скрыто|свёрнуто/, 'без компонентов всё влезло — сравнение нечестное');
+});
+
+test('круг19 п.2: правила компонентов уходят модели только при живой библиотеке', async () => {
+  const core = await realCore();
+  const doc = core.createDoc();
+  const seen = {};
+  const provider = {
+    name: 'fake', async ready() { return true; },
+    async complete(messages, schema) {
+      seen[schema.name] = String((messages.find((m) => m.role === 'system') || {}).content || '');
+      return schema.name === 'plan' ? PLAN19 : { edits: [{ op: 'set', target: 'Шапка', path: 'layout.gap', value: '16' }] };
+    },
+  };
+  await runCommand({ doc, selection: [], utterance: 'поправь шапку', provider, engine: core, activeArtboardId: nameOf(doc, 'Маршрут дня') });
+  assert.match(seen.patch, /БИБЛИОТЕКА ПРОДУКТА/);
+  assert.match(seen.patch, /op:"master"/, 'модели не сказали, чем правят компонент целиком');
+  assert.match(seen.patch, /props\.<имя свойства>/, 'модели не сказали, как менять свойство экземпляра');
+  assert.match(seen.plan, /библиотека компонентов/i);
+  // тот же документ без библиотеки: обещать компоненты нельзя — их нет
+  const lib = core.libraryNode(doc);
+  const bare = core.applyOps(doc, [core.ops.remove(lib.id)]).doc;
+  const seen2 = {};
+  const provider2 = {
+    name: 'fake', async ready() { return true; },
+    async complete(messages, schema) {
+      seen2[schema.name] = String((messages.find((m) => m.role === 'system') || {}).content || '');
+      return schema.name === 'plan' ? PLAN19 : { edits: [{ op: 'set', target: 'Шапка', path: 'layout.gap', value: '16' }] };
+    },
+  };
+  await runCommand({ doc: bare, selection: [], utterance: 'поправь шапку', provider: provider2, engine: core, activeArtboardId: nameOf(bare, 'Маршрут дня') });
+  assert.ok(!/БИБЛИОТЕКА ПРОДУКТА/.test(seen2.patch), 'библиотеки нет, а блок в промпте есть');
+  assert.ok(!/op:"master"/.test(seen2.patch), 'библиотеки нет, а правка компонента обещана');
+});
+
+test('круг19 п.3: экземпляр создаётся ссылкой на компонент, одной операцией', async () => {
+  const core = await realCore();
+  const { doc, res } = await run19(core, 'добавь в шапку кнопку «Войти»', {
+    edits: [{
+      op: 'create', parent: 'Шапка',
+      node: { type: 'instance', of: 'Кнопка', props: [{ name: 'текст', value: 'Войти' }, { name: 'вид', value: 'accent' }] },
+    }],
+  });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.ops.length, 1, 'экземпляр — один узел, а не поддерево');
+  const node = res.ops[0].node;
+  assert.equal(node.type, 'instance');
+  assert.equal(node.of, core.components(doc).find((c) => c.name === 'Кнопка').id, 'ссылка на мастер по id');
+  assert.deepEqual(node.props, { 'текст': 'Войти', 'вид': 'accent' });
+  assert.equal(node.parent, nameOf(doc, 'Шапка'));
+  assert.ok(!node.children, 'у экземпляра нет детей');
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.equal(core.instanceSummary(next.doc, node.id), 'Кнопка "Войти" вид=accent');
+  assert.deepEqual(core.validate(next.doc, core.solve(next.doc)).filter((v) => v.severity === 'error'), []);
+});
+
+test('круг19 п.3: выдуманный компонент отсекается там же, где выдуманный слой, и с перечнем', async () => {
+  const core = await realCore();
+  const { res } = await run19(core, 'поставь тут переключатель', {
+    edits: [{ op: 'create', parent: 'Шапка', node: { type: 'instance', of: 'Переключатель' } }],
+  });
+  assert.equal(res.ops.length, 0);
+  const said = (res.warnings || []).concat(res.error ? [res.error.message] : []).join(' | ');
+  assert.match(said, /такого компонента в библиотеке нет/);
+  assert.match(said, /Кнопка, Метка, Карточка показателя/, 'человеку не сказали, что есть взамен');
+});
+
+test('круг19 п.3: свойство экземпляра правится по «props.имя», необъявленное — нет', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const inst = instOfComp(core, doc0, 'Кнопка');
+  const { doc, res } = await run19(core, 'поменяй у кнопки надпись и цвет', {
+    edits: [
+      { op: 'set', target: `#${inst}`, path: 'props.текст', value: 'Поехали' },
+      { op: 'set', target: `#${inst}`, path: 'props.цвет', value: 'красный' },
+    ],
+  }, { doc: doc0 });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.deepEqual(res.ops, [{ op: 'set', id: inst, path: 'props.текст', value: 'Поехали' }]);
+  const said = res.warnings.join(' | ');
+  assert.match(said, /нет свойства «цвет»/);
+  assert.match(said, /есть «текст», «вид»/, 'не перечислили объявленные свойства');
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(core.instanceSummary(next.doc, inst), 'Кнопка "Поехали" вид=surface');
+});
+
+test('круг19 п.3: значение свойства сверяется по виду и списку значений', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const inst = instOfComp(core, doc0, 'Кнопка');
+  const { res } = await run19(core, 'сделай кнопку изумрудной', {
+    edits: [{ op: 'set', target: `#${inst}`, path: 'props.вид', value: 'изумрудный' }],
+  }, { doc: doc0 });
+  assert.equal(res.ops.length, 0, 'негодное значение перечисления не должно пройти');
+  const said = (res.warnings || []).concat(res.error ? [res.error.message] : []).join(' | ');
+  assert.match(said, /значения только/);
+  assert.ok(!/[A-Za-z]{3,}/.test(said.replace(/«[^»]*»/g, '')), `латиница в тексте человеку: ${said}`);
+});
+
+test('круг19 п.2: правка внутренности экземпляра уходит в объявленное свойство, а не в пустоту', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const inst = instOfComp(core, doc0, 'Кнопка');
+  const { doc, res } = await run19(core, 'поменяй текст кнопки на «Купить»', {
+    edits: [{ op: 'set', target: `#${inst}`, path: 'characters', value: 'Купить' }],
+  }, { doc: doc0 });
+  assert.deepEqual(res.ops, [{ op: 'set', id: inst, path: 'props.текст', value: 'Купить' }]);
+  assert.match(res.warnings.join(' | '), /правка ушла в его свойство «текст»/);
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(core.instanceSummary(next.doc, inst), 'Кнопка "Купить" вид=surface');
+});
+
+test('круг19 п.2: поле, которого у экземпляра нет, отклоняется словами — без молчаливой записи', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const inst = instOfComp(core, doc0, 'Метка');
+  const { res } = await run19(core, 'поставь метке обводку', {
+    edits: [{ op: 'set', target: `#${inst}`, path: 'stroke', value: 'line' }],
+  }, { doc: doc0 });
+  assert.equal(res.ops.length, 0);
+  const said = (res.warnings || []).concat(res.error ? [res.error.message] : []).join(' | ');
+  assert.match(said, /внутренности экземпляра не правятся/);
+  assert.match(said, /можно менять свойства: «текст», «тон»/);
+});
+
+test('круг19 п.6: op:"master" правит компонент и человеку сказано, что задело все экземпляры', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const btn = core.components(doc0).find((c) => c.name === 'Кнопка');
+  const { doc, res } = await run19(core, 'сделай все кнопки крупнее', {
+    edits: [{ op: 'master', target: 'Кнопка', path: 'size.h', value: '64' }],
+  }, { doc: doc0 });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.ops.length, 1);
+  assert.equal(res.ops[0].id, btn.id, 'правка ушла в мастер компонента');
+  const first = res.warnings[0];
+  assert.match(first, /Это правка компонента «Кнопка», а не одного слоя/);
+  assert.match(first, /все его экземпляры на досках — их 1/);
+  // и она правда меняет экземпляр на доске: у него своей высоты нет
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  const inst = instOfComp(core, next.doc, 'Кнопка');
+  assert.equal(core.solve(next.doc).rects[inst].h, 64, 'экземпляр не подхватил высоту компонента');
+});
+
+test('круг19 п.6: правка по ИМЕНИ не заходит в библиотеку — «кнопка» это кнопка на доске', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const libIds = new Set();
+  (function walk(id) { libIds.add(id); for (const k of (doc0.nodes[id].children || [])) walk(k); })(core.libraryNode(doc0).id);
+  /* Подметание: имена, которые человек называет вслух и которые ЕСТЬ и в библиотеке, и на доске.
+   * Ни одна такая правка не имеет права уйти в мастер: иначе точечная правка молча меняет все
+   * экземпляры — ровно то, из-за чего ядро убрало библиотеку из resolveTarget. */
+  const said = [
+    'Кнопка', 'кнопка', 'кнопку', 'Метка', 'метка', 'метку', 'Карточка показателя',
+    'карточка показателя', 'Подпись кнопки', 'Текст метки', 'Подпись показателя', 'Значение показателя',
+  ];
+  const leaks = [];
+  for (const target of said) {
+    const { res } = await run19(core, `поправь ${target}`, {
+      edits: [{ op: 'set', target, path: 'radius', value: '12' }],
+    }, { doc: core.createDoc(JSON.parse(JSON.stringify(doc0))) });
+    for (const o of res.ops || []) if (o.id && libIds.has(o.id)) leaks.push(`«${target}» → ${o.id}`);
+  }
+  assert.deepEqual(leaks, [], 'правка по имени утекла в библиотеку: ' + leaks.join(', '));
+});
+
+test('круг19 п.6: выдуманный компонент в op:"master" отсекается с перечнем, а имя слоя — не компонент', async () => {
+  const core = await realCore();
+  for (const target of ['Переключатель', 'Шапка', 'Кнопка «Добавить пункт»']) {
+    const { res } = await run19(core, 'поправь компонент', {
+      edits: [{ op: 'master', target, path: 'radius', value: '24' }],
+    });
+    assert.equal(res.ops.length, 0, `«${target}» не должен считаться компонентом`);
+    const said = (res.warnings || []).concat(res.error ? [res.error.message] : []).join(' | ');
+    assert.match(said, /в библиотеке нет — есть Кнопка, Метка, Карточка показателя/);
+  }
+});
+
+test('круг19 п.5: op:"detach" превращает экземпляр в настоящую копию поддерева', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const inst = instOfComp(core, doc0, 'Метка');
+  const before = core.solve(doc0).rects[inst];
+  /* Реплика нарочно НЕ из тех, что мозг распознаёт локально: op:"detach" от МОДЕЛИ нужен
+   * там, где просят поправить именно эту копию не через свойства, и решает это она. */
+  const { doc, res } = await run19(core, 'поправь первый ярлык по-своему', {
+    edits: [{ op: 'detach', target: `#${inst}` }],
+  }, { doc: doc0 });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.ops[0].op, 'remove');
+  assert.ok(res.ops.slice(1).every((o) => o.op === 'create'), 'остальное — создание копии');
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.equal(instIds(next.doc).length, instIds(doc).length - 1);
+  const copy = res.ops[1].node.id;
+  assert.equal(next.doc.nodes[copy].type, 'frame', 'на месте экземпляра — обычный фрейм');
+  const after = core.solve(next.doc).rects[copy];
+  assert.deepEqual({ w: after.w, h: after.h }, { w: before.w, h: before.h }, 'копия встала на то же место');
+  // отсоединять то, что не экземпляр, — отказ словами
+  const { res: no } = await run19(core, 'поправь шапку по-своему', { edits: [{ op: 'detach', target: 'Шапка' }] });
+  assert.equal(no.ops.length, 0);
+  assert.match((no.warnings || []).concat(no.error ? [no.error.message] : []).join(' | '),
+    /не экземпляр компонента, отсоединять нечего/);
+});
+
+test('круг19 п.4: op:"component" уносит узел в библиотеку и оставляет на доске экземпляр', async () => {
+  const core = await realCore();
+  // и тут реплика не из локально распознаваемых: так op:"component" присылает МОДЕЛЬ
+  const { doc, res } = await run19(core, 'карточка встречи пусть переиспользуется', {
+    edits: [{ op: 'component', target: 'Карточка встречи', name: 'Плитка дня' }],
+  });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  const made = core.components(next.doc).find((c) => c.name === 'Плитка дня');
+  assert.ok(made, 'компонента в библиотеке нет');
+  assert.ok(made.props.length >= 3, 'свойства не предложены: ' + JSON.stringify(made.props));
+  assert.equal(made.instances, 1, 'на доске не осталось экземпляра');
+  assert.match(res.warnings.join(' | '), /Компонент «Плитка дня» добавлен в библиотеку/);
+  assert.match(res.warnings.join(' | '), /Менять у экземпляров можно/);
+  assert.deepEqual(core.validate(next.doc, core.solve(next.doc)).filter((v) => v.severity === 'error'), []);
+});
+
+test('круг19 п.4-5: «сделай из этого компонент» и «отсоедини» стоят НОЛЬ вызовов модели', async () => {
+  const core = await realCore();
+  const dead = { name: 'fake', async ready() { return true; }, async complete() { throw new Error('модель звать не надо'); } };
+  const doc = core.createDoc();
+  const card = nameOf(doc, 'Карточка встречи');
+  const made = await runCommand({ doc, selection: [card], utterance: 'сделай из этого компонент', provider: dead, engine: core });
+  assert.equal(made.error, undefined, JSON.stringify(made.error));
+  assert.equal(made.usage.calls, 0, 'модель всё-таки позвали');
+  assert.equal(made.local, 'component');
+  const next = core.applyOps(doc, made.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.ok(core.components(next.doc).some((c) => c.name === 'Карточка встречи'), 'компонент не появился');
+
+  const doc2 = core.createDoc();
+  const inst = instIds(doc2)[0];
+  const off = await runCommand({ doc: doc2, selection: [inst], utterance: 'отсоедини этот экземпляр', provider: dead, engine: core });
+  assert.equal(off.error, undefined, JSON.stringify(off.error));
+  assert.equal(off.usage.calls, 0);
+  assert.equal(off.local, 'detach');
+  const next2 = core.applyOps(doc2, off.ops);
+  assert.equal(next2.error, undefined, JSON.stringify(next2.error));
+  assert.equal(instIds(next2.doc).length, instIds(doc2).length - 1);
+});
+
+test('круг19 п.4: без цели — переспрос с готовыми командами, а не догадка', async () => {
+  const core = await realCore();
+  const dead = { name: 'fake', async ready() { return true; }, async complete() { throw new Error('модель звать не надо'); } };
+  const doc = core.createDoc();
+  const res = await runCommand({
+    doc, selection: [], utterance: 'сделай из этого компонент', provider: dead, engine: core,
+    activeArtboardId: nameOf(doc, 'Маршрут дня'),
+  });
+  assert.equal(res.usage.calls, 0);
+  assert.equal(res.ops.length, 0);
+  assert.match(res.clarify, /из чего делать компонент/);
+  assert.ok(res.clarifyOptions.length >= 1 && res.clarifyOptions.length <= 3);
+  for (const opt of res.clarifyOptions) {
+    const name = /«([^»]+)»/.exec(opt);
+    assert.ok(name && nameOf(doc, name[1]), `в готовой команде слой не из документа: ${opt}`);
+  }
+});
+
+test('круг19 п.4: доску компонентом не сделать — это «нельзя», а не авария', async () => {
+  const core = await realCore();
+  const dead = { name: 'fake', async ready() { return true; }, async complete() { throw new Error('модель звать не надо'); } };
+  const doc = core.createDoc();
+  const res = await runCommand({
+    doc, selection: [nameOf(doc, 'Маршрут дня')], utterance: 'сделай из этого компонент', provider: dead, engine: core,
+  });
+  assert.equal(res.error, undefined, 'отказ не должен быть аварией');
+  assert.equal(res.ops.length, 0);
+  assert.match(res.cannot, /доска компонентом не станет/);
+});
+
+test('круг19 п.4: «назови это компонентом X» на экземпляре переименовывает компонент', async () => {
+  const core = await realCore();
+  const dead = { name: 'fake', async ready() { return true; }, async complete() { throw new Error('модель звать не надо'); } };
+  const doc = core.createDoc();
+  const inst = instOfComp(core, doc, 'Кнопка');
+  const res = await runCommand({
+    doc, selection: [inst], utterance: 'назови это компонентом Главная кнопка', provider: dead, engine: core,
+  });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.usage.calls, 0);
+  assert.equal(res.local, 'componentRename');
+  assert.match(res.warnings.join(' | '), /теперь называется «Главная кнопка»/);
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.ok(core.components(next.doc).some((c) => c.name === 'Главная кнопка'));
+  // без нового имени та же фраза — честное «это уже компонент», а не второй компонент в библиотеке
+  const again = await runCommand({ doc, selection: [inst], utterance: 'сделай из этого компонент', provider: dead, engine: core });
+  assert.equal(again.ops.length, 0);
+  assert.match(again.cannot, /это компонент «Кнопка»/);
+});
+
+test('круг19 п.5: «отсоедини экземпляры метки» отсоединяет все экземпляры компонента', async () => {
+  const core = await realCore();
+  const dead = { name: 'fake', async ready() { return true; }, async complete() { throw new Error('модель звать не надо'); } };
+  const doc = core.createDoc();
+  const tags = core.components(doc).find((c) => c.name === 'Метка').instances;
+  const res = await runCommand({ doc, selection: [], utterance: 'отсоедини экземпляры метки', provider: dead, engine: core });
+  assert.equal(res.usage.calls, 0);
+  assert.equal(res.ops.filter((o) => o.op === 'remove').length, tags, 'отсоединились не все');
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.equal(core.components(next.doc).find((c) => c.name === 'Метка').instances, 0);
+});
+
+test('круг19 п.5: мягкая формулировка без экземпляра под рукой уходит в модель, а не угадывается', async () => {
+  const core = await realCore();
+  const doc = core.createDoc();
+  let asked = 0;
+  const provider = {
+    name: 'fake', async ready() { return true; },
+    async complete(messages, schema) {
+      asked++;
+      return schema.name === 'plan' ? PLAN19 : { edits: [{ op: 'set', target: 'Шапка', path: 'layout.gap', value: '8' }] };
+    },
+  };
+  const res = await runCommand({
+    doc, selection: [nameOf(doc, 'Шапка')], utterance: 'сделай его обычным', provider, engine: core,
+  });
+  assert.ok(asked >= 1, 'реплику не отдали модели');
+  assert.equal(res.local, undefined);
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+});
+
+test('круг19 п.4-5: подметание распознавания — просьбы и ловушки', () => {
+  const ASK = [
+    ['сделай из этого компонент', 'make'], ['сделай компонент', 'make'], ['сделай компонент из этого', 'make'],
+    ['сделай из карточки встречи компонент', 'make'], ['собери из этого компонент', 'make'],
+    ['оформи это компонентом', 'make'], ['создай компонент из этого', 'make'],
+    ['преврати это в компонент', 'make'], ['вынеси это в компонент', 'make'], ['вынеси это в библиотеку', 'make'],
+    ['добавь кнопку в библиотеку', 'make'], ['добавь это в библиотеку', 'make'], ['положи это в библиотеку', 'make'],
+    ['закинь это в библиотеку', 'make'], ['сохрани это в библиотеку', 'make'], ['помести это в библиотеку', 'make'],
+    ['назови это компонентом Карточка', 'make'], ['назови карточку компонентом Плитка', 'make'],
+    ['сделай это компонентом', 'make'], ['сделай это компонентом Карточка', 'make'], ['пусть это будет компонентом', 'make'],
+    ['сделай карточку встречи компонентом', 'make'], ['ну сделай из этого компонент, пожалуйста', 'make'],
+    ['отсоедини', 'detach'], ['отсоедини этот экземпляр', 'detach'], ['отсоедини экземпляр', 'detach'],
+    ['отсоедини метку', 'detach'], ['отсоедини экземпляры метки', 'detach'], ['отвяжи этот экземпляр', 'detach'],
+    ['отцепи это', 'detach'], ['отлепи это', 'detach'], ['разорви связь', 'detach'], ['разорви связь с компонентом', 'detach'],
+    ['сделай его обычным', 'detach'], ['сделай это обычным', 'detach'], ['сделай его независимым', 'detach'],
+    ['сделай его отдельным', 'detach'], ['сделай его самостоятельным', 'detach'], ['сделай это простым', 'detach'],
+    ['преврати его в обычный', 'detach'], ['отсоедини, пожалуйста', 'detach'],
+  ];
+  const TRAPS = [
+    'сделай все кнопки крупнее', 'сделай кнопку крупнее', 'сделай компонент кнопки крупнее',
+    'поправь компонент кнопка', 'у всех меток другой фон', 'сделай метки помельче',
+    'добавь кнопку на экран', 'добавь кнопку в шапку', 'добавь кнопку из библиотеки на экран',
+    'добавь метку в ярлыки', 'поставь сюда карточку показателя', 'собери экран из библиотеки',
+    'покажи компоненты', 'что в библиотеке?', 'сколько компонентов в библиотеке',
+    'какие свойства у кнопки', 'убери компонент из библиотеки', 'удали компонент кнопка',
+    'отсоедини от раскладки', 'открепи от сетки', 'верни в поток раскладки',
+    'сделай его обычным текстом', 'сделай заголовок обычным текстом', 'сделай шапку обычной строкой',
+    'сделай заголовок крупнее', 'создай экран тарифов', 'собери карточку товара', 'сделай тёмную тему',
+    'покажи три варианта', 'отмени', 'верни как было', 'убери последнее', 'продублируй карточку',
+    'скопируй кнопку', 'сделай из карточки две', 'сделай отступы компактнее', 'выровняй по центру',
+  ];
+  const bad = [];
+  for (const [said, kind] of ASK) {
+    const got = recognizeComponentIntent(said);
+    if (!got || got.kind !== kind) bad.push(`«${said}» → ${JSON.stringify(got)}, ждали ${kind}`);
+  }
+  for (const said of TRAPS) {
+    const got = recognizeComponentIntent(said);
+    if (got) bad.push(`ловушка сработала: «${said}» → ${JSON.stringify(got)}`);
+  }
+  assert.deepEqual(bad, [], `расхождений ${bad.length} на ${ASK.length + TRAPS.length} репликах:\n` + bad.join('\n'));
+  // имя компонента сохраняет регистр, как сказал человек
+  assert.equal(recognizeComponentIntent('назови это компонентом Плитка дня').name, 'Плитка дня');
+  // и прежние локальные намерения целы
+  assert.equal(recognizeAction('верни как было'), 'undo');
+  assert.ok(recognizeVariants('покажи три варианта'));
+  assert.ok(recognizeUndoDoubt('убери последнее'));
+});
+
+test('круг19 п.7: новые замечания проверки человек читает словами, без латиницы', async () => {
+  const core = await realCore();
+  const base = core.createDoc();
+  const btn = core.components(base).find((c) => c.name === 'Кнопка');
+  const inst = instOfComp(core, base, 'Кнопка');
+  const cases = {
+    'мёртвая ссылка': (d) => { d.nodes[inst].of = 'нет-такого-узла'; },
+    'ссылка вне библиотеки': (d) => { d.nodes[inst].of = nameOf(d, 'Шапка'); },
+    'необъявленное свойство': (d) => { d.nodes[inst].props = { 'текст': 'Вперёд', 'цвет': 'красный' }; },
+    'компонент внутри себя': (d) => {
+      const self = { type: 'instance', id: 'iself', parent: btn.id, of: btn.id, props: {} };
+      d.nodes[self.id] = self;
+      d.nodes[btn.id].children = (d.nodes[btn.id].children || []).concat([self.id]);
+    },
+  };
+  for (const [what, mutate] of Object.entries(cases)) {
+    // мимо createDoc: он лишние свойства чинит сам, а нам нужен документ «как из файла»
+    const doc = JSON.parse(JSON.stringify(base));
+    mutate(doc);
+    const list = core.validate(doc, core.solve(doc));
+    assert.ok(list.length, `${what}: валидатор молчит`);
+    const text = describeViolations(list, doc);
+    assert.ok(text, `${what}: замечаний нет`);
+    const clean = text.replace(/«[^»]*»/g, '').replace(/#[0-9a-zA-Z_-]+/g, '');
+    assert.ok(!/[A-Za-z]{3,}/.test(clean), `${what}: латиница в тексте человеку — ${text}`);
+    assert.ok(!/пропс/i.test(text), `${what}: внутреннее слово «пропс» ушло человеку — ${text}`);
+  }
+  // и словами именно про то, что случилось
+  const dead = JSON.parse(JSON.stringify(base));
+  dead.nodes[inst].of = 'нет-такого-узла';
+  assert.match(describeViolations(core.validate(dead, core.solve(dead)), dead),
+    /ссылается на компонент, которого в библиотеке нет/);
+});
+
+test('круг19: выделен мастер — правка идёт в компонент, и об этом сказано', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const btn = core.components(doc0).find((c) => c.name === 'Кнопка');
+  const { res } = await run19(core, 'сделай крупнее', {
+    edits: [{ op: 'set', target: 'selection', path: 'radius', value: '28' }],
+  }, { doc: doc0, selection: [btn.id] });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.deepEqual(res.ops, [{ op: 'set', id: btn.id, path: 'radius', value: 28 }]);
+  assert.match(res.warnings[0], /Это правка компонента «Кнопка»/);
+  // и модель видит, что выделен компонент, а не слой на доске
+  const scope = resolveScope(doc0, [btn.id], core, {});
+  const digest = describeDoc(doc0, scope.ids, { engine: core, geo: core.solve(doc0), scopeKind: scope.kind });
+  assert.match(digest, /РАБОТАЕМ С: компонент «Кнопка» из библиотеки/);
+  assert.match(describeLibrary(doc0, core, { selected: scope.ids }), /Кнопка\(.*ВЫДЕЛЕНО/);
+});
+
+test('круг19: экземпляры в сгенерированном дереве становятся узлами-экземплярами', async () => {
+  const core = await realCore();
+  const doc = core.createDoc();
+  const tree = {
+    type: 'frame', name: 'Показатели недели', size: { w: 390, h: 'hug' }, fill: 'surface',
+    layout: { mode: 'column', gap: 16, padding: [24, 20], align: 'stretch' },
+    children: [
+      { type: 'text', name: 'Заголовок', text: 'Показатели недели', style: 'title' },
+      { type: 'instance', of: 'Карточка показателя', props: [{ name: 'заголовок', value: 'Задач закрыто' }, { name: 'значение', value: '48' }] },
+      { type: 'instance', of: 'Кнопка', props: [{ name: 'текст', value: 'Открыть отчёт' }] },
+    ],
+  };
+  const provider = makeFakeProvider({
+    plan: { intent: 'create', title: 'Экран показателей', summary: 'Собираю из библиотеки.', steps: ['раз'], targets: [] },
+    tree,
+  });
+  const res = await runCommand({ doc, selection: [], utterance: 'собери экран с показателями', provider, engine: core });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.ops.length, 4, 'доска + заголовок + два экземпляра, без поддеревьев компонентов');
+  const kinds = res.ops.map((o) => o.node.type);
+  assert.deepEqual(kinds, ['frame', 'text', 'instance', 'instance']);
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.deepEqual(core.validate(next.doc, core.solve(next.doc)).filter((v) => v.severity === 'error'), []);
+  const ids = res.ops.filter((o) => o.node.type === 'instance').map((o) => o.node.id);
+  assert.equal(core.instanceSummary(next.doc, ids[0]), 'Карточка показателя "Задач закрыто" "48"');
+  assert.equal(core.instanceSummary(next.doc, ids[1]), 'Кнопка "Открыть отчёт"');
+});
+
+test('круг19 п.7: правка компонента, перекрытая свойством экземпляра, не выдаётся за сделанную', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const btn = core.components(doc0).find((c) => c.name === 'Кнопка');
+  const label = btn.props.find((p) => p.name === 'текст').target;
+  // экземпляр на доске задал свой «текст» — значит правка текста ВНУТРИ компонента его не тронет
+  const { doc, res } = await run19(core, 'пусть все кнопки говорят «Дальше»', {
+    edits: [{ op: 'master', target: 'Кнопка', path: 'characters', value: 'Дальше' }],
+  }, { doc: doc0 });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.ops.length, 1);
+  assert.equal(res.ops[0].id, label, 'правка ушла в текст внутри компонента');
+  const said = res.warnings.join(' | ');
+  assert.match(said, /на досках ничего не изменит/);
+  assert.match(said, /свойство «текст» задано своим значением/);
+  assert.ok(!/разом меняет все его экземпляры/.test(said),
+    'сказали и «меняет все экземпляры», и «ничего не изменит» — одно из двух неправда');
+  // и это правда: у экземпляра остаётся своя надпись
+  const next = core.applyOps(doc, res.ops);
+  const inst = instOfComp(core, next.doc, 'Кнопка');
+  const ex = core.expandInstance(next.doc, inst);
+  const texts = Object.values(ex.nodes).filter((n) => n.type === 'text').map((n) => n.characters);
+  assert.deepEqual(texts, ['Открыть день'], 'свойство экземпляра перестало быть сильнее');
+});
+
+test('круг19 п.3: свойство, которое уже такое, — «менять нечего», без «Повторить»', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const inst = instOfComp(core, doc0, 'Кнопка');
+  const { res } = await run19(core, 'поставь кнопке простой вид', {
+    edits: [{ op: 'set', target: `#${inst}`, path: 'props.вид', value: 'surface' }],
+  }, { doc: doc0 });
+  assert.equal(res.nothingChanged, true);
+  assert.equal(res.nothingToChange, true, 'оболочка предложит «Повторить» там, где повтор бесполезен');
+  assert.match(res.warnings.join(' | '), /свойство «вид» уже «карточка»/);
+});
+
+test('круг19 п.3: свойство можно снять — тогда значение берётся у компонента', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const inst = instOfComp(core, doc0, 'Кнопка');
+  const { doc, res } = await run19(core, 'пусть у кнопки будет обычный вид', {
+    edits: [{ op: 'set', target: `#${inst}`, path: 'props.вид', value: 'none' }],
+  }, { doc: doc0 });
+  // снятие — та же операция, что у кнопки инспектора «Без заливки»: set без значения
+  assert.equal(res.ops.length, 1);
+  assert.equal(res.ops[0].op, 'set');
+  assert.equal(res.ops[0].id, inst);
+  assert.equal(res.ops[0].path, 'props.вид');
+  assert.equal(res.ops[0].value, undefined);
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.equal(core.instanceSummary(next.doc, inst), 'Кнопка "Открыть день"');
+  const ex = core.expandInstance(next.doc, inst);
+  assert.equal(ex.nodes[inst].fill, 'accent', 'заливка не вернулась к заливке компонента');
+});
+
+test('круг19 п.7: в словах про компоненты нет латиницы и внутренних имён', async () => {
+  const core = await realCore();
+  const doc0 = core.createDoc();
+  const inst = instOfComp(core, doc0, 'Кнопка');
+  const cases = [
+    ['поставь тут переключатель', { edits: [{ op: 'create', parent: 'Шапка', node: { type: 'instance', of: 'Переключатель' } }] }],
+    ['поправь компонент', { edits: [{ op: 'master', target: 'Шапка', path: 'radius', value: '8' }] }],
+    ['покрась кнопку', { edits: [{ op: 'set', target: `#${inst}`, path: 'props.цвет', value: 'красный' }] }],
+    ['сделай кнопку изумрудной', { edits: [{ op: 'set', target: `#${inst}`, path: 'props.вид', value: 'изумрудный' }] }],
+    ['поставь кнопке обводку', { edits: [{ op: 'set', target: `#${inst}`, path: 'stroke', value: 'line' }] }],
+    ['поменяй текст кнопки', { edits: [{ op: 'set', target: `#${inst}`, path: 'characters', value: 'Купить' }] }],
+    ['сделай все кнопки крупнее', { edits: [{ op: 'master', target: 'Кнопка', path: 'size.h', value: '70' }] }],
+    ['поправь шапку по-своему', { edits: [{ op: 'detach', target: 'Шапка' }] }],
+    ['карточка встречи пусть переиспользуется', { edits: [{ op: 'component', target: 'Карточка встречи', name: 'Плитка' }] }],
+  ];
+  const leaks = [];
+  for (const [said, patch] of cases) {
+    const { res } = await run19(core, said, patch, { doc: core.createDoc(JSON.parse(JSON.stringify(doc0))) });
+    const texts = (res.warnings || []).concat([res.cannot, res.clarify].filter(Boolean));
+    for (const w of texts) {
+      /* Латиница допустима только там, где это СЛОВО МОДЕЛИ или человека — его мы печатаем
+       * в кавычках («изумрудный», «line»). Внутренние имена наших полей, операций и id — нет. */
+      const cleaned = String(w).replace(/«[^»]*»/g, '').replace(/#[0-9a-zA-Z_-]+/g, '');
+      const bad = cleaned.match(/[A-Za-z][A-Za-z.]{2,}/g) || [];
+      if (bad.length) leaks.push(`«${said}»: ${w} → ${bad.join(',')}`);
+      if (/артборд/i.test(w)) leaks.push(`«${said}»: «артборд» вместо «доска» — ${w}`);
+      if (/пропс|мастер/i.test(w)) leaks.push(`«${said}»: внутреннее слово — ${w}`);
+    }
+  }
+  assert.deepEqual(leaks, [], 'внутренние имена в словах человеку:\n' + leaks.join('\n'));
+});
+
+test('круг19: компоненты не ломают работу без них — движок и документ без библиотеки', async () => {
+  const core = await realCore();
+  const doc = core.createDoc();
+  const lib = core.libraryNode(doc);
+  const bare = core.applyOps(doc, [core.ops.remove(lib.id)]).doc;
+  assert.deepEqual(core.components(bare), []);
+  // 1. выжимка без словаря и без слова «экземпляр»
+  assert.equal(describeLibrary(bare, core, {}), '');
+  // 2. обычная правка работает как до круга 19
+  const { res } = await run19(core, 'сделай шапку просторнее', {
+    edits: [{ op: 'set', target: 'Шапка', path: 'layout.gap', value: '20' }],
+  }, { doc: bare, activeArtboardId: nameOf(bare, 'Маршрут дня') });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.ops.length, 1);
+  // 3. просьба про компонент — честное «нечем», а не авария
+  const { res: no } = await run19(core, 'добавь кнопку в шапку', {
+    edits: [{ op: 'create', parent: 'Шапка', node: { type: 'instance', of: 'Кнопка' } }],
+  }, { doc: bare, activeArtboardId: nameOf(bare, 'Маршрут дня') });
+  assert.match((no.warnings || []).concat(no.error ? [no.error.message] : []).join(' | '),
+    /библиотеки компонентов в документе нет/i);
+  // 4. движок без компонентных функций (заглушка прошлых кругов) — мозг работает как раньше
+  const stub = makeStubEngine();
+  const patched = { edits: [{ op: 'set', target: 'Заголовок', path: 'style', value: 'h1' }] };
+  const stubRes = await runCommand({
+    doc: makeDoc(), selection: [], utterance: 'сделай заголовок крупнее',
+    provider: makeFakeProvider({ plan: PLAN_EDIT, patch: patched }), engine: stub,
+  });
+  assert.equal(stubRes.error, undefined, JSON.stringify(stubRes.error));
+  assert.equal(stubRes.ops.length, 1);
+});
+
+test('круг19 п.4-5: у механической просьбы вариантов не бывает — один прогон, ноль вызовов', async () => {
+  const core = await realCore();
+  const dead = { name: 'fake', async ready() { return true; }, async complete() { throw new Error('модель звать не надо'); } };
+  const doc = core.createDoc();
+  const inst = instIds(doc)[0];
+  const list = await runVariants({
+    doc, selection: [inst], utterance: 'покажи два варианта: отсоедини этот экземпляр',
+    provider: dead, engine: core, n: 2,
+  });
+  assert.equal(list.length, 1, 'три копии одного и того же действия человеку не нужны');
+  assert.equal(list[0].usage.calls, 0);
+  assert.equal(list[0].local, 'detach');
+  assert.ok(list[0].ops.length >= 2, 'операций отсоединения нет');
 });

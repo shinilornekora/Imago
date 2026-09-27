@@ -529,7 +529,7 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
   const node = {
     type: 'object',
     properties: {
-      type: { type: 'string', enum: NODE_TYPES },
+      type: { type: 'string', enum: NODE_TYPES.concat(['instance']) },
       name: { type: 'string' },
       layout: layoutSchema(),
       size: { type: 'object', properties: { w: sizeSpecSchema(), h: sizeSpecSchema() } },
@@ -541,6 +541,23 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
       style: { type: 'string' },
       align: { type: 'string', enum: ['left', 'center', 'right'] },
       src: { type: 'string' },
+      /**
+       * Круг 19, п.2 (SPEC §5.5): экземпляр компонента — не новая ФОРМА правки, а новый ТИП
+       * УЗЛА в том же дереве. Поэтому он сразу доступен и генерации целого экрана, и правке
+       * {op:"create", node}, и вся машинерия «куда класть» работает без единой поправки.
+       * props — массив, а не словарь: словарь с произвольными ключами в JSON-схеме не
+       * выражается (та же причина, что у SCHEMAS.theme).
+       */
+      of: { type: 'string' },
+      props: {
+        type: 'array',
+        maxItems: 12,
+        items: {
+          type: 'object',
+          properties: { name: { type: 'string' }, value: { type: 'string' } },
+          required: ['name', 'value'],
+        },
+      },
     },
     required: ['type'],
   };
@@ -555,7 +572,9 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
 }
 
 const TREE_HINT = `{
-  type: "frame" | "text" | "rect" | "ellipse" | "image",
+  type: "frame" | "text" | "rect" | "ellipse" | "image" | "instance",
+  of?: string,                         // ТОЛЬКО для type:"instance": ИМЯ компонента из библиотеки
+  props?: [{name: string, value: string}],  // ТОЛЬКО для type:"instance": объявленные свойства компонента
   name?: string,                       // короткое русское имя слоя
   layout?: { mode: "none"|"row"|"column", gap?: number, padding?: number | [v,h] | [t,r,b,l],
              align?: "start"|"center"|"end"|"stretch", justify?: "start"|"center"|"end"|"between", wrap?: boolean },
@@ -650,7 +669,11 @@ export const SCHEMAS = {
           items: {
             type: 'object',
             properties: {
-              op: { type: 'string', enum: ['set', 'remove', 'create', 'move', 'duplicate', 'nudge'] },
+              /* круг 19, п.2: master / detach / component — про КОМПОНЕНТЫ, и это отдельные
+               * операции, а не set по имени: у мастера «Кнопка» и у слоя «Кнопка «Добавить пункт»»
+               * одно и то же слово в имени, поэтому «поправить одну кнопку» было бы неотличимо
+               * от «поправить все» (обоснование — в componentRules). */
+              op: { type: 'string', enum: ['set', 'remove', 'create', 'move', 'duplicate', 'nudge', 'master', 'detach', 'component'] },
               target: { type: 'string' },
               path: { type: 'string' },
               value: { type: 'string' },
@@ -659,6 +682,8 @@ export const SCHEMAS = {
               index: { type: 'integer' },
               dx: { type: 'number' },
               dy: { type: 'number' },
+              // op:"component": как назвать новый компонент
+              name: { type: 'string' },
             },
             required: ['op', 'target'],
           },
@@ -670,9 +695,14 @@ export const SCHEMAS = {
   cannot?: string,       // просьбу нельзя выполнить в этой модели документа — объясни по-русски,
                          // почему именно, и оставь edits пустым. НЕ выдумывай поле ради вида.
   edits: [{
-  op: "set" | "remove" | "create" | "move" | "duplicate" | "nudge",
-  target: string,        // id узла ("#f12"), точное имя слоя ("Кнопка оформить") или "selection"
+  op: "set" | "remove" | "create" | "move" | "duplicate" | "nudge" | "master" | "detach" | "component",
+                         // master/detach/component — только если выше есть блок «БИБЛИОТЕКА ПРОДУКТА»:
+                         // master — правка САМОГО компонента (сразу во всех его экземплярах),
+                         // detach — отсоединить экземпляр, component — сделать узел компонентом.
+  target: string,        // id узла ("#f12"), точное имя слоя ("Кнопка оформить") или "selection";
+                         // для op:"master" — ИМЯ компонента из библиотеки ("Кнопка")
   path?: string,         // для set: "characters" | "style" | "fill" | "size.w" | "layout.gap" | "layout.padding" | "radius" | "align" ...
+                         // у экземпляра компонента — только "props.<имя свойства>"
   value?: string,        // ВСЕГДА строка: "24", "fill", "hug", "#101418", "accent", "Купить".
                          // value:"none" (или вовсе без value) = СНЯТЬ свойство: «без заливки»,
                          // «убери скругление». Снимаются fill, stroke, color, radius, opacity,
@@ -680,7 +710,8 @@ export const SCHEMAS = {
   node?: Node,           // для create: поддерево в том же DSL, что и схема tree
   parent?: string,       // для create (ОБЯЗАТЕЛЬНО) и для move/duplicate: узел-контейнер
   index?: number,        // позиция среди детей
-  dx?: number, dy?: number  // только для nudge: сдвиг в пикселях от текущего места
+  dx?: number, dy?: number, // только для nudge: сдвиг в пикселях от текущего места
+  name?: string          // только для op:"component": как назвать новый компонент
 }] }`,
     example: {
       summary: 'Крупнее заголовок и плотнее отступ',
@@ -1272,6 +1303,12 @@ function header(ctx, role) {
   lines.push('ТОКЕНЫ ДОКУМЕНТА');
   lines.push(ctx.tokens);
   lines.push('');
+  // Круг 19, п.1 (SPEC §5.9): библиотека — отдельным блоком ПЕРЕД документом. Это словарь
+  // сборки, и стоять он обязан раньше макета: сначала «чем собирать», потом «что уже собрано».
+  if (ctx.library) {
+    lines.push(ctx.library);
+    lines.push('');
+  }
   lines.push(`ТЕКУЩИЙ ДОКУМЕНТ ЦЕЛИКОМ — все доски. Область работы: ${ctx.scopeLabel}`);
   lines.push(DIGEST_LEGEND);
   lines.push(ctx.digest);
@@ -1322,6 +1359,7 @@ export const PROMPTS = {
   одно-два русских предложения: чего именно в редакторе нет и что можно попросить вместо этого.
   Это не clarify (переспрашивать нечего) и не повод угадывать похожую правку.`,
       '',
+      ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'plan')}\n` : '',
       `Локальный классификатор предполагает: ${ctx.guess}. Согласись, если он прав, иначе поставь свой intent.`,
       /**
        * Круг 16, п.5: НЕ прошедшее время. Эту строку лента стадий показывает, ПОКА агент
@@ -1363,6 +1401,7 @@ export const PROMPTS = {
       '',
       DSL_RULES,
       '',
+      ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'tree')}\n` : '',
       CONTENT_RULES,
       '',
       ctx.personaHint ? `ХАРАКТЕР — ТВОЙ И ТОЛЬКО ТВОЙ\n${ctx.personaHint}\n` : '',
@@ -1389,6 +1428,7 @@ export const PROMPTS = {
       // Круг 5, п.10: «куда класть» считает приложение (describePlacement) и на него же
       // опирается материализация, когда модель не назвала parent, — а модель этого не видела.
       ctx.placement ? `КУДА КЛАДЁМ НОВОЕ, ЕСЛИ ПРАВКА ЕГО СОЗДАЁТ (это посчитало приложение)\n${ctx.placement}\n` : '',
+      ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'patch')}\n` : '',
       `ПРАВИЛА ПРАВОК
 - Меняй только то, о чём просят. Ничего не переписывай «заодно».
 - Правь ТОЛЬКО область работы (строка «РАБОТАЕМ С:» в выжимке). Остальные доски — источник образцов:
@@ -2037,6 +2077,108 @@ export function recognizeVariants(utterance, { doc = null } = {}) {
  * Локальная классификация по глаголам и наличию выделения.
  * Возвращает {intent, confidence 0..1, reason}. План модели может её поправить.
  */
+/* — Четвёртое и пятое локальные действия: компонент из узла и отсоединение (круг 19, п.4-5) —
+ *
+ * Почему локально, а не «обычной командой через модель». «Сделай из этого компонент» и
+ * «отсоедини этот экземпляр» — это механика, а не замысел: что делать, ясно из самой фразы, а
+ * ЧТО делать это с чем — из выделения. Единственное, что мог бы придумать за нас планировщик, —
+ * имя компонента и набор свойств; но и то и другое уже лежит в документе именами слоёв, которые
+ * дал человек. Поэтому команда стоит 0 вызовов модели вместо 2 (на локальной сборке это
+ * секунды ожидания) и не может «промахнуться» — а предложенные имя и свойства говорятся вслух,
+ * и переназвать их одной фразой дешевле, чем ждать круг планирования.
+ *
+ * Сознательно консервативно, как и откат: фраза сверяется ЦЕЛИКОМ, а если цели не нашлось —
+ * либо честный переспрос (когда просьба однозначна), либо реплика уходит в модель (когда она
+ * могла значить и что-то другое). Подметание на десятках просьб и ловушек — в отчёте круга.
+ */
+
+/** Слова, которые в имени компонента не встречаются: с ними это не имя, а продолжение команды. */
+const RE_NOT_NAME = new RegExp('(крупн|больш|меньш|мельч|шир|уж|выш|ниж|жирн|тонь|светл|темн|т[её]мн'
+  + '|плотн|простор|воздушн|компактн|иначе|друг|поменя|измен|сделай|удали|убер|поставь|добав)', 'iu');
+
+/** Имя компонента из реплики: одно-три слова без служебных хвостов. '' — имени нет. */
+function nameFromWords(raw) {
+  const t = String(raw == null ? '' : raw).trim().replace(/^[«"']+|[»"'.,!?]+$/g, '').trim();
+  if (!t) return '';
+  const words = t.split(/\s+/);
+  if (words.length > 3 || RE_NOT_NAME.test(t)) return '';
+  return t.slice(0, 60);
+}
+
+/** Указание на выделенное словами: «это», «этого», «его». */
+const THIS_WORDS = new Set([
+  'это', 'этот', 'эту', 'этого', 'этом', 'этим', 'его', 'её', 'ее', 'их', 'том', 'тот', 'то',
+  'вот это', 'вот этот', 'выделенное', 'выделение', 'выделенный',
+]);
+
+const RE_MAKE_FROM = /^(?:сделай(?:те)?|сделать|собери|собрать|оформи|оформить|заведи|создай|создать)\s+из\s+(.+?)\s+компонент\p{L}*(?:\s+(.+))?$/u;
+const RE_MAKE_BARE = /^(?:сделай(?:те)?|сделать|собери|собрать|оформи|оформить|заведи|создай|создать)\s+компонент\p{L}*(?:\s+из\s+(.+?))?$/u;
+const RE_MAKE_INTO = /^(?:преврати|превратить|переведи|перенеси|вынеси|вынести|заверни)\s+(.+?)\s+в\s+компонент\p{L}*(?:\s+(.+))?$/u;
+const RE_MAKE_LIB = /^(?:добав(?:ь|ьте|ить)|положи(?:те)?|помести|занеси|закинь|отправь|сохрани|сохранить|перенеси|вынеси|вынести)\s+(.+?)\s+в\s+библиотек\p{L}*$/u;
+const RE_MAKE_NAMED = /^(?:назови|назвать|назовите|обзови|переименуй)\s+(.+?)\s+компонентом(?:\s+(.+))?$/u;
+const RE_MAKE_IS = /^(?:сделай(?:те)?|сделать|пусть|оформи(?:те)?|оформить|заведи|сохрани|сохранить|объяви|объявить)\s+(.+?)\s+(?:будет\s+)?компонентом(?:\s+(.+))?$/u;
+
+const RE_DETACH_HARD = /^(?:отсоедин\p{L}*|отвяж\p{L}*|отцеп\p{L}*|отлеп\p{L}*|разорви\s+связь)(?:\s+(.+))?$/u;
+const RE_DETACH_SOFT = /^(?:сделай(?:те)?|преврати)\s+(.+?)\s+(?:в\s+)?(?:обычн\p{L}*|обыкновенн\p{L}*|независим\p{L}*|самостоятельн\p{L}*|отдельн\p{L}*|прост(?:ым|ой|ое))$/u;
+/** «Отсоединить от раскладки» — это НЕ компоненты, а ручной сдвиг: у него своя правка. */
+const RE_LAYOUT_WORD = /(раскладк|поток|сетк|привязк\p{L}*\s+к\s+сетк)/iu;
+
+/**
+ * Слова про «то самое» выкидываем: «этот экземпляр» — это выделенное, а не слой с таким именем.
+ * @returns {string|null} что названо словами, или null — «выделенное»
+ */
+function cleanWhat(raw) {
+  const words = String(raw == null ? '' : raw).trim().split(/\s+/).filter(Boolean)
+    .filter((w) => !THIS_WORDS.has(w) && !/^(?:экземпляр\p{L}*|копи\p{L}*|штук\p{L}*|шту)$/u.test(w));
+  const out = words.join(' ').trim();
+  return out || null;
+}
+
+/** Имя компонента в том виде, в каком его сказал человек: разбор идёт по строчным. */
+function originalCase(utterance, lowered) {
+  const low = String(lowered == null ? '' : lowered);
+  if (!low) return '';
+  const src = String(utterance == null ? '' : utterance);
+  const at = src.toLowerCase().replace(/ё/g, 'е').indexOf(low);
+  if (at >= 0) return src.slice(at, at + low.length);
+  return low.charAt(0).toUpperCase() + low.slice(1);
+}
+
+/**
+ * Локально распознанная просьба про компоненты (круг 19, п.4-5).
+ * @returns {{kind:'make'|'detach', what:string|null, name:string, soft:boolean}|null}
+ */
+export function recognizeComponentIntent(utterance) {
+  for (const core of actionCores(utterance)) {
+    if (!core || core.length > 90) continue;
+    if (RE_LAYOUT_WORD.test(core)) continue;
+    const mk = (what, name, soft = false) => ({
+      kind: 'make',
+      what: cleanWhat(what),
+      name: originalCase(utterance, nameFromWords(name)),
+      soft,
+    });
+    let m = RE_MAKE_FROM.exec(core);
+    if (m && (!m[2] || nameFromWords(m[2]))) return mk(m[1], m[2]);
+    m = RE_MAKE_BARE.exec(core);
+    if (m) return mk(m[1], '');
+    m = RE_MAKE_INTO.exec(core);
+    if (m && (!m[2] || nameFromWords(m[2]))) return mk(m[1], m[2]);
+    m = RE_MAKE_LIB.exec(core);
+    if (m) return mk(m[1], '');
+    m = RE_MAKE_NAMED.exec(core);
+    if (m && m[2] && nameFromWords(m[2])) return mk(m[1], m[2]);
+    m = RE_MAKE_IS.exec(core);
+    // «сделай это компонентом» — про выделенное; «сделай карточку компонентом Плитка» — про карточку
+    if (m && (!m[2] || nameFromWords(m[2]))) return mk(m[1], m[2]);
+    m = RE_DETACH_HARD.exec(core);
+    if (m) return { kind: 'detach', what: cleanWhat(m[1]), name: '', soft: false };
+    m = RE_DETACH_SOFT.exec(core);
+    if (m) return { kind: 'detach', what: cleanWhat(m[1]), name: '', soft: true };
+  }
+  return null;
+}
+
 export function classifyUtterance(utterance, { hasSelection = false, doc = null, prefer = null } = {}) {
   const s = String(utterance || '').trim();
   if (!s) return { intent: 'clarify', confidence: 0.9, reason: 'пустая команда' };
@@ -2123,6 +2265,10 @@ function namedChildren(doc, rootId, limit = 24) {
     for (const kid of (Array.isArray(n.children) ? n.children : [])) {
       const k = nodeOf(doc, kid);
       if (!k) continue;
+      /* Круг 19: имена из библиотеки сюда не годятся. Отсюда берутся ГОТОВЫЕ КОМАНДЫ человеку
+       * («сделай «Кнопка» просторнее»), а поиск цели по имени в библиотеку не заходит — команда
+       * с именем мастера попала бы в одноимённый слой на доске или никуда. */
+      if (inLibrary(doc, null, kid)) continue;
       const name = String(k.name || '').trim();
       if (name) out.push({ id: kid, name, type: k.type });
       walk(kid, depth + 1);
@@ -2340,6 +2486,248 @@ export function describeTokens(doc) {
   return out.join('\n');
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * 6a. Компоненты: библиотека как СЛОВАРЬ агента (круг 19, SPEC §5)
+ *
+ * Смысл круга — не переиспользование, а СУЖЕНИЕ СЛОВАРЯ: модель выбирает из
+ * компонентов продукта вместо того, чтобы сочинять кнопку с нуля. Отсюда всё
+ * остальное в этом файле:
+ *   • библиотека идёт отдельным блоком ПЕРЕД документом (§5.9) — это словарь,
+ *     а не часть макета: её узлы в выжимке не печатаются вовсе;
+ *   • экземпляр — ОДНА строка, без внутренностей (в документе их и нет);
+ *   • компонент адресуется ТОЛЬКО по имени, отдельным каналом. Ядро нарочно
+ *     убрало библиотеку из resolveTarget, иначе мастер «Кнопка» перебивал бы
+ *     кнопку на доске; здесь то же правило повторено для поиска по именам,
+ *     который мозг ведёт сам (см. refCandidates).
+ *
+ * Функции ядра для компонентов НЕ входят в ENGINE_MEMBERS сознательно: движок
+ * без них (и документ без библиотеки) остаётся законным, и мозг просто работает
+ * как до круга 19. Поэтому каждый вызов — через проверку «а умеет ли движок».
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Роль страницы-библиотеки (SPEC §5.3) — контракт документа, а не имя функции. */
+const LIBRARY_ROLE = 'library';
+
+/** Библиотека документа: сначала спрашиваем ядро, иначе — по контракту §5.3. */
+function libraryIdOf(doc, engine) {
+  if (engine && typeof engine.libraryNode === 'function') {
+    try {
+      const n = engine.libraryNode(doc);
+      if (n && n.id && nodeOf(doc, n.id)) return n.id;
+    } catch { /* движок без компонентов — ищем сами */ }
+  }
+  const root = nodeOf(doc, doc && doc.root);
+  for (const id of (root && root.children) || []) {
+    const n = nodeOf(doc, id);
+    if (n && n.type === 'page' && n.role === LIBRARY_ROLE) return id;
+  }
+  return null;
+}
+
+/** Кеш «библиотека этого документа»: за одну команду он спрашивается десятки раз. */
+const libCache = new WeakMap();
+
+/**
+ * Все узлы библиотеки (сама страница и мастера с их поддеревьями).
+ * Пустое множество — библиотеки нет, и весь код ниже становится пустой веткой.
+ * @returns {Set<string>}
+ */
+function libraryIds(doc, engine) {
+  if (!doc || !doc.nodes) return new Set();
+  const hit = libCache.get(doc);
+  if (hit) return hit;
+  const out = new Set();
+  const libId = libraryIdOf(doc, engine);
+  if (libId) {
+    const walk = (id, depth) => {
+      if (out.has(id) || depth > MAX_TREE_DEPTH * 4) return;
+      out.add(id);
+      for (const k of (nodeOf(doc, id) || {}).children || []) walk(k, depth + 1);
+    };
+    walk(libId, 0);
+  }
+  libCache.set(doc, out);
+  return out;
+}
+
+/** Лежит ли узел в библиотеке (сам мастер, его внутренность или страница библиотеки). */
+function inLibrary(doc, engine, id) {
+  const set = libraryIds(doc, engine);
+  return set.size ? set.has(id) : false;
+}
+
+/** Список компонентов документа — словарь агента (SPEC §5.4: реестра нет, считается на лету). */
+function componentList(engine, doc) {
+  if (!engine || typeof engine.components !== 'function') return [];
+  try {
+    const list = engine.components(doc);
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
+}
+
+/** Подпись компонента: `Кнопка(текст, вид: accent|surface)` (§5.9). Без ядра — сами. */
+function signatureOf(engine, info) {
+  if (engine && typeof engine.componentSignature === 'function') {
+    try {
+      const s = engine.componentSignature(info);
+      if (s) return s;
+    } catch { /* соберём сами */ }
+  }
+  const parts = ((info && info.props) || []).map((p) => (p.kind === 'enum' && Array.isArray(p.values) && p.values.length
+    ? `${p.name}: ${p.values.join('|')}` : p.name));
+  return `${(info && info.name) || 'Компонент'}${parts.length ? '(' + parts.join(', ') + ')' : '()'}`;
+}
+
+/** Экземпляр одной строкой: `Кнопка "Оплатить" вид=accent` (§5.9). */
+function instanceWords(doc, engine, node) {
+  if (engine && typeof engine.instanceSummary === 'function') {
+    try {
+      const s = engine.instanceSummary(doc, node.id);
+      if (s) return s;
+    } catch { /* соберём сами */ }
+  }
+  const master = nodeOf(doc, node.of);
+  const comp = master && master.component;
+  const name = (comp && typeof comp.name === 'string' && comp.name.trim()) || 'Компонент';
+  const bits = [];
+  for (const p of (comp && Array.isArray(comp.props) ? comp.props : [])) {
+    const raw = node.props ? node.props[p.name] : undefined;
+    if (raw === undefined || !p || !p.name) continue;
+    if (p.kind === 'text') bits.push(`"${raw}"`);
+    else bits.push(`${p.name}=${refWord(raw)}`);
+  }
+  return bits.length ? `${name} ${bits.join(' ')}` : name;
+}
+
+/** Имена компонентов через запятую — для человеческих фраз «есть Кнопка, Метка». */
+function componentNames(list) {
+  return asArray(list).map((c) => c && c.name).filter(Boolean).join(', ');
+}
+
+/**
+ * Компонент по имени, как его назвала модель или человек. Совпадение — по имени без
+ * учёта регистра и кавычек; при нескольких частичных совпадениях возвращаем их все,
+ * чтобы вызывающий переспросил, а не угадывал.
+ * @returns {{info:object|null, ambiguous:Array}}
+ */
+function findComponent(list, raw) {
+  const all = asArray(list);
+  const needle = String(raw == null ? '' : raw).trim().replace(/^[«"'#]+|[»"'.,!?]+$/g, '').toLowerCase();
+  if (!needle || !all.length) return { info: null, ambiguous: [] };
+  const exact = all.filter((c) => String(c.name || '').toLowerCase() === needle);
+  if (exact.length) return { info: exact[0], ambiguous: [] };
+  // «кнопку», «кнопки» — тот же компонент: сверяем по основе слова, как в остальном мозге
+  const stem = (s) => String(s || '').toLowerCase().split(/\s+/).map(stemRu).join(' ');
+  const byStem = all.filter((c) => stem(c.name) === stem(needle));
+  if (byStem.length === 1) return { info: byStem[0], ambiguous: [] };
+  /* Сокращение имени компонента принимаем («карточка» → «Карточка показателя»), а вот
+   * ОБРАТНОЕ — нет: «Кнопка «Добавить пункт»» начинается с «Кнопка», но это имя СЛОЯ на доске.
+   * Принять его за компонент значило бы превратить «поправь эту кнопку» в «поправь все кнопки»
+   * — ровно ту подмену, из-за которой ядро убрало библиотеку из поиска по именам. Лучше
+   * отказать словами и дать модели назвать компонент точно. */
+  const part = all.filter((c) => {
+    const n = String(c.name || '').toLowerCase();
+    return n.startsWith(needle) || n.includes(needle);
+  });
+  if (part.length === 1) return { info: part[0], ambiguous: [] };
+  return { info: null, ambiguous: part.length ? part : [] };
+}
+
+/**
+ * Блок «БИБЛИОТЕКА» перед выжимкой документа (§5.9) — тот самый словарь.
+ * Пустая строка, если библиотеки нет: обещать модели компоненты, которых нет,
+ * значит получить ссылку на выдуманный компонент.
+ * @param {object} doc
+ * @param {object} engine движок (может не умать компонентов — тогда блока нет)
+ * @param {{selected?:Iterable<string>}} [opts] выделенные узлы: если человек выбрал мастера,
+ *   в словаре это надо пометить — иначе «сделай крупнее» непонятно к чему отнести
+ * @returns {string}
+ */
+export function describeLibrary(doc, engine, opts = {}) {
+  const list = componentList(engine, doc);
+  if (!list.length) return '';
+  const chosen = new Set(asArray([...(opts.selected || [])]));
+  const lines = [`БИБЛИОТЕКА ПРОДУКТА — СЛОВАРЬ СБОРКИ, компонентов: ${list.length}.`];
+  for (const info of list) {
+    const mine = chosen.has(info.id) || (info.props || []).some((p) => chosen.has(p.target));
+    const used = info.instances === 0 ? 'на досках ещё нет'
+      : `на досках экземпляров: ${info.instances}`;
+    lines.push(`  ${signatureOf(engine, info)} — ${used}${mine ? `  ${MARK_SELECTED}` : ''}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Что за компоненты выделил человек (узлы внутри библиотеки → компоненты и число экземпляров).
+ * @returns {{names:string[], instances:number}}
+ */
+function libraryWorkInfo(doc, engine, ids) {
+  const names = [];
+  let instances = 0;
+  for (const info of componentList(engine, doc)) {
+    const mine = asArray(ids).some((id) => id === info.id || chainUp(doc, id).includes(info.id));
+    if (!mine) continue;
+    names.push(info.name);
+    instances += Number(info.instances) || 0;
+  }
+  return { names, instances };
+}
+
+/**
+ * Правила компонентов для промпта (круг 19, п.2). Выдаются ТОЛЬКО когда библиотека есть:
+ * пообещать модели компоненты в документе без библиотеки — это заказать ссылку на выдуманный
+ * компонент, а мы её потом отклоним и потратим круг починки.
+ *
+ * Почему именно такая схема ответа (обоснование выбора):
+ *   • поставить экземпляр — НЕ новая форма правки, а новый ТИП УЗЛА в том же дереве
+ *     ({type:"instance", of, props}). Так экземпляры сразу доступны и в генерации целого
+ *     экрана (schema tree), и в точечной правке (op:"create" с node) — одной ценой вместо двух,
+ *     и вся машинерия «куда класть» (placement, wideTarget, parent по имени) работает как была;
+ *   • свойство экземпляра — обычный set по пути "props.<имя>": от этого бесплатно достаются
+ *     «уже так» (nothingToChange), снятие значения, дедупликация правок и человеческие строки
+ *     про пропущенную правку;
+ *   • правка КОМПОНЕНТА — отдельная операция op:"master", а не set по имени. Иначе «сделай
+ *     кнопку крупнее» неотличимо от «сделай кнопку на доске крупнее»: у мастера «Кнопка» и
+ *     у слоя «Кнопка «Добавить пункт»» одно и то же слово в имени. Ядро ровно поэтому убрало
+ *     библиотеку из resolveTarget; отдельная операция — то же решение на нашем уровне, и она
+ *     заставляет модель ВЫБРАТЬ, а не промахнуться молча.
+ * @param {Array} list components(doc)
+ * @param {'tree'|'patch'|'plan'} role
+ * @returns {string}
+ */
+function componentRules(list, role) {
+  if (!asArray(list).length) return '';
+  const names = componentNames(list);
+  const head = `КОМПОНЕНТЫ (блок «БИБЛИОТЕКА ПРОДУКТА» выше — это словарь сборки)
+- Если в библиотеке есть подходящий компонент, собирай ИЗ НЕГО, а не из фреймов с текстом:
+  так экран получается из системы продукта, а не похожим на неё. Компоненты: ${names}.
+- Экземпляр — это узел {type:"instance", of:"<ИМЯ компонента из библиотеки>", props:[{name:"<имя свойства>", value:"<значение>"}]}.
+  Детей у него НЕТ и быть не может: содержимое экземпляра — сам компонент.
+- Имя компонента бери из библиотеки ДОСЛОВНО. Выдуманное имя будет отброшено, как выдуманный слой.
+- Свойства — только объявленные в подписи компонента; значения через двоеточие («вид: accent|surface») — закрытый список.
+- Внутренности экземпляра не адресуются: в документе их нет, в выжимке их нет, по имени их не найти.`;
+  if (role === 'tree') {
+    return `${head}
+- Размер экземпляра задавать не нужно: он берёт его у компонента. Задай, только если просили другой.`;
+  }
+  if (role === 'plan') {
+    return `КОМПОНЕНТЫ
+- В документе есть библиотека компонентов: ${names}. Новое собирается ИЗ НИХ, если подходящее есть.
+- «Сделай все кнопки крупнее», «поправь компонент» — это intent "edit" (правка компонента), а не "theme" и не "create".
+- Правка компонента задевает все его экземпляры сразу: так и напиши в summary, если задача про компонент.`;
+  }
+  return `${head}
+- Поменять свойство у ОДНОГО экземпляра: {op:"set", target:"<id экземпляра из выжимки>", path:"props.<имя свойства>", value:"<значение>"}.
+- Поставить новый экземпляр: {op:"create", parent:"<куда>", node:{type:"instance", of:"<имя компонента>", props:[…]}}.
+- Поменять САМ компонент — сразу во всех экземплярах: {op:"master", target:"<имя компонента>", path:"radius", value:"24"}.
+  Это та же правка, что set, но по компоненту: пути и значения те же. Так делается «сделай ВСЕ кнопки крупнее»,
+  «поправь компонент», «у всех меток другой фон». Для одной кнопки на доске op:"master" НЕ годится: там обычный set.
+- Отсоединить экземпляр (нужно, только если просят поправить именно ЭТУ копию не через свойства):
+  {op:"detach", target:"<id экземпляра>"} — он станет обычным поддеревом и перестанет следовать компоненту.
+- Сделать компонентом существующий узел: {op:"component", target:"<узел>", name:"<как назвать>"}.
+- Не выдумывай пути внутрь экземпляра: "characters" у экземпляра нет, есть его свойство (например "props.текст").`;
+}
+
 const sizeWord = (spec) => {
   if (!spec || typeof spec !== 'object') return '?';
   if (spec.mode === 'fixed') return String(spec.value);
@@ -2389,6 +2777,10 @@ const rnd = (v) => Math.round(Number(v) || 0);
 function repeatSignature(doc, id, depth = 0) {
   const n = nodeOf(doc, id);
   if (!n) return '';
+  /* Круг 19: у экземпляра «такой же» — это ТОТ ЖЕ компонент и ТЕ ЖЕ свойства. Имя и дети
+   * у экземпляров пустые, и по общему правилу три разные метки схлопывались бы в «ещё 2
+   * таких же» вместе со своими текстами — то есть содержимое досок пропадало бы из выжимки. */
+  if (n.type === 'instance') return `instance|${n.of}|${JSON.stringify(n.props || {})}`;
   const name = String(n.name || '').replace(/\d+/g, '#').trim().toLowerCase();
   const bits = [n.type, name, typeof n.style === 'string' ? n.style : '', n.layout ? n.layout.mode : '', (n.children || []).length];
   if (depth < 2) bits.push((n.children || []).map((k) => repeatSignature(doc, k, depth + 1)).join('~'));
@@ -2410,6 +2802,23 @@ function refWord(v) {
 function digestLine(doc, id, depth, rects, engine) {
   const n = nodeOf(doc, id);
   const pad = '  '.repeat(depth);
+  /**
+   * Круг 19, п.1 (SPEC §5.9): экземпляр — ОДНА строка, без внутренностей. Их и нет в
+   * документе: содержимое экземпляра раскрывает решатель, а doc.nodes хранит ссылку на
+   * мастер и объявленные свойства. Это и есть главное усыхание выжимки — и заодно
+   * честность: адресовать внутренности экземпляра модель не может, так что печатать их
+   * значило бы предлагать цели, которых нет.
+   */
+  if (n.type === 'instance') {
+    const one = [`${pad}#${id} экземпляр ${instanceWords(doc, engine, n)}`];
+    // оси размера необязательны по отдельности (§5.5): незаданную экземпляр берёт у мастера
+    if (n.size && n.size.w) one.push(`w=${sizeWord(n.size.w)}`);
+    if (n.size && n.size.h) one.push(`h=${sizeWord(n.size.h)}`);
+    if (n.override) one.push('override');
+    const own = rects && rects[id];
+    if (own && Number.isFinite(Number(own.w))) one.push(`→ ${rnd(own.w)}×${rnd(own.h)} @${rnd(own.x)},${rnd(own.y)}`);
+    return one.join(' ');
+  }
   const bits = [`${pad}#${id} ${n.type}`];
   if (n.name) bits.push(`"${n.name}"`);
   if (n.type === 'frame' && n.layout) {
@@ -2457,11 +2866,26 @@ function artboardOf(doc, id) {
  * Строка «РАБОТАЕМ С: …» — куда вносить правку по умолчанию (круг 2, п.1).
  * brief — краткая форма для крошечного бюджета: без пояснений, только адрес области.
  */
-function workAreaLine(doc, work, activeArtboard, kind, brief = false) {
+function workAreaLine(doc, work, activeArtboard, kind, brief = false, lib = null) {
   const nameOf = (id) => {
     const n = nodeOf(doc, id);
     return `#${id} «${(n && n.name) || id}»`;
   };
+  /**
+   * Круг 19, п.6: человек выделил МАСТЕРА в библиотеке — значит, речь о компоненте целиком,
+   * и «сделай крупнее» тут означает «во всех экземплярах». Сказать это модели обязательно:
+   * иначе она видит выделение, которого нет ни в одной строке выжимки (узлы библиотеки в
+   * выжимку не идут), и начинает искать похожий узел на досках.
+   */
+  if (lib && lib.names && lib.names.length) {
+    const who = lib.names.map((x) => `«${x}»`).join(', ');
+    if (brief) return `РАБОТАЕМ С: компонент ${who} из библиотеки.`;
+    const tail = lib.instances
+      ? ` Правка компонента меняет ВСЕ его экземпляры на досках, их ${lib.instances}.`
+      : ' Экземпляров на досках у него пока нет.';
+    return `РАБОТАЕМ С: компонент ${who} из библиотеки — человек выделил его, а не узел на доске.${tail}`
+      + ' Правь компонент правкой op:"master" с его ИМЕНЕМ в target; доски при этом не трогай.';
+  }
   const where = activeArtboard ? ` Экран на виду: ${nameOf(activeArtboard)}.` : '';
   if (!work.length || (work.length === 1 && work[0] === doc.root) || kind === 'document') {
     if (brief) return 'РАБОТАЕМ С: весь документ.';
@@ -2500,11 +2924,24 @@ export function describeDoc(doc, scopeIds, opts = {}) {
   if (!roots.length) return '(область пуста)';
   const rects = rectsOf(geo) || rectsOf(engine ? safeSolve(engine, doc) : null);
 
-  const workSet = new Set(work);
-  const activeArtboard = artboardOf(doc, work[0]);
-  let footer = workAreaLine(doc, work, activeArtboard, scopeKind);
+  /**
+   * Круг 19, п.1 (SPEC §5.9): узлы БИБЛИОТЕКИ в выжимку документа не идут вовсе. Библиотека —
+   * словарь, а не часть макета: она печатается отдельным блоком ПЕРЕД документом
+   * (describeLibrary), компонент адресуется по имени, и внутренности мастера модель ни назвать,
+   * ни поправить точечной правкой не может (ядро убрало библиотеку из resolveTarget). Печатать
+   * их значило бы предлагать цели, которых нет, — и тратить на это половину выжимки.
+   */
+  const libSet = libraryIds(doc, engine);
+  const hidLib = (id) => libSet.has(id);
+  const libWork = work.filter(hidLib);
+  const boardWork = work.filter((id) => !hidLib(id));
+  const libInfo = libWork.length ? libraryWorkInfo(doc, engine, libWork) : null;
+
+  const workSet = new Set(boardWork);
+  const activeArtboard = artboardOf(doc, boardWork[0]);
+  let footer = workAreaLine(doc, boardWork, activeArtboard, scopeKind, false, libInfo);
   // при крошечном бюджете пояснения в строке «РАБОТАЕМ С:» съели бы всю выжимку
-  if (limit - footer.length - 1 - TAIL_RESERVE < 400) footer = workAreaLine(doc, work, activeArtboard, scopeKind, true);
+  if (limit - footer.length - 1 - TAIL_RESERVE < 400) footer = workAreaLine(doc, boardWork, activeArtboard, scopeKind, true, libInfo);
   // из бюджета сразу вычтены строка «РАБОТАЕМ С:» и место под итоговое «… ещё N скрыто»,
   // иначе выжимка вылезала за предел на длину этих строк
   const budget = Math.max(40, limit - footer.length - 1 - TAIL_RESERVE);
@@ -2517,7 +2954,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
    * далёкое (не near) — сворачиваем первым и агрессивнее всего. */
   const pinned = new Set(roots);
   for (const a of (nodeOf(doc, doc.root) && nodeOf(doc, doc.root).children) || []) {
-    if (nodeOf(doc, a)) pinned.add(a);
+    if (nodeOf(doc, a) && !hidLib(a)) pinned.add(a);
   }
   const near = new Set(pinned);
   const addSubtree = (id) => {
@@ -2527,7 +2964,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     for (const k of n.children || []) addSubtree(k);
   };
   const NEAR_SIBLINGS = 6;
-  for (const id of work) {
+  for (const id of boardWork) {
     pinned.add(id);
     addSubtree(id);
     for (const up of chainUp(doc, id)) {
@@ -2556,7 +2993,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     const entry = { id, depth, text, children: [], collapsed: null, cost: text.length + 1, far: !near.has(id) };
     index.set(id, entry);
     for (const kid of (nodeOf(doc, id).children || [])) {
-      if (!nodeOf(doc, kid)) continue;
+      if (!nodeOf(doc, kid) || hidLib(kid)) continue;
       const child = build(kid, depth + 1);
       entry.children.push(child);
       entry.cost += child.cost;
@@ -2571,7 +3008,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
    * иначе документ с тысячей уровней вложенности успевал израсходовать бюджет предками
    * раньше, чем доходил до второго артборда. */
   const forced = new Set([...roots, ...workSet]);
-  for (const a of (nodeOf(doc, doc.root) && nodeOf(doc, doc.root).children) || []) forced.add(a);
+  for (const a of (nodeOf(doc, doc.root) && nodeOf(doc, doc.root).children) || []) { if (!hidLib(a)) forced.add(a); }
 
   /** Точный размер выжимки при текущем сворачивании: считаем, а не накапливаем. */
   const measure = () => {
@@ -2777,8 +3214,13 @@ function buildContext({ doc, scope, engine, guess, persona, placement, geo, hist
   const personaHint = persona
     ? (intent && intent !== 'create' && persona.patchHint ? persona.patchHint : persona.hint)
     : '';
+  const comps = componentList(engine, doc);
   return {
     tokens: describeTokens(doc),
+    /* Круг 19, п.1 (SPEC §5.9): СЛОВАРЬ идёт перед документом. Не «ещё одна доска в выжимке»,
+     * а отдельный блок: из него модель выбирает, чем собирать, и его узлов в выжимке нет. */
+    comps,
+    library: describeLibrary(doc, engine, { selected: scope.ids }),
     // выжимка — весь документ; scope.ids задаёт лишь подсветку области работы (круг 2, п.1)
     digest: describeDoc(doc, scope.ids, { engine, geo, scopeKind: scope.kind }),
     scopeLabel: SCOPE_LABELS[scope.kind] || 'документ',
@@ -2841,7 +3283,7 @@ function makeIdFactory(doc, extraTaken = []) {
   const taken = new Set(Object.keys((doc && doc.nodes) || {}));
   for (const id of extraTaken) taken.add(id);
   let seq = 0;
-  const prefix = { frame: 'f', text: 't', rect: 'r', ellipse: 'e', image: 'i' };
+  const prefix = { frame: 'f', text: 't', rect: 'r', ellipse: 'e', image: 'i', instance: 'i' };
   const mint = (type) => {
     const p = prefix[type] || 'n';
     for (;;) {
@@ -3145,10 +3587,93 @@ function normPadding(raw, note, what) {
 }
 
 /**
+ * Круг 19, п.3: значение СВОЙСТВА экземпляра проверяется по его виду (`kind`) и, для
+ * перечисления, по объявленному списку `values`. Это ровно то место, где отсекаются
+ * выдуманные значения, — то же самое, где отсекаются выдуманные токены цвета.
+ * @returns {*} undefined — значение не годится (о причине уже сказано словами)
+ */
+function propValueFor(prop, raw, doc, note, who) {
+  const kind = prop && prop.kind;
+  const bare = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw.value != null ? raw.value : raw) : raw;
+  const str = bare == null ? '' : String(bare).trim();
+  if (kind === 'text') {
+    if (bare == null) { note(`${who}: свойство «${prop.name}» — текст, а значения нет: пропущено`); return undefined; }
+    return clampChars(String(bare), note, `${who}, свойство «${prop.name}»`);
+  }
+  if (kind === 'number') {
+    const got = parsePx(bare);
+    if (!got) { note(`${who}: «${str}» — не число, свойство «${prop.name}» пропущено`); return undefined; }
+    return clampPx(got.n, note, `${who}, свойство «${prop.name}»`);
+  }
+  if (kind === 'bool') {
+    if (typeof bare === 'boolean') return bare;
+    const word = BOOL_WORDS[str.toLowerCase()];
+    if (word === undefined) { note(`${who}: «${str}» — не «да» и не «нет», свойство «${prop.name}» пропущено`); return undefined; }
+    return word;
+  }
+  if (kind === 'color') {
+    const color = normColor(bare, doc, note, `${who}, свойство «${prop.name}»`);
+    return color === undefined ? undefined : color;
+  }
+  if (kind === 'enum') {
+    const values = Array.isArray(prop.values) ? prop.values : [];
+    const hit = values.find((v) => v === str) || values.find((v) => String(v).toLowerCase() === str.toLowerCase());
+    if (!hit) {
+      note(`${who}: у свойства «${prop.name}» значения только ${values.map((v) => `«${ruToken('colors', v)}»`).join(', ')}`
+        + `${str ? `, а «${str}» среди них нет` : ', а значения не было'} — свойство пропущено`);
+      return undefined;
+    }
+    return hit;
+  }
+  note(`${who}: свойство «${(prop && prop.name) || '?'}» неизвестного вида — пропущено`);
+  return undefined;
+}
+
+/**
+ * Свойства экземпляра: что прислала модель → что объявил компонент (§5.5).
+ * Принимаем и массив [{name,value}] (так в схеме), и словарь {имя: значение} — модели
+ * присылают то и то, а отбрасывать понятный ответ из-за формы было бы недоразумением.
+ * @returns {object} готовое поле props для узла-экземпляра
+ */
+function instanceProps(raw, info, doc, note, who) {
+  const declared = (info && info.props) || [];
+  const out = {};
+  if (raw == null) return out;
+  const pairs = [];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      const nm = [item.name, item.prop, item.key].find((v) => typeof v === 'string' && v.trim());
+      if (nm) pairs.push([nm.trim(), item.value !== undefined ? item.value : item.val]);
+    }
+  } else if (typeof raw === 'object') {
+    for (const k of Object.keys(raw)) pairs.push([k, raw[k]]);
+  }
+  for (const [nm, value] of pairs) {
+    const low = nm.toLowerCase();
+    const prop = declared.find((p) => p.name === nm)
+      || declared.find((p) => String(p.name).toLowerCase() === low)
+      || declared.find((p) => stemRu(String(p.name).toLowerCase()) === stemRu(low));
+    if (!prop) {
+      note(`${who}: у компонента «${info.name}» нет свойства «${nm}»`
+        + `${declared.length ? ` — есть ${declared.map((p) => `«${p.name}»`).join(', ')}` : ' (свойств он не объявлял вовсе)'}`
+        + '. Свойство пропущено');
+      continue;
+    }
+    const val = propValueFor(prop, value, doc, note, who);
+    if (val !== undefined) out[prop.name] = val;
+  }
+  return out;
+}
+
+/**
  * Синонимы типов узлов. Это ЯВНАЯ таблица (круг 7, п.1), и предупреждения здесь сознательно нет:
  * «карточка» в этой модели и есть фрейм, человек получает ровно то, что просил, а строка
  * «card → frame» на каждый узел сгенерированного экрана была бы шумом, а не честностью.
  */
+/** Как модель зовёт экземпляр компонента. «component» тоже сюда: узел-компонент на доске — это он. */
+const INSTANCE_TYPES = new Set(['instance', 'экземпляр', 'component', 'компонент', 'инстанс']);
+
 const NODE_TYPE_ALIASES = {
   container: 'frame', box: 'frame', group: 'frame', stack: 'frame', row: 'frame', column: 'frame',
   section: 'frame', card: 'frame', button: 'frame', list: 'frame', div: 'frame',
@@ -3162,7 +3687,7 @@ const NODE_TYPE_ALIASES = {
  * Дерево модели → спецификации узлов. Невалидные узлы отбрасываются с предупреждением,
  * валидные соседи сохраняются.
  */
-export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget } = {}) {
+export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engine = null } = {}) {
   const P = (persona && persona.defaults) || { gap: 16, padding: 24, radius: 8 };
   const note = warn || (() => {});
   const bud = budget || makeNodeBudget(note);
@@ -3196,6 +3721,51 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget } = {
   if (!bud.take()) return null;                  // общий предел на число узлов (п.19)
 
   let type = String(raw.type == null ? '' : raw.type).trim().toLowerCase();
+  /**
+   * Круг 19, п.2 (SPEC §5.5): ЭКЗЕМПЛЯР КОМПОНЕНТА — свой тип узла со своей формой. Ни детей,
+   * ни заливки, ни стиля у него нет: содержимое экземпляра — сам компонент. Поэтому ветка
+   * стоит тут, до общих правил для frame/text, и выходит из функции сразу.
+   *
+   * Тут же отсекается ВЫДУМАННЫЙ компонент — ровно там, где отсекается выдуманный тип узла и
+   * выдуманный токен цвета, и такой же строкой для человека: чего нет и что есть взамен.
+   */
+  if (INSTANCE_TYPES.has(type) || (!type && typeof raw.of === 'string' && raw.of.trim())) {
+    const list = componentList(engine, doc);
+    const called = [raw.of, raw.component, raw.master, raw.name].find((v) => typeof v === 'string' && v.trim()) || '';
+    const who = `Экземпляр${called ? ` «${String(called).trim().slice(0, 40)}»` : ''}`;
+    if (!list.length) {
+      note(`${who}: библиотеки компонентов в документе нет, ставить экземпляр не из чего — узел отброшен.`
+        + ' Соберите узел обычными слоями или сначала сделайте компонент');
+      return null;
+    }
+    const { info, ambiguous } = findComponent(list, called);
+    if (!info) {
+      note(ambiguous.length
+        ? `${who}: под это имя подходит несколько компонентов — ${componentNames(ambiguous)}.`
+          + ' Узел отброшен: назовите компонент точно'
+        : `${who}: такого компонента в библиотеке нет — есть ${componentNames(list)}. Узел отброшен`);
+      return null;
+    }
+    const spec = {
+      type: 'instance',
+      name: typeof raw.name === 'string' && raw.name.trim() && raw.name.trim() !== info.name
+        ? raw.name.trim().slice(0, 80) : undefined,
+      of: info.id,
+      compName: info.name,
+      props: instanceProps(raw.props !== undefined ? raw.props : raw.values, info, doc, note, who),
+    };
+    // §5.5: оси размера необязательны ПО ОТДЕЛЬНОСТИ — незаданную экземпляр берёт у компонента,
+    // поэтому пустой size не пишем вовсе: иначе кнопка потеряла бы свой размер
+    const w = normSizeSpec(raw.size && raw.size.w);
+    const h = normSizeSpec(raw.size && raw.size.h);
+    if (w || h) spec.size = { ...(w ? { w } : {}), ...(h ? { h } : {}) };
+    if (Array.isArray(raw.children) && raw.children.length) {
+      note(`${who}: у экземпляра компонента детей не бывает — его содержимое задаёт сам компонент.`
+        + ` Вложенные узлы (${raw.children.length}) пропущены`);
+    }
+    if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
+    return spec;
+  }
   if (!NODE_TYPES.includes(type)) {
     if (type && NODE_TYPE_ALIASES[type]) {
       type = NODE_TYPE_ALIASES[type];
@@ -3295,7 +3865,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget } = {
     }
     spec.children = [];
     for (const kid of kids) {
-      const norm = normalizeTree(kid, { doc, warn: note, persona, depth: depth + 1, budget: bud });
+      const norm = normalizeTree(kid, { doc, warn: note, persona, depth: depth + 1, budget: bud, engine });
       if (norm) spec.children.push(norm);
     }
   }
@@ -3319,6 +3889,11 @@ function specToNodes(spec, parentId, ids, out) {
     node.align = spec.align;
     node.size = spec.size;
     if (spec.color) node.color = spec.color;
+  } else if (spec.type === 'instance') {
+    // круг 19 (§5.5): у экземпляра только ссылка на компонент, свойства и (необязательно) размер
+    node.of = spec.of;
+    node.props = spec.props || {};
+    if (spec.size) node.size = spec.size;
   } else {
     node.size = spec.size;
     node.radius = spec.radius || 0;
@@ -3336,6 +3911,8 @@ function specToNodes(spec, parentId, ids, out) {
 
 function defaultName(spec) {
   if (spec.type === 'text') return String(spec.characters || 'Текст').slice(0, 24);
+  // экземпляр без своего имени зовётся как компонент: в списке слоёв так его и узнают
+  if (spec.type === 'instance') return String(spec.compName || 'Экземпляр').slice(0, 24);
   return { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка' }[spec.type] || 'Узел';
 }
 
@@ -3378,7 +3955,7 @@ function wideTarget(doc, placement, fullWidth, note) {
 /** Дерево → массив операций core.ops (родитель раньше детей). */
 export function treeToOps({ doc, tree, parentId, index, engine, warn, persona, asArtboard, artboardSize }) {
   const note = warn || (() => {});
-  let spec = normalizeTree(tree, { doc, warn: note, persona, budget: makeNodeBudget(note) });
+  let spec = normalizeTree(tree, { doc, warn: note, persona, budget: makeNodeBudget(note), engine });
   if (!spec) throw ERR('schema', 'Модель не вернула ни одного пригодного узла');
 
   if (asArtboard && spec.type !== 'frame') {
@@ -3435,7 +4012,18 @@ const lowerChars = (n) => String((n && n.characters) || '').trim().toLowerCase()
  */
 const nameOrId = (doc, id) => {
   const n = nodeOf(doc, id);
-  return n && n.name ? `«${n.name}»` : `#${id}`;
+  if (n && n.name) return `«${n.name}»`;
+  /* Круг 19: у экземпляра своего имени обычно нет — он зовётся по компоненту (так же, как в
+   * списке слоёв оболочки). Показывать вместо этого внутренний id («#i_f651jz») человеку
+   * нельзя: это наше слово, а не его. Кавычки те же, что у слоя, — строка встаёт в любую
+   * фразу, где уже стоит имя слоя. */
+  if (n && n.type === 'instance') {
+    const master = nodeOf(doc, n.of);
+    const comp = master && master.component;
+    const named = comp && typeof comp.name === 'string' ? comp.name.trim() : '';
+    return `«${named || 'Экземпляр'}»`;
+  }
+  return `#${id}`;
 };
 
 /**
@@ -3612,7 +4200,16 @@ export function refCandidates(engine, doc, ref, scope, opts = {}) {
 
   const scopeIds = collectSubtree(doc, (scope && scope.ids) || []);
   const inScope = new Set(scopeIds);
-  const all = Object.keys(doc.nodes || {});
+  /**
+   * Круг 19 (SPEC §5.3): поиск по ИМЕНИ в библиотеку не заходит. Ядро нарочно убрало её из
+   * resolveTarget: мастер «Кнопка» перебивал бы «Кнопку «Добавить пункт»» на доске, и точечная
+   * правка молча меняла бы все экземпляры. Здесь то же правило для нашего поиска по именам —
+   * иначе запрет ядра ничего не стоил бы: имена мы ищем сами.
+   *
+   * Исключение одно: узлы, которые ЧЕЛОВЕК ВЫДЕЛИЛ (они и есть scopeIds). Он показал пальцем на
+   * мастера — значит, речь о нём, и молчания тут нет: про правку компонента скажет patchToOps.
+   */
+  const all = Object.keys(doc.nodes || {}).filter((id) => !inLibrary(doc, engine, id) || inScope.has(id));
   const take = (ids, pred) => ids.filter((id) => { const n = nodeOf(doc, id); return n && pred(n); });
 
   /**
@@ -3644,12 +4241,34 @@ export function refCandidates(engine, doc, ref, scope, opts = {}) {
     const hit = how === 'partial' ? preferPrefix(take(ids, pred)) : take(ids, pred);
     if (hit.length) return withFresh({ ids: hit, how, inScope: within || hit.every((id) => inScope.has(id)) });
   }
+  /**
+   * Круг 19: у экземпляра своего имени обычно нет — и в списке слоёв оболочки, и в выжимке он
+   * зовётся по КОМПОНЕНТУ («экземпляр Кнопка "Открыть день"»). Поэтому имя компонента годится и
+   * как имя цели — но ПОСЛЕДНИМ шагом, после всех имён слоёв: иначе экземпляры перебивали бы
+   * одноимённые слои на досках («Метка» — это и текст в карточке, и три ярлыка). Без этого шага
+   * безымянный экземпляр адресуется только идентификатором или словом «selection».
+   */
+  const byComp = take(all, (n) => {
+    if (n.type !== 'instance') return false;
+    const master = nodeOf(doc, n.of);
+    const cn = master && master.component && master.component.name;
+    if (!cn) return false;
+    const low = String(cn).toLowerCase();
+    return low === needle || stemRu(low) === stemRu(needle);
+  });
+  if (byComp.length) {
+    return withFresh({ ids: byComp, how: 'partial', inScope: byComp.every((id) => inScope.has(id)) });
+  }
+
   // последний шанс — роли движка («кнопка», «шапка»): их таблица шире нашего поиска по именам
   if (engine && typeof engine.resolveTarget === 'function') {
     try {
       const got = engine.resolveTarget(doc, raw);           // при неоднозначности core вернёт null
       const id = typeof got === 'string' ? got : got && got.id;
-      if (id && nodeOf(doc, id)) return withFresh({ ids: [id], how: 'role', inScope: inScope.has(id) });
+      // круг 19: и по роли в библиотеку не заходим — см. выше про мастера «Кнопка»
+      if (id && nodeOf(doc, id) && (!inLibrary(doc, engine, id) || inScope.has(id))) {
+        return withFresh({ ids: [id], how: 'role', inScope: inScope.has(id) });
+      }
     } catch { /* роли нет — значит, не нашли */ }
   }
   // существующего нет — тогда годится и созданный этим же патчем
@@ -3961,6 +4580,9 @@ const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 export const ALLOWED_PATH_HEADS = new Set([
   'characters', 'style', 'align', 'color', 'fill', 'stroke', 'radius',
   'size', 'layout', 'name', 'opacity', 'src', 'clip',
+  // круг 19, п.3 (SPEC §5.5): «props.<имя>» — ОБЪЯВЛЕННОЕ свойство экземпляра компонента.
+  // Единственный законный путь внутрь экземпляра: всё остальное у него задаёт компонент.
+  'props',
 ]);
 
 /** Пути, которыми модель пытается двигать узлы руками: у них есть честная замена. */
@@ -3977,6 +4599,9 @@ const UNIFORM_PATHS = new Set(['style', 'align', 'color', 'fill', 'stroke', 'rad
 const RU_TYPE = {
   frame: 'фрейма', text: 'текста', rect: 'прямоугольника',
   ellipse: 'эллипса', image: 'картинки', page: 'страницы',
+  // круг 19: у экземпляра компонента свой разговор (см. adjustSetPath), но в общих строках
+  // он тоже должен зваться по-русски
+  instance: 'экземпляра компонента',
 };
 
 /** Поля, которые есть ТОЛЬКО у текста. */
@@ -4028,8 +4653,38 @@ export function adjustSetPath(doc, id, path, warn) {
   if (!node) return { id, path };                  // узел создан этим же патчем — сверять нечем
   const head = String(path).split('.')[0];
   const owners = PATH_OWNERS[head];
-  const who = `«${node.name || id}»`;
+  const who = nameOrId(doc, id);
   if (!owners || owners.includes(node.type)) return { id, path };
+
+  /**
+   * Круг 19, п.2 (SPEC §5.5): у ЭКЗЕМПЛЯРА своих внутренностей нет — их задаёт компонент, и в
+   * документе их нет вовсе. Но у него есть ОБЪЯВЛЕННЫЕ свойства, и часть из них ведёт ровно на
+   * тот путь, который просит модель: «текст» → characters, «вид» → fill. Если такое свойство
+   * ровно одно, правку уводим в него — это то же самое, что уже делается для кнопки-фрейма
+   * («сделай надпись другой» → её текст), и это именно то, о чём просил человек.
+   *
+   * Если подходящего свойства нет — отказ СЛОВАМИ, с перечнем того, что менять можно. Молча
+   * записать экземпляру поле, которого он не показывает, значит соврать «готово»: решатель
+   * берёт содержимое у мастера и такое поле не посмотрит.
+   */
+  if (node.type === 'instance') {
+    const master = nodeOf(doc, node.of);
+    const comp = master && master.component;
+    const named = (comp && typeof comp.name === 'string' && comp.name.trim()) || 'компонента';
+    const declared = (comp && Array.isArray(comp.props) ? comp.props : []).filter((x) => x && typeof x.name === 'string');
+    const fit = declared.filter((x) => String(x.path) === String(path));
+    if (fit.length === 1) {
+      note(`${who} — экземпляр компонента «${named}», своего ${ruPathGen(path)} у него нет:`
+        + ` правка ушла в его свойство «${fit[0].name}»`);
+      return { id, path: `props.${fit[0].name}` };
+    }
+    note(`${who} — экземпляр компонента «${named}»: внутренности экземпляра не правятся, их задаёт сам компонент.`
+      + (declared.length
+        ? ` У экземпляра можно менять свойства: ${declared.map((x) => `«${x.name}»`).join(', ')}.`
+        : ' Свойств компонент не объявлял вовсе.')
+      + ' Правка пропущена — поменяйте свойство, поправьте компонент целиком или отсоедините экземпляр');
+    return null;
+  }
 
   if (TEXT_ONLY_PATHS.has(head) && (node.type === 'frame' || node.type === 'page')) {
     const kids = textDescendants(doc, id);
@@ -4355,11 +5010,23 @@ function lookupPath(table, path) {
  * наше, и в ответе «такого поля у узла нет» его и надо показать.
  */
 export function ruPath(path) {
-  return lookupPath(PATH_RU, path) || String(path == null ? '' : path) || 'свойство';
+  const p = String(path == null ? '' : path);
+  /* Круг 19: свойство экземпляра зовётся тем именем, которое объявил компонент, — оно
+   * русское и пришло из документа, переводить его не из чего и незачем. */
+  if (/^props(\.|$)/.test(p)) {
+    const nm = p.slice('props.'.length).trim();
+    return nm ? `свойство «${nm}»` : 'свойство компонента';
+  }
+  return lookupPath(PATH_RU, path) || p || 'свойство';
 }
 /** То же в родительном падеже — для «и так нет …». */
 export function ruPathGen(path) {
-  return lookupPath(PATH_RU_GEN, path) || `«${String(path == null ? '' : path)}»`;
+  const p = String(path == null ? '' : path);
+  if (/^props(\.|$)/.test(p)) {
+    const nm = p.slice('props.'.length).trim();
+    return nm ? `свойства «${nm}»` : 'свойства компонента';
+  }
+  return lookupPath(PATH_RU_GEN, path) || `«${p}»`;
 }
 
 /** Цветовые токены документа словами (те же, что в палитре оболочки). */
@@ -4801,6 +5468,195 @@ function nudgeOps({ doc, engine, geo, id, dx, dy, note }) {
  * geo — посчитанная геометрия, нужна для op:"nudge" (круг 3, п.6);
  * group — формулировка групповая, частичное совпадение применяется ко всем (круг 3, п.4).
  */
+/** Компонент, на который ссылается экземпляр (или null, если ссылка мёртвая). */
+function componentOfInstance(doc, engine, node) {
+  if (!node || node.type !== 'instance') return null;
+  return componentList(engine, doc).find((c) => c.id === node.of) || null;
+}
+
+/** Значение свойства словами человека: «акцент», «да», «„Оплатить“». */
+function propWords(prop, value) {
+  if (prop && prop.kind === 'bool') return value ? 'да' : 'нет';
+  if (prop && prop.kind === 'text') return `«${String(value)}»`;
+  if (prop && (prop.kind === 'enum' || prop.kind === 'color')) return `«${ruToken('colors', value)}»`;
+  return `«${String(value)}»`;
+}
+
+/**
+ * Круг 19, п.3: одна правка СВОЙСТВА экземпляра. Сюда приходят оба пути — и явный
+ * path:"props.<имя>", и правка внутренности экземпляра, уведённая adjustSetPath
+ * («поменяй текст у этой кнопки» → её свойство «текст»).
+ *
+ * Отсекается здесь же, где отсекаются выдуманные слои: необъявленное свойство и негодное
+ * значение — с человеческой строкой, что есть взамен.
+ * @returns {object|null} операция set или null
+ */
+function instancePropOp({ doc, engine, id, path, raw, note, setSeen }) {
+  const node = nodeOf(doc, id);
+  const asked = String(path).slice('props.'.length).trim();
+  if (!node) return null;
+  if (node.type !== 'instance') {
+    note(`${nameOrId(doc, id)} — не экземпляр компонента, свойств компонента у него нет:`
+      + ' правка пропущена. Назовите поле слоя — текст, заливку, размер');
+    return null;
+  }
+  if (!asked || asked.indexOf('.') >= 0) {
+    note(`${nameOrId(doc, id)}: свойство компонента называется одним именем, а «${asked}» на него не похоже`
+      + ' — правка пропущена');
+    return null;
+  }
+  const info = componentOfInstance(doc, engine, node);
+  if (!info) {
+    note(`${nameOrId(doc, id)}: компонента, на который ссылается этот экземпляр, в библиотеке нет`
+      + ' — менять у него нечего, правка пропущена');
+    return null;
+  }
+  const declared = info.props || [];
+  const low = asked.toLowerCase();
+  const prop = declared.find((x) => x.name === asked)
+    || declared.find((x) => String(x.name).toLowerCase() === low)
+    || declared.find((x) => stemRu(String(x.name).toLowerCase()) === stemRu(low));
+  if (!prop) {
+    note(`У компонента «${info.name}» нет свойства «${asked}»`
+      + `${declared.length ? ` — есть ${declared.map((x) => `«${x.name}»`).join(', ')}` : ' (свойств он не объявлял)'}`
+      + '. Правка пропущена');
+    return null;
+  }
+  const aimed = `props.${prop.name}`;
+  const who = `Экземпляр «${info.name}»`;
+  // «убери надпись» у свойства значит «не задавать его»: тогда экземпляр берёт значение
+  // у компонента. У текстового свойства пустая строка — законное значение, а не «снять».
+  const clearing = prop.kind !== 'text' && looksCleared(raw, aimed);
+  let value;
+  if (!clearing) {
+    value = propValueFor(prop, raw, doc, note, who);
+    if (value === undefined) return null;
+  }
+  const key = `${id}|${aimed}|${clearing ? '∅' : JSON.stringify(value)}`;
+  if (setSeen.has(key)) return null;
+  setSeen.add(key);
+  const cur = node.props ? node.props[prop.name] : undefined;
+  if (clearing && cur === undefined) {
+    note(`У ${nameOrId(doc, id)} свойство «${prop.name}» и так не задано — оно берётся у компонента,`
+      + ' эта правка ничего не меняет');
+  } else if (!clearing && sameAsNow(cur, value, aimed)) {
+    note(`${nameOrId(doc, id)}: свойство «${prop.name}» уже ${propWords(prop, value)}`
+      + ' — эта правка ничего не меняет');
+  }
+  return mkOp(engine, 'set', clearing ? { id, path: aimed } : { id, path: aimed, value });
+}
+
+/**
+ * Круг 19, п.4: какие свойства объявить у НОВОГО компонента. Предлагает их приложение, а не
+ * модель, и вот почему: имя компонента и имена свойств уже лежат в документе — это имена
+ * слоёв, которые дал им человек (или та же модель, когда собирала экран). Лишний вызов модели
+ * за тем же самым стоил бы на локальной сборке секунды ожидания и мог бы вернуть выдуманные
+ * цели. Что предложено — говорится вслух, и переназвать это одной фразой дешевле, чем ждать.
+ * @returns {Array} props по схеме SPEC §5.4
+ */
+function proposeProps(doc, id) {
+  const MAX_PROPS = 4;
+  const texts = textDescendants(doc, id).slice(0, MAX_PROPS);
+  const used = new Set();
+  const out = [];
+  for (const tid of texts) {
+    const node = nodeOf(doc, tid);
+    let name = String((node && node.name) || '').trim().toLowerCase();
+    if (texts.length === 1) name = 'текст';
+    if (!name) name = `текст ${out.length + 1}`;
+    while (used.has(name)) name = `${name} ${out.length + 1}`;
+    used.add(name);
+    out.push({ name, kind: 'text', target: tid, path: 'characters' });
+  }
+  return out;
+}
+
+/**
+ * Круг 19, п.4: операции «сделать этот узел компонентом». Отказ — словами ядра
+ * (canMakeComponent), а не общим «не получилось»: причина у него уже человеческая.
+ * @returns {{ops:Array, info:{name:string, props:Array}|null}}
+ */
+function componentFromNode({ engine, doc, id, name, note }) {
+  const none = { ops: [], info: null };
+  const node = nodeOf(doc, id);
+  /**
+   * Круг 19, п.4: узел УЖЕ компонент (или его экземпляр). Тогда та же просьба значит другое —
+   * «назови компонент иначе», и это законная правка одного поля. Отказ «это уже компонент» тут
+   * был бы отпиской: человек сказал имя, и сделать с ним что-то осмысленное можно.
+   */
+  const master = node && node.type === 'instance' ? nodeOf(doc, node.of)
+    : (node && node.component && inLibrary(doc, engine, id) ? node : null);
+  if (master && master.component) {
+    const fresh = String(name == null ? '' : name).trim().replace(/^[«"']+|[»"'.,!?]+$/g, '').slice(0, 60);
+    const was = String(master.component.name || '').trim();
+    if (!fresh) {
+      note(`${nameOrId(doc, id)} — это уже компонент «${was}», второй раз в библиотеку он не попадёт.`
+        + ' Скажите новое имя, если надо переназвать');
+      return none;
+    }
+    if (fresh === was) {
+      note(`Компонент и так называется «${was}» — менять нечего`);
+      return none;
+    }
+    return {
+      ops: [mkOp(engine, 'set', { id: master.id, path: 'component', value: { ...master.component, name: fresh } })],
+      info: { name: fresh, props: master.component.props || [], renamed: was },
+    };
+  }
+  if (!engine || typeof engine.makeComponentOps !== 'function') {
+    note('Этот движок компонентов не умеет — просьбу выполнить нечем');
+    return none;
+  }
+  const can = typeof engine.canMakeComponent === 'function' ? engine.canMakeComponent(doc, id) : { ok: true };
+  if (!can || !can.ok) {
+    note(`${nameOrId(doc, id)} компонентом сделать нельзя: ${(can && can.reason) || 'так нельзя'}`);
+    return none;
+  }
+  const clean = String(name == null ? '' : name).trim().replace(/^[«"']+|[»"'.,!?]+$/g, '').slice(0, 60);
+  const props = proposeProps(doc, id);
+  let list = [];
+  try {
+    list = engine.makeComponentOps(doc, id, { ...(clean ? { name: clean } : {}), props }) || [];
+  } catch (e) {
+    note(`${nameOrId(doc, id)}: компонент собрать не удалось — ${factOnly(e && e.message ? e.message : e)}`);
+    return none;
+  }
+  if (!list.length) {
+    note(`${nameOrId(doc, id)} компонентом сделать нельзя`);
+    return none;
+  }
+  const given = clean || String((nodeOf(doc, id) || {}).name || 'Компонент');
+  /* Круг 19, п.4: имена компонентов — это словарь модели и человека, и два одинаковых имени
+   * в нём делают второй компонент неадресуемым: «поставь кнопку» попадёт в первый. Молчать
+   * об этом нельзя — переназвать дешевле сразу. */
+  if (componentList(engine, doc).some((c) => String(c.name).toLowerCase() === given.toLowerCase())) {
+    note(`В библиотеке уже есть компонент «${given}» — теперь их два с одним именем, и по имени`
+      + ' их не различить. Скажите новое имя: «назови это компонентом …»');
+  }
+  return { ops: list, info: { name: given, props } };
+}
+
+/** Круг 19, п.5: операции «отсоединить экземпляр» — настоящая копия поддерева на его месте. */
+function detachOpsFor({ engine, doc, id, note, budget }) {
+  if (!engine || typeof engine.detachInstanceOps !== 'function') {
+    note('Этот движок отсоединять экземпляры не умеет — правка пропущена');
+    return [];
+  }
+  let list = [];
+  try { list = engine.detachInstanceOps(doc, id) || []; } catch { list = []; }
+  if (!list.length) {
+    note(`${nameOrId(doc, id)}: отсоединять нечего — компонента, на который он ссылается, в библиотеке нет`);
+    return [];
+  }
+  const made = list.filter((o) => o && o.op === 'create').length;
+  if (budget && made > budget.left) {
+    note(`${nameOrId(doc, id)}: копия компонента не помещается в предел ${MAX_TREE_NODES} узлов — правка пропущена`);
+    return [];
+  }
+  if (budget) budget.left -= made;
+  return list;
+}
+
 export function patchToOps({ doc, patch, scope, engine, warn, persona, placement = null, geo = null, group = false, said: utterance = '' }) {
   // считаем выданные объяснения: если причина уже названа («неизвестный цвет «буряковый»»),
   // общее «значение непригодно» только зашумит экран
@@ -4809,6 +5665,37 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
   const note = (m) => { notes++; said.push(m); if (warn) warn(m); };
   const edits = patch && Array.isArray(patch.edits) ? patch.edits : [];
   if (!edits.length) throw ERR('schema', 'Модель не вернула ни одной правки');
+  /**
+   * Круг 19, п.6: op:"master" — это ТА ЖЕ правка set, но по КОМПОНЕНТУ. Переписываем её в set
+   * по мастеру здесь, до общего цикла, и дальше она идёт общей дорогой: путь сверяется с типом
+   * цели, значение проверяется, «уже так» и дедупликация работают. Своя половинчатая копия
+   * ветки set была бы вторым местом, где всё это надо помнить.
+   *
+   * Цель подставляем ИДЕНТИФИКАТОРОМ (#id мастера), а не именем: по имени искать нельзя —
+   * поиск по именам в библиотеку не заходит (и не должен: мастер «Кнопка» перебивал бы кнопку
+   * на доске). Отдельная операция для этого и нужна: она, а не похожесть имён, говорит, что
+   * человек просил изменить компонент целиком.
+   */
+  const comps = componentList(engine, doc);
+  const work = [];
+  for (const raw of edits) {
+    if (!raw || typeof raw !== 'object' || String(raw.op || '').toLowerCase() !== 'master') { work.push(raw); continue; }
+    if (!comps.length) {
+      note('Библиотеки компонентов в документе нет — правку компонента выполнить нечем, она пропущена');
+      continue;
+    }
+    const called = [raw.target, raw.name, raw.of, raw.component].find((v) => typeof v === 'string' && v.trim()) || '';
+    const { info, ambiguous } = findComponent(comps, called);
+    if (!info) {
+      note(ambiguous.length
+        ? `Под «${String(called).trim()}» подходит несколько компонентов — ${componentNames(ambiguous)}.`
+          + ' Правка пропущена: назовите компонент точно'
+        : `Компонента «${String(called).trim() || '—'}» в библиотеке нет — есть ${componentNames(comps)}.`
+          + ' Правка пропущена');
+      continue;
+    }
+    work.push({ ...raw, op: 'set', target: `#${info.id}` });
+  }
   const ops = [];
   const ids = makeIdFactory(doc);
   const created = new Map();                       // «имя из этого патча» → новый id (п.9)
@@ -4834,7 +5721,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
   const refOpts = { created, said: utterance };
   const setSeen = new Set();                       // одинаковые set не дублируем
 
-  for (const edit of edits) {
+  for (const edit of work) {
     if (!edit || typeof edit !== 'object') { note('Правка не объект — пропущена'); continue; }
     const op = String(edit.op || '').toLowerCase();
 
@@ -4867,6 +5754,13 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         // заливка на тексте отбрасывается с объяснением (круг 3, п.1)
         const aimed = adjustSetPath(doc, id, path, note);
         if (!aimed) continue;
+        /* Круг 19, п.3: свойство экземпляра. Сюда приходят и явный path:"props.<имя>", и
+         * правка внутренности экземпляра, уведённая adjustSetPath в объявленное свойство. */
+        if (String(aimed.path).indexOf('props.') === 0 || String(aimed.path) === 'props') {
+          const got = instancePropOp({ doc, engine, id: aimed.id, path: aimed.path, raw: edit.value, note, setSeen });
+          if (got) ops.push(got);
+          continue;
+        }
         const before = notes;
         // ctx: цель и посчитанная геометрия — по ним видно, во что узел вложен (круг 7, п.8)
         const value = coerceValue(edit.value, aimed.path, doc, note, { id: aimed.id, geo });
@@ -5028,7 +5922,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         parentId = containerFor(doc, parentNode.parent);
       }
       if (!parentId) { note('Некуда вставить новый узел — правка пропущена'); continue; }
-      const spec = normalizeTree(edit.node, { doc, warn: note, persona, budget });
+      const spec = normalizeTree(edit.node, { doc, warn: note, persona, budget, engine });
       if (!spec) continue;
       let at = edit.index != null ? Number(edit.index)
         : (placement && placement.insert && placement.parentId === parentId && placement.index != null ? placement.index : null);
@@ -5100,10 +5994,106 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
           }
         });
       }
+    } else if (op === 'detach') {
+      /* Круг 19, п.5 (SPEC §5.7): отсоединить — значит поставить на место экземпляра настоящую
+       * копию поддерева компонента. Операции даёт ядро одной отменяемой транзакцией. */
+      const targets = resolveRefs(engine, doc, edit.target, scope, note, { ...refOpts, existingFirst: true });
+      if (!targets.length) continue;
+      for (const id of targets) {
+        const node = nodeOf(doc, id);
+        if (!node) continue;
+        if (node.type !== 'instance') {
+          note(`${nameOrId(doc, id)} — не экземпляр компонента, отсоединять нечего: правка пропущена`);
+          continue;
+        }
+        ops.push(...detachOpsFor({ engine, doc, id, note, budget }));
+      }
+    } else if (op === 'component') {
+      // круг 19, п.4: сделать компонентом существующий узел
+      const id = resolveRef(engine, doc, edit.target, scope, note, { ...refOpts, existingFirst: true });
+      if (!id) continue;
+      const made = componentFromNode({ engine, doc, id, name: edit.name, note });
+      if (!made.ops.length) continue;
+      ops.push(...made.ops);
+      if (made.info.renamed) {
+        note(`Компонент «${made.info.renamed}» теперь называется «${made.info.name}»`
+          + ' — новое имя видно у всех его экземпляров');
+        continue;
+      }
+      note(`Компонент «${made.info.name}» добавлен в библиотеку, на доске остался его экземпляр.`
+        + (made.info.props.length
+          ? ` Менять у экземпляров можно ${made.info.props.map((x) => `«${x.name}»`).join(', ')}`
+            + ' — скажите, если нужны другие свойства'
+          : ' Свойств у него пока нет — скажите, что у экземпляров надо будет менять'));
     } else {
       note(`Неизвестная операция «${edit.op}» — пропущена`);
     }
   }
+
+  /**
+   * Круг 19, п.6: ЧЕСТНОСТЬ. Правка мастера меняет все его экземпляры разом, и человек обязан
+   * это прочитать: главную строку результата оболочка собирает по операциям («Скругление 16 → 24
+   * в «Кнопка»»), и по ней правка компонента выглядит правкой одного слоя.
+   *
+   * Считаем по САМИМ ОПЕРАЦИЯМ, а не по виду правки: в библиотеку можно попасть и через
+   * op:"master", и прямым id мастера, и выделением мастера на холсте — во всех случаях сказать
+   * надо одно и то же.
+   */
+  const touched = new Map();
+  const mine = new Map();                          // мастер → сколько операций его задели
+  for (const o of ops) {
+    const where = o && (o.id || (o.node && o.node.parent));
+    if (!where || !inLibrary(doc, engine, where)) continue;
+    // про сам компонент (имя, набор свойств) говорит своя строка — «правка всех экземпляров»
+    // рядом с ней была бы вторым сообщением об одном и том же
+    if (o.op === 'set' && String(o.path) === 'component') continue;
+    for (const info of comps) {
+      if (where !== info.id && !chainUp(doc, where).includes(info.id)) continue;
+      touched.set(info.id, info);
+      mine.set(info.id, (mine.get(info.id) || 0) + 1);
+    }
+  }
+  /**
+   * Круг 19, п.7: и вторая половина той же честности. Экземпляр ПЕРЕКРЫВАЕТ то, что задано его
+   * свойством: если правка компонента попала ровно в тот узел и путь, которые объявлены
+   * свойством, у экземпляров со своим значением не изменится ничего. Замер на демо: «пусть все
+   * кнопки говорят „Дальше“» правит текст внутри мастера, а единственный экземпляр говорит
+   * «Открыть день» — и «меняет все экземпляры» было бы неправдой ровно там, где человек
+   * проверит её глазами.
+   */
+  const shadowed = new Map();                      // мастер → сколько операций перекрыто целиком
+  const shadowSaid = [];
+  for (const o of ops) {
+    if (!o || o.op !== 'set' || !o.id) continue;
+    for (const info of comps) {
+      const prop = (info.props || []).find((x) => x.target === o.id && String(x.path) === String(o.path));
+      if (!prop) continue;
+      const all = instancesOf(doc, info.id);
+      const over = all.filter((id) => ((nodeOf(doc, id) || {}).props || {})[prop.name] !== undefined);
+      if (!over.length) continue;
+      if (over.length === all.length) {
+        shadowed.set(info.id, (shadowed.get(info.id) || 0) + 1);
+        shadowSaid.push(`Правка компонента «${info.name}» на досках ничего не изменит:`
+          + ` у ${all.length === 1 ? 'единственного экземпляра' : `всех ${all.length} экземпляров`}`
+          + ` свойство «${prop.name}» задано своим значением, и оно сильнее. Поменяйте это свойство`
+          + ' у экземпляров или снимите его, чтобы значение бралось у компонента');
+      } else {
+        shadowSaid.push(`Правка компонента «${info.name}»: у ${over.length} из ${all.length} экземпляров`
+          + ` свойство «${prop.name}» задано своим значением — у них ${ruPath(o.path)} останется прежним`);
+      }
+    }
+  }
+  for (const info of touched.values()) {
+    // если ВСЁ, что правили у компонента, перекрыто свойствами экземпляров, «меняет все
+    // экземпляры» было бы ложью: об этом скажет строка ниже, и она точнее
+    if ((shadowed.get(info.id) || 0) >= (mine.get(info.id) || 0)) continue;
+    note(info.instances
+      ? `Это правка компонента «${info.name}», а не одного слоя: она разом меняет все его экземпляры`
+        + ` на досках — их ${info.instances}`
+      : `Это правка компонента «${info.name}» в библиотеке. Экземпляров на досках у него пока нет,`
+        + ' так что на самих досках ничего не изменилось');
+  }
+  for (const m of shadowSaid) note(m);
 
   /**
    * Круг 13, п.5: «убери шапку и заголовок» — модель присылает remove «Шапка» и remove
@@ -5298,6 +6288,9 @@ const WARN_RANKS = [
   [0, new RegExp([
     'пропущен', 'не найден', 'отброшен', 'обрез', 'ни на что не повлияла', 'не изменилось',
     'на экране — нет', 'неизвестн\\p{L}* цвет', 'не #rrggbb', 'служебн', 'недопустим',
+    // круг 19, п.6: «это правка компонента, а не одного слоя» человек обязан прочитать первым:
+    // главная строка результата собирается по операциям и выглядит правкой одного узла
+    'правка компонента', 'добавлен в библиотеку',
     'нет типографического токена', 'не одно из', 'ничего не мен',
     // круг 16, п.3: цвета в документе не те, что вернула модель — это про результат, а не придирка
     'в палитре от модели',
@@ -5358,17 +6351,53 @@ function formatViolation(v, doc) {
   const where = v.nodeId || v.id || v.node || v.target;
   const node = doc && where ? nodeOf(doc, where) : null;
   const name = node && node.name ? String(node.name) : '';
-  const who = name ? `«${name}»` : (where ? `#${where}` : '');
+  // круг 19: у экземпляра своего имени обычно нет — он зовётся по компоненту, а не «#i_2g7a8l»
+  const who = node ? nameOrId(doc, where) : (where ? `#${where}` : '');
   let text = String(v.message || v.text || v.code || v.rule || JSON.stringify(v)).trim();
   // core пишет имя слоя в начале сообщения; второй раз его печатать не надо (круг 3, п.10)
   const lead = `«${name}»`;
   if (name && text.startsWith(lead)) text = text.slice(lead.length).replace(/^\s*:?\s*/, '');
+  // у экземпляра имя в документе пустое, а ядро пишет в начало имя компонента — тот же повтор
+  if (!name && who && text.startsWith(who)) text = text.slice(who.length).replace(/^\s*:?\s*/, '');
   if (v.code === 'low-contrast') {
     const ratio = /(\d+[.,]\d+):1/.exec(text);
     const need = /норме\s*(\d+(?:[.,]\d+)?):1/.exec(text);
     const tail = ratio && need ? `контраст ${ratio[1]}:1 при норме ${need[1]}:1` : text;
     return `Плохо читается текст ${who || ''}: ${tail}`.replace('  ', ' ').trim();
   }
+  /**
+   * Круг 19, п.7 (SPEC §5.8): новые коды — человеческими словами. Сообщения ядра тут не годятся
+   * дословно: в них есть внутренний id мастера («компонента «f_28e1k6» в документе нет») и слово
+   * «пропс». Ни того, ни другого человек знать не должен — он видит имена компонентов и свойств.
+   */
+  if (v.code === 'dead-instance') {
+    return `${who || 'Экземпляр'} ссылается на компонент, которого в библиотеке нет:`
+      + ' показать его нечем. Удалите этот экземпляр или соберите компонент заново';
+  }
+  if (v.code === 'unknown-prop') {
+    /* Ядро присылает ОДНО нарушение на каждое лишнее свойство, и его имя стоит в сообщении
+     * последним в кавычках. Берём именно его, а не весь список лишних: иначе одна и та же
+     * строка печаталась бы по разу на каждое свойство. Если разобрать не удалось — считаем
+     * список по документу сами. */
+    const master = node ? nodeOf(doc, node.of) : null;
+    const comp = master && master.component;
+    const named = (comp && comp.name) || 'компонент';
+    const one = /«([^»]+)»\s*$/.exec(text);
+    if (one) {
+      return `${who || 'У экземпляра'}: свойства «${one[1]}» компонент «${named}» не объявлял`
+        + ' — оно не применяется';
+    }
+    const known = new Set((comp && Array.isArray(comp.props) ? comp.props : []).map((x) => x && x.name));
+    const extra = Object.keys((node && node.props) || {}).filter((k) => !known.has(k));
+    return `${who || 'У экземпляра'}: ${extra.length > 1 ? 'свойств' : 'свойства'}`
+      + ` ${extra.map((k) => `«${k}»`).join(', ') || '—'} компонент «${named}» не объявлял`
+      + ` — ${extra.length > 1 ? 'они не применяются' : 'оно не применяется'}`;
+  }
+  if (v.code === 'component-cycle') {
+    return `Так нельзя: ${text} — такой компонент ни посчитать, ни показать.`
+      + ' Уберите его экземпляр из его же содержимого';
+  }
+  if (v.code === 'instance-too-deep') return `Экземпляры вложены слишком глубоко: ${text}`;
   if (v.code === 'zero-size') return `Слой ${who} не виден: ${text}`;
   if (v.code === 'out-of-parent') return `Слой ${who} вылез за рамки: ${text}`;
   if (v.code === 'empty-frame') return `Фрейм ${who} пуст — внутри ничего нет`;
@@ -5385,6 +6414,11 @@ const VIOLATION_KIND = {
   'low-contrast': 'плохо читается текст',
   'off-scale': 'отступы вне шкалы',
   'empty-frame': 'пустые фреймы',
+  // круг 19, п.7 (SPEC §5.8)
+  'dead-instance': 'экземпляры без компонента',
+  'unknown-prop': 'свойства, которых компонент не объявлял',
+  'component-cycle': 'компонент внутри самого себя',
+  'instance-too-deep': 'слишком глубокая вложенность экземпляров',
 };
 
 /**
@@ -5439,6 +6473,168 @@ function safeValidate(engine, doc, geo) {
   } catch (e) {
     return [{ message: `валидатор упал: ${e && e.message ? e.message : e}` }];
   }
+}
+
+/** Все экземпляры компонента в документе, в порядке документа. */
+function instancesOf(doc, masterId) {
+  return Object.keys((doc && doc.nodes) || {})
+    .filter((id) => doc.nodes[id] && doc.nodes[id].type === 'instance' && doc.nodes[id].of === masterId);
+}
+
+/**
+ * Круг 19, п.4-5: «сделай из этого компонент» и «отсоедини экземпляр» БЕЗ обращения к модели.
+ * Возвращает готовый результат прогона либо null — «пусть решает модель» (так поступаем с
+ * мягкими формулировками, которые могли значить и что-то другое: «сделай его обычным»).
+ *
+ * Отказ здесь — это `cannot` (честный ответ), а не ошибка с кнопкой «Повторить»: повтор той же
+ * фразы над тем же документом заведомо даст то же самое.
+ */
+function componentIntent({ engine, doc, scope, utterance, ask, geo, emit }) {
+  const warnings = [];
+  const note = (m) => { if (m && !warnings.includes(m)) warnings.push(m); };
+  const comps = componentList(engine, doc);
+  const preview = { doc, geo: geo || safeSolve(engine, doc) };
+  const planOf = (title, summary) => ({ intent: 'edit', title, summary, steps: [title], targets: [] });
+  const done = (data, local, plan) => {
+    const baseline = baselineViolations(safeValidate(engine, doc, preview.geo));
+    const got = materialize({
+      engine, doc, data, intent: 'edit', scope, placement: null, persona: null,
+      baseline, geo: preview.geo, group: false, said: utterance,
+    });
+    if (got.fatal || !got.ops.length) {
+      /* Причина уже названа словами внутри patchToOps и лежит в его предупреждениях. Берём
+       * ИМЕННО её, а не текст фатальной ошибки: «Ни одну правку не удалось применить» — это
+       * служебная шапка про наш конвейер, а человек спрашивал про компонент. */
+      const said = (got.warnings || []).filter(Boolean);
+      const why = said[0] || got.problems[0] || 'Эту просьбу выполнить не удалось';
+      emit('cannot', why);
+      emit('done', 'Так нельзя');
+      return { ops: [], preview, plan, cannot: why, warnings: warnings.concat(said.slice(1)) };
+    }
+    emit('materialize', plan.summary, { title: plan.title });
+    emit('validate', got.problems.length ? `Осталось замечаний: ${got.problems.length}` : 'Нарушений нет');
+    for (const p of got.problems.slice(0, MAX_VALIDATOR_WARNINGS)) note(`Проверка макета: ${p}`);
+    emit('done', plan.summary, { title: plan.title });
+    return {
+      ops: got.ops, preview: got.preview, plan, local,
+      ...(got.nothingChanged ? { nothingChanged: true } : {}),
+      ...(got.nothingToChange ? { nothingToChange: true } : {}),
+      warnings: warnings.concat(got.warnings || []),
+    };
+  };
+  const asking = (question, options) => {
+    emit('clarify', question, { options });
+    emit('done', 'Жду уточнения');
+    return { ops: [], preview, plan: planOf('Уточняю', question), clarify: question, clarifyOptions: options, warnings };
+  };
+  const nope = (why, title) => {
+    emit('cannot', why);
+    emit('done', 'Так нельзя');
+    return { ops: [], preview, plan: planOf(title, why), cannot: why, warnings };
+  };
+  /** Названные словами узлы: сначала слой, потом — не назван ли так сам компонент. */
+  const named = (words) => {
+    const got = refCandidates(engine, doc, words, scope, {});
+    return got.ids.filter((id) => nodeOf(doc, id));
+  };
+  const selected = scope.kind === 'selection' ? asArray(scope.ids).filter((id) => nodeOf(doc, id)) : [];
+  /** Три готовые команды-ответа: слои, из которых компонент сделать МОЖНО. */
+  const makeOptions = () => {
+    const root = scope.containerId && nodeOf(doc, scope.containerId) ? scope.containerId : doc.root;
+    const can = (id) => {
+      if (typeof engine.canMakeComponent !== 'function') return true;
+      try { return !!engine.canMakeComponent(doc, id).ok; } catch { return false; }
+    };
+    const out = [];
+    for (const kid of (nodeOf(doc, root) || {}).children || []) {
+      const n = nodeOf(doc, kid);
+      if (!n || !n.name || n.type !== 'frame' || !can(kid)) continue;
+      out.push(`сделай из «${n.name}» компонент`);
+      if (out.length === 3) break;
+    }
+    return out;
+  };
+
+  if (ask.kind === 'detach') {
+    let ids = [];
+    if (ask.what) {
+      const comp = findComponent(comps, ask.what);
+      if (comp.info) ids = instancesOf(doc, comp.info.id);
+      if (!ids.length) ids = named(ask.what).filter((id) => nodeOf(doc, id).type === 'instance');
+      if (!ids.length) {
+        const hit = named(ask.what)[0];
+        if (ask.soft) return null;
+        if (hit) {
+          return nope(`${nameOrId(doc, hit)} — не экземпляр компонента, отсоединять там нечего.`
+            + ' Отсоединяют экземпляр: он показан в документе одной строкой и следует за компонентом'
+            + ' из библиотеки.', 'Отсоединять нечего');
+        }
+      }
+    } else {
+      ids = selected.filter((id) => nodeOf(doc, id).type === 'instance');
+    }
+    if (!ids.length) {
+      if (ask.soft) return null;                     // формулировка мягкая — пусть решает модель
+      const any = Object.keys(doc.nodes).some((id) => doc.nodes[id].type === 'instance');
+      if (!any) {
+        return nope('В документе нет ни одного экземпляра компонента — отсоединять нечего.'
+          + ' Экземпляры появляются, когда собираешь из библиотеки.', 'Отсоединять нечего');
+      }
+      return asking('Не понял, что отсоединить: выделите экземпляр компонента или назовите компонент.',
+        comps.filter((c) => c.instances).slice(0, 3).map((c) => `отсоедини экземпляры «${c.name}»`));
+    }
+    emit('classify', `отсоединение — распознано локально, без модели (экземпляров: ${ids.length})`);
+    const plan = planOf(ids.length > 1 ? `Отсоединяю экземпляры: ${ids.length}` : 'Отсоединяю экземпляр',
+      'Экземпляр стал обычным поддеревом: за компонентом он больше не следует. Это делает редактор, модель тут не нужна.');
+    return done({ edits: ids.map((id) => ({ op: 'detach', target: `#${id}` })) }, 'detach', plan);
+  }
+
+  // ask.kind === 'make'
+  let ids = ask.what ? named(ask.what) : selected;
+  if (ask.what && !ids.length) {
+    const comp = findComponent(comps, ask.what);
+    if (comp.info) {
+      return nope(`«${comp.info.name}» — уже компонент библиотеки, второй раз добавлять его некуда.`
+        + (ask.name ? ` Чтобы переназвать, скажите «назови этот компонент ${ask.name}», выделив его экземпляр.` : ''),
+        'Это уже компонент');
+    }
+  }
+  if (ids.length > 1) {
+    const names = listNames(doc, ids.slice(0, 3)).join(', ');
+    return asking(`Компонент делается из одного слоя, а выделено ${ids.length}: ${names}${ids.length > 3 ? ' и ещё' : ''}.`
+      + ' Скажите, из какого именно, — или сначала оберните их в один фрейм.',
+      ids.slice(0, 3).map((id) => `сделай из «${(nodeOf(doc, id) || {}).name || id}» компонент`));
+  }
+  if (!ids.length) {
+    return asking('Не понял, из чего делать компонент: выделите слой или назовите его.', makeOptions());
+  }
+  const id = ids[0];
+  const node = nodeOf(doc, id);
+  const isComp = node.type === 'instance' || (node.component && inLibrary(doc, engine, id));
+  if (!isComp && typeof engine.canMakeComponent === 'function') {
+    let can = { ok: false, reason: 'так нельзя' };
+    try { can = engine.canMakeComponent(doc, id); } catch { /* причину скажем общей */ }
+    if (!can.ok) {
+      return nope(`${nameOrId(doc, id)} компонентом сделать нельзя: ${can.reason}.`
+        + ' Компонент делается из обычного слоя на доске — например из карточки или кнопки.',
+        'Компонентом это не станет');
+    }
+  }
+  if (isComp && !ask.name) {
+    const master = node.type === 'instance' ? nodeOf(doc, node.of) : node;
+    const was = (master && master.component && master.component.name) || 'компонент';
+    return nope(`${nameOrId(doc, id)} и так из библиотеки: это компонент «${was}», второй раз добавлять его некуда.`
+      + ` Скажите новое имя («назови это компонентом …»), если надо переназвать, или отсоедините экземпляр,`
+      + ' чтобы он перестал следовать компоненту.', 'Это уже компонент');
+  }
+  emit('classify', `компонент — распознано локально, без модели${ask.name ? `, имя сказано: «${ask.name}»` : ''}`);
+  const plan = planOf(isComp ? `Компонент «${ask.name}» вместо прежнего имени`
+    : `Компонент${ask.name ? ` «${ask.name}»` : ''} из ${nameOrId(doc, id)}`,
+    isComp
+      ? 'Имя компонента меняется разом во всех его экземплярах. Это делает редактор, модель тут не нужна.'
+      : 'Узел переезжает в библиотеку, на доске остаётся его экземпляр. Это делает редактор, модель тут не нужна.');
+  return done({ edits: [{ op: 'component', target: `#${id}`, ...(ask.name ? { name: ask.name } : {}) }] },
+    isComp ? 'componentRename' : 'component', plan);
 }
 
 /**
@@ -5638,6 +6834,25 @@ export async function runCommand(options = {}) {
         preview: { doc, geo: geoIn || safeSolve(engine, doc) },
         warnings: sortWarnings(warnings), usage, stages,
       };
+    }
+
+    /* — 0c. Компоненты словами: сделать компонент, переназвать его, отсоединить экземпляр
+     * (круг 19, п.4-5) — тоже дело оболочки и ядра, модель тут не нужна ни для чего: что делать,
+     * сказано в самой фразе, а с чем — показано выделением. Стоит 0 вызовов вместо 2.
+     * Стоит ДО проверки провайдера сознательно: эти команды должны работать и без модели. */
+    const wantComponent = insideVariants ? null : recognizeComponentIntent(utterance);
+    if (wantComponent) {
+      const localScope = resolveScope(doc, selection, engine, { activeArtboardId, selectionBy });
+      const got = componentIntent({
+        engine, doc, scope: localScope, utterance, ask: wantComponent,
+        geo: geoIn || safeSolve(engine, doc), emit,
+      });
+      // null — формулировка мягкая и могла значить другое: пусть решает модель
+      if (got) {
+        for (const w of got.warnings || []) warn(w);
+        const { warnings: _drop, ...rest } = got;
+        return { ...rest, warnings: sortWarnings(warnings), usage, stages };
+      }
     }
 
     if (!provider || typeof provider.complete !== 'function') throw ERR('model', 'Провайдер модели не настроен');
@@ -6106,6 +7321,8 @@ function matchNodeByWords(doc, phrase, prefer, sameArtboard, needFrame, frameBon
   for (const id of Object.keys(doc.nodes || {})) {
     const n = doc.nodes[id];
     if (!n || n.type === 'page') continue;
+    // круг 19: место вставки в библиотеке не ищем — новое кладут на доску, а не в словарь
+    if (inLibrary(doc, null, id)) continue;
     if (needFrame && n.type !== 'frame') continue;
     const ns = (String(n.name || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).map(stemRu);
     if (!ns.length) continue;
@@ -6172,6 +7389,9 @@ export function mentionsExistingLayer(doc, utterance, opts = {}) {
   for (const id of Object.keys(doc.nodes)) {
     const n = doc.nodes[id];
     if (!n || n.type === 'page') continue;
+    // круг 19: «слой с таким именем в документе есть» — про доски, а не про библиотеку:
+    // мастер «Кнопка» иначе превращал бы любое «добавь кнопку» в правку существующего слоя
+    if (inLibrary(doc, null, id)) continue;
     const ns = (String(n.name || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [])
       .map(stemRu).filter((w) => w.length >= 4);
     if (!ns.length) continue;
@@ -7141,6 +8361,30 @@ export async function runVariants(options = {}) {
       ops: [], action, preview: null,
       plan: { intent: action, title, summary: 'Откат не требует вариантов.', steps: [title], targets: [] },
       warnings: [], usage: { calls: 0, ms: 0 }, stages: [],
+    }];
+  }
+
+  /**
+   * Круг 19, п.4-5: у «сделай из этого компонент» и «отсоедини экземпляр» вариантов не бывает —
+   * это одно механическое действие, и три его копии были бы одинаковы. Гоним ОДИН прогон: он
+   * распознает просьбу локально и не позовёт модель ни разу (иначе внутри вариантов локальные
+   * намерения выключены, и три варианта ушли бы в модель за тем, что мы и так умеем сами).
+   */
+  if (recognizeComponentIntent(task)) {
+    const one = await runCommand({
+      doc, selection, utterance: task, provider, signal, engine: engineOpt,
+      activeArtboardId, history, geo, modelTier, selectionBy, onStage,
+    });
+    return [{
+      key: one.local || 'component', label: (one.plan && one.plan.title) || 'Компонент',
+      description: (one.plan && one.plan.summary) || 'Это делает редактор, без модели.',
+      ops: one.ops || [], preview: one.preview, plan: one.plan,
+      ...(one.local ? { local: one.local } : {}),
+      ...(one.clarify ? { clarify: one.clarify } : {}),
+      ...(one.clarifyOptions ? { clarifyOptions: one.clarifyOptions } : {}),
+      ...(one.cannot ? { cannot: one.cannot } : {}),
+      ...(one.error ? { error: one.error } : {}),
+      warnings: one.warnings || [], usage: one.usage, stages: one.stages || [],
     }];
   }
 

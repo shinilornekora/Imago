@@ -6,6 +6,11 @@ import {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops as OPS,
   nodeById, ancestors, isArtboard, artboards, subtreeIds, hashGeometry,
   placeholderName, displayName,
+  /* Круг 19 (SPEC §5): компоненты. Оболочка не заводит своих структур — всё, что она
+     знает о библиотеке, она спрашивает у ядра, а правки берёт готовыми операциями. */
+  isLibrary, libraryNode, ensureLibrary, components as libComponents,
+  isMaster, masterOf, componentName, canMakeComponent, makeComponentOps, instanceOps,
+  detachInstanceOps, instanceSummary, PROP_KINDS,
 } from './src/core.js';
 import * as CORE from './src/core.js';
 import { makeProvider, runCommand, runVariants } from './src/brain.js';
@@ -442,8 +447,8 @@ function setRunnable(ok) {
 /** Текст ошибки применения: по новому контракту core отдаёт {code, message}, раньше — строку. */
 function opError(err) {
   if (!err) return '';
-  if (typeof err === 'string') return err;
-  return err.message || err.code || 'причина не названа';
+  if (typeof err === 'string') return shellWord(err);
+  return shellWord(err.message || err.code || 'причина не названа');
 }
 
 /* --------------------------------- история ----------------------------------- */
@@ -687,6 +692,10 @@ const PROP_NAMES = {
   width: 'Толщина',
   // те же вещи без приставки: в предупреждениях агента путь приходит и коротким —
   // «padding.t», «gap». Без этих ключей человек читал «padding.t 10» (п.9)
+  // круг 19: поля компонента и экземпляра (SPEC §5.4–5.5) — без них в истории правок
+  // стояло бы «Component.name «Кнопка»» и «Props ...»
+  component: 'Компонент', 'component.name': 'Имя компонента', 'component.props': 'Свойства компонента',
+  props: 'Свойства', of: 'Компонент',
   gap: 'Зазор', padding: 'Отступ', mode: 'Поток', justify: 'Распределение', wrap: 'Перенос',
   fontSize: 'Кегль', fontWeight: 'Жирность', token: 'Стиль текста', w: 'Ширина', h: 'Высота',
 };
@@ -737,6 +746,9 @@ const VALUE_WORDS = {
 
 function propName(path) {
   const p = String(path || '');
+  // круг 19: свойства экземпляра зовутся так, как их назвал человек у компонента,
+  // и словаря на них быть не может — имя берём прямо из пути
+  if (p.startsWith('props.')) return `Свойство «${p.slice(6)}»`;
   if (PROP_NAMES[p]) return PROP_NAMES[p];
   const head = p.split('.').slice(0, 2).join('.');
   if (PROP_NAMES[head]) return PROP_NAMES[head];
@@ -852,6 +864,11 @@ function humanValue(value, axis) {
         : (sizeLabels(axis)[value.mode] || value.mode);
     }
     if (typeof value.fontSize === 'number') return String(value.fontSize);
+    /* Круг 19. Объявленное свойство компонента — объект {name, kind, target, path}: без этой
+       ветки «Свойства компонента» печатались пустотой, а список из трёх свойств — «, , ». */
+    if (typeof value.name === 'string' && typeof value.kind === 'string' && PROP_KINDS.has(value.kind)) {
+      return value.name;
+    }
     // положение: без этой ветки первая правка pos печаталась без значения вовсе (п.31)
     if (typeof value.x === 'number' || typeof value.y === 'number') {
       return `${Math.round(Number(value.x) || 0)}, ${Math.round(Number(value.y) || 0)}`;
@@ -1692,7 +1709,23 @@ function changeIsVisible(box) {
  * за родителя, нулевой размер. Всё прочее (перекрытия, вне шкалы, пустой фрейм) —
  * придирки, и тревожить ими правку руками не за чем.
  */
-const LOUD_ISSUES = new Set(['overflow', 'out-of-parent', 'zero-size']);
+const LOUD_ISSUES = new Set([
+  'overflow', 'out-of-parent', 'zero-size',
+  /* Круг 19, п.7. Из четырёх новых кодов показываем ВСЕ четыре, но не потому, что их
+     четыре, а потому, что каждый из них человек видит на холсте и без нас — и без
+     подписи гадает, что случилось:
+       dead-instance   — экземпляр не рисуется вовсе (компонент удалили),
+       component-cycle — компонент не раскрывается (сам в себе),
+       instance-too-deep — раскрытие обрывается на восьмом уровне, дальше пусто,
+       unknown-prop    — значение в экземпляре есть, а действия от него нет.
+     Последний — единственный тихий: на холсте всё цело, просто правка не применяется,
+     и сказать о нём тем более некому. Замечание держится, пока держится причина. */
+  'dead-instance', 'unknown-prop', 'component-cycle', 'instance-too-deep',
+]);
+
+/** Чем начинается фраза о замечании: раскладка и компоненты — разные разговоры (п.7). */
+const COMPONENT_ISSUES = new Set(['dead-instance', 'unknown-prop', 'component-cycle', 'instance-too-deep']);
+const issueTopic = (code) => (COMPONENT_ISSUES.has(code) ? 'Компоненты' : 'Раскладка');
 
 /**
  * Движок умеет проверять раскладку, а оболочка его ни разу не звала: ручная правка,
@@ -1711,6 +1744,42 @@ function layoutIssues(doc, geo) {
   return map;
 }
 
+/**
+ * Замечание словами. Ядро подписывает узел его именем, а безымянный — идентификатором
+ * (`node.name || id`), и человек читал «i_2l998v выходит за «Сводка недели»». Безымянных
+ * узлов стало заметно больше: экземпляр, поставленный из библиотеки, своего имени не
+ * заводит — его зовут именем компонента. Подставляем то же имя, каким узел подписан
+ * всюду ещё (круг 19, п.7). Чего в документе нет (мёртвая ссылка dead-instance) —
+ * оставляем как есть: это и есть ответ на вопрос «чего именно нет».
+ */
+function issueText(note) {
+  const t = shellWord(String((note && note.message) || note || ''));
+  if (!state.doc || !state.doc.nodes) return t;
+  return t.replace(/«([A-Za-z0-9_]+)»/g, (all, id) => (
+    state.doc.nodes[id] ? `«${nodeTitleById(state.doc, id)}»` : all));
+}
+
+/**
+ * Круг 19, п.8. В документе и в ядре объявленное поле зовётся «пропс» (так его называет
+ * SPEC §5.4), а на экране у нас — «свойство»: в панели стоит «Что можно менять», рядом
+ * «Объявить свойство», и одно и то же не может зваться двумя словами в одном окне.
+ * Слово меняем ровно там, где чужой текст попадает человеку на глаза, — в замечаниях
+ * валидатора и в причинах отказа операции; сам документ и ядро мы не трогаем.
+ */
+function shellWord(text) {
+  return String(text || '')
+    // «пропс» мужского рода, «свойство» — среднего: где за словом идёт сказуемое,
+    // меняем пару целиком, иначе выйдет «свойство должен быть объектом»
+    .replace(/пропс должен/gi, 'свойство должно')
+    // \b в JS считает границей только ASCII — с кириллицей он не срабатывает вовсе
+    .replace(/пропс([а-яё]*)/gi, (all, tail) => {
+      const base = /^[А-ЯЁ]/.test(all) ? 'Свойств' : 'свойств';
+      // пропс→свойство, пропса→свойства, пропсы→свойства, пропсов→свойств, пропсом→свойством
+      const map = { '': 'о', 'а': 'а', 'у': 'у', 'ом': 'ом', 'е': 'е', 'ы': 'а', 'ов': '', 'ам': 'ам', 'ами': 'ами' };
+      return base + (map[tail.toLowerCase()] !== undefined ? map[tail.toLowerCase()] : 'о');
+    });
+}
+
 /** Что сломала ИМЕННО эта правка: о старых замечаниях молчим, иначе это нытьё. */
 function freshIssues(before, after) {
   const out = [];
@@ -1726,7 +1795,9 @@ function announceIssues(fresh) {
   if (!fresh.length) return;
   const first = fresh[0];
   const more = fresh.length > 1 ? ` · и ещё ${fresh.length - 1}` : '';
-  toast(`Раскладка: ${clip(first.message, 84)}${more}`, 'warn', 8000);
+  // круг 19, п.7: «Раскладка: компонента в документе нет» звучало бы небылицей —
+  // у замечаний о компонентах свой зачин
+  toast(`${issueTopic(first.code)}: ${clip(issueText(first), 84)}${more}`, 'warn', 8000);
 }
 
 function renderAll(opts = {}) {
@@ -2075,13 +2146,18 @@ function openArtboardList(list) {
 }
 
 function activeArtboardId() {
+  const list = artboards(state.doc);
   const first = state.selection[0];
   if (first) {
     let n = nodeById(state.doc, first);
     while (n && n.parent && n.parent !== state.doc.root) n = nodeById(state.doc, n.parent);
-    if (n) return n.id;
+    /* Круг 19, п.2. Подъём до ребёнка корня доходит и до БИБЛИОТЕКИ: выделили компонент —
+       и «активной доской» становилась она. Это не мелочь: отсюда кормятся вкладки,
+       «Вписать», и главное — экспорт, который предложил бы сохранить библиотеку как
+       доску (SPEC §5.3: библиотека доской не считается нигде). Выделение внутри
+       библиотеки активной доски не меняет — берём первую настоящую. */
+    if (n && isArtboard(state.doc, n)) return n.id;
   }
-  const list = artboards(state.doc);
   return list.length ? list[0].id : null;
 }
 
@@ -2124,10 +2200,13 @@ function renderLayers() {
   }
   host.textContent = '';
 
+  const lib = libraryNode(state.doc);
   const rows = [];
   const walk = (id, depth) => {
     const n = nodeById(state.doc, id);
     if (!n) return;
+    // библиотека — не доска: её группа собирается ниже, отдельно (круг 19, п.2)
+    if (lib && id === lib.id) return;
     const isPage = n.type === 'page';
     if (!isPage) rows.push({ id, depth, node: n });
     const kids = n.children || [];
@@ -2135,6 +2214,16 @@ function renderLayers() {
     for (const c of kids) walk(c, isPage ? 0 : depth + 1);
   };
   walk(state.doc.root, 0);
+  const boardRows = rows.length;
+
+  /* Круг 19, п.2. Прежний обход пропускал страницы, но обходил их ДЕТЕЙ, и компоненты
+     («Кнопка», «Метка», «Карточка показателя») стояли в одном столбце с досками, ничем от
+     них не отличаясь: по рельсу нельзя было понять, что доска, а что заготовка. Теперь у
+     библиотеки своя группа внизу списка — заголовок-ветка, под ним компоненты. Заголовок
+     не выделяется (страницу правят не в инспекторе): щелчок по нему складывает группу. */
+  if (lib) rows.push({ id: lib.id, depth: 0, node: lib, lib: true });
+  const libOpen = lib && !set.has(lib.id);
+  if (libOpen) for (const c of (lib.children || [])) walk(c, 1);
 
   if (!rows.length) {
     const note = document.createElement('div');
@@ -2143,6 +2232,14 @@ function renderLayers() {
     host.appendChild(note);
     host.removeAttribute('aria-activedescendant');
     return;
+  }
+  // досок нет, а библиотека есть всегда: без этой строки пустой документ выглядел бы так,
+  // будто в нём одна библиотека и есть
+  if (!boardRows) {
+    const note = document.createElement('div');
+    note.className = 'layers-empty';
+    note.textContent = 'Слоёв пока нет.';
+    host.appendChild(note);
   }
 
   // roving tabindex: в табуляцию попадает ровно одна строка
@@ -2154,7 +2251,8 @@ function renderLayers() {
   for (const r of rows) {
     const n = r.node;
     const row = document.createElement('div');
-    row.className = 'layer';
+    // заголовок группы библиотеки оформлен как рубрика, а не как слой (круг 19, п.2)
+    row.className = r.lib ? 'layer lib-head' : 'layer';
     row.dataset.id = r.id;
     row.style.paddingLeft = `${6 + r.depth * 12}px`;
     row.setAttribute('role', 'treeitem');
@@ -2178,14 +2276,63 @@ function renderLayers() {
       tw.setAttribute('aria-hidden', 'true');
     }
 
-    const g = document.createElement('span');
-    g.className = 'glyph';
-    g.textContent = glyphFor(n);
     const nm = document.createElement('span');
     nm.className = 'name';
-    nm.textContent = n.name || defaultName(n);
-    nm.title = n.name || defaultName(n);
-    row.append(tw, g, nm);
+    // круг 19, п.8: компонент зовут ЕГО именем (component.name) — тем же, что в бейдже
+    // экземпляра на холсте и в словаре агента, а не именем узла-заготовки
+    const shown = r.lib ? 'Библиотека'
+      : isMaster(state.doc, n) ? componentName(n)
+        : (n.name || defaultName(n));
+    nm.textContent = shown;
+    /* Экземпляр в подсказке описан ровно так же, как в словаре агента (SPEC §5.9):
+       «Кнопка "Оплатить" вид=accent». Одна строка вместо поддерева — по ней видно,
+       чем этот экземпляр отличается от соседнего, не раскрывая ничего. */
+    nm.title = r.lib ? 'Компоненты документа: из них собирается продукт'
+      : n.type === 'instance' ? (instanceSummary(state.doc, n) || shown)
+        : shown;
+    if (r.lib) {
+      row.append(tw, nm);
+    } else {
+      const g = document.createElement('span');
+      g.className = 'glyph';
+      g.textContent = glyphFor(n);
+      row.append(tw, g, nm);
+    }
+    /* Круг 19, п.4. Список компонентов должен быть ВИДЕН, а не спрятан за меню: он и есть
+       половина смысла работы. Поэтому вставка экземпляра живёт прямо в строке компонента —
+       «+» рядом с именем кладёт экземпляр на открытую доску (см. placeInstance). */
+    if (!r.lib && isMaster(state.doc, n)) {
+      // строке компонента нужен запас под «+» и счётчик: без него они уезжали на вторую
+      // строку у длинных имён («Карточка показателя»)
+      row.dataset.kind = 'master';
+      const used = (state.doc.nodes && Object.values(state.doc.nodes)
+        .filter((x) => x && x.type === 'instance' && x.of === r.id).length) || 0;
+      if (used) {
+        row.dataset.used = 'on';   // строке со счётчиком имени положено меньше: см. styles.css
+        const t = document.createElement('span');
+        t.className = 'tagpill count';
+        /* Только число: с ромбом пилюля шире на 9 px, и при рельсе уже 190 px «+» уезжал
+           на вторую строку. Что считается — сказано в подсказке и доступном имени. */
+        t.textContent = String(used);
+        t.title = `${used} ${plural(used, 'экземпляр', 'экземпляра', 'экземпляров')} на досках`;
+        t.setAttribute('role', 'img');
+        t.setAttribute('aria-label', t.title);
+        row.appendChild(t);
+      }
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'layer-add';
+      /* Стрелка и крестик в строке живут с tabIndex −1: у них есть клавиши (Arrow*, Delete).
+         У «+» клавиши нет, и оставить её только мыши нельзя. Поэтому она попадает в
+         табуляцию вместе со СВОЕЙ строкой — по правилу roving tabindex: Tab с выделенной
+         строки ведёт на её «+», а не пробегает по всем компонентам подряд. */
+      add.tabIndex = r.id === state.railFocus ? 0 : -1;
+      add.title = `Поставить «${componentName(n)}» на доску`;
+      add.setAttribute('aria-label', add.title);
+      add.appendChild(iconEl('plus'));
+      add.addEventListener('click', (e) => { e.stopPropagation(); placeInstance(r.id); });
+      row.appendChild(add);
+    }
     if (n.override) {
       const t = document.createElement('span');
       t.className = 'tagpill'; t.textContent = 'вручную';
@@ -2194,17 +2341,20 @@ function renderLayers() {
     // замечание раскладки держится, пока держится причина: тост уходит, значок — нет (п.5)
     const bad = state.issues.get(r.id);
     if (bad && bad.length) {
-      const words = bad.map((x) => x.message).join(' · ');
+      const words = bad.map(issueText).join(' \u00b7 ');
       const t = document.createElement('span');
       t.className = 'tagpill warn';
       t.textContent = '!';
       t.title = words;
       t.setAttribute('role', 'img');
-      t.setAttribute('aria-label', `Замечание раскладки: ${words}`);
+      // круг 19, п.7: у замечания о компонентах свой зачин — «раскладка» тут ни при чём
+      t.setAttribute('aria-label', `${issueTopic(bad[0].code)}: ${words}`);
       row.appendChild(t);
     }
     row.addEventListener('click', (e) => {
       state.railFocus = r.id;
+      // заголовок группы не выделяется: щелчок по нему складывает и раскрывает библиотеку
+      if (r.lib) { setBranch(r.id, set.has(r.id)); focusLayerRow(r.id); return; }
       if (e.shiftKey) setSelection([...state.selection, r.id]);
       else setSelection([r.id]);
       /* Дерево перерисовалось, и строка под курсором — уже другой элемент: без этого
@@ -2218,6 +2368,17 @@ function renderLayers() {
     row.addEventListener('dblclick', () => fitView([r.id], { maxZoom: 1.5 }));
     row.addEventListener('keydown', (e) => onLayerKey(e, rows, r));
     host.appendChild(row);
+  }
+
+  /* Круг 19, п.1 и п.4. У документа, пришедшего из прежней версии, библиотека пустая:
+     заголовок группы без единой строки под ним — тупик, по которому не догадаться, что
+     это вообще такое и откуда там берутся компоненты. Пишем прямо, откуда. */
+  if (lib && libOpen && !(lib.children || []).length) {
+    const hint = document.createElement('div');
+    hint.className = 'layers-empty lib-empty';
+    hint.textContent = 'Компонентов пока нет. Выделите узел на доске и нажмите «Сделать компонентом» — '
+      + 'он переедет сюда, и его можно будет ставить на доски сколько угодно раз.';
+    host.appendChild(hint);
   }
 }
 
@@ -2258,6 +2419,9 @@ function updateLayerSelection() {
     }
     const focus = row.dataset.id === state.railFocus;
     if ((row.tabIndex === 0) !== focus) row.tabIndex = focus ? 0 : -1;
+    // «+» компонента ходит в табуляции за своей строкой (круг 19, п.4)
+    const add = row.querySelector('.layer-add');
+    if (add && (add.tabIndex === 0) !== focus) add.tabIndex = focus ? 0 : -1;
   }
   return true;
 }
@@ -2293,12 +2457,22 @@ function deleteNodes(ids) {
 
 /** Клавиатура в дереве слоёв: стрелки ходят, Enter выделяет, Delete удаляет. */
 function onLayerKey(e, rows, cur) {
+  /* Круг 19, п.4. Событие всплывает к строке и с кнопок внутри неё, а Enter здесь гасится
+     через preventDefault — и «+» компонента, дойдя до него табуляцией, на Enter не
+     срабатывала вовсе: строка съедала нажатие и просто выделяла себя. Клавиши строки —
+     дело строки; кнопка внутри отвечает за себя сама. */
+  if (e.target !== e.currentTarget) return;
   const idx = rows.findIndex((r) => r.id === cur.id);
   const focusRow = (i) => {
     const r = rows[Math.max(0, Math.min(rows.length - 1, i))];
     if (!r) return;
     state.railFocus = r.id;
-    for (const el2 of dom.layers.querySelectorAll('.layer')) el2.tabIndex = el2.dataset.id === r.id ? 0 : -1;
+    for (const el2 of dom.layers.querySelectorAll('.layer')) {
+      const on = el2.dataset.id === r.id;
+      el2.tabIndex = on ? 0 : -1;
+      const add = el2.querySelector('.layer-add');
+      if (add) add.tabIndex = on ? 0 : -1;   // «+» следует за своей строкой (круг 19, п.4)
+    }
     const el2 = dom.layers.querySelector(`.layer[data-id="${CSS.escape(r.id)}"]`);
     if (el2) { el2.focus(); el2.scrollIntoView({ block: 'nearest' }); }
   };
@@ -2323,11 +2497,14 @@ function onLayerKey(e, rows, cur) {
     }
   } else if (e.key === 'Enter' || e.key === ' ') {
     e.preventDefault();
+    // заголовок библиотеки не выделяется — он складывается (круг 19, п.2)
+    if (cur.lib) { setBranch(cur.id, set.has(cur.id)); focusLayerRow(cur.id); return; }
     setSelection([cur.id]);
     focusRow(idx);   // дерево перерисовалось — без этого фокус падал на <body> (п.9)
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
     // то же, что Delete на холсте: удаляем выделенное, а если строка не выделена — её саму (п.13)
     e.preventDefault();
+    if (cur.lib) return;   // библиотеку удалять нечем: это не слой
     const sel = state.selection.includes(cur.id) && state.selection.length ? state.selection : [cur.id];
     const near = (rows[idx + 1] || rows[idx - 1] || {}).id;
     if (!deleteNodes(sel)) return;
@@ -2341,7 +2518,11 @@ function focusLayerRow(id) {
   if (!dom.layers || !id) return;
   const el2 = dom.layers.querySelector(`.layer[data-id="${CSS.escape(id)}"]`);
   if (!el2) return;
-  for (const other of dom.layers.querySelectorAll('.layer')) other.tabIndex = other === el2 ? 0 : -1;
+  for (const other of dom.layers.querySelectorAll('.layer')) {
+    other.tabIndex = other === el2 ? 0 : -1;
+    const add = other.querySelector('.layer-add');
+    if (add) add.tabIndex = other === el2 ? 0 : -1;
+  }
   try { el2.focus({ preventScroll: true }); } catch { el2.focus(); }
 }
 
@@ -2353,8 +2534,17 @@ function revealLayerRow() {
   if (row) row.scrollIntoView({ block: 'nearest' });
 }
 
+/* Круг 19, п.2. Экземпляр помечен ТЕМ ЖЕ знаком, что на холсте: Stage._instanceLabel
+   рисует в бейдже «◇ Кнопка», и в рельсе он тоже ◇ — иначе один и тот же узел зовётся
+   на экране двумя разными значками. Сам компонент — тот же ромб, но закрашенный: это
+   заготовка, с которой экземпляры сняты. */
+const GLYPH_INSTANCE = '◇';
+const GLYPH_MASTER = '◆';
+
 function glyphFor(n) {
   if (isArtboard(state.doc, n.id)) return '▣';
+  if (n.type === 'instance') return GLYPH_INSTANCE;
+  if (isMaster(state.doc, n)) return GLYPH_MASTER;
   return ({ frame: '▤', text: 'T', rect: '▭', ellipse: '◯', image: '⬚' })[n.type] || '•';
 }
 /**
@@ -2364,6 +2554,728 @@ function glyphFor(n) {
  */
 function defaultName(n) {
   return placeholderName(state.doc, n);
+}
+
+/* ------------------------------- компоненты ---------------------------------- */
+
+/**
+ * Круг 19 (SPEC §5). Сначала библиотека, потом продукт из неё. Оболочка не заводит своих
+ * структур: список компонентов считает ядро из детей библиотеки, а каждая правка приходит
+ * готовым списком операций и ложится в обычный commit — поэтому отмена достаётся даром.
+ *
+ * СЛОВО (п.8). В интерфейсе живут три слова: «библиотека», «компонент», «экземпляр».
+ * «Мастера» и «инстанса» нет нигде — это слова из кода, и человек ими не говорит.
+ * Поле component.props зовём «свойствами»: в инспекторе «свойство» уже значит ровно это.
+ */
+
+/** Вид свойства словами: им подписана и строка компонента, и выбор при объявлении. */
+const PROP_KIND_WORDS = { text: 'текст', enum: 'выбор', color: 'цвет', number: 'число', bool: 'да/нет' };
+
+/* Значение выбора человеческим словом — теми же таблицами, что подписывают палитру и
+   поля инспектора: иначе у компонента стоит «accent | surface», а у экземпляра под тем
+   же свойством сегменты «акцент | карточка», и человек не связывает одно с другим. */
+const enumWord = (v) => SWATCH_NAMES[v] || VALUE_WORDS[v] || TYPE_LABELS[v] || String(v);
+
+/** Компоненты документа — производная от детей библиотеки, считает ядро (SPEC §5.4). */
+function libraryList() {
+  try { return libComponents(state.doc) || []; } catch { return []; }
+}
+
+/** Лежит ли узел в библиотеке (сам библиотека или внутри неё). */
+function inLibrary(id) {
+  const n = nodeById(state.doc, id);
+  if (!n) return false;
+  if (isLibrary(state.doc, n)) return true;
+  return ancestors(state.doc, id).some((a) => isLibrary(state.doc, a));
+}
+
+/** Абзац-пояснение: та же серая приписка, что и в остальных панелях. */
+function noteEl(text) {
+  const p = document.createElement('p');
+  p.className = 'note';
+  p.textContent = text;
+  return p;
+}
+
+/**
+ * Куда встанет новый экземпляр. Выделен контейнер — внутрь него; выделен узел — сразу за
+ * ним, у того же родителя; ничего подходящего — в конец открытой доски. В библиотеку
+ * экземпляр не кладём никогда: там живут заготовки, а не сборка (SPEC §5.3).
+ * @returns {{parent:string, index?:number}|null} null — досок нет вовсе
+ */
+function instanceHome() {
+  const sel = state.selection.filter((id) => nodeById(state.doc, id));
+  if (sel.length === 1 && !inLibrary(sel[0])) {
+    const n = nodeById(state.doc, sel[0]);
+    if (n && n.type === 'frame') return { parent: n.id };
+    const p = n ? nodeById(state.doc, n.parent) : null;
+    if (p && p.type === 'frame') return { parent: p.id, index: (p.children || []).indexOf(n.id) + 1 };
+  }
+  const list = artboards(state.doc);
+  if (!list.length) return null;
+  const act = list.find((a) => a.id === activeArtboardId()) || list[0];
+  return { parent: act.id };
+}
+
+/** Поставить экземпляр компонента на доску (п.4). */
+function placeInstance(masterId) {
+  const master = nodeById(state.doc, masterId);
+  if (!isMaster(state.doc, master)) return;
+  const home = instanceHome();
+  if (!home) {
+    showMsg('warn', 'Экземпляр положить некуда', {
+      note: 'В документе нет ни одной доски. Заведите доску — и компонент встанет на неё.',
+      actions: [{ label: 'Пустая доска', primary: true, onClick: () => addArtboard() }],
+    });
+    return;
+  }
+  const list = instanceOps(state.doc, { of: masterId, parent: home.parent, index: home.index });
+  if (!list.length) {
+    showMsg('error', 'Экземпляр не поставить', { note: `«${componentName(master)}» сейчас не компонент библиотеки.` });
+    return;
+  }
+  const born = list[0].node.id;
+  // quiet: о правке говорим сами — иначе сообщений будет два, и разными словами
+  /* human: describeOps прочитал бы это как «добавил узел» — правда, но не та, которую
+     человек только что сделал. Своя строка идёт и в историю, и в «Отменить». */
+  const r = commit(list, `Поставить «${componentName(master)}»`, 'human', {
+    quiet: true,
+    human: `Поставил «${componentName(master)}» в «${nodeTitleById(state.doc, home.parent)}»`,
+  });
+  if (!r.ok) return;
+  setSelection([born]);
+  showMsg('plain', `Поставил «${componentName(master)}» в «${nodeTitleById(state.doc, home.parent)}»`, {
+    note: 'Что у него можно менять — в панели справа. Вернуть можно здесь или по Ctrl+Z.',
+    ms: 9000,
+    actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
+    undoTx: r.tx.id,
+  });
+}
+
+/**
+ * Очевидные свойства будущего компонента: текст внутри (п.3). Кнопка без своей подписи
+ * как компонент бесполезна — её придётся отсоединять на первом же экране, — поэтому текст
+ * предлагаем сразу и включённым. Остальное объявляется позже, у самого компонента: гадать
+ * за человека, какая заливка «вид», а какая просто заливка, оболочка не берётся.
+ * @returns {Array<{name:string,kind:string,target:string,path:string,sample:string}>}
+ */
+function suggestProps(doc, id) {
+  const texts = [];
+  for (const nid of subtreeIds(doc, id)) {
+    const n = nodeById(doc, nid);
+    if (n && n.type === 'text' && nid !== id) texts.push(n);
+  }
+  const used = new Set();
+  const out = [];
+  for (const n of texts.slice(0, 4)) {
+    // один текст внутри — это и есть «текст» компонента; несколько — зовём их своими именами
+    let name = texts.length === 1 ? 'текст' : String(n.name || '').trim().toLowerCase();
+    if (!name || name.length > 24 || used.has(name)) name = `текст ${out.length + 1}`;
+    if (used.has(name)) continue;
+    used.add(name);
+    out.push({ name, kind: 'text', target: n.id, path: 'characters', sample: String(n.characters || '') });
+  }
+  return out;
+}
+
+/** Пилюля-выбор: то же согласие «да/нет», что сегменты, но списком (п.3). */
+function pickPill(label, sample, on, onToggle) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'pickpill';
+  b.setAttribute('aria-pressed', String(on));
+  const box = document.createElement('span');
+  box.className = 'pickpill-box';
+  box.setAttribute('aria-hidden', 'true');
+  const t = document.createElement('span');
+  t.className = 'pickpill-text';
+  t.textContent = label;
+  b.append(box, t);
+  if (sample) {
+    const s = document.createElement('span');
+    s.className = 'pickpill-sample';
+    s.textContent = sample;
+    b.appendChild(s);
+  }
+  b.addEventListener('click', () => {
+    const now = b.getAttribute('aria-pressed') !== 'true';
+    b.setAttribute('aria-pressed', String(now));
+    onToggle(now);
+  });
+  return b;
+}
+
+/** Спросить имя и что можно будет менять — и сделать узел компонентом (п.3). */
+function openMakeComponent(id) {
+  const node = nodeById(state.doc, id);
+  if (!node) return;
+  const can = canMakeComponent(state.doc, id);
+  // причина у ядра уже словами — своей выдумывать не надо
+  if (!can.ok) { showMsg('warn', 'Компонентом это не станет', { note: `${can.reason}.` }); return; }
+  const was = displayName(state.doc, node);
+  const suggested = suggestProps(state.doc, id);
+  const picked = new Set(suggested.map((p) => p.name));
+  const taken = new Set(libraryList().map((c) => c.name.toLowerCase()));
+
+  openSheet('Сделать компонентом', (body) => {
+    body.appendChild(noteEl(`«${was}» переедет в библиотеку, а на его месте останется экземпляр. `
+      + 'Дальше правка компонента будет менять все его экземпляры разом.'));
+
+    const nameField = field('input', was, () => { /* читаем при нажатии */ }, 'Имя компонента');
+    const dup = noteEl('');
+    dup.hidden = true;
+    const checkDup = () => {
+      const v = String(nameField.value || '').trim().toLowerCase();
+      dup.hidden = !v || !taken.has(v);
+      if (!dup.hidden) dup.textContent = `Компонент с именем «${nameField.value.trim()}» уже есть — будет два с одним именем.`;
+    };
+    nameField.addEventListener('input', checkDup);
+    checkDup();
+    body.appendChild(group('Имя компонента', [nameField, dup]));
+
+    const rows = [noteEl(suggested.length
+      ? 'Свойство — то, что разрешено менять у экземпляра. Текст внутри нужен почти всегда; '
+        + 'остальное объявляется позже, у самого компонента.'
+      : 'Внутри нет текста, а больше оболочка ничего не угадывает. Свойства объявляются потом, '
+        + 'у самого компонента; компонент без свойств законен.')];
+    for (const p of suggested) {
+      rows.push(pickPill(`${p.name} — ${PROP_KIND_WORDS[p.kind]}`, p.sample ? `«${clip(p.sample, 22)}»` : '',
+        picked.has(p.name), (on) => { if (on) picked.add(p.name); else picked.delete(p.name); }));
+    }
+    body.appendChild(group('Что можно будет менять', rows));
+
+    const go = document.createElement('button');
+    go.className = 'btn accent wide';
+    go.textContent = 'Сделать компонентом';
+    go.addEventListener('click', () => {
+      // change у поля мог не случиться (нажали мышью, не покидая поле) — читаем напрямую
+      const typed = String(nameField.value || '').trim();
+      makeComponentNow(id, typed || was, suggested.filter((p) => picked.has(p.name)));
+    });
+    body.appendChild(go);
+  }, { size: 'auto', key: 'make-component' });
+}
+
+/** Одна транзакция: узел уезжает в библиотеку, на его месте встаёт экземпляр. */
+function makeComponentNow(id, name, props) {
+  const clean = (props || []).map((p) => ({
+    name: p.name, kind: p.kind, target: p.target, path: p.path,
+    ...(Array.isArray(p.values) ? { values: p.values.slice() } : {}),
+  }));
+  /* ensureLibraryOps внутри makeComponentOps на каждый вызов даёт НОВЫЙ id библиотеки,
+     поэтому инвертировать нужно ровно тот массив, который применили. commit так и делает:
+     invertOps и applyOps получают один и тот же list. */
+  const list = makeComponentOps(state.doc, id, { name, props: clean });
+  if (!list.length) {
+    const can = canMakeComponent(state.doc, id);
+    showMsg('warn', 'Компонентом это не станет', { note: `${can.reason || 'узел не годится'}.` });
+    return;
+  }
+  const born = list.find((o) => o.op === 'create' && o.node && o.node.type === 'instance');
+  // «перенёс узел; добавил узел» — верно по операциям и бесполезно по смыслу
+  const r = commit(list, `Сделать компонентом «${name}»`, 'human', {
+    quiet: true, human: `Сделал «${displayName(state.doc, nodeById(state.doc, id))}» компонентом «${name}»`,
+  });
+  if (!r.ok) return;
+  closeSheet();
+  if (born) setSelection([born.node.id]);
+  const what = clean.length
+    ? `У экземпляров можно менять: ${clean.map((p) => p.name).join(', ')}.`
+    : 'Свойства можно объявить у самого компонента — он в группе «Библиотека» в панели слоёв.';
+  showMsg('result', `«${name}» — теперь компонент`, {
+    note: `Заготовка уехала в библиотеку, на её месте — экземпляр. ${what} Вернуть можно здесь или по Ctrl+Z.`,
+    ms: 13000,
+    actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
+    undoTx: r.tx.id,
+  });
+}
+
+/** Отсоединить экземпляр: на его месте — настоящая копия (SPEC §5.7). */
+function detachInstance(id) {
+  const node = nodeById(state.doc, id);
+  if (!node || node.type !== 'instance') return;
+  const master = masterOf(state.doc, node);
+  const title = master ? componentName(master) : displayName(state.doc, node);
+  const list = detachInstanceOps(state.doc, id);
+  if (!list.length) {
+    showMsg('warn', 'Отсоединять не от чего', {
+      note: `Компонента этого экземпляра в документе нет — копировать нечего.`,
+    });
+    return;
+  }
+  const born = list.find((o) => o.op === 'create');
+  // по операциям это «удалил узел; добавил 4 узла» — по смыслу одно действие
+  const r = commit(list, `Отсоединить «${title}»`, 'human', {
+    quiet: true, human: `Отсоединил экземпляр «${title}» от компонента`,
+  });
+  if (!r.ok) return;
+  if (born) setSelection([born.node.id]);
+  // род имени компонента заранее неизвестен («Кнопка отсоединён»), поэтому согласуем
+  // фразу со словом «экземпляр», а имя берём в кавычки
+  showMsg('plain', `Экземпляр «${title}» отсоединён от компонента`, {
+    note: 'Это обычная копия: правки компонента её больше не касаются. Вернуть можно здесь или по Ctrl+Z.',
+    ms: 10000,
+    actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
+    undoTx: r.tx.id,
+  });
+}
+
+/** Показать сам компонент: выделяем его, рельс сам раскроет группу «Библиотека». */
+function showComponent(masterId) {
+  if (!nodeById(state.doc, masterId)) return;
+  setSelection([masterId]);
+  focusLayerRow(masterId);
+}
+
+/** Значения экземпляра целиком: имя свойства может содержать точку, так что путь — «props». */
+function setInstanceProp(node, name, value) {
+  const next = { ...(node.props && typeof node.props === 'object' ? node.props : {}) };
+  if (value === undefined) delete next[name]; else next[name] = value;
+  commit([OPS.set(node.id, 'props', next)], `Свойство «${name}»`);
+}
+
+/**
+ * Поле для одного свойства экземпляра — по его виду (п.5). Вид объявлен у компонента,
+ * и оболочка ему подчиняется: текст правится полем, выбор — сегментами, да/нет —
+ * переключателем, цвет — теми же образцами, что заливка, число — числовым полем.
+ */
+function instancePropControl(node, prop) {
+  const raw = node.props ? node.props[prop.name] : undefined;
+  const put = (v) => setInstanceProp(node, prop.name, v);
+  if (prop.kind === 'text') {
+    const cur = typeof raw === 'string' ? raw : masterPropValue(node, prop);
+    return field(String(cur).includes('\n') ? 'textarea' : 'input', String(cur), (v) => put(v), prop.name);
+  }
+  if (prop.kind === 'number') {
+    const cur = typeof raw === 'number' ? raw : Number(masterPropValue(node, prop)) || 0;
+    return numberField(cur, (v) => put(v), { label: prop.name });
+  }
+  if (prop.kind === 'bool') {
+    const cur = typeof raw === 'boolean' ? raw : masterPropValue(node, prop) !== false;
+    return segField(['on', 'off'], cur ? 'on' : 'off', (v) => put(v === 'on'), ['Да', 'Нет']);
+  }
+  if (prop.kind === 'enum') {
+    const values = Array.isArray(prop.values) ? prop.values : [];
+    const cur = typeof raw === 'string' ? raw : String(masterPropValue(node, prop) || '');
+    const words = values.map(enumWord);
+    // до трёх коротких значений — сегменты (выбор виден целиком), дальше список
+    const short = values.length <= 3 && words.every((w) => w.length <= 12);
+    return short ? segField(values, cur, (v) => put(v), words)
+      : selectField(values, cur, (v) => put(v), Object.fromEntries(values.map((v, i) => [v, words[i]])));
+  }
+  if (prop.kind === 'color') {
+    const cur = raw !== undefined ? raw : masterPropValue(node, prop);
+    return swatches(node, prop.name, prop.name, { value: cur, onPick: (v) => put(v) });
+  }
+  return field('input', raw === undefined ? '' : String(raw), (v) => put(v), prop.name);
+}
+
+/** Что стоит у самого компонента: это и есть значение экземпляра, пока своего нет. */
+function masterPropValue(node, prop) {
+  const target = nodeById(state.doc, prop.target);
+  if (!target) return '';
+  return readPath(target, prop.path);
+}
+
+/** Строка свойства со сбросом: «как в компоненте» — это отсутствие своего значения. */
+function propRow(node, prop) {
+  const r = row(prop.name, instancePropControl(node, prop));
+  const own = !!(node.props && Object.prototype.hasOwnProperty.call(node.props, prop.name));
+  const back = document.createElement('button');
+  back.type = 'button';
+  back.className = 'row-reset';
+  back.textContent = '↺';
+  back.title = `Вернуть «${prop.name}» как в компоненте`;
+  back.setAttribute('aria-label', back.title);
+  back.disabled = !own;
+  back.addEventListener('click', () => setInstanceProp(node, prop.name, undefined));
+  r.appendChild(back);
+  return r;
+}
+
+/** Панель экземпляра (п.5). */
+function instanceInspector(body, node) {
+  const master = masterOf(state.doc, node);
+  const name = master ? componentName(master) : '';
+
+  const head = document.createElement('div');
+  head.className = 'comp-head';
+  const mark = document.createElement('span');
+  mark.className = 'comp-mark';
+  mark.textContent = GLYPH_INSTANCE;
+  mark.setAttribute('aria-hidden', 'true');
+  const what = document.createElement('span');
+  what.className = 'comp-what';
+  what.textContent = master ? `Экземпляр компонента «${name}»` : 'Экземпляр без компонента';
+  head.append(mark, what);
+  body.appendChild(head);
+
+  if (!master) {
+    body.appendChild(noteEl('Компонента, с которого снят этот экземпляр, в документе нет: '
+      + 'на холсте он не рисуется. Его можно удалить или вернуть компонент отменой правки.'));
+    return;
+  }
+
+  const show = document.createElement('button');
+  show.className = 'btn subtle small';
+  show.textContent = 'Показать компонент';
+  show.title = `Выделить «${name}» в библиотеке`;
+  show.addEventListener('click', () => showComponent(master.id));
+
+  const props = libraryList().find((c) => c.id === master.id);
+  const list = (props && props.props) || [];
+  if (list.length) {
+    const rows = list.map((p) => propRow(node, p));
+    rows.push(noteEl('Кнопка ↺ убирает своё значение — тогда свойство берётся у компонента.'));
+    body.appendChild(group('Что можно менять', rows));
+  } else {
+    body.appendChild(group('Что можно менять', [
+      noteEl(`У компонента «${name}» не объявлено ни одного свойства — менять у экземпляра нечего. `
+        + 'Свойства объявляются у самого компонента.'),
+    ]));
+  }
+
+  const detach = document.createElement('button');
+  detach.className = 'btn subtle small';
+  detach.textContent = 'Отсоединить';
+  detach.title = 'Превратить экземпляр в обычную копию';
+  detach.addEventListener('click', () => detachInstance(node.id));
+
+  body.appendChild(group('Компонент', [
+    noteEl('Внутренности экземпляра правятся у компонента: здесь меняются только объявленные '
+      + 'свойства. Нужна разовая правка — отсоедините, и получится обычная копия.'),
+    show,
+    detach,
+  ]));
+}
+
+/**
+ * Круг 19, п.6. Узел ВНУТРИ компонента правится теми же полями, что любой другой, но
+ * последствия у правки другие: она разойдётся по всем экземплярам. Человек, дошедший
+ * сюда крошками или кликом по холсту, об этом ниоткуда не узнаёт — предупреждение
+ * стоит до полей, тем же словом и тем же видом, что у самого компонента.
+ * @returns {boolean} сказали ли что-нибудь (иначе слово берёт makeComponentGroup)
+ */
+function insideComponentWarn(body, node) {
+  const master = ancestors(state.doc, node.id).find((a) => isMaster(state.doc, a));
+  if (!master) return false;
+  const info = libraryList().find((c) => c.id === master.id);
+  const used = info ? info.instances : 0;
+  const warn = document.createElement('p');
+  warn.className = 'comp-warn';
+  warn.setAttribute('role', 'status');
+  warn.textContent = used
+    ? `Это внутренность компонента «${componentName(master)}». Правка разойдётся по всем `
+      + `${used} ${plural(used, 'экземпляру', 'экземплярам', 'экземплярам')} на досках.`
+    : `Это внутренность компонента «${componentName(master)}». Экземпляров у него пока нет.`;
+  const go = document.createElement('button');
+  go.className = 'btn subtle small';
+  go.textContent = 'Показать компонент';
+  go.addEventListener('click', () => showComponent(master.id));
+  body.append(warn, go);
+  return true;
+}
+
+/** Панель компонента (п.6). */
+function masterInspector(body, node) {
+  const info = libraryList().find((c) => c.id === node.id);
+  const used = info ? info.instances : 0;
+  const name = componentName(node);
+
+  const head = document.createElement('div');
+  head.className = 'comp-head';
+  const mark = document.createElement('span');
+  mark.className = 'comp-mark';
+  mark.textContent = GLYPH_MASTER;
+  mark.setAttribute('aria-hidden', 'true');
+  const what = document.createElement('span');
+  what.className = 'comp-what';
+  what.textContent = `Компонент «${name}»`;
+  head.append(mark, what);
+  body.appendChild(head);
+
+  // предупреждение должно стоять ДО полей, иначе его читают уже после правки
+  const warn = document.createElement('p');
+  warn.className = 'comp-warn';
+  warn.setAttribute('role', 'status');
+  warn.textContent = used > 1
+    ? `Правка заденет все ${used} ${plural(used, 'экземпляр', 'экземпляра', 'экземпляров')} на досках.`
+    : used === 1
+      ? 'Правка заденет единственный экземпляр на досках.'
+      : 'Экземпляров пока нет: правка не заденет ничего, кроме самой заготовки.';
+  body.appendChild(warn);
+
+  const nameField = field('input', name, (v) => {
+    const t = String(v || '').trim();
+    // пустое имя ядро не примет — молча возвращаем прежнее, а не ругаемся ошибкой операции
+    if (!t) { renderInspector(); return; }
+    if (t === name) return;
+    // оба поля одной транзакцией: иначе рельс зовёт компонент старым именем, а панель новым
+    const list = [OPS.set(node.id, 'component.name', t)];
+    if (String(node.name || '') !== t) list.push(OPS.set(node.id, 'name', t));
+    commit(list, `Имя компонента «${t}»`);
+  }, 'Имя компонента');
+  body.appendChild(group('Имя компонента', [nameField]));
+
+  const put = document.createElement('button');
+  put.className = 'btn subtle small';
+  put.textContent = 'Поставить на доску';
+  put.addEventListener('click', () => placeInstance(node.id));
+
+  const rows = [];
+  const props = (info && info.props) || [];
+  for (const p of props) rows.push(propLine(node, p));
+  if (!props.length) {
+    rows.push(noteEl('Свойств нет: экземпляры будут одинаковыми. Это законно — например, у логотипа '
+      + 'или разделителя менять нечего.'));
+  }
+  const add = document.createElement('button');
+  add.className = 'btn subtle small';
+  add.textContent = 'Объявить свойство';
+  add.addEventListener('click', () => openAddProp(node.id));
+  rows.push(add);
+  body.appendChild(group('Что можно менять у экземпляров', rows));
+  body.appendChild(group('Экземпляры', [
+    noteEl(used
+      ? `На досках ${used} ${plural(used, 'экземпляр', 'экземпляра', 'экземпляров')} этого компонента.`
+      : 'На досках экземпляров этого компонента нет.'),
+    put,
+  ]));
+}
+
+/** Строка объявленного свойства: имя, вид, где оно живёт — и «убрать». */
+function propLine(master, p) {
+  const wrap = document.createElement('div');
+  wrap.className = 'propline';
+  const t = document.createElement('span');
+  t.className = 'propline-name';
+  t.textContent = p.name;
+  const k = document.createElement('span');
+  k.className = 'propline-kind';
+  k.textContent = p.kind === 'enum' && p.values && p.values.length
+    ? `${PROP_KIND_WORDS.enum}: ${p.values.map(enumWord).join(' | ')}`
+    : PROP_KIND_WORDS[p.kind] || p.kind;
+  const w = document.createElement('span');
+  w.className = 'propline-where';
+  const target = nodeById(state.doc, p.target);
+  w.textContent = `${target ? displayName(state.doc, target) : '?'} · ${humanPath(p.path) || p.path}`;
+  w.title = w.textContent;
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'propline-del';
+  del.textContent = '×';
+  del.title = `Убрать свойство «${p.name}»`;
+  del.setAttribute('aria-label', del.title);
+  del.addEventListener('click', () => removeProp(master.id, p.name));
+  wrap.append(t, k, w, del);
+  return wrap;
+}
+
+/**
+ * Убрать свойство. Одной транзакцией — вместе со значениями в экземплярах: иначе у них
+ * остаётся имя, которого компонент уже не объявлял (валидатор зовёт это unknown-prop).
+ * Порядок важен: сначала чистим экземпляры, потом компонент, иначе промежуточное
+ * состояние документа не проходит проверку схемы.
+ */
+function removeProp(masterId, propName) {
+  const master = nodeById(state.doc, masterId);
+  if (!master || !master.component) return;
+  const rest = (master.component.props || []).filter((p) => p && p.name !== propName);
+  const list = [];
+  for (const n of Object.values(state.doc.nodes || {})) {
+    if (!n || n.type !== 'instance' || n.of !== masterId) continue;
+    if (!n.props || !Object.prototype.hasOwnProperty.call(n.props, propName)) continue;
+    const next = { ...n.props };
+    delete next[propName];
+    list.push(OPS.set(n.id, 'props', next));
+  }
+  const touched = list.length;
+  list.push(OPS.set(masterId, 'component.props', rest));
+  const r = commit(list, `Убрать свойство «${propName}»`, 'human', {
+    quiet: true, human: `Убрал свойство «${propName}» у компонента «${componentName(master)}»`,
+  });
+  if (!r.ok) return;
+  showMsg('plain', `Свойство «${propName}» убрано у компонента «${componentName(master)}»`, {
+    note: touched
+      ? `Значение пропало у ${touched} ${plural(touched, 'экземпляра', 'экземпляров', 'экземпляров')}. Вернуть можно здесь или по Ctrl+Z.`
+      : 'Вернуть можно здесь или по Ctrl+Z.',
+    ms: 9000,
+    actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
+    undoTx: r.tx.id,
+  });
+}
+
+/* Что у узла разрешено объявлять свойством. Список короткий нарочно: это поля, у которых
+   есть поле в инспекторе, значит человек видит, что именно изменится. Пути те же, что
+   понимает `set`, — ядро проверит их ещё раз (checkComponent). */
+const PROP_FIELDS = {
+  text: [
+    { path: 'characters', label: 'Текст', kinds: ['text'] },
+    { path: 'color', label: 'Цвет текста', kinds: ['color', 'enum'] },
+    { path: 'visible', label: 'Виден', kinds: ['bool'] },
+  ],
+  frame: [
+    { path: 'fill', label: 'Заливка', kinds: ['color', 'enum'] },
+    { path: 'radius', label: 'Скругление', kinds: ['number'] },
+    { path: 'visible', label: 'Виден', kinds: ['bool'] },
+  ],
+  rect: [
+    { path: 'fill', label: 'Заливка', kinds: ['color', 'enum'] },
+    { path: 'radius', label: 'Скругление', kinds: ['number'] },
+    { path: 'visible', label: 'Виден', kinds: ['bool'] },
+  ],
+  ellipse: [
+    { path: 'fill', label: 'Заливка', kinds: ['color', 'enum'] },
+    { path: 'visible', label: 'Виден', kinds: ['bool'] },
+  ],
+  image: [
+    { path: 'src', label: 'Источник', kinds: ['text'] },
+    { path: 'visible', label: 'Виден', kinds: ['bool'] },
+  ],
+  instance: [
+    { path: 'visible', label: 'Виден', kinds: ['bool'] },
+  ],
+};
+
+/** Узлы внутри компонента — там, где свойство может жить. */
+function propTargets(masterId) {
+  const out = [];
+  for (const id of subtreeIds(state.doc, masterId)) {
+    const n = nodeById(state.doc, id);
+    if (!n || !PROP_FIELDS[n.type]) continue;
+    out.push({ id, label: id === masterId ? `${displayName(state.doc, n)} — сам компонент` : displayName(state.doc, n) });
+  }
+  return out;
+}
+
+/**
+ * Объявить свойство (п.6). Самое трудное место круга: человеку надо выбрать узел ВНУТРИ
+ * компонента и путь к полю. Сводим выбор к трём шагам, каждый из которых — список того,
+ * что у этого узла вообще есть: где → что менять → как. Имя подставляется от поля и
+ * правится; значения выбора предлагаются от нынешнего значения узла.
+ */
+function openAddProp(masterId) {
+  const master = nodeById(state.doc, masterId);
+  if (!master || !master.component) return;
+  const targets = propTargets(masterId);
+  if (!targets.length) return;
+  const draft = { target: targets[0].id, path: '', kind: '', values: '', name: '' };
+
+  const fieldsOf = (id) => {
+    const n = nodeById(state.doc, id);
+    return (n && PROP_FIELDS[n.type]) || [];
+  };
+  const pickField = (path) => {
+    const list = fieldsOf(draft.target);
+    const f = list.find((x) => x.path === path) || list[0];
+    draft.path = f ? f.path : '';
+    draft.kind = f ? f.kinds[0] : '';
+    draft.name = f ? f.label.toLowerCase() : '';
+    const cur = draft.target ? readPath(nodeById(state.doc, draft.target), draft.path) : undefined;
+    const token = colorToken(cur);
+    // выбор всегда начинается с того, что стоит сейчас: «accent|surface», а не пустая строка
+    draft.values = token ? `${token}, surface` : '';
+  };
+  pickField('');
+
+  openSheet('Объявить свойство', (body) => {
+    body.appendChild(noteEl(`Свойство — то, что экземпляры компонента «${componentName(master)}» `
+      + 'смогут менять у себя. Всё остальное у них будет общим.'));
+
+    const where = selectField(targets.map((t) => t.id), draft.target, (v) => {
+      draft.target = v;
+      pickField('');
+      redraw();
+    }, Object.fromEntries(targets.map((t) => [t.id, t.label])));
+    body.appendChild(group('Где', [where]));
+
+    const rest = document.createElement('div');
+    rest.className = 'group-stack';
+    body.appendChild(rest);
+
+    const go = document.createElement('button');
+    go.className = 'btn accent wide';
+    go.textContent = 'Объявить';
+    body.appendChild(go);
+
+    let nameField = null;
+    function redraw() {
+      rest.textContent = '';
+      const list = fieldsOf(draft.target);
+      const what = selectField(list.map((f) => f.path), draft.path, (v) => { pickField(v); redraw(); },
+        Object.fromEntries(list.map((f) => [f.path, f.label])));
+      rest.appendChild(group('Что менять', [what]));
+
+      const f = list.find((x) => x.path === draft.path);
+      const kinds = (f && f.kinds) || [];
+      if (kinds.length > 1) {
+        rest.appendChild(group('Как', [
+          segField(kinds, draft.kind, (v) => { draft.kind = v; redraw(); },
+            kinds.map((k) => (k === 'color' ? 'любой цвет' : 'выбор из нескольких'))),
+        ]));
+      }
+      if (draft.kind === 'enum') {
+        const vals = field('input', draft.values, (v) => { draft.values = v; }, 'Значения через запятую');
+        vals.addEventListener('input', () => { draft.values = vals.value; });
+        rest.appendChild(group('Значения', [
+          vals,
+          noteEl('Через запятую. Для заливки и цвета это имена из палитры: accent, surface, surfaceAlt, accentSoft.'),
+        ]));
+      }
+      nameField = field('input', draft.name, (v) => { draft.name = v; }, 'Имя свойства');
+      nameField.addEventListener('input', () => { draft.name = nameField.value; });
+      rest.appendChild(group('Имя свойства', [
+        nameField,
+        noteEl('Этим именем свойство назовётся и в панели экземпляра, и в словаре агента.'),
+      ]));
+      hydrateIcons(dom.sheet);
+    }
+    redraw();
+
+    go.addEventListener('click', () => {
+      const name = String((nameField && nameField.value) || draft.name || '').trim();
+      addProp(masterId, {
+        name,
+        kind: draft.kind,
+        target: draft.target,
+        path: draft.path,
+        values: draft.kind === 'enum'
+          ? String(draft.values || '').split(',').map((x) => x.trim()).filter(Boolean)
+          : undefined,
+      });
+    });
+  }, { size: 'auto', key: 'add-prop' });
+}
+
+/** Дописать свойство компоненту. Схему проверяет ядро — нам довольно отсеять пустяки. */
+function addProp(masterId, p) {
+  const master = nodeById(state.doc, masterId);
+  if (!master || !master.component) return;
+  const why = (t) => showMsg('warn', 'Свойство не объявлено', { note: t });
+  if (!p.name) { why('У свойства должно быть имя.'); return; }
+  const had = (master.component.props || []).slice();
+  if (had.some((x) => x && x.name === p.name)) {
+    why(`Свойство «${p.name}» у компонента «${componentName(master)}» уже есть.`);
+    return;
+  }
+  if (p.kind === 'enum' && (!p.values || p.values.length < 2)) {
+    why('Для выбора нужно хотя бы два значения через запятую.');
+    return;
+  }
+  had.push({
+    name: p.name, kind: p.kind, target: p.target, path: p.path,
+    ...(p.kind === 'enum' ? { values: p.values } : {}),
+  });
+  const r = commit([OPS.set(masterId, 'component.props', had)], `Свойство «${p.name}» у «${componentName(master)}»`,
+    'human', { quiet: true, human: `Объявил свойство «${p.name}» у компонента «${componentName(master)}»` });
+  if (!r.ok) return;
+  closeSheet();
+  showMsg('result', `«${componentName(master)}»: объявлено свойство «${p.name}»`, {
+    note: 'Теперь оно правится у каждого экземпляра в панели справа. Вернуть можно здесь или по Ctrl+Z.',
+    ms: 10000,
+    actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
+    undoTx: r.tx.id,
+  });
 }
 
 /* -------------------------------- инспектор ---------------------------------- */
@@ -2467,13 +3379,58 @@ function renderInspector() {
     const warn = document.createElement('p');
     warn.className = 'insp-issue';
     warn.setAttribute('role', 'status');
-    warn.textContent = issues.map((x) => x.message).join(' · ');
+    warn.textContent = issues.map(issueText).join(' · ');
     body.appendChild(warn);
   }
 
-  body.appendChild(group('Имя', [
-    field('input', node.name || '', (v) => setProp(node.id, 'name', v), 'Имя узла'),
-  ]));
+  /* Круг 19, п.6 и п.8. У компонента имя ОДНО. В документе их два поля — `name` узла и
+     `component.name`, — и показывать оба значило бы спрашивать человека, какое из них
+     настоящее: рельс, холст и словарь агента берут разные. Поэтому у компонента группа
+     «Имя» не показывается вовсе, а «Имя компонента» ниже пишет оба поля одной правкой. */
+  if (!isMaster(state.doc, node)) {
+    body.appendChild(group('Имя', [
+      field('input', node.name || '', (v) => setProp(node.id, 'name', v), 'Имя узла'),
+    ]));
+  }
+
+  /* Круг 19, п.5. Экземпляр правится не как обычный узел: внутренности у него общие с
+     компонентом, своё — только объявленные свойства, размер и место. Поэтому дальше
+     панели расходятся, и заливка с типографикой у экземпляра не показываются вовсе:
+     их там нет, и поле, которое ничего не меняет, — хуже отсутствия поля. */
+  if (node.type === 'instance') {
+    instanceInspector(body, node);
+    if (node.size || masterOf(state.doc, node)) {
+      const master = masterOf(state.doc, node);
+      const eff = {
+        id: node.id,
+        size: {
+          w: (node.size && node.size.w) || (master && master.size && master.size.w) || { mode: 'hug' },
+          h: (node.size && node.size.h) || (master && master.size && master.size.h) || { mode: 'hug' },
+        },
+      };
+      const own = node.size && (node.size.w || node.size.h);
+      body.appendChild(group('Размер', [
+        row('Ширина', sizeField(eff, 'w')),
+        row('Высота', sizeField(eff, 'h')),
+        noteEl(own ? 'Незаданная ось берётся у компонента.' : 'Размер сейчас целиком от компонента.'),
+      ]));
+    }
+    if (node.override) body.appendChild(overrideGroup(node));
+    const del = document.createElement('button');
+    del.className = 'btn danger small';
+    del.textContent = 'Удалить экземпляр';
+    del.addEventListener('click', () => deleteNodes([node.id]));
+    body.appendChild(del);
+    tagInspFields(body);
+    restoreInspFocus(keepFocus);
+    return;
+  }
+
+  // круг 19, п.6: сам компонент — это заготовка, и об этом сказано до всех полей
+  if (isMaster(state.doc, node)) masterInspector(body, node);
+  // внутри компонента makeComponentGroup повторил бы ту же мысль слабее («Компонентом
+  // не станет: узел внутри другого компонента») — одного объяснения довольно
+  else if (!insideComponentWarn(body, node)) makeComponentGroup(body, node);
 
   if (node.type === 'text') {
     body.appendChild(group('Текст', [
@@ -2530,26 +3487,74 @@ function renderInspector() {
     ]));
   }
 
-  if (node.override) {
-    const note = document.createElement('div');
-    note.className = 'note';
-    note.textContent = 'Узел отсоединён: положение задано вручную и переживает правки агента.';
-    const btn = document.createElement('button');
-    btn.className = 'btn subtle small';
-    btn.textContent = 'Вернуть в поток';
-    btn.addEventListener('click', () => commit([OPS.set(node.id, 'override', undefined)], 'Вернуть в поток'));
-    body.appendChild(group('Положение', [note, btn]));
-  }
+  if (node.override) body.appendChild(overrideGroup(node));
 
   const del = document.createElement('button');
   del.className = 'btn danger small';
-  del.textContent = 'Удалить узел';
+  /* Круг 19, п.6. Удаление компонента — самая резкая из правок, которые задевают все
+     экземпляры: они остаются в документе без своей заготовки и перестают рисоваться
+     (валидатор зовёт это dead-instance). Кнопка называет, ЧТО удаляет, а счёт сломанного
+     стоит рядом с ней — до нажатия, а не в сообщении после. */
+  if (isMaster(state.doc, node)) {
+    const info = libraryList().find((c) => c.id === node.id);
+    const used = info ? info.instances : 0;
+    del.textContent = 'Удалить компонент';
+    if (used) {
+      const one = used === 1;
+      const note = noteEl(`${used} ${plural(used, 'экземпляр', 'экземпляра', 'экземпляров')} `
+        + `${one ? 'останется' : 'останутся'} без компонента и ${one ? 'перестанет' : 'перестанут'} `
+        + 'рисоваться. Вернуть можно будет отменой.');
+      note.className = 'note danger-note';
+      body.appendChild(note);
+    }
+  } else {
+    del.textContent = 'Удалить узел';
+  }
   del.addEventListener('click', () => deleteNodes([node.id]));
   body.appendChild(del);
 
   // поля получили устойчивые имена — и фокус с кареткой вернулись на своё место (п.20)
   tagInspFields(body);
   restoreInspFocus(keepFocus);
+}
+
+/**
+ * Круг 19, п.3. «Сделать компонентом» живёт в инспекторе, а не в рельсе: решение
+ * принимают, глядя на сам узел и на его поля. Стоит сразу под именем — это утверждение
+ * о том, чем узел может стать, родня шапкам экземпляра и компонента; внизу панели живут
+ * разрушительные действия, и кнопке созидания там не место. В рельсе на компоненты
+ * заведена своя группа, и «+» в её строках кладёт экземпляр: обе половины работы стоят
+ * там, где на них смотрят.
+ * Отказ показываем только там, где он что-то объясняет: «доска компонентом не станет»
+ * на каждой выделенной доске — шум, а «узел внутри другого компонента» отвечает ровно
+ * на тот вопрос, который человек и задал, нажав на узел внутри компонента.
+ */
+function makeComponentGroup(body, node) {
+  const can = canMakeComponent(state.doc, node);
+  if (can.ok) {
+    const mk = document.createElement('button');
+    mk.className = 'btn subtle small';
+    mk.textContent = 'Сделать компонентом';
+    mk.title = `Отправить «${displayName(state.doc, node)}» в библиотеку и оставить здесь экземпляр`;
+    mk.addEventListener('click', () => openMakeComponent(node.id));
+    body.appendChild(group('Компонент', [mk]));
+    return;
+  }
+  if (/компонент|библиотек/i.test(String(can.reason || ''))) {
+    body.appendChild(group('Компонент', [noteEl(`Компонентом не станет: ${can.reason}.`)]));
+  }
+}
+
+/** Ручное положение узла: одна и та же группа у обычного узла и у экземпляра (круг 19, п.5). */
+function overrideGroup(node) {
+  const note = document.createElement('div');
+  note.className = 'note';
+  note.textContent = 'Узел отсоединён: положение задано вручную и переживает правки агента.';
+  const btn = document.createElement('button');
+  btn.className = 'btn subtle small';
+  btn.textContent = 'Вернуть в поток';
+  btn.addEventListener('click', () => commit([OPS.set(node.id, 'override', undefined)], 'Вернуть в поток'));
+  return group('Положение', [note, btn]);
 }
 
 function tokenType(token) {
@@ -2777,13 +3782,21 @@ const SWATCH_GROUPS = [
  * информации, и выбор приходилось делать вслепую (круг 13, п.10). Поэтому у каждого
  * образца стоит его значение; круг 16, п.14 сделал это правилом без исключений.
  */
-function swatches(node, prop, label) {
+/**
+ * @param {object} node узел, которому принадлежит цвет
+ * @param {string} prop поле узла (или имя свойства компонента — тогда пишет opts.onPick)
+ * @param {string} label доступное имя группы
+ * @param {{value?:*, onPick?:Function}} [opts] круг 19, п.5: у свойства экземпляра цвет
+ *   лежит не в поле узла, а в props — читаем и пишем его снаружи, палитра та же самая.
+ */
+function swatches(node, prop, label, opts = {}) {
   const w = document.createElement('div');
   w.className = 'swatch-groups';
   w.setAttribute('role', 'group');
   w.setAttribute('aria-label', label || 'Цвет');
   const colors = state.doc.tokens.colors || {};
-  const cur = colorToken(node[prop]);
+  const cur = colorToken('value' in opts ? opts.value : node[prop]);
+  const pick = typeof opts.onPick === 'function' ? opts.onPick : ((v) => setProp(node.id, prop, v));
   const used = new Set();
 
   const chip = (name) => {
@@ -2812,7 +3825,7 @@ function swatches(node, prop, label) {
     val.className = 'swatch-val';
     val.textContent = String(hex).toUpperCase().replace(/^#/, '');
     b.appendChild(val);
-    b.addEventListener('click', () => setProp(node.id, prop, { token: name }));
+    b.addEventListener('click', () => pick({ token: name }));
     return b;
   };
 
@@ -2864,7 +3877,7 @@ function swatches(node, prop, label) {
   cap.textContent = prop === 'color' ? 'Без цвета' : 'Без заливки';
   none.append(dot, cap);
   none.title = cap.textContent;
-  none.addEventListener('click', () => setProp(node.id, prop, undefined));
+  none.addEventListener('click', () => pick(undefined));
   rowEl.appendChild(none);
   g.appendChild(rowEl);
   w.appendChild(g);
@@ -3340,9 +4353,17 @@ async function runUtterance(text, { variants = false, toModel = false } = {}) {
       { plan: res.plan, invisible: invisibleEdits(res) });
     if (!r.ok) return;
 
-    // главная строка — что именно изменилось; слова агента уходят во вторую строку (п.2)
-    const headline = r.tx.human || summary;
-    const aside = summary && summary !== headline ? summary : '';
+    /* Главная строка — что именно изменилось; слова агента уходят во вторую строку (п.2).
+     * Круг 19: у операций, которые мозг собрал сам (res.local — компонент, переименование,
+     * отсоединение), разбор по диффу читается как бухгалтерия: «Добавил «Ярлыки» в «Маршрут
+     * дня»; перенёс «Ярлыки» и ещё 1 правка» вместо «Компонент из «Ярлыки»». Человек просил
+     * одну вещь, и одной вещью она и должна называться — а перечень правок уходит второй
+     * строкой, где он к месту. */
+    const conceptual = res.local ? String((res.plan && res.plan.title) || '').trim() : '';
+    const headline = conceptual || r.tx.human || summary;
+    const aside = res.local
+      ? [r.tx.human, summary && summary !== conceptual ? summary : ''].filter(Boolean).join(' · ')
+      : (summary && summary !== headline ? summary : '');
     // в память разговора кладём факт, а не намерение: иначе «верни как было» не на что опереть (п.12)
     rememberPair(utterance, headline);
     addChat('you', utterance);
@@ -5966,7 +6987,10 @@ function addArtboard() {
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 let sheetReturnFocus = null;
 /** Шторки, ради которых документ гасить нельзя: они про сам документ (п.9). */
-const QUIET_SHEETS = new Set(['history', 'export', 'artboards']);
+/* Круг 19, п.3 и п.6: обе шторки компонентов — тоже разговор о документе. В «Сделать
+   компонентом» человек смотрит на узел, который называет; в «Объявить свойство» выбирает
+   узел ВНУТРИ компонента и должен видеть, какой именно он выбрал на холсте. */
+const QUIET_SHEETS = new Set(['history', 'export', 'artboards', 'make-component', 'add-prop']);
 
 /** Шторка — модальный диалог: фокус внутрь, Esc и клик по затемнению закрывают. */
 function openSheet(title, fill, opts = {}) {
@@ -6610,7 +7634,19 @@ function adoptDoc(raw) {
       if (typeof kid === 'string' && next.nodes[kid] && !nowKids.has(kid)) lostEdges += 1;
     }
   }
-  return { doc: next, geo, lost, lostEdges };
+  /* Круг 19, п.1. МИГРАЦИЯ. Документы, сохранённые до компонентов, библиотеки не имеют,
+     а ядро намеренно не заводит её в createDoc: импорт сверяет разобранные узлы с узлами
+     файла (проверка `alien` выше), и новая библиотека сорвала бы эту сверку как чужой узел.
+     Поэтому библиотеку добавляем ЗДЕСЬ — после всех проверок и ровно один раз на обе
+     дороги, по которым чужой документ попадает в состояние: импорт JSON и восстановление
+     из хранилища (обе идут через adoptDoc). Вызов идемпотентен: если библиотека уже есть,
+     ensureLibrary отдаёт тот же самый документ, и пересчитывать нечего. */
+  const withLib = ensureLibrary(next);
+  if (withLib === next) return { doc: next, geo, lost, lostEdges };
+  // библиотека рисуется на холсте рядом с досками (SPEC §5.3) — геометрию считаем заново
+  const geoLib = solve(withLib);
+  if (!geoLib || !geoLib.rects) throw new Error('раскладка не считается');
+  return { doc: withLib, geo: geoLib, lost, lostEdges, migrated: true };
 }
 
 /* Круг 16, п.13. Порог «большого документа». Замеры круга: 3 077 узлов — validate 18…30 мс,
@@ -6679,6 +7715,9 @@ function importJson() {
           + `${plural(taken.lostEdges, 'связь', 'связи', 'связей')} между узлами — вложение выпрямлено`);
       }
       if (blank) bits.push('досок в файле не оказалось — холст пуст');
+      // круг 19, п.1: файл из прежней версии библиотеки не имел — говорим об этом словами,
+      // иначе в рельсе просто из ниоткуда появляется группа «Библиотека»
+      if (taken.migrated) bits.push('файл из прежней версии — завёл библиотеку компонентов');
       /* Круг 16, п.13(б). На таком документе правка и отмена занимают заметное время, и
          честнее сказать об этом заранее, чем оставлять человека гадать, не завис ли
          редактор: во время самой правки поток занят и нарисовать предупреждение нечем. */

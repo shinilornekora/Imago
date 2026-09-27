@@ -8,6 +8,16 @@
  * Дополнительно (нужно app.js / brain.js):
  *   nodeById, ancestors, isArtboard, cloneSubtree, resolveTarget, hashGeometry,
  *   artboards, resolveColor, resolveTextStyle, contrastRatio, NODE_TYPES, DEFAULT_TOKENS
+ *   Компоненты (круг 19, SPEC §5):
+ *     ensureLibrary(doc) — МИГРАЦИЯ: документ без библиотеки приводится к нынешнему
+ *       виду одним вызовом (идемпотентно, вход не мутируется). Звать после загрузки
+ *       из `db` и после импорта JSON; createDoc его не зовёт сам — импорт сверяет
+ *       узлы разобранного документа с узлами файла и счёл бы библиотеку чужим узлом.
+ *     components(doc) → словарь компонентов (brain строит из него блок «БИБЛИОТЕКА»),
+ *       componentSignature / instanceSummary — строки §5.9;
+ *     canMakeComponent / makeComponentOps / instanceOps / detachInstanceOps —
+ *       возвращают ОПЕРАЦИИ, документ не меняют: оболочка применяет их транзакцией;
+ *     solve(doc).expanded — раскрытые узлы экземпляров (в doc.nodes их нет).
  *   resetMeasureCache, measureEpoch, onMeasureEpoch — кеш измерений текста:
  *     ширины живут между вызовами solve, и без сброса первая раскладка, померенная
  *     системным шрифтом, залипает навсегда. Модуль сбрасывает кеш сам по событиям
@@ -20,8 +30,22 @@
  * ------------------------------------------------------------------ */
 
 /** @type {Set<string>} */
-const NODE_TYPES = new Set(['page', 'frame', 'text', 'rect', 'ellipse', 'image']);
+const NODE_TYPES = new Set(['page', 'frame', 'text', 'rect', 'ellipse', 'image', 'instance']);
 const CONTAINER_TYPES = new Set(['page', 'frame']);
+/* Круг 19 (SPEC §5): компоненты. Мастер — узел в библиотеке с полем `component`,
+   экземпляр — узел типа `instance` со ссылкой `of` и значениями пропсов. Детей у
+   экземпляра нет: его содержимое раскрывает решатель (см. expandDoc). */
+/** Роль узла-библиотеки: второй потомок корня, НЕ доска (SPEC §5.3). */
+const LIBRARY_ROLE = 'library';
+/** Виды пропсов мастера (SPEC §5.4). */
+const PROP_KINDS = new Set(['text', 'enum', 'color', 'number', 'bool']);
+/**
+ * Предел вложенности экземпляров (SPEC §5.6 требует предел и просит его назвать).
+ * Восемь: живой словарь — это «кнопка внутри карточки внутри списка внутри экрана»,
+ * то есть 3–4 уровня; восемь даёт двойной запас и при этом держит раскрытие
+ * конечным, даже если валидатор о цикле почему-то промолчал.
+ */
+const MAX_INSTANCE_DEPTH = 8;
 /** Верхний уровень пути, который set никогда не меняет: на этом стоит дерево. */
 const PROTECTED_PATHS = new Set(['id', 'type', 'parent', 'children', '__proto__', 'prototype', 'constructor']);
 /** Ключи прототипа: запрещены на любом уровне пути — иначе у узла появляются свойства «из ниоткуда». */
@@ -298,13 +322,26 @@ function checkNode(node, doc) {
   if (!NODE_TYPES.has(node.type)) return `неизвестный тип «${node.type}»`;
   if (node.name !== undefined && typeof node.name !== 'string') return 'name должен быть строкой';
   if (node.type === 'page') {
-    if (node.parent !== null && node.parent !== undefined) return 'page не может иметь родителя';
+    /* Круг 19, п.1: страница-библиотека — единственная страница с родителем
+       (SPEC §5.3: второй потомок корня). Остальным страницам родитель по-прежнему
+       запрещён: на этом стоит «корень — страница без родителя». */
+    if (node.parent !== null && node.parent !== undefined) {
+      if (node.role !== LIBRARY_ROLE) return 'page не может иметь родителя';
+      if (typeof node.parent !== 'string') return 'нет parent';
+      if (doc && doc.root && node.parent !== doc.root) return 'библиотека может лежать только в корне';
+    }
   } else if (typeof node.parent !== 'string') return 'нет parent';
   if (CONTAINER_TYPES.has(node.type)) {
     if (!Array.isArray(node.children)) return 'children должен быть массивом';
     if (node.children.some((c) => typeof c !== 'string')) return 'children: только id';
+  } else if (node.type === 'instance' && node.children !== undefined) {
+    // SPEC §5.5: детей у экземпляра нет — его содержимое это мастер
+    if (Array.isArray(node.children) ? node.children.length > 0 : true) return 'у экземпляра не бывает детей';
   }
-  if (node.type !== 'page') {
+  if (node.type === 'instance') {
+    const instErr = checkInstance(node, doc);
+    if (instErr) return instErr;
+  } else if (node.type !== 'page') {
     const s = node.size;
     if (!s || typeof s !== 'object') return 'нет size';
     for (const ax of ['w', 'h']) {
@@ -315,6 +352,10 @@ function checkNode(node, doc) {
         if (spec.value < 0 || spec.value > MAX_SIZE) return `size.${ax}.value вне диапазона 0..${MAX_SIZE}`;
       }
     }
+  }
+  if (node.component !== undefined) {
+    const compErr = checkComponent(node, doc);
+    if (compErr) return compErr;
   }
   if (node.type === 'frame') {
     const l = node.layout;
@@ -373,6 +414,601 @@ function checkNode(node, doc) {
 }
 
 /* ------------------------------------------------------------------ *
+ * 2.5 Компоненты: библиотека, мастера, экземпляры (круг 19, SPEC §5)
+ *
+ * Новых операций нет (SPEC §5.2): мастер — это ПОЛЕ `component` на обычном узле
+ * библиотеки, экземпляр — узел типа `instance`. Поэтому create/remove/set/move/
+ * setToken, иммутабельность applyOps и отмена через invertOps работают как были.
+ * Синхронизировать нечего: геометрию экземпляра считает решатель (см. expandDoc).
+ * ------------------------------------------------------------------ */
+
+/** Имя компонента для человека и модели. @returns {string} */
+function componentName(master) {
+  const c = master && master.component;
+  const n = c && typeof c.name === 'string' ? c.name.trim() : '';
+  return n || 'Компонент';
+}
+
+/** Пропсы мастера по имени. Дубли и мусор отбрасываются. @returns {Map<string,object>} */
+function propMap(master) {
+  const out = new Map();
+  const list = master && master.component && Array.isArray(master.component.props) ? master.component.props : [];
+  for (const p of list) {
+    if (!p || typeof p !== 'object' || typeof p.name !== 'string' || !p.name) continue;
+    if (!out.has(p.name)) out.set(p.name, p);
+  }
+  return out;
+}
+
+/**
+ * Значение пропса, приведённое к его виду. `undefined` — значение не годится
+ * (такой пропс не применяется, см. SPEC §5.5 и checkInstance).
+ */
+function propValue(prop, raw) {
+  switch (prop && prop.kind) {
+    case 'text': return typeof raw === 'string' ? raw : undefined;
+    case 'number': return isNum(raw) ? raw : undefined;
+    case 'bool': return typeof raw === 'boolean' ? raw : undefined;
+    // цвет живёт в узле и строкой ('accent', '#ff0000'), и обёрткой {token} — берём оба вида
+    case 'color': return (typeof raw === 'string' && raw) || wrappedName(raw, WRAPPED_FIELDS.fill) !== undefined
+      ? deepClone(raw) : undefined;
+    case 'enum': return typeof raw === 'string' && Array.isArray(prop.values) && prop.values.indexOf(raw) >= 0
+      ? raw : undefined;
+    default: return undefined;
+  }
+}
+
+/**
+ * Лежит ли `targetId` в поддереве узла `node`. Идём ВНИЗ по children, а не вверх
+ * по parent: в момент `create` заранее перечисленные дети ещё числятся у прежних
+ * родителей (их перевешивает applyOne уже после проверки схемы), и подъём по
+ * parent отклонял бы законный мастер, созданный одной операцией со своим деревом.
+ * @returns {boolean}
+ */
+function inSubtree(doc, node, targetId) {
+  if (!node || !targetId) return false;
+  if (node.id === targetId) return true;
+  if (!doc || !doc.nodes) return false;
+  const seen = new Set([node.id]);
+  const stack = kidsOf(node).slice();
+  let guard = 0;
+  while (stack.length) {
+    if (guard++ > 100000) return false;
+    const id = stack.pop();
+    if (id === targetId) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const n = doc.nodes[id];
+    if (n) for (const c of kidsOf(n)) stack.push(c);
+  }
+  return false;
+}
+
+/**
+ * Проверка поля `component` по схеме SPEC §5.4.
+ * @returns {string|null} причина или null
+ */
+function checkComponent(node, doc) {
+  const c = node.component;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return 'component должен быть объектом';
+  if (typeof c.name !== 'string' || !c.name.trim()) return 'component.name: нужно непустое имя';
+  if (c.props !== undefined && !Array.isArray(c.props)) return 'component.props должен быть массивом';
+  const seen = new Set();
+  for (const p of (Array.isArray(c.props) ? c.props : [])) {
+    if (!p || typeof p !== 'object') return 'component.props: пропс должен быть объектом';
+    if (typeof p.name !== 'string' || !p.name.trim()) return 'component.props: нужно непустое имя пропса';
+    if (seen.has(p.name)) return `component.props: имя «${p.name}» встречается дважды`;
+    seen.add(p.name);
+    if (!PROP_KINDS.has(p.kind)) return `component.props «${p.name}»: kind «${p.kind}» неизвестен`;
+    if (typeof p.target !== 'string' || !p.target) return `component.props «${p.name}»: нет target`;
+    if (typeof p.path !== 'string' || !p.path) return `component.props «${p.name}»: нет path`;
+    // путь — тот же, что понимает set, значит и запреты те же
+    const parts = p.path.split('.');
+    if (PROTECTED_PATHS.has(parts[0])) return `component.props «${p.name}»: путь «${parts[0]}» защищён`;
+    if (parts.some((x) => UNSAFE_KEYS.has(x))) return `component.props «${p.name}»: путь «${p.path}» защищён`;
+    if (p.kind === 'enum') {
+      const ok = Array.isArray(p.values) && p.values.length && p.values.every((v) => typeof v === 'string' && v);
+      if (!ok) return `component.props «${p.name}»: enum без непустого списка values`;
+    }
+    // SPEC §5.4: target обязан быть узлом ВНУТРИ этого мастера
+    if (doc && doc.nodes && !inSubtree(doc, node, p.target)) {
+      return `component.props «${p.name}»: target «${p.target}» вне мастера`;
+    }
+  }
+  return null;
+}
+
+/** Проверка узла-экземпляра по схеме SPEC §5.5. @returns {string|null} */
+function checkInstance(node, doc) {
+  if (typeof node.of !== 'string' || !node.of) return 'экземпляр: нет ссылки of на мастера';
+  if (node.of === node.id) return 'экземпляр: of указывает на сам экземпляр';
+  if (node.size !== undefined) {
+    if (!node.size || typeof node.size !== 'object' || Array.isArray(node.size)) return 'size экземпляра: нужен объект';
+    for (const ax of ['w', 'h']) {
+      const spec = node.size[ax];
+      if (spec === undefined) continue;   // ось не задана — берётся у мастера
+      if (!spec || !SIZE_MODES.has(spec.mode)) return `size.${ax}: неизвестный режим`;
+      if (spec.mode === 'fixed') {
+        if (!isNum(spec.value)) return `size.${ax}.value должен быть числом`;
+        if (spec.value < 0 || spec.value > MAX_SIZE) return `size.${ax}.value вне диапазона 0..${MAX_SIZE}`;
+      }
+    }
+  }
+  if (node.props !== undefined) {
+    if (!node.props || typeof node.props !== 'object' || Array.isArray(node.props)) return 'props экземпляра: нужен объект';
+    const master = doc && doc.nodes ? doc.nodes[node.of] : null;
+    // мастера может ещё не быть (его создаёт соседняя операция той же транзакции) —
+    // тогда имена пропсов проверять нечем, об этом скажет validate (dead-instance)
+    if (master && master.component) {
+      const known = propMap(master);
+      for (const name of Object.keys(node.props)) {
+        // SPEC §5.5: неизвестное имя пропса — негодная операция
+        if (!known.has(name)) return `props: «${componentName(master)}» не объявлял пропс «${name}»`;
+        if (propValue(known.get(name), node.props[name]) === undefined) {
+          return `props.${name}: значение не годится для вида «${known.get(name).kind}»`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Библиотека ли этот узел (SPEC §5.3). @returns {boolean} */
+function isLibrary(doc, idOrNode) {
+  const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  return !!(n && n.type === 'page' && n.role === LIBRARY_ROLE && doc && n.parent === doc.root);
+}
+
+/** Узел библиотеки документа или null. @returns {object|null} */
+function libraryNode(doc) {
+  const root = nodeById(doc, doc && doc.root);
+  if (!root) return null;
+  for (const id of kidsOf(root)) {
+    const n = nodeById(doc, id);
+    if (isLibrary(doc, n)) return n;
+  }
+  return null;
+}
+
+/** id библиотеки или null. @returns {string|null} */
+function libraryId(doc) {
+  const n = libraryNode(doc);
+  return n ? n.id : null;
+}
+
+/**
+ * Мастер ли узел: поле `component` ПЛЮС место — прямой ребёнок библиотеки
+ * (SPEC §5.3: «его дети — мастера компонентов»). Поле само по себе мастером не
+ * делает: иначе `set component` на карточке внутри доски молча создавал бы
+ * компонент, которого нет в словаре агента, и холст с валидатором расходились бы.
+ * @returns {boolean}
+ */
+function isMaster(doc, idOrNode) {
+  const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  if (!n || !n.component || typeof n.component !== 'object') return false;
+  const lib = libraryNode(doc);
+  return !!lib && n.parent === lib.id;
+}
+
+/** Мастер экземпляра или null (ссылка мёртвая либо ведёт вне библиотеки). */
+function masterOf(doc, idOrNode) {
+  const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  if (!n || n.type !== 'instance' || typeof n.of !== 'string') return null;
+  const m = nodeById(doc, n.of);
+  return isMaster(doc, m) ? m : null;
+}
+
+/**
+ * Размер экземпляра: своя ось, если задана, иначе ось мастера. Так экземпляр
+ * кнопки 200×48 получает её размер сам, а ресайз одной кромкой (он пишет только
+ * потянутую ось — см. Stage._resizeOps) не превращает вторую ось в «по содержимому».
+ * @returns {{w:object,h:object}}
+ */
+function instanceSize(inst, master) {
+  const own = inst && inst.size && typeof inst.size === 'object' ? inst.size : null;
+  const base = master && master.size && typeof master.size === 'object' ? master.size : null;
+  const pick = (ax) => {
+    const a = own && own[ax];
+    if (a && SIZE_MODES.has(a.mode)) return deepClone(a);
+    const b = base && base[ax];
+    if (b && SIZE_MODES.has(b.mode)) return deepClone(b);
+    return { mode: 'hug' };
+  };
+  return { w: pick('w'), h: pick('h') };
+}
+
+/**
+ * Список компонентов документа — производная от детей библиотеки, реестра нет
+ * (SPEC §5.4). Это словарь агента: brain строит из него блок «БИБЛИОТЕКА», а
+ * оболочка — панель компонентов.
+ * @returns {Array<{id:string,name:string,props:Array,instances:number}>}
+ */
+function components(doc) {
+  const lib = libraryNode(doc);
+  if (!lib) return [];
+  const used = new Map();
+  for (const id of Object.keys((doc && doc.nodes) || {})) {
+    const n = doc.nodes[id];
+    if (n && n.type === 'instance' && typeof n.of === 'string') used.set(n.of, (used.get(n.of) || 0) + 1);
+  }
+  const out = [];
+  for (const id of kidsOf(lib)) {
+    const n = nodeById(doc, id);
+    if (!n || !n.component || typeof n.component !== 'object') continue;
+    const props = [];
+    for (const p of propMap(n).values()) {
+      props.push({
+        name: p.name, kind: p.kind, target: p.target, path: p.path,
+        ...(p.kind === 'enum' ? { values: p.values.slice() } : {})
+      });
+    }
+    out.push({ id: n.id, name: componentName(n), props, instances: used.get(n.id) || 0 });
+  }
+  return out;
+}
+
+/**
+ * Строка компонента для словаря модели (SPEC §5.9):
+ * `Кнопка(текст, вид: accent|surface)`.
+ * @param {{name:string,props:Array}} info элемент components()
+ * @returns {string}
+ */
+function componentSignature(info) {
+  if (!info) return '';
+  const parts = (info.props || []).map((p) => (p.kind === 'enum' && Array.isArray(p.values) && p.values.length
+    ? `${p.name}: ${p.values.join('|')}` : p.name));
+  return `${info.name}${parts.length ? '(' + parts.join(', ') + ')' : '()'}`;
+}
+
+/**
+ * Экземпляр одной строкой (SPEC §5.9): `Кнопка "Оплатить" вид=accent`.
+ * Без внутренностей — в этом и смысл: выжимка документа схлопывается.
+ * @returns {string}
+ */
+function instanceSummary(doc, idOrNode) {
+  const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  if (!n || n.type !== 'instance') return '';
+  const master = masterOf(doc, n);
+  const name = master ? componentName(master) : `?${n.of}`;
+  const known = propMap(master);
+  const bits = [];
+  for (const [key, p] of known) {
+    const raw = n.props ? n.props[key] : undefined;
+    if (raw === undefined) continue;
+    if (p.kind === 'text') bits.push(`"${raw}"`);
+    else bits.push(`${key}=${typeof raw === 'string' ? raw : wrappedName(raw, WRAPPED_FIELDS.fill) || JSON.stringify(raw)}`);
+  }
+  return bits.length ? `${name} ${bits.join(' ')}` : name;
+}
+
+/* ---------------------- раскрытие экземпляров ---------------------- */
+
+/**
+ * Кеш раскрытия: экземпляр → его синтетические узлы и те узлы документа, от
+ * которых результат зависит. Нужен НЕ ради скорости, а ради ссылок: точечная
+ * отрисовка Stage._patchSVG (круг 16, п.6) сравнивает узлы по ссылке, а у
+ * раскрытых узлов своей ссылки в документе нет. Пока экземпляр и поддерево его
+ * мастера — те же объекты, раскрытие отдаёт ТЕ ЖЕ объекты, и сцена не
+ * пересобирает экземпляры на каждую чужую правку. Правка мастера сразу делает
+ * записи негодными — и все его экземпляры перерисовываются разом.
+ * @type {WeakMap<object,{deps:Array, nodes:Record<string,object>}>}
+ */
+const expandCache = new WeakMap();
+
+/** Свежи ли зависимости записи кеша: те же объекты по тем же id. @returns {boolean} */
+function depsFresh(doc, deps) {
+  for (let i = 0; i < deps.length; i += 2) {
+    if (doc.nodes[deps[i]] !== deps[i + 1]) return false;
+  }
+  return true;
+}
+
+/**
+ * Раскрывает один экземпляр: кладёт в `out` синтетические узлы поддерева мастера
+ * с применёнными пропсами. Корень мастера ложится под id САМОГО экземпляра
+ * (он и стоит на его месте), потомки — под `"<id экземпляра>/<id узла мастера>"`
+ * (SPEC §5.6). В doc.nodes этих узлов нет и не будет.
+ * @param {object} doc
+ * @param {object} inst узел-экземпляр (настоящий или уже синтетический)
+ * @param {string} rootId id для корня мастера
+ * @param {string} ownerId id настоящего экземпляра в документе (для поля instance)
+ * @param {number} depth уровень вложенности, 1 — верхний экземпляр
+ * @param {string[]} chain мастера, раскрытые выше — защита от самовключения
+ * @param {object} out карта синтетических узлов
+ * @param {Array} deps плоский список [id, узел, ...] для кеша
+ */
+function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps) {
+  const lib = libraryNode(doc);
+  deps.push(lib ? lib.id : '', lib || undefined);
+  const master = doc.nodes[inst.of];
+  deps.push(inst.of, master);
+  // мёртвая ссылка, мастер вне библиотеки, самовключение и перебор вложенности —
+  // не зависание и не исключение, а отсутствие раскрытия: об этом скажет validate
+  if (!master || !(lib && master.parent === lib.id) || !master.component) return;
+  if (chain.indexOf(master.id) >= 0) return;
+  if (depth > MAX_INSTANCE_DEPTH) return;
+
+  const known = propMap(master);
+  /** цель → список правок {path, value}: пропсы применяются к узлам мастера */
+  const patches = new Map();
+  const given = inst.props && typeof inst.props === 'object' ? inst.props : {};
+  for (const name of Object.keys(given)) {
+    const p = known.get(name);
+    if (!p) continue;                                  // неизвестное имя НЕ применяется (SPEC §5.5)
+    const v = propValue(p, given[name]);
+    if (v === undefined) continue;
+    let list = patches.get(p.target);
+    if (!list) { list = []; patches.set(p.target, list); }
+    list.push({ path: p.path, value: v });
+  }
+
+  const synId = (mid) => (mid === master.id ? rootId : rootId + '/' + mid);
+  const nested = [];
+  for (const mid of subtreeIds(doc, master.id)) {
+    const mn = doc.nodes[mid];
+    deps.push(mid, mn);
+    if (!mn) continue;
+    // копия поверхностная: setPath ниже делает свою ветку, а сами узлы никто не правит
+    let sn = { ...mn, id: synId(mid), synthetic: true, instance: ownerId, master: mid };
+    if (Array.isArray(mn.children)) sn.children = mn.children.map(synId);
+    if (mid === master.id) {
+      // корень мастера встаёт РОВНО на место экземпляра: его место, размер,
+      // видимость и имя — от экземпляра, вид и содержимое — от мастера
+      sn.parent = inst.parent;
+      delete sn.component;
+      sn.size = instanceSize(inst, mn);
+      if (inst.name !== undefined) sn.name = inst.name;
+      for (const k of ['pos', 'override', 'visible', 'opacity']) {
+        if (inst[k] !== undefined) sn[k] = deepClone(inst[k]);
+        else delete sn[k];
+      }
+      if (inst.role !== undefined) sn.role = inst.role;
+      if (inst.locked !== undefined) sn.locked = inst.locked;
+    } else {
+      sn.parent = synId(mn.parent);
+    }
+    const patch = patches.get(mid);
+    if (patch) for (const one of patch) sn = setPath(sn, one.path, one.value);
+    out[sn.id] = sn;
+    if (sn.type === 'instance') nested.push(sn);
+  }
+  // вложенные экземпляры раскрываем после всего поддерева: запись под тем же id
+  // заменяется раскрытым корнем их мастера
+  for (const sn of nested) {
+    expandOne(doc, sn, sn.id, ownerId, depth + 1, chain.concat(master.id), out, deps);
+  }
+}
+
+/**
+ * Раскрытие всех экземпляров документа. Чистая функция от документа — на этом
+ * стоит детерминированность решателя (SPEC §5.6).
+ * @param {object} doc
+ * @returns {{nodes:Record<string,object>, count:number}} count — сколько экземпляров в документе
+ */
+function expandDoc(doc) {
+  const out = {};
+  let count = 0;
+  if (!doc || !doc.nodes) return { nodes: out, count };
+  for (const id of Object.keys(doc.nodes)) {
+    const inst = doc.nodes[id];
+    if (!inst || inst.type !== 'instance') continue;
+    count += 1;
+    const hit = expandCache.get(inst);
+    if (hit && depsFresh(doc, hit.deps)) { Object.assign(out, hit.nodes); continue; }
+    const local = {};
+    const deps = [];
+    try {
+      expandOne(doc, inst, inst.id, inst.id, 1, [], local, deps);
+      expandCache.set(inst, { deps, nodes: local });
+    } catch (e) {
+      logOnce('expand:throw:' + id, `раскрытие экземпляра «${id}» не удалось`, e);
+    }
+    Object.assign(out, local);
+  }
+  return { nodes: out, count };
+}
+
+/**
+ * Раскрытие одного экземпляра — для оболочки и мозга (превью компонента,
+ * разбор «что внутри этого экземпляра»).
+ * @returns {{nodes:Record<string,object>, root:object|null}|null}
+ */
+function expandInstance(doc, idOrNode) {
+  const inst = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  if (!inst || inst.type !== 'instance') return null;
+  const nodes = {};
+  expandOne(doc, inst, inst.id, inst.id, 1, [], nodes, []);
+  return { nodes, root: nodes[inst.id] || null };
+}
+
+/* ------------------------- миграция и правки ------------------------- */
+
+/**
+ * Где на бесконечном холсте встанет библиотека: ПОД досками, а не правее их.
+ * Правее — там, куда оболочка кладёт следующую новую доску (она считает место от
+ * последней доски по горизонтали), и библиотека оказалась бы ровно под ней.
+ * Снизу пусто всегда.
+ */
+function libraryPlace(doc) {
+  const root = nodeById(doc, doc && doc.root);
+  let bottom = 0;
+  let left = 0;
+  let first = true;
+  for (const id of kidsOf(root)) {
+    const n = nodeById(doc, id);
+    if (!n) continue;
+    const pos = nodePos(n);
+    const h = n.size && n.size.h && n.size.h.mode === 'fixed' ? numIn(n.size.h.value, 0, MAX_SIZE, 0) : 400;
+    bottom = Math.max(bottom, pos.y + h);
+    left = first ? pos.x : Math.min(left, pos.x);
+    first = false;
+  }
+  return { x: r2(first ? 0 : left), y: r2(first ? 0 : bottom + 120) };
+}
+
+/** Заготовка узла библиотеки. @returns {object} */
+function libraryTemplate(doc) {
+  return {
+    type: 'page', id: uid('lib'), name: 'Библиотека', role: LIBRARY_ROLE,
+    parent: doc.root, children: [], pos: libraryPlace(doc),
+    // колонкой, а не по pos: мастера не должны наезжать друг на друга
+    layout: normalizeLayout({ mode: 'column', gap: 24, align: 'start' })
+  };
+}
+
+/**
+ * Операции, добавляющие документу библиотеку. Пустой массив, если она уже есть.
+ * Нужны, когда библиотеку заводят внутри отменяемой транзакции (создание
+ * первого компонента) — см. makeComponentOps.
+ * @returns {object[]}
+ */
+function ensureLibraryOps(doc) {
+  if (!doc || !doc.nodes || !doc.root || !doc.nodes[doc.root]) return [];
+  if (libraryNode(doc)) return [];
+  return [ops.create(libraryTemplate(doc))];
+}
+
+/**
+ * МИГРАЦИЯ (круг 19, п.1). Документы, сохранённые до компонентов, библиотеки не
+ * имеют: их приводит к нынешнему виду ровно этот вызов — один, идемпотентный,
+ * без мутации входа. Возвращает ТОТ ЖЕ документ, если библиотека уже есть.
+ * Оболочке довольно позвать его после загрузки из `db` и после импорта JSON.
+ * (createDoc его НЕ зовёт сам намеренно: импорт сверяет узлы разобранного
+ * документа с узлами файла и посчитал бы новую библиотеку чужим узлом.)
+ * @param {object} doc
+ * @returns {object} Doc с библиотекой
+ */
+function ensureLibrary(doc) {
+  const list = ensureLibraryOps(doc);
+  if (!list.length) return doc;
+  const res = applyOps(doc, list);
+  if (res.error) {
+    logOnce('ensureLibrary:' + res.error.code, `ensureLibrary: библиотеку не добавить — ${res.error.message}`);
+    return doc;
+  }
+  return res.doc;
+}
+
+/**
+ * Можно ли сделать компонентом этот узел. Ответ словами — оболочке для кнопки
+ * и подсказки, мозгу — чтобы не сочинять невозможную правку.
+ * @returns {{ok:boolean, reason?:string}}
+ */
+function canMakeComponent(doc, idOrNode) {
+  const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
+  if (!n) return { ok: false, reason: 'узел не найден' };
+  if (n.id === doc.root) return { ok: false, reason: 'корень документа компонентом не станет' };
+  if (n.type === 'page') return { ok: false, reason: 'страница компонентом не станет' };
+  if (n.type === 'instance') return { ok: false, reason: 'это уже экземпляр компонента' };
+  if (isMaster(doc, n)) return { ok: false, reason: 'это уже компонент' };
+  if (isArtboard(doc, n)) return { ok: false, reason: 'доска компонентом не станет' };
+  if (isLibrary(doc, n.parent)) return { ok: false, reason: 'узел уже лежит в библиотеке' };
+  if (ancestors(doc, n.id).some((a) => isLibrary(doc, a) || isMaster(doc, a))) {
+    return { ok: false, reason: 'узел внутри другого компонента' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Операции: сделать узел компонентом. Узел переезжает в библиотеку (библиотека
+ * создаётся, если её нет), получает поле `component`, а на его прежнее место
+ * встаёт экземпляр. Документ не меняется — оболочка применяет это транзакцией.
+ * @param {object} doc
+ * @param {string} id
+ * @param {{name?:string, props?:Array}} [opt] props — по схеме SPEC §5.4
+ * @returns {object[]} пустой массив, если так нельзя (см. canMakeComponent)
+ */
+function makeComponentOps(doc, id, opt = {}) {
+  const node = nodeById(doc, id);
+  if (!canMakeComponent(doc, node).ok) return [];
+  const parentId = node.parent;
+  const parent = nodeById(doc, parentId);
+  const index = parent && Array.isArray(parent.children) ? parent.children.indexOf(id) : -1;
+  const list = ensureLibraryOps(doc);
+  // библиотеки может ещё не быть — её id знаем из операции создания
+  const libId = libraryNode(doc) ? libraryId(doc) : list[0].node.id;
+  const name = typeof opt.name === 'string' && opt.name.trim() ? opt.name.trim() : displayName(doc, node);
+  list.push(ops.move(id, libId, 0));
+  list.push(ops.set(id, 'component', { name, props: Array.isArray(opt.props) ? deepClone(opt.props) : [] }));
+  // мастер внутри библиотеки живёт в потоке: pos и override там не про что
+  if (node.pos !== undefined) list.push(ops.set(id, 'pos', undefined));
+  if (node.override !== undefined) list.push(ops.set(id, 'override', undefined));
+  const inst = {
+    type: 'instance', id: uid('i'), name: node.name, parent: parentId, of: id, props: {},
+    ...(node.pos !== undefined ? { pos: deepClone(node.pos) } : {}),
+    ...(node.override !== undefined ? { override: deepClone(node.override) } : {})
+  };
+  list.push(ops.create(inst, index < 0 ? undefined : index));
+  return list;
+}
+
+/**
+ * Операции: поставить экземпляр компонента.
+ * @param {object} doc
+ * @param {{of:string, parent:string, index?:number, props?:object, pos?:object, name?:string, size?:object}} spec
+ * @returns {object[]} пустой массив, если компонент или родитель не годятся
+ */
+function instanceOps(doc, spec) {
+  if (!spec || typeof spec !== 'object') return [];
+  const master = nodeById(doc, spec.of);
+  if (!isMaster(doc, master)) return [];
+  const parent = nodeById(doc, spec.parent);
+  if (!parent || !CONTAINER_TYPES.has(parent.type)) return [];
+  const node = {
+    type: 'instance', id: uid('i'), parent: parent.id, of: master.id,
+    props: spec.props && typeof spec.props === 'object' ? deepClone(spec.props) : {},
+    ...(typeof spec.name === 'string' ? { name: spec.name } : {}),
+    ...(spec.pos ? { pos: deepClone(spec.pos) } : {}),
+    ...(spec.size ? { size: deepClone(spec.size) } : {})
+  };
+  return [ops.create(node, isNum(spec.index) ? spec.index : undefined)];
+}
+
+/**
+ * Операции: ОТСОЕДИНИТЬ экземпляр (SPEC §5.7) — настоящая копия поддерева
+ * мастера на его месте, одной отменяемой транзакцией `remove` + `create`.
+ * Документ не мутируется: оболочка вешает на этот список кнопку, мозг — правку.
+ * @param {object} doc
+ * @param {string} id
+ * @returns {object[]} пустой массив, если это не экземпляр или мастер мёртв
+ */
+function detachInstanceOps(doc, id) {
+  const inst = nodeById(doc, id);
+  if (!inst || inst.type !== 'instance') return [];
+  const ex = expandInstance(doc, inst);
+  if (!ex || !ex.root) return [];
+  const parent = nodeById(doc, inst.parent);
+  if (!parent || !Array.isArray(parent.children)) return [];
+  const index = parent.children.indexOf(id);
+  // новые id: копия настоящая, а не вторая ссылка на мастера
+  const fresh = new Map();
+  const order = [];
+  const walk = (sid, depth) => {
+    const n = ex.nodes[sid];
+    if (!n || depth > MAX_DEPTH || fresh.has(sid)) return;
+    fresh.set(sid, uid(n.type === 'frame' ? 'f' : 'n'));
+    order.push(sid);
+    for (const c of kidsOf(n)) walk(c, depth + 1);
+  };
+  walk(inst.id, 0);
+  const list = [ops.remove(id)];
+  for (let i = 0; i < order.length; i++) {
+    const sid = order[i];
+    const src = ex.nodes[sid];
+    const node = deepClone(src);
+    delete node.synthetic;
+    delete node.instance;
+    delete node.master;
+    node.id = fresh.get(sid);
+    node.parent = i === 0 ? inst.parent : fresh.get(src.parent) || inst.parent;
+    // дети создаются своими операциями и встают в родителя сами
+    if (Array.isArray(node.children)) node.children = [];
+    list.push(i === 0 ? ops.create(node, index < 0 ? undefined : index) : ops.create(node));
+  }
+  return list;
+}
+
+/* ------------------------------------------------------------------ *
  * 3. Документ и утилиты обхода
  * ------------------------------------------------------------------ */
 
@@ -428,10 +1064,18 @@ function placeholderName(doc, idOrNode) {
   // Круг 18: человек называет их досками, и весь интерфейс перешёл на это слово. Имя-заглушку
   // рисует и холст, и рельс — расходиться им нельзя, поэтому слово меняется здесь, в одном месте.
   if (doc && isArtboard(doc, n)) return 'Доска';
+  if (doc && isLibrary(doc, n)) return 'Библиотека';
+  // круг 19: безымянный экземпляр зовут его компонентом — в рельсе слоёв «Узел»
+  // ничего не говорил, а имя компонента и есть то, чем человек его называет
+  if (n.type === 'instance') {
+    const master = doc ? masterOf(doc, n) : null;
+    return master ? componentName(master) : 'Экземпляр';
+  }
   return PLACEHOLDER_NAMES[n.type] || 'Узел';
 }
 const PLACEHOLDER_NAMES = {
-  frame: 'Группа', text: 'Текст', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка'
+  frame: 'Группа', text: 'Текст', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка',
+  instance: 'Экземпляр'
 };
 
 /**
@@ -523,7 +1167,17 @@ function resolveTarget(doc, ref) {
   const key = ref.trim();
   if (!key) return null;
   if (doc.nodes[key]) return doc.nodes[key];
-  const all = Object.values(doc.nodes);
+  /* Круг 19: поиск по ИМЕНИ, РОЛИ и ТЕКСТУ не заходит в библиотеку. Мастер
+     компонента «Кнопка» иначе перебивал кнопку на доске («кнопка» → мастер), и
+     точечная правка от агента молча меняла бы ВСЕ экземпляры там, где человек
+     говорил про один узел на экране. Компоненты адресуются отдельным каналом —
+     словарём components(doc) и полем `of` экземпляра (SPEC §5.9); по точному id
+     мастер по-прежнему находится (проверка выше). */
+  const libId = libraryId(doc);
+  const hidden = libId ? new Set(subtreeIds(doc, libId)) : null;
+  const all = hidden
+    ? Object.values(doc.nodes).filter((n) => !hidden.has(n.id))
+    : Object.values(doc.nodes);
   const low = key.toLowerCase();
   // роль учитываем только тогда, когда запрос указывает ровно на одну роль
   const roles = ROLE_PATTERNS.filter(([role, re]) => role === low || re.test(key));
@@ -618,14 +1272,22 @@ function applyOne(draft, op) {
       if (!node.id) node.id = uid();
       if (draft.nodes[node.id]) return opErr('bad-node', `create: id «${node.id}» уже занят`);
       if (node.type === 'frame' || node.type === 'page') node.children = Array.isArray(node.children) ? node.children.slice() : [];
-      if (node.type !== 'page' && !node.size) node.size = sizeSpec('hug', 'hug');
+      // круг 19: у экземпляра размер НЕ достраиваем — незаданная ось берётся у
+      // мастера (см. instanceSize). Достроенный hug сделал бы экземпляр кнопки
+      // 200×48 размером «по содержимому» и увёл бы его вид от компонента.
+      if (node.type !== 'page' && node.type !== 'instance' && !node.size) node.size = sizeSpec('hug', 'hug');
       // layout нормализуем и здесь: `set layout.*` это делал, а `create` — нет,
       // поэтому сырая операция с layout:{padding:8} отклонялась («padding должен
       // быть объектом»), а с {mode,gap} кладла в документ половину объекта.
       // Отсутствующий layout не добавляем — он равносилен DEFAULT_LAYOUT.
       if (node.type === 'frame' && node.layout !== undefined) node.layout = normalizeLayout(node.layout);
       const parent = node.parent ? draft.nodes[node.parent] : null;
-      if (node.type !== 'page') {
+      /* Круг 19, п.1: родитель нужен всем, кроме страницы БЕЗ родителя (корень).
+         Страница-библиотека — тоже ребёнок корня: ей нужен и живой родитель, и
+         место в его children, иначе она висела бы в doc.nodes мёртвым грузом
+         и pruneBrokenEdges выбросил бы её как недостижимую. */
+      const needsParent = node.type !== 'page' || !!node.parent;
+      if (needsParent) {
         if (!parent) return opErr('bad-parent', `create: родитель «${node.parent}» не найден`);
         if (!CONTAINER_TYPES.has(parent.type)) return opErr('bad-parent', 'create: родитель не контейнер');
       }
@@ -646,7 +1308,7 @@ function applyOne(draft, op) {
         if (draft.nodes[c].type === 'page') return opErr('bad-node', `create: «${c}» — страница, её нельзя вложить`);
       }
 
-      if (node.type !== 'page') {
+      if (needsParent) {
         const list = draft.nodes[parent.id].children.slice();
         const idx = isNum(op.index) ? clamp(Math.round(op.index), 0, list.length) : list.length;
         list.splice(idx, 0, node.id);
@@ -718,6 +1380,16 @@ function applyOne(draft, op) {
       if (!parent) return opErr('bad-parent', `move: родитель «${op.parent}» не найден`);
       if (!CONTAINER_TYPES.has(parent.type)) return opErr('bad-parent', 'move: родитель не контейнер');
       if (op.id === op.parent) return opErr('cycle', 'move: узел не может быть своим родителем');
+      /* Круг 19, п.1: move схемой не перепроверяет узел (он не меняется), поэтому
+         единственное правило о странице проверяем здесь: страница живёт только в
+         корне, и только если это библиотека. Иначе `move` заводил бы в документе
+         страницу внутри фрейма — вид, который checkNode отклоняет, а solve
+         раскладывает как контейнер. */
+      if (draft.nodes[op.id] && draft.nodes[op.id].type === 'page') {
+        if (op.id === draft.root) return opErr('protected-path', 'move: корень не перевешивают');
+        if (op.parent !== draft.root) return opErr('bad-parent', 'move: страница живёт только в корне');
+        if (draft.nodes[op.id].role !== LIBRARY_ROLE) return opErr('bad-parent', 'move: эту страницу перевешивать нельзя');
+      }
       let p = parent;
       let guard = 0;
       while (p && guard++ < MAX_DEPTH) {
@@ -1329,7 +2001,9 @@ function flowLayout(ctx, node, boxW, boxH) {
   if (hit) return hit;
   const L = normalizeLayout(node.layout);
   const pad = L.padding;
-  const kids = kidsOf(node).map((id) => ctx.doc.nodes[id]).filter((n) => n && n.visible !== false);
+  // круг 19: детей берём из карты РАСКРЫТОГО документа — у раскрытого узла
+  // экземпляра дети синтетические, в doc.nodes их нет (SPEC §5.6)
+  const kids = kidsOf(node).map((id) => ctx.nodes[id]).filter((n) => n && n.visible !== false);
   const flowKids = kids.filter((k) => !k.override);
   const absKids = kids.filter((k) => k.override);
   const innerW = boxW === null ? null : Math.max(0, r2(boxW - pad.l - pad.r));
@@ -1522,7 +2196,11 @@ function placeNode(ctx, node, x, y, w, h, depth) {
   }
   ctx.placed.add(node.id);
   ctx.rects[node.id] = { x: r2(x), y: r2(y), w: r2(w), h: r2(h) };
-  ctx.order.push(node.id);
+  /* Круг 19, п.4: в geo.order только узлы САМОГО документа. Порядок читают
+     хит-тест и выбор верхнего узла (Stage._topUnder), а раскрытые узлы выделять
+     нельзя — экземпляр берётся и таскается как один узел (SPEC §5, п.5 задания).
+     Прямоугольники у раскрытых узлов при этом есть: по ним рисуют и меряют. */
+  if (ctx.doc.nodes[node.id]) ctx.order.push(node.id);
   if (node.type === 'text') {
     const style = resolveTextStyle(ctx.doc, node);
     const sw = (node.size && node.size.w) || { mode: 'hug' };
@@ -1546,6 +2224,7 @@ function solve(doc, opts) {
   const options = opts || {};
   const ctx = {
     doc,
+    nodes: (doc && doc.nodes) || {},
     m: makeMeasurer(options),
     measCache: new Map(),
     flowCache: new Map(),
@@ -1553,15 +2232,24 @@ function solve(doc, opts) {
     placed: new Set(),  // уже размещённые — ловит узел с двумя родителями
     rects: {}, lines: {}, order: []
   };
-  const geo = { rects: ctx.rects, lines: ctx.lines, order: ctx.order };
+  const geo = { rects: ctx.rects, lines: ctx.lines, order: ctx.order, expanded: {} };
   if (!doc || !doc.nodes || !doc.nodes[doc.root]) {
     logOnce('solve:empty', 'solve: документ пуст или повреждён');
     return geo;
   }
+  /* Круг 19, п.4 (SPEC §5.6): экземпляры раскрываются ДО раскладки — один раз,
+     чистой функцией от документа. Дальше решатель работает с общей картой
+     «документ + раскрытые узлы» и не получает ни одного особого случая: поток,
+     hug/fill, перенос текста и обрезка считаются раскрытому поддереву так же,
+     как настоящему. Раскрытые узлы наружу отдаются в geo.expanded — по ним
+     рисует Stage, в doc.nodes их нет и не будет. */
+  const ex = expandDoc(doc);
+  geo.expanded = ex.nodes;
+  if (ex.count) ctx.nodes = { ...doc.nodes, ...ex.nodes };
   const root = doc.nodes[doc.root];
   ctx.rects[root.id] = { x: 0, y: 0, w: 0, h: 0 };
   for (const id of kidsOf(root)) {
-    const child = doc.nodes[id];
+    const child = ctx.nodes[id];
     if (!child) continue;
     const pos = nodePos(child);
     const m = measureNode(ctx, child, null, null);
@@ -1671,7 +2359,10 @@ function contrastRatio(hexA, hexB) {
  * 8. Валидаторы
  * ------------------------------------------------------------------ */
 
-const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'off-scale': 'info', 'empty-frame': 'info' };
+/* Круг 19, п.7 (SPEC §5.8): четыре кода про компоненты. Первые три блокирующие —
+   документ с ними нельзя показать как верный; вложенность глубже предела — warn:
+   макет при этом рисуется, просто дальше предела не раскрывается. */
+const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info' };
 const SEV_RANK = { error: 0, warn: 1, info: 2 };
 
 function nearestFill(doc, node) {
@@ -1683,6 +2374,101 @@ function nearestFill(doc, node) {
     cur = cur.parent ? doc.nodes[cur.parent] : null;
   }
   return resolveColor(doc, (doc.tokens && doc.tokens.colors && doc.tokens.colors.canvas) || '#ffffff');
+}
+
+/**
+ * Проверки компонентов (круг 19, п.7; SPEC §5.8): dead-instance, unknown-prop,
+ * component-cycle, instance-too-deep. Считается по СТРУКТУРЕ, без геометрии:
+ * мёртвая ссылка и самовключение — свойства документа, а не раскладки.
+ * @param {object} doc
+ * @param {(code:string,nodeId:string,message:string)=>void} add
+ */
+function validateComponents(doc, add) {
+  const lib = libraryNode(doc);
+  /** мастера библиотеки: id → узел, в порядке детей библиотеки */
+  const masters = new Map();
+  if (lib) {
+    for (const id of kidsOf(lib)) {
+      const n = nodeById(doc, id);
+      if (n && n.component && typeof n.component === 'object') masters.set(id, n);
+    }
+  }
+  const instances = [];
+  for (const id of Object.keys(doc.nodes)) {
+    const n = doc.nodes[id];
+    if (n && n.type === 'instance') instances.push(n);
+  }
+  if (!instances.length && !masters.size) return;
+
+  /** мастер → мастера, чьи экземпляры лежат внутри него */
+  const uses = new Map();
+  for (const mid of masters.keys()) {
+    const set = new Set();
+    for (const nid of subtreeIds(doc, mid)) {
+      const n = doc.nodes[nid];
+      if (n && n.type === 'instance' && typeof n.of === 'string') set.add(n.of);
+    }
+    uses.set(mid, set);
+  }
+  // самовключение: от мастера по ссылкам можно вернуться в него же
+  const cyclic = new Set();
+  for (const mid of masters.keys()) {
+    const seen = new Set();
+    const stack = [...(uses.get(mid) || [])];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (cur === mid) { cyclic.add(mid); break; }
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      for (const nx of (uses.get(cur) || [])) stack.push(nx);
+    }
+  }
+  for (const [mid, m] of masters) {
+    if (cyclic.has(mid)) {
+      add('component-cycle', mid, `компонент «${componentName(m)}» содержит экземпляр самого себя`);
+    }
+  }
+  /** насколько глубоко вкладываются экземпляры, если поставить экземпляр этого мастера */
+  const depthOf = new Map();
+  const TOO = MAX_INSTANCE_DEPTH + 2;
+  const masterDepth = (mid) => {
+    if (depthOf.has(mid)) return depthOf.get(mid);
+    if (cyclic.has(mid)) { depthOf.set(mid, TOO); return TOO; }
+    depthOf.set(mid, 1);   // страховка от повторного входа
+    let best = 1;
+    for (const nx of (uses.get(mid) || [])) {
+      if (!masters.has(nx)) continue;
+      best = Math.max(best, 1 + masterDepth(nx));
+      if (best >= TOO) break;
+    }
+    depthOf.set(mid, best);
+    return best;
+  };
+
+  for (const n of instances) {
+    const master = masters.get(n.of);
+    if (!master) {
+      add('dead-instance', n.id, nodeById(doc, n.of)
+        ? `«${displayName(doc, n)}»: «${n.of}» — не компонент библиотеки`
+        : `«${displayName(doc, n)}»: компонента «${n.of}» в документе нет`);
+      continue;
+    }
+    const known = propMap(master);
+    const given = n.props && typeof n.props === 'object' && !Array.isArray(n.props) ? n.props : {};
+    for (const key of Object.keys(given).sort()) {
+      if (!known.has(key)) {
+        add('unknown-prop', n.id, `«${componentName(master)}» не объявлял пропс «${key}»`);
+      }
+    }
+    // о самовключении уже сказано кодом component-cycle — вторую жалобу на те же
+    // узлы не шлём, иначе на один цикл сыплется по строке на каждый экземпляр
+    if (cyclic.has(master.id)) continue;
+    const d = masterDepth(master.id);
+    if (d > MAX_INSTANCE_DEPTH) {
+      add('instance-too-deep', n.id, `вложенность экземпляров ${Math.min(d, TOO)} глубже предела ${MAX_INSTANCE_DEPTH}`
+        + ` — глубже этого «${componentName(master)}» не раскрывается`);
+    }
+  }
 }
 
 /**
@@ -1815,6 +2601,7 @@ function validate(doc, geo, opts) {
       }
     }
   }
+  validateComponents(doc, add);
   out.sort((a, b) => (SEV_RANK[a.severity] - SEV_RANK[b.severity])
     || a.code.localeCompare(b.code) || a.nodeId.localeCompare(b.nodeId));
   return out;
@@ -1868,6 +2655,13 @@ function buildDemo(doc) {
   const E = (parent, name, o = {}) => push({
     type: 'ellipse', id: uid('e'), name, parent, size: sizeSpec(o.w, o.h),
     ...(o.fill ? { fill: o.fill } : {}), ...(o.stroke ? { stroke: o.stroke } : {}), radius: 999
+  });
+  /** instance(parent, мастер, пропсы, {name,size,pos}) — круг 19, п.9 */
+  const I = (parent, of, props, o = {}) => push({
+    type: 'instance', id: uid('i'), parent, of: of.id, props: { ...props },
+    ...(o.name ? { name: o.name } : {}),
+    ...(o.size ? { size: o.size } : {}),
+    ...(o.pos ? { pos: o.pos } : {})
   });
 
   /* ---------- Артборд 1: мобильный экран «Маршрут дня» ---------- */
@@ -1975,6 +2769,69 @@ function buildDemo(doc) {
   row(['Экспорт в SVG', 'готово', 'Лиза Май', '24 сен']);
   row(['Библиотека токенов', 'в плане', 'Марк Орлов', '1 окт']);
 
+  /* ---------- Библиотека компонентов (круг 19, п.9; SPEC §5.3) ----------
+     Живая, а не пустая: без неё ни соседи, ни критики не увидят компоненты
+     вживую. Библиотека — страница с role:'library' рядом с досками; досками
+     её не считают ни isArtboard, ни artboards, ни экспорт «всё». Стоит правее
+     обеих досок (см. libraryPlace), поэтому существующие доски не поехали. */
+  const lib = push({
+    type: 'page', id: uid('lib'), name: 'Библиотека', role: LIBRARY_ROLE,
+    parent: doc.root, children: [], pos: libraryPlace(doc),
+    layout: normalizeLayout({ mode: 'column', gap: 24, align: 'start' })
+  });
+
+  const btnM = F(lib.id, 'Кнопка', {
+    w: 'hug', h: 'hug', fill: 'accent', radius: 16, role: 'button',
+    layout: { mode: 'row', gap: 8, align: 'center', justify: 'center', padding: { t: 16, r: 20, b: 16, l: 20 } }
+  });
+  const btnMLabel = T(btnM.id, 'Подпись кнопки', 'Кнопка', { style: { token: 'body', fontWeight: 600 }, color: 'onAccent' });
+  btnM.component = {
+    name: 'Кнопка',
+    props: [
+      { name: 'текст', kind: 'text', target: btnMLabel.id, path: 'characters' },
+      { name: 'вид', kind: 'enum', target: btnM.id, path: 'fill', values: ['accent', 'surface'] }
+    ]
+  };
+
+  const tagM = F(lib.id, 'Метка', {
+    w: 'hug', h: 'hug', fill: 'surfaceAlt', radius: 999, role: 'caption',
+    layout: { mode: 'row', gap: 6, align: 'center', justify: 'center', padding: { t: 6, r: 12, b: 6, l: 12 } }
+  });
+  const tagMLabel = T(tagM.id, 'Текст метки', 'метка', { style: { token: 'caption', fontWeight: 600 }, color: 'muted' });
+  tagM.component = {
+    name: 'Метка',
+    props: [
+      { name: 'текст', kind: 'text', target: tagMLabel.id, path: 'characters' },
+      { name: 'тон', kind: 'enum', target: tagM.id, path: 'fill', values: ['surfaceAlt', 'accentSoft'] }
+    ]
+  };
+
+  const statM = F(lib.id, 'Карточка показателя', {
+    w: 240, h: 'hug', fill: 'surfaceAlt', radius: 16, role: 'metric',
+    layout: { mode: 'column', gap: 6, padding: { t: 20, r: 20, b: 20, l: 20 } }
+  });
+  const statCap = T(statM.id, 'Подпись показателя', 'Показатель', { style: { token: 'caption' }, color: 'muted', w: 'fill' });
+  const statVal = T(statM.id, 'Значение показателя', '0', { style: { token: 'display' }, w: 'fill' });
+  statM.component = {
+    name: 'Карточка показателя',
+    props: [
+      { name: 'заголовок', kind: 'text', target: statCap.id, path: 'characters' },
+      { name: 'значение', kind: 'text', target: statVal.id, path: 'characters' },
+      { name: 'фон', kind: 'enum', target: statM.id, path: 'fill', values: ['surfaceAlt', 'accentSoft'] }
+    ]
+  };
+
+  /* Экземпляры на доске: три метки и кнопка вида surface. Дописаны В КОНЕЦ
+     мобильной доски (под ней было 296 px свободных), поэтому ничего из прежнего
+     содержимого не сдвинулось. Правка мастера меняет их все разом. */
+  const tags = F(mob.id, 'Ярлыки', {
+    w: 'fill', h: 'hug', layout: { mode: 'row', gap: 8, align: 'center', wrap: true }
+  });
+  I(tags.id, tagM, { 'текст': 'сегодня' });
+  I(tags.id, tagM, { 'текст': '3 встречи', 'тон': 'accentSoft' });
+  I(tags.id, tagM, { 'текст': '2 задачи' });
+  I(mob.id, btnM, { 'текст': 'Открыть день', 'вид': 'surface' });
+
   return doc;
 }
 
@@ -2054,7 +2911,7 @@ function repairSizeSpec(spec) {
  * @param {object} n изменяется на месте
  * @returns {string[]} имена поправленных полей — для сообщения человеку
  */
-function repairNode(n) {
+function repairNode(n, doc) {
   const fixed = [];
   const mark = (name) => { if (!fixed.includes(name)) fixed.push(name); };
   if (n.name !== undefined && typeof n.name !== 'string') { delete n.name; mark('name'); }
@@ -2065,7 +2922,48 @@ function repairNode(n) {
       mark('children');
     }
   }
-  if (n.type !== 'page') {
+  /* Круг 19: компонент и экземпляр из чужого файла чиним, а не выбрасываем.
+     Узел, не прошедший checkNode, createDoc удаляет вместе с поддеревом — терять
+     целый мастер из-за одного пропса, целящего в никуда, несоразмерно. */
+  if (n.component !== undefined && checkComponent(n, doc)) {
+    const c = n.component;
+    const name = c && typeof c.name === 'string' && c.name.trim() ? c.name.trim() : null;
+    if (!name) { delete n.component; mark('component'); }
+    else {
+      const props = (Array.isArray(c.props) ? c.props : []).filter((p) => !checkComponent(
+        { ...n, component: { name, props: [p] } }, doc));
+      n.component = { name, props };
+      mark('component');
+    }
+  }
+  if (n.type === 'instance') {
+    if (typeof n.of !== 'string' || !n.of || n.of === n.id) { n.of = ''; mark('of'); }
+    if (n.children !== undefined) { delete n.children; mark('children'); }
+    if (n.size !== undefined && (!n.size || typeof n.size !== 'object' || Array.isArray(n.size))) {
+      delete n.size; mark('size');
+    } else if (n.size) {
+      for (const ax of ['w', 'h']) {
+        const a = n.size[ax];
+        if (a === undefined) continue;
+        const b = repairSizeSpec(a);
+        if (!a || a.mode !== b.mode || a.value !== b.value) { n.size[ax] = b; mark('size.' + ax); }
+      }
+    }
+    if (n.props !== undefined && (!n.props || typeof n.props !== 'object' || Array.isArray(n.props))) {
+      delete n.props; mark('props');
+    } else if (n.props && doc) {
+      // пропс, которого мастер не объявлял, оставить нельзя: checkNode его отклоняет,
+      // и узел вместе с ним уехал бы из документа целиком
+      const known = propMap(doc.nodes ? doc.nodes[n.of] : null);
+      for (const key of Object.keys(n.props)) {
+        const p = known.get(key);
+        if (p && propValue(p, n.props[key]) !== undefined) continue;
+        if (!known.size && !(doc.nodes && doc.nodes[n.of])) continue;   // мастера нет — скажет validate
+        delete n.props[key]; mark('props.' + key);
+      }
+    }
+  }
+  if (n.type !== 'page' && n.type !== 'instance') {
     const src = n.size && typeof n.size === 'object' ? n.size : {};
     const size = { w: repairSizeSpec(src.w), h: repairSizeSpec(src.h) };
     for (const ax of ['w', 'h']) {
@@ -2187,11 +3085,11 @@ function createDoc(seed) {
         logOnce('createDoc:kids:' + id, `createDoc: у «${id}» children не массив — поле убрано`);
       }
       if (n.type === 'frame') n.layout = normalizeLayout(n.layout);
-      if (n.type !== 'page' && !n.size) n.size = sizeSpec('hug', 'hug');
+      if (n.type !== 'page' && n.type !== 'instance' && !n.size) n.size = sizeSpec('hug', 'hug');
       let err = checkNode(n, doc);
       if (!err) continue;
       // узел не по схеме нельзя просто оставить: solve даст NaN и вид залипнет
-      const fixed = repairNode(n);
+      const fixed = repairNode(n, doc);
       err = checkNode(n, doc);
       if (err) {
         // починить нечем (тип, id, родитель) — выбрасываем, как битое ребро
@@ -2215,7 +3113,7 @@ function createDoc(seed) {
       rootNode.parent = null;
       rootNode.id = doc.root;
       if (!Array.isArray(rootNode.children)) rootNode.children = [];
-      repairNode(rootNode);   // children — только строки, остальное по схеме страницы
+      repairNode(rootNode, doc);   // children — только строки, остальное по схеме страницы
       const left = checkNode(rootNode, doc);
       if (left) {
         logOnce('createDoc:root', `createDoc: корень не по схеме (${left}) — начинаем с пустой страницы`);
@@ -2259,6 +3157,13 @@ const STAGE_CSS = `
 .imago-box{position:absolute;border:1px solid var(--accent,#FF6B3D);pointer-events:none;box-sizing:border-box}
 .imago-box.is-hover{border-color:color-mix(in srgb,var(--accent,#FF6B3D) 55%,transparent);border-style:dashed}
 .imago-box.is-detached{border-style:dashed}
+/* Круг 19, п.5: примета экземпляра компонента — ДВОЙНАЯ рамка выделения (вторая
+   линия внутрь, через светлый зазор). Цвет не меняем и второго бейджа не заводим:
+   --agent занят активностью агента, а у кромки уже стоят бейдж размера и плашка
+   «отсоединён», разведённые кругом 16. Две линии читаются как «это ссылка на
+   компонент, а не сам узел» и не спорят ни с пунктиром «отсоединён», ни с
+   бейджем — имя компонента уходит в тот же бейдж (см. Stage._paintUI). */
+.imago-box.is-instance{box-shadow:inset 0 0 0 1px var(--canvas-bg,#F7F6F3),inset 0 0 0 2px var(--accent,#FF6B3D)}
 /* Бейдж — мелкий текст (10px/500), значит норма контраста 4.5:1. Цвет текста берём
    парой к фону из токенов оболочки: #fff на акценте давал 2.83:1 в тёмной теме.
    Положение считает _badge(): под узлом бейдж накрывал соседнее содержимое. */
@@ -3146,6 +4051,44 @@ class Stage {
   }
 
   /**
+   * Узел для ОТРИСОВКИ по id. Круг 19, п.4: у экземпляра рисуется раскрытое
+   * поддерево мастера, и его узлов в doc.nodes нет — они приходят в geo.expanded
+   * (решатель раскрывает их один раз, см. expandDoc). Под id самого экземпляра
+   * там лежит корень мастера с применёнными пропсами, поэтому карта раскрытия
+   * идёт ПЕРВОЙ: сцена рисует компонент, а выделение и бейджи по-прежнему читают
+   * настоящий узел из doc.nodes.
+   * @param {string} id
+   * @returns {object|undefined}
+   */
+  _rn(id) {
+    const ex = this.geo && this.geo.expanded;
+    const syn = ex ? ex[id] : undefined;
+    if (syn) return syn;
+    return this.doc && this.doc.nodes ? this.doc.nodes[id] : undefined;
+  }
+
+  /**
+   * Все узлы поддерева с учётом раскрытых экземпляров — для сборки экспорта
+   * (какие гарнитуры и какие картинки нужны).
+   * @param {string} id
+   * @returns {object[]}
+   */
+  _subtreeNodes(id) {
+    const out = [];
+    const seen = new Set();
+    const walk = (nid, d) => {
+      if (d > MAX_DEPTH || seen.has(nid)) return;
+      const n = this._rn(nid);
+      if (!n) return;
+      seen.add(nid);
+      out.push(n);
+      for (const c of kidsOf(n)) walk(c, d + 1);
+    };
+    walk(id, 0);
+    return out;
+  }
+
+  /**
    * Дешёвая смена выделения: SVG не пересобираем, красим только слой интерфейса.
    * @param {string[]} ids
    * @returns {void}
@@ -3280,7 +4223,10 @@ class Stage {
     const root = doc.nodes[doc.root];
     const loose = [];
     for (const id of kidsOf(root)) {
-      const n = doc.nodes[id];
+      // круг 19: экземпляр прямо на холсте рисуется раскрытым поддеревом, а
+      // страница-библиотека — своими мастерами (плашки и подписи доски у неё нет:
+      // она не доска, см. isLibrary)
+      const n = this._rn(id);
       if (n && n.type !== 'frame' && this.geo.rects[id]) {
         loose.push(id);
         this._drawNode(frag, n, 0, 0);
@@ -3310,7 +4256,7 @@ class Stage {
     if (!sameIdList(abs.map((a) => a.id), st.abs)) return false;
     const root = doc.nodes[doc.root];
     const loose = kidsOf(root).filter((id) => {
-      const n = doc.nodes[id];
+      const n = this._rn(id);
       return n && n.type !== 'frame' && this.geo.rects[id];
     });
     if (!sameIdList(loose, st.loose)) return false;
@@ -3360,7 +4306,9 @@ class Stage {
   _planNode(id, plan, depth) {
     if (depth > MAX_DEPTH) return false;
     const c = this._drawn.get(id);
-    const node = this.doc.nodes[id];
+    // круг 19: планируем по РАСКРЫТОМУ узлу — иначе синтетический ребёнок
+    // экземпляра читался бы как «узла нет» и ветку сносили бы на каждом кадре
+    const node = this._rn(id);
     const rect = this.geo.rects[id];
     const drawNow = !!(node && rect && node.visible !== false);
     if (!c) return !drawNow;            // узел не рисовался: если пора рисовать — только полной сборкой
@@ -3408,7 +4356,7 @@ class Stage {
   /** Заменить собственные фигуры узла (дети остаются на месте). */
   _repaintShapes(id) {
     const c = this._drawn.get(id);
-    const node = this.doc.nodes[id];
+    const node = this._rn(id);
     const rect = this.geo.rects[id];
     if (!c || !node || !rect) return;
     const shapes = this._nodeShapes(node, rect, 0, 0);
@@ -3438,7 +4386,7 @@ class Stage {
    * @returns {Element|null}
    */
   _redrawNode(id) {
-    const node = this.doc.nodes[id];
+    const node = this._rn(id);
     if (!node) return null;
     const seen = this._drawSeen;
     this._drawSeen = new Set();
@@ -3590,7 +4538,7 @@ class Stage {
         g.appendChild(holder);
       }
       for (const cid of kids) {
-        const child = doc.nodes[cid];
+        const child = this._rn(cid);
         if (child) this._drawNode(holder, child, dx, dy, collect, d + 1);
       }
     }
@@ -3618,9 +4566,10 @@ class Stage {
   _fontNeeds(id) {
     const out = new Map();
     const doc = this.doc;
-    if (!doc || !doc.nodes || !doc.nodes[id]) return out;
-    for (const nid of subtreeIds(doc, id)) {
-      const n = doc.nodes[nid];
+    if (!doc || !doc.nodes || !this._rn(id)) return out;
+    // круг 19: обход с учётом раскрытых экземпляров — иначе в экспорт не попали бы
+    // начертания текстов, которые живут только в мастере
+    for (const n of this._subtreeNodes(id)) {
       if (!n || n.type !== 'text' || n.visible === false) continue;
       const chars = String(n.characters === undefined || n.characters === null ? '' : n.characters);
       if (!chars) continue;
@@ -3741,7 +4690,9 @@ class Stage {
     }
     try {
       const id = artboardId || this.activeArtboard;
-      const node = this.doc && this.doc.nodes[id];
+      // круг 19: экспорт доски включает экземпляры; экспорт самого экземпляра
+      // (превью компонента) отдаёт раскрытое поддерево, а не пустую разметку
+      const node = this._rn(id);
       const rect = node && this.geo.rects[id];
       this.lastSVG = null;   // нечего сказать, пока разметка не собралась
       if (!node || !rect) return '';
@@ -3994,10 +4945,9 @@ class Stage {
    */
   _externalImages(id) {
     const doc = this.doc;
-    if (!doc || !doc.nodes || !doc.nodes[id]) return [];
+    if (!doc || !doc.nodes || !this._rn(id)) return [];
     const out = [];
-    for (const nid of subtreeIds(doc, id)) {
-      const n = doc.nodes[nid];
+    for (const n of this._subtreeNodes(id)) {
       if (!n || n.type !== 'image' || n.visible === false) continue;
       const src = safeImageSrc(n.src);
       if (isExternalSrc(src) && !out.includes(src)) out.push(src);
@@ -4073,6 +5023,18 @@ class Stage {
     b.style.top = r2(place.y) + 'px';
     this.ui.appendChild(b);
     return b;
+  }
+
+  /**
+   * Подпись экземпляра для бейджа: ромб и имя компонента. Мёртвая ссылка названа
+   * словами — молчащий ромб выглядел бы как обычный экземпляр (валидатор тем же
+   * временем даёт dead-instance).
+   * @param {object} node узел-экземпляр из документа
+   * @returns {string}
+   */
+  _instanceLabel(node) {
+    const master = masterOf(this.doc, node);
+    return '\u25C7 ' + (master ? componentName(master) : 'нет компонента');
   }
 
   /**
@@ -4278,12 +5240,17 @@ class Stage {
         // узел, который тянут за ручку, рисует предпросмотр: иначе поверх нового
         // размера остаётся рамка старого и непонятно, какой из них настоящий
         if (resizing && this._drag.id === id) continue;
-        this._box(node.override ? 'is-detached' : '', sr);
+        // круг 19, п.5: у экземпляра рамка двойная — видно, что это компонент
+        const inst = node.type === 'instance';
+        this._box((node.override ? 'is-detached' : '') + (inst ? ' is-instance' : ''), sr);
         if (resizing) continue;
         const rect = this.geo.rects[id];
         // полоса подписи артборда: бейджу нельзя ложиться на имя макета
         const band = this._labelBand(id, sr);
-        this._badge(`${Math.round(rect.w)} × ${Math.round(rect.h)}`, sr, '', 0, band);
+        const size = `${Math.round(rect.w)} × ${Math.round(rect.h)}`;
+        // имя компонента — в ТОТ ЖЕ бейдж, а не третьей плашкой у той же кромки:
+        // этажей у кромки два, и третий лёг бы на содержимое (см. badgePlace)
+        this._badge(inst ? `${this._instanceLabel(node)} · ${size}` : size, sr, '', 0, band);
         // «отсоединён» встаёт этажом выше размера, по той же кромке
         if (node.override) this._badge('отсоединён', sr, 'is-detached', 1, band);
       }
@@ -5543,5 +6510,13 @@ export {
   hashGeometry, nodeById, ancestors, isArtboard, artboards, subtreeIds, cloneSubtree,
   resolveTarget, resolveColor, resolveTextStyle, contrastRatio, sizeSpec, normalizeLayout,
   placeholderName, displayName,
-  NODE_TYPES, DEFAULT_TOKENS
+  NODE_TYPES, DEFAULT_TOKENS,
+  /* Круг 19 (SPEC §5): компоненты. Библиотека и миграция — */
+  isLibrary, libraryId, libraryNode, ensureLibrary, ensureLibraryOps,
+  /* словарь компонентов (мозгу и оболочке) — */
+  components, componentSignature, instanceSummary, isMaster, masterOf, componentName,
+  /* правки (возвращают ОПЕРАЦИИ, документ не меняют) — */
+  canMakeComponent, makeComponentOps, instanceOps, detachInstanceOps,
+  /* раскрытие и пределы — */
+  expandInstance, expandDoc, MAX_INSTANCE_DEPTH, PROP_KINDS, LIBRARY_ROLE
 };
