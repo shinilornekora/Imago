@@ -1,0 +1,53 @@
+flowchart TD
+    V["Голос<br/>Web Speech API"] --> S
+    T["Команда текстом"] --> S
+
+    S{"shellIntent<br/>намерения оболочки"}
+    S -->|"отмена · повтор · зум · доски<br/>экспорт · панели · стоп<br/>0 вызовов модели"| SH["Оболочка делает сама,<br/>мгновенно"]
+    S -->|"всё остальное"| DG
+
+    DG["describeDoc<br/>выжимка документа:<br/>дерево, имена, токены,<br/>строка «РАБОТАЕМ С»"]
+    DG --> PLAN
+
+    PLAN["Модель · вызов 1<br/>план: intent + шаги"]
+    PLAN -->|"clarify"| CLR["Переспрос<br/>+ 3 готовые команды<br/>имена слоёв сверены с документом"]
+    PLAN -->|"refuse"| CNT["cannot: в этой модели<br/>документа так нельзя"]
+    PLAN -->|"ask"| ANS["Ответ на вопрос<br/>документ не трогаем"]
+    PLAN -->|"create · edit · theme"| GEN
+
+    GEN["Модель · вызов 2<br/>патч, дерево или палитра"]
+    GEN --> P2O["patchToOps<br/>цель по имени и выделению,<br/>проверка полей и значений,<br/>предупреждения человеку"]
+    P2O --> APPLY
+
+    APPLY["applyOps<br/>create · remove · set · move · setToken<br/>документ неизменяем, на выходе новый"]
+    APPLY --> SOLVE["solve<br/>детерминированный решатель:<br/>поток, размеры, перенос текста,<br/>override — отсоединённый узел"]
+    SOLVE --> VALID{"validate<br/>нарушения раскладки"}
+
+    VALID -->|"блокирующие<br/>и человек их не просил"| FIX["Модель · вызов 3<br/>починка"]
+    FIX --> APPLY
+    VALID -->|"чисто, или человек<br/>сам просил такой цвет"| RES["Результат:<br/>ops · plan · warnings ·<br/>nothingChanged · cannot"]
+
+    RES --> COMMIT
+    SH --> COMMIT
+
+    COMMIT["commit<br/>одна транзакция + обратные операции"]
+    COMMIT --> HIST["История<br/>отмена и повтор одним шагом"]
+    COMMIT --> DRAW["Stage.render<br/>точечное обновление SVG"]
+    COMMIT --> SAVE["Автосохранение<br/>claude.use('db')"]
+    DRAW --> OUT["Ход работы — наверху справа, гаснет сам<br/>Итог с «Отменить» — карточкой внизу"]
+
+    MODEL["Откуда модель:<br/>артефакт — claude.use('sample')<br/>локально — LM Studio :1234"]
+    MODEL -.-> PLAN
+    MODEL -.-> GEN
+    MODEL -.-> FIX
+
+    CLR -.->|"человек выбрал вариант"| S
+
+    classDef shell fill:#1b6ef3,stroke:#1b6ef3,color:#fff
+    classDef brain fill:#38d6b0,stroke:#38d6b0,color:#14161c
+    classDef core fill:#ff6b3d,stroke:#ff6b3d,color:#14161c
+    classDef model fill:#5b6270,stroke:#5b6270,color:#fff
+    class S,SH,COMMIT,HIST,DRAW,SAVE,OUT,V,T shell
+    class DG,PLAN,GEN,P2O,RES,CLR,CNT,ANS brain
+    class APPLY,SOLVE,VALID core
+    class MODEL,FIX model

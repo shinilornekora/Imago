@@ -1,0 +1,51 @@
+flowchart LR
+
+    H(("Человек"))
+
+    subgraph BROWSER["Браузер человека — здесь живёт ВСЁ приложение"]
+        direction TB
+        UI["Оболочка<br/>app.js<br/>холст, слои, инспектор, история,<br/>командная строка, голос"]
+        AG["ИИ-агент<br/>brain.js<br/>выжимка → план → патч → операции<br/>→ проверка → починка<br/>исполняется В БРАУЗЕРЕ, не на сервере"]
+        EN["Движок<br/>core.js<br/>документ, 5 операций, решатель,<br/>валидатор, отрисовка SVG, экспорт"]
+        LS[("localStorage<br/>документ, история,<br/>настройки")]
+        UI --> AG --> EN
+        EN --> UI
+        UI --> LS
+    end
+
+    H -->|"текст"| UI
+    H -->|"голос"| STT
+
+    STT["Распознавание речи<br/>Web Speech API → сервис Google<br/>(звук уходит наружу; это Chrome, не мы)"]
+    STT -->|"текст команды"| UI
+
+    subgraph CLOUD["Вариант 1 — артефакт claude.ai"]
+        direction TB
+        RT["Рантайм артефакта claude.ai<br/>хостит страницу, выдаёт способности"]
+        SAMPLE["claude.use('sample')<br/>→ Anthropic API → Claude<br/>ключей на странице нет,<br/>платит зритель из подписки"]
+        DB[("claude.use('db')<br/>хранилище артефакта<br/>на стороне claude.ai")]
+        RT --> SAMPLE
+        RT --> DB
+    end
+
+    subgraph LOCAL["Вариант 2 — локальная сборка"]
+        direction TB
+        SRV["START.cmd → статический сервер<br/>python http.server или node<br/>отдаёт файлы. Больше НИЧЕГО"]
+        LMS["LM Studio<br/>http://localhost:1234/v1<br/>OpenAI-совместимый API,<br/>модель на GPU человека"]
+    end
+
+    AG -.->|"план · патч · починка<br/>2–3 запроса на команду"| SAMPLE
+    AG -.->|"те же запросы,<br/>тот же код"| LMS
+    UI -.->|"автосохранение"| DB
+    SRV -.->|"index.html, app.js, core.js, brain.js"| BROWSER
+
+    NONE["ЧЕГО НЕТ:<br/>своего бэкенда · базы · веб-сокета ·<br/>уведомлений · аккаунтов · сервера агента.<br/>Один человек, одна вкладка, документ у него"]
+
+    classDef browser fill:#1b6ef3,stroke:#1b6ef3,color:#fff
+    classDef ext fill:#5b6270,stroke:#5b6270,color:#fff
+    classDef store fill:#38d6b0,stroke:#38d6b0,color:#14161c
+    classDef none fill:#ff6b3d,stroke:#ff6b3d,color:#14161c
+    class UI,AG,EN browser
+    class STT,RT,SAMPLE,SRV,LMS ext
+    class LS,DB store
+    class NONE none

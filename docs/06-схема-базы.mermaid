@@ -1,0 +1,81 @@
+erDiagram
+    WORKSPACES ||--o{ MEMBERSHIPS : "кто в пространстве"
+    USERS ||--o{ MEMBERSHIPS : ""
+    WORKSPACES ||--o{ LIBRARIES : "владеет"
+    LIBRARIES ||--o{ LIBRARY_VERSIONS : "неизменяемые версии"
+    WORKSPACES ||--o{ PROJECTS : "владеет"
+    LIBRARY_VERSIONS ||--o{ PROJECTS : "проект прибит к версии"
+    PROJECTS ||--o{ COMPONENT_USAGE : "какие компоненты стоят"
+    PROJECTS ||--o{ AGENT_RUNS : "трассы команд"
+    WORKSPACES ||--o{ ASSETS : "картинки"
+
+    WORKSPACES {
+        uuid id PK
+        text name
+        timestamptz created_at
+    }
+    USERS {
+        uuid id PK
+        text email UK
+        text name
+    }
+    MEMBERSHIPS {
+        uuid workspace_id PK, FK
+        uuid user_id PK, FK
+        text role "owner · editor · viewer"
+    }
+    LIBRARIES {
+        uuid id PK
+        uuid workspace_id FK
+        text name
+        int head_version "последняя выпущенная"
+    }
+    LIBRARY_VERSIONS {
+        uuid library_id PK, FK
+        int version PK
+        jsonb content "components{id: name, props, tree} · scales{spacing, radii} · tokens{colors, type}"
+        uuid created_by FK
+        text note "что изменилось"
+        timestamptz created_at
+    }
+    PROJECTS {
+        uuid id PK
+        uuid workspace_id FK
+        text name
+        uuid library_id FK
+        int library_version FK "к какой версии прибит"
+        jsonb state "актуальный DSL: root, nodes"
+        int version "растёт на каждую запись DSLTS"
+        uuid updated_by FK
+        timestamptz updated_at
+    }
+    COMPONENT_USAGE {
+        uuid project_id PK, FK
+        uuid component_id PK "стабильный id мастера"
+        int instances "сколько экземпляров"
+    }
+    ASSETS {
+        uuid id PK
+        uuid workspace_id FK
+        text storage_key
+        text mime
+        int bytes
+    }
+    AGENT_RUNS {
+        uuid id PK
+        uuid project_id FK
+        uuid user_id FK
+        text utterance
+        text intent "shell · edit · create · theme · ask · clarify · refuse"
+        int base_version
+        int result_version "null если не записано"
+        jsonb ops
+        jsonb warnings
+        text model
+        int calls "вызовов LLM"
+        int tokens_in
+        int tokens_out
+        int ms
+        text status "ok · retry · failed · cancelled"
+        timestamptz created_at
+    }
