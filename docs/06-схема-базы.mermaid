@@ -1,16 +1,78 @@
 erDiagram
-    WORKSPACES ||--o{ MEMBERSHIPS : "кто в пространстве"
-    USERS ||--o{ MEMBERSHIPS : ""
-    WORKSPACES ||--o{ LIBRARIES : "владеет"
-    LIBRARIES ||--o{ LIBRARY_VERSIONS : "неизменяемые версии"
-    WORKSPACES ||--o{ PROJECTS : "владеет"
-    LIBRARY_VERSIONS ||--o{ PROJECTS : "проект прибит к версии"
     PROJECTS ||--o{ OPERATIONS : "журнал — источник истины"
     PROJECTS ||--o{ SNAPSHOTS : "снимки для открытия"
-    PROJECTS ||--o{ COMPONENT_USAGE : "какие компоненты стоят"
+    PROJECTS ||--o{ LIBRARY_VERSIONS : "проект вида library: помеченные снимки"
+    PROJECTS ||--o{ PROJECT_IMPORTS : "продукт импортирует библиотеку"
+    LIBRARY_VERSIONS ||--o{ PROJECT_IMPORTS : "прибит к версии"
     PROJECTS ||--o{ AGENT_RUNS : "трассы команд"
-    WORKSPACES ||--o{ ASSETS : "картинки"
+    WORKSPACES ||--o{ PROJECTS : "владеет (фаза 2)"
+    WORKSPACES ||--o{ MEMBERSHIPS : "кто в пространстве (фаза 2)"
+    USERS ||--o{ MEMBERSHIPS : ""
+    WORKSPACES ||--o{ ASSETS : "картинки (фаза 2)"
 
+    PROJECTS {
+        uuid id PK
+        text name
+        text kind "design · library"
+        bigint head_seq "номер последней транзакции — точка сериализации"
+        int engine "версия формата движка"
+        uuid workspace_id FK "фаза 2"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    OPERATIONS {
+        uuid project_id PK, FK
+        bigint seq PK "присваивает DSLTS"
+        text tx_id UK "с project_id — ключ идемпотентности"
+        bigint base_seq "поверх чего слал клиент"
+        jsonb ops "ПРИМЕНЁННАЯ форма после слияния"
+        jsonb dropped "что не пережило слияние, с причиной"
+        text undo_of "tx_id отменяемой"
+        text redo_of "tx_id повторяемой"
+        text author "отображаемое имя"
+        text author_kind "human · agent · system"
+        text client "clientId вкладки"
+        text title "как показать в истории"
+        int engine
+        timestamptz created_at
+    }
+    SNAPSHOTS {
+        uuid project_id PK, FK
+        bigint seq PK "документ после этой транзакции"
+        jsonb doc "root · nodes · tokens · meta — целиком"
+        int engine
+        timestamptz created_at
+    }
+    LIBRARY_VERSIONS {
+        uuid project_id PK, FK
+        text tag PK "v5"
+        bigint seq "какой снимок помечен"
+        text note
+        timestamptz created_at
+    }
+    PROJECT_IMPORTS {
+        uuid project_id PK, FK
+        uuid library_id PK, FK
+        text version_tag FK
+        timestamptz imported_at
+    }
+    AGENT_RUNS {
+        uuid id PK
+        uuid project_id FK
+        text tx_id "какая транзакция вышла"
+        text author
+        text utterance
+        text intent
+        jsonb plan
+        jsonb warnings
+        text model
+        int calls
+        int tokens_in
+        int tokens_out
+        int ms
+        text status "queued · running · ok · retry · failed · cancelled"
+        timestamptz created_at
+    }
     WORKSPACES {
         uuid id PK
         text name
@@ -26,72 +88,11 @@ erDiagram
         uuid user_id PK, FK
         text role "owner · editor · viewer"
     }
-    LIBRARIES {
-        uuid id PK
-        uuid workspace_id FK
-        text name
-        int head_version
-    }
-    LIBRARY_VERSIONS {
-        uuid library_id PK, FK
-        int version PK
-        jsonb content "components · scales · tokens"
-        uuid created_by FK
-        text note
-        timestamptz created_at
-    }
-    PROJECTS {
-        uuid id PK
-        uuid workspace_id FK
-        text name
-        uuid library_id FK
-        int library_version FK
-        bigint head_seq "номер последней операции"
-        timestamptz updated_at
-    }
-    OPERATIONS {
-        uuid project_id PK, FK
-        bigint seq PK "номер, выдаёт DSLTS"
-        uuid tx_id "транзакция: одна команда = один tx"
-        jsonb ops "create · remove · set · move · setToken"
-        jsonb inverse "обратные операции — для отмены"
-        text author_kind "human · agent"
-        uuid author_id FK
-        bigint base_seq "поверх чего слал клиент"
-        text title "как показать в истории"
-        timestamptz created_at
-    }
-    SNAPSHOTS {
-        uuid project_id PK, FK
-        bigint seq PK "стейт после этой операции"
-        jsonb state "root, nodes"
-        timestamptz created_at
-    }
-    COMPONENT_USAGE {
-        uuid project_id PK, FK
-        uuid component_id PK
-        int instances
-    }
     ASSETS {
         uuid id PK
         uuid workspace_id FK
         text storage_key
+        text sha256
         text mime
-        int bytes
-    }
-    AGENT_RUNS {
-        uuid id PK
-        uuid project_id FK
-        uuid user_id FK
-        uuid tx_id FK "какая транзакция вышла"
-        text utterance
-        text intent
-        jsonb warnings
-        text model
-        int calls
-        int tokens_in
-        int tokens_out
-        int ms
-        text status "ok · retry · failed · cancelled"
-        timestamptz created_at
+        bigint bytes
     }
