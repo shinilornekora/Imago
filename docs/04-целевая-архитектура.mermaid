@@ -2,22 +2,22 @@ flowchart LR
 
     U(("Человек"))
     NGINX["NGINX"]
-    CLIENT["CLIENT<br/>оболочка + движок · история отмены у себя"]
+    CLIENT["CLIENT<br/>оболочка + движок · свои правки применяет сразу"]
     ORCH["Orchestrator<br/>знает только сервисы"]
     JEV["JEV<br/>команда оболочки?"]
     DUIL["DUIL<br/>Design UI Library — читает библиотеки"]
-    DSLR["DSLR<br/>DSL Reader — читает стейт проекта"]
+    DSLR["DSLR<br/>DSL Reader — снимок + хвост журнала"]
     LLM["LLM"]
     DSLV["DSLV<br/>DSL Validator — движок, копия, суд"]
-    DSLTS["DSLTS<br/>DSL Transformer — только пишет"]
-    DB[("База<br/>актуальный стейт проектов · библиотеки")]
+    DSLTS["DSLTS<br/>DSL Transaction — секвенсор: нумерует, перекладывает, пишет, рассылает"]
+    DB[("База<br/>журнал операций · снимки · библиотеки")]
 
     CLIENT -->|"0 · открыть проект"| ORCH
     ORCH -->|"0"| DSLR
-    DSLR -->|"0 · стейт + версия"| ORCH
+    DSLR -->|"0 · стейт + номер последней операции"| ORCH
     U -->|"1 · HTTPS"| NGINX
     NGINX -->|"2"| CLIENT
-    CLIENT -->|"3 · команда"| ORCH
+    CLIENT -->|"3 · команда агенту / ручная правка = транзакция"| ORCH
     ORCH -->|"4"| JEV
     JEV -->|"5 · да / нет"| ORCH
     ORCH -->|"6"| DUIL
@@ -26,12 +26,12 @@ flowchart LR
     LLM -->|"9 · патч"| ORCH
     ORCH -->|"10 · стейт + патч"| DSLV
     DSLV -->|"11 · годные операции / нарушение → снова 8"| ORCH
-    ORCH -->|"12 · стейт + операции"| DSLTS
-    DSLTS -->|"13 · новая версия"| ORCH
-    DSLTS -->|"12a · пишет новый стейт"| DB
+    ORCH -->|"12 · транзакция + номер базы"| DSLTS
+    DSLTS -->|"13 · номер, при перекладке — что изменилось"| ORCH
+    DSLTS -->|"12a · дописывает журнал, раз в N — снимок"| DB
     DB -->|"срез библиотек"| DUIL
-    DB -->|"стейт проекта"| DSLR
-    ORCH -->|"6a · при открытии — стейт; дальше — операции, версия, стадии"| CLIENT
+    DB -->|"снимок + хвост"| DSLR
+    ORCH -->|"6a · при открытии — стейт; дальше — каждая транзакция всем, стадии, присутствие"| CLIENT
 
     classDef human fill:#1b6ef3,stroke:#1b6ef3,color:#fff
     classDef infra fill:#7c6cf5,stroke:#7c6cf5,color:#fff

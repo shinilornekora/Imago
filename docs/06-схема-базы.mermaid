@@ -5,6 +5,8 @@ erDiagram
     LIBRARIES ||--o{ LIBRARY_VERSIONS : "неизменяемые версии"
     WORKSPACES ||--o{ PROJECTS : "владеет"
     LIBRARY_VERSIONS ||--o{ PROJECTS : "проект прибит к версии"
+    PROJECTS ||--o{ OPERATIONS : "журнал — источник истины"
+    PROJECTS ||--o{ SNAPSHOTS : "снимки для открытия"
     PROJECTS ||--o{ COMPONENT_USAGE : "какие компоненты стоят"
     PROJECTS ||--o{ AGENT_RUNS : "трассы команд"
     WORKSPACES ||--o{ ASSETS : "картинки"
@@ -28,14 +30,14 @@ erDiagram
         uuid id PK
         uuid workspace_id FK
         text name
-        int head_version "последняя выпущенная"
+        int head_version
     }
     LIBRARY_VERSIONS {
         uuid library_id PK, FK
         int version PK
-        jsonb content "components{id: name, props, tree} · scales{spacing, radii} · tokens{colors, type}"
+        jsonb content "components · scales · tokens"
         uuid created_by FK
-        text note "что изменилось"
+        text note
         timestamptz created_at
     }
     PROJECTS {
@@ -43,16 +45,32 @@ erDiagram
         uuid workspace_id FK
         text name
         uuid library_id FK
-        int library_version FK "к какой версии прибит"
-        jsonb state "актуальный DSL: root, nodes"
-        int version "растёт на каждую запись DSLTS"
-        uuid updated_by FK
+        int library_version FK
+        bigint head_seq "номер последней операции"
         timestamptz updated_at
+    }
+    OPERATIONS {
+        uuid project_id PK, FK
+        bigint seq PK "номер, выдаёт DSLTS"
+        uuid tx_id "транзакция: одна команда = один tx"
+        jsonb ops "create · remove · set · move · setToken"
+        jsonb inverse "обратные операции — для отмены"
+        text author_kind "human · agent"
+        uuid author_id FK
+        bigint base_seq "поверх чего слал клиент"
+        text title "как показать в истории"
+        timestamptz created_at
+    }
+    SNAPSHOTS {
+        uuid project_id PK, FK
+        bigint seq PK "стейт после этой операции"
+        jsonb state "root, nodes"
+        timestamptz created_at
     }
     COMPONENT_USAGE {
         uuid project_id PK, FK
-        uuid component_id PK "стабильный id мастера"
-        int instances "сколько экземпляров"
+        uuid component_id PK
+        int instances
     }
     ASSETS {
         uuid id PK
@@ -65,14 +83,12 @@ erDiagram
         uuid id PK
         uuid project_id FK
         uuid user_id FK
+        uuid tx_id FK "какая транзакция вышла"
         text utterance
-        text intent "shell · edit · create · theme · ask · clarify · refuse"
-        int base_version
-        int result_version "null если не записано"
-        jsonb ops
+        text intent
         jsonb warnings
         text model
-        int calls "вызовов LLM"
+        int calls
         int tokens_in
         int tokens_out
         int ms
