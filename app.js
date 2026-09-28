@@ -16,9 +16,15 @@ import {
      resolveScale), и оболочка читает эти поля исключительно через него (§6.3). */
   resolveScale, resolveLayout, resolveRadius, parseScaleRef, isScaleRef, scaleRef,
   scaleIndexOf, scaleSteps, SCALE_NAMES, ensureScaleRefs, scaleRefsIn, insertScaleStep,
+  /* Круг 22 (SPEC §8–9): в серверном режиме миграции формата — не тихая правка снимка,
+     а системная транзакция из тех же операций, что делает ensureLibrary/ensureScaleRefs. */
+  ensureLibraryOps, ensureScaleRefsOps,
 } from './src/core.js';
 import * as CORE from './src/core.js';
 import { makeProvider, runCommand, runVariants } from './src/brain.js';
+/* Круг 22 (SPEC §9.5): клиент-реплика. Документ в серверном режиме живёт в ней, а не в
+   localStorage/db; оболочка получает view и шлёт транзакции. */
+import { createSync, idbStorage, memoryStorage } from './src/sync.js';
 
 /* --------------------------------- состояние --------------------------------- */
 
@@ -75,6 +81,15 @@ let db = null;
 let downloads = null;
 let saveTimer = null;
 
+/* Круг 22 (SPEC §8–9). Серверный режим: страница отдана сервером (nginx или Document
+   service со STATIC_DIR), и `/api/health` отвечает {ok:true}. Тогда истина — журнал
+   операций на сервере, документ — реплика (src/sync.js), а автосохранение в db/localStorage
+   выключено. Пока `server` — null, всё работает прежним путём: артефакт на claude.ai
+   к серверу подключиться не может (CSP) и остаётся демонстрацией без сервера. */
+let server = null;   // {engine, project, sync, status, others, migrated, list}
+let serverProbe = null;
+const CLIENT_KEY = 'imago.client.v1';   // id вкладки-браузера: по нему свои транзакции узнаются в рассылке
+
 const SETTINGS_KEY = 'imago.settings.v1';
 const LOCAL_DOC_KEY = 'imago.doc.v1';
 const BROKEN_DOC_KEY = 'imago.doc.broken.v1';   // копия документа, который не открылся
@@ -117,6 +132,9 @@ function stageErrorNote(e) {
 }
 
 async function boot() {
+  // есть ли сервер, выясняем параллельно с первой отрисовкой: ответ нужен только
+  // к моменту восстановления документа (initCapabilities), а ждать его до первого кадра незачем
+  serverProbe = probeServer();
   cacheDom();
   applyTheme(settings.theme);
   /* Порядок важен: applyRail решает, открыт рельс или нет, и только потом имеет смысл
@@ -142,6 +160,8 @@ async function boot() {
       // на кнопке видно, вписано сейчас или масштаб ручной (п.18)
       updateFitButton();
       if (dom['empty-state'] && !dom['empty-state'].hidden) renderEmptyState();
+      // чужие рамки живут в экранных координатах — при зуме и панораме их надо переставить
+      if (server) renderPresence();
     },
     // жест снят из-за правки агента под рукой: раньше узел просто не ехал, и молча (п.28)
     onDragCancel: ({ reason, mode } = {}) => {
@@ -294,6 +314,8 @@ const ICONS = {
   node: '<rect x="3" y="3" width="10" height="10" rx="2"/>',
   // круг 20: линейка — шкала отступов и скруглений (кнопка «Шкалы» в шапке)
   scale: '<rect x="2" y="5.25" width="12" height="5.5" rx="1.25"/><path d="M5 5.25v2.25"/><path d="M8 5.25v3.25"/><path d="M11 5.25v2.25"/>',
+  // круг 22: папка — проекты на сервере (кнопка рядом с именем документа)
+  folder: '<path d="M2.25 4.25h4l1.5 1.75h6v7h-11.5z"/><path d="M2.25 7.5h11.5"/>',
 };
 
 function iconMarkup(name) {
@@ -332,6 +354,8 @@ function cacheDom() {
     'dockmsg', 'dockmsg-text', 'dockmsg-note', 'dockmsg-issue', 'dockmsg-ask', 'dockmsg-chips', 'dockmsg-actions', 'btn-msg-close',
     'empty-state', 'empty-title', 'empty-sub', 'empty-examples', 'dock', 'viewbar',
     'peekbar', 'peekbar-text', 'agent-dot',
+    // круг 22: серверный режим — проекты, состояние синхронизации, чужие выделения
+    'btn-projects', 'sync-status', 'presence',
   ]) dom[id] = el(id);
   dom.dockmsg.setAttribute('role', 'status');
   dom.dockmsg.setAttribute('aria-live', 'polite');
@@ -364,8 +388,715 @@ async function initCapabilities() {
   if (!state.provider && settings.lmstudio.enabled) useLmStudio();
   if (!state.provider) setRunnable(false);
 
+  /* Круг 22. Сервер ответил на /api/health — документ живёт в реплике, а не в db/localStorage:
+     дальше проект открывает initServer, и прежний путь восстановления не трогается вовсе.
+     Агент (brain) при этом остаётся в браузере: его результат тоже уходит транзакцией. */
+  const health = await serverProbe;
+  if (health) { await initServer(health); return; }
+
   const restored = db ? await restoreFromDb() : await restoreFromLocal();
   maybeShowIntro(restored);
+}
+
+/* ------------------------------ серверный режим ------------------------------ */
+
+/**
+ * Есть ли за страницей Document service. Любой сбой — прежний режим: артефакт на claude.ai
+ * до сервера не достучится (CSP), статический http.server ответит 404, а хост, который
+ * на любой путь отдаёт свою страницу, не разберётся как JSON. Ждём не дольше трёх секунд:
+ * восстановление документа не должно зависеть от медленной сети.
+ */
+async function probeServer() {
+  if (typeof fetch !== 'function') return null;
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, 3000);
+  try {
+    const res = await fetch('/api/health', { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return body && body.ok === true ? body : null;
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
+/** JSON к серверу. Имя автора в заголовке — процентно закодированное: кириллица в заголовок fetch не проходит. */
+async function apiJson(path, init = {}) {
+  const res = await fetch(path, {
+    method: init.method || 'GET',
+    headers: { 'content-type': 'application/json', 'x-author': encodeURIComponent(settings.author || ''), ...(init.headers || {}) },
+    body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+    cache: 'no-store',
+  });
+  let body = null;
+  try { body = await res.json(); } catch { body = null; }
+  if (!res.ok) {
+    const e = new Error((body && (body.message || body.error)) || `сервер ответил ${res.status}`);
+    e.status = res.status;
+    throw e;
+  }
+  return body;
+}
+
+/** id вкладки-браузера — один на браузер, переживает перезагрузку: свои транзакции узнаются в журнале. */
+function clientIdOf() {
+  let id = '';
+  try { id = localStorage.getItem(CLIENT_KEY) || ''; } catch { id = ''; }
+  if (!id) {
+    id = CORE.uid('c');
+    try { localStorage.setItem(CLIENT_KEY, id); } catch { /* приватный режим — id на одну сессию */ }
+  }
+  return id;
+}
+
+function projectIdFromUrl() {
+  try { return new URL(location.href).searchParams.get('project') || ''; } catch { return ''; }
+}
+
+function setProjectUrl(id) {
+  try {
+    const u = new URL(location.href);
+    if (u.searchParams.get('project') === id) return;
+    u.searchParams.set('project', id);
+    history.replaceState(null, '', u.toString());
+  } catch { /* history недоступна — ссылку не меняем */ }
+}
+
+/** Последний по updated_at — тот, что откроется без ?project= в ссылке. */
+function latestProject(list) {
+  const items = (list || []).filter((p) => p && p.id);
+  items.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  return items[0] || null;
+}
+
+async function createProject(name) {
+  return apiJson('/api/projects', { method: 'POST', body: { name: name || 'Новый проект' } });
+}
+
+/**
+ * Серверный режим: выбрать проект и открыть реплику. Проект — из ?project= в ссылке; без
+ * него — последний по времени правки, а если проектов нет — новый «Новый проект» с
+ * записью id в ссылку, чтобы перезагрузка вернула туда же.
+ */
+async function initServer(health) {
+  server = {
+    engine: health.engine, project: null, sync: null, others: [], migrated: false, list: [],
+    status: { online: false, pending: 0, syncing: true, error: null },
+    authorAsked: false,
+  };
+  if (dom['btn-projects']) dom['btn-projects'].hidden = false;
+  if (dom['sync-status']) dom['sync-status'].hidden = false;
+  renderSyncStatus();
+  const wanted = projectIdFromUrl();
+  let project = null;
+  try {
+    const got = await apiJson('/api/projects');
+    server.list = Array.isArray(got && got.projects) ? got.projects : [];
+    if (wanted) {
+      project = server.list.find((p) => p && p.id === wanted) || null;
+      if (!project) {
+        toast(`Проекта «${clip(wanted, 24)}» на сервере нет — открыл последний.`, 'plain', 8000);
+      }
+    }
+    if (!project) project = latestProject(server.list);
+    if (!project) project = await createProject('Новый проект');
+  } catch (e) {
+    server.status = { ...server.status, error: 'unreachable' };
+    renderSyncStatus();
+    showMsg('error', 'Сервер недоступен', {
+      note: `Список проектов не пришёл: ${humanError(e)}.`,
+      actions: [{ label: 'Попробовать снова', primary: true, onClick: () => location.reload() }],
+    });
+    return;
+  }
+  openProject(project);
+}
+
+/**
+ * Открыть проект в реплике. Прежняя реплика закрывается (журнал дописывается), состояние
+ * оболочки — история, разговор, выделение — начинается заново: всё это принадлежит проекту.
+ */
+function openProject(project) {
+  if (!server || !project || !project.id) return;
+  if (server.sync) { server.sync.close(); server.sync = null; }
+  server.project = { id: project.id, name: project.name || '', kind: project.kind || 'design', updated_at: project.updated_at || '' };
+  server.migrated = false;
+  server.others = [];
+  server.status = { online: false, pending: 0, syncing: true, error: null };
+  setProjectUrl(project.id);
+  state.selection = [];
+  state.collapsed = null;
+  state.history = [];
+  state.cursor = 0;
+  state.chat = [];
+  state.pairs = [];
+  state.saveBlocked = null;
+  hideVariants();
+  hideMsg();
+  setDocNameText(docTitle());
+  renderSyncStatus();
+  renderPresence();
+  let storage = null;
+  try { storage = idbStorage(); } catch { storage = null; }
+  if (!storage) storage = memoryStorage();
+  const sync = createSync({
+    core: CORE,
+    baseUrl: '',
+    projectId: project.id,
+    clientId: clientIdOf(),
+    author: settings.author || '',
+    storage,
+    onChange: onSyncChange,
+    onStatus: onSyncStatus,
+    onDropped: onSyncDropped,
+    onPresence: onSyncPresence,
+    onGone: () => toast('Сервер прислал свежий снимок — свои правки переиграны поверх него.', 'plain', 6000),
+    onError: onSyncError,
+    extra: journalExtra,
+  });
+  server.sync = sync;
+  sync.open().catch((e) => {
+    showMsg('error', 'Проект не открылся', { note: humanError(e) });
+  });
+}
+
+/** Что оболочка кладёт в локальный журнал рядом с документом: история, разговор, свёрнутые ветки. */
+function journalExtra() {
+  const past = packHistory();
+  return {
+    chat: state.chat.slice(-60),
+    pairs: state.pairs.slice(-5),
+    history: past.list,
+    cursor: past.cursor,
+    collapsed: state.collapsed ? [...state.collapsed].slice(0, 400) : null,
+  };
+}
+
+function adoptJournalExtra(extra) {
+  const e = extra && typeof extra === 'object' ? extra : {};
+  state.chat = sanitizeChat(e.chat);
+  state.pairs = sanitizePairs(e.pairs);
+  const past = sanitizeHistory(e.history, e.cursor);
+  state.history = past.list;
+  state.cursor = past.cursor;
+  // что из истории ещё не подтверждено сервером — знает реплика (её очередь пережила перезагрузку)
+  const waiting = new Set(server && server.sync ? server.sync.pending.map((t) => t.tx_id) : []);
+  for (const t of state.history) t.pending = waiting.has(t.id);
+  state.collapsed = Array.isArray(e.collapsed) && e.collapsed.length
+    ? new Set(e.collapsed.filter((id) => typeof id === 'string'))
+    : null;
+}
+
+/** Выделение переживает чужое удаление: узлов уже нет, а рамки и инспектор ссылались бы на них. */
+function pruneSelection() {
+  const keep = state.selection.filter((id) => state.doc && state.doc.nodes[id]);
+  if (keep.length !== state.selection.length) state.selection = keep;
+}
+
+/**
+ * Реплика изменилась не по своей правке: открытие, подтверждение своей транзакции, чужая
+ * транзакция, снимок после `gone`. Чужие правки рисуются как правки агента — с рамками
+ * по diffOf и плавным переездом соседей, — но без сообщений в доке: о чужой работе
+ * говорит присутствие, а не карточка итога.
+ */
+function onSyncChange(view, info = {}) {
+  if (!server || !view) return;
+  const prevGeo = state.geo;
+  switch (info.reason) {
+    case 'open': {
+      state.doc = view;
+      state.geo = solve(view);
+      adoptJournalExtra(info.extra);
+      renderAll();
+      state.userView = false;
+      fitSmart();
+      refreshSheet();
+      // снимок с сервера свеж — мигрировать можно сразу; локальная копия дождётся синхронизации
+      if (info.from === 'server') maybeMigrate();
+      askAuthorIfNeeded();
+      return;
+    }
+    case 'confirmed': {
+      settleHistory(info);
+      state.doc = view;
+      // сервер применил ровно то, что мы предсказали, — геометрия та же, рисовать нечего
+      if (info.same) { refreshSheet(); return; }
+      state.geo = solve(view);
+      pruneSelection();
+      renderAll();
+      refreshSheet();
+      return;
+    }
+    case 'remote': {
+      state.doc = view;
+      state.geo = solve(view);
+      pruneSelection();
+      const diff = info.tx && Array.isArray(info.tx.ops) ? diffOf(info.tx.ops, prevGeo) : null;
+      renderAll(diff ? { diff, prevGeo } : {});
+      refreshSheet();
+      return;
+    }
+    default: {
+      state.doc = view;
+      state.geo = solve(view);
+      pruneSelection();
+      renderAll();
+      refreshSheet();
+    }
+  }
+}
+
+function onSyncStatus(s) {
+  if (!server) return;
+  server.status = s;
+  renderSyncStatus();
+  // локальная копия могла отстать: миграцию шлём, когда реплика догнала сервер
+  if (s.online && !s.syncing && !s.error) maybeMigrate();
+}
+
+function onSyncPresence(list) {
+  if (!server) return;
+  server.others = Array.isArray(list) ? list : [];
+  renderSyncStatus();
+  renderPresence();
+}
+
+function onSyncError(e) {
+  if (!server || !e) return;
+  if (e.code === 'engine') {
+    showMsg('error', 'Версия редактора устарела', {
+      note: 'Сервер работает с другой версией движка — правки не принимаются. Обновите страницу.',
+      actions: [{ label: 'Обновить', primary: true, onClick: () => location.reload() }],
+    });
+    return;
+  }
+  if (e.code === 'not-found') {
+    showMsg('error', 'Проект не найден', {
+      note: 'Его могли удалить, или ссылка ведёт не туда.',
+      actions: [
+        { label: 'Открыть последний', primary: true, onClick: async () => {
+          try {
+            const got = await apiJson('/api/projects');
+            const p = latestProject(got && got.projects) || await createProject('Новый проект');
+            hideMsg();
+            openProject(p);
+          } catch (err) { toast(`Не вышло: ${humanError(err)}`, 'error', 8000); }
+        } },
+        { label: 'Проекты', onClick: () => { hideMsg(); openProjects(); } },
+      ],
+    });
+    return;
+  }
+  if (e.code === 'diverged') {
+    toast('Транзакция сервера не применилась к реплике — обновите страницу, если холст разошёлся.', 'error', 9000);
+    return;
+  }
+  if (e.tx) {
+    // сервер отверг транзакцию целиком (форма): её уже нет в очереди, документ откатился —
+    // и в стеке отмены ей делать нечего
+    const i = state.history.findIndex((t) => t.id === e.tx.tx_id);
+    if (i >= 0) {
+      state.history.splice(i, 1);
+      if (state.cursor > i) state.cursor -= 1;
+      refreshSheet();
+    }
+    showMsg('error', 'Сервер не принял правку', { note: e.message ? shellWord(e.message) : '' });
+  }
+}
+
+/** Причины отброшенных операций — словами человека (SPEC §9.1 DropReason). */
+const DROP_WORDS = {
+  removed: 'узел уже удалён',
+  orphan: 'родитель удалён',
+  cycle: 'перемещение создало бы цикл',
+  exists: 'уже есть',
+  invalid: 'правка не подошла к документу',
+};
+
+function droppedLine(dropped) {
+  const list = Array.isArray(dropped) ? dropped : [];
+  const n = list.length;
+  const why = [...new Set(list.map((d) => DROP_WORDS[d && d.reason] || DROP_WORDS.invalid))];
+  return `${n} ${plural(n, 'правка не применилась', 'правки не применились', 'правок не применились')}: ${why.join(', ')}`;
+}
+
+/**
+ * Сервер отбросил часть своей транзакции (§9.5): одна строка в доке. Если то же самое
+ * предсказал локальный rebase при commit — человеку уже сказано, второй раз не говорим.
+ */
+function onSyncDropped(committed) {
+  if (!server || !committed || !Array.isArray(committed.dropped) || !committed.dropped.length) return;
+  if (committed.author_kind === 'system') return;
+  const entry = state.history.find((t) => t.id === committed.tx_id);
+  const predicted = entry && Array.isArray(entry.predicted) ? entry.predicted : [];
+  const got = committed.dropped.map((d) => d.index).sort((a, b) => a - b);
+  if (predicted.length && predicted.join(',') === got.join(',')) return;
+  showMsg('warn', droppedLine(committed.dropped), {
+    note: 'Кто-то изменил документ раньше — остальное применено.',
+    ms: 9000,
+  });
+}
+
+/**
+ * Подтверждение своей транзакции: запись истории получает номер, применённую форму и
+ * инверсию от подтверждённого состояния — она точнее оптимистичной, если сервер что-то
+ * переложил. Транзакция отмены/повтора записи не имеет: её инверсия достаётся той записи,
+ * которую она отменяла или возвращала (см. serverStep).
+ */
+function settleHistory(info) {
+  const c = info && info.tx;
+  if (!c) return;
+  // сервер отбросил всё: транзакция ничего не сделала, и в стеке отмены ей нечего отменять
+  const dead = Array.isArray(c.ops) && c.ops.length === 0;
+  const i = state.history.findIndex((t) => t.id === c.tx_id);
+  if (i >= 0) {
+    if (dead) { dropHistoryEntry(i); return; }
+    const entry = state.history[i];
+    entry.pending = false;
+    entry.seq = c.seq;
+    entry.ops = c.ops;
+    if (Array.isArray(info.inverse) && info.inverse.length) entry.inverse = info.inverse;
+    return;
+  }
+  const j = state.history.findIndex((t) => t.lastTx === c.tx_id);
+  if (j >= 0) {
+    if (dead) { dropHistoryEntry(j); return; }
+    const owner = state.history[j];
+    if (Array.isArray(info.inverse) && info.inverse.length) {
+      if (owner.undone) owner.ops = info.inverse; else owner.inverse = info.inverse;
+    }
+    owner.pending = false;
+  }
+}
+
+/** 12 знаков base36 от строки — детерминированный id, когда два клиента должны сойтись на одном. */
+function hash36(str, len = 12) {
+  let h = 0x811c9dc5, g = 0x01000193;
+  const s = String(str);
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h = Math.imul(h ^ c, 16777619) >>> 0;
+    g = Math.imul(g ^ c, 2246822519) >>> 0;
+  }
+  return (h.toString(36) + g.toString(36) + h.toString(36)).slice(0, len);
+}
+
+/**
+ * Миграции формата (SPEC §8.3): библиотека компонентов и ссылки на шкалы — те же операции,
+ * что делают ensureLibrary/ensureScaleRefs в adoptDoc, но системной транзакцией в журнал,
+ * один раз на открытие и только если есть что мигрировать. Id библиотеки выводится из id
+ * проекта: два клиента, открывшие проект одновременно, заведут ОДНУ библиотеку — второй
+ * create сервер отбросит как повтор (exists), а не положит вторую страницу.
+ */
+function maybeMigrate() {
+  if (!server || server.migrated || !server.sync || !server.sync.view || !state.doc) return;
+  server.migrated = true;
+  const libOps = ensureLibraryOps(state.doc);
+  for (const op of libOps) {
+    if (op.op === 'create' && op.node) op.node.id = 'lib_' + hash36(server.project.id);
+  }
+  let next = state.doc;
+  if (libOps.length) {
+    const r = applyOps(state.doc, libOps);
+    if (!r.error) next = r.doc;
+  }
+  const list = [...libOps, ...ensureScaleRefsOps(next)];
+  if (!list.length) return;
+  const r = commit(list, 'Миграция формата', 'human', { system: true, quiet: true, noFrames: true, noHistory: true });
+  if (r.ok) {
+    const done = [];
+    if (libOps.length) done.push('завёл библиотеку компонентов');
+    if (list.length > libOps.length) done.push('отступы и скругления перевёл на шкалы документа');
+    toast(`Документ из прежней версии — ${done.join(', ')}.`, 'plain', 8000);
+  }
+}
+
+/** Имя автора: видно другим участникам у рамки выделения и в истории. Спрашиваем один раз, в доке. */
+function askAuthorIfNeeded() {
+  if (!server || settings.author || server.authorAsked) return;
+  server.authorAsked = true;
+  showMsg('question', 'Как вас называть?', {
+    note: 'Имя видно другим участникам проекта — у вашего выделения и в истории правок. Сменить можно в настройках.',
+    role: 'author',
+  });
+  const host = dom['dockmsg-ask'];
+  if (!host) return;
+  host.textContent = '';
+  host.hidden = false;
+  const form = document.createElement('form');
+  form.className = 'ask-form';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'ask-input';
+  input.spellcheck = false;
+  input.maxLength = 40;
+  input.placeholder = 'Ваше имя';
+  input.setAttribute('aria-label', 'Ваше имя для других участников');
+  const go = document.createElement('button');
+  go.type = 'submit';
+  go.className = 'btn accent small';
+  go.textContent = 'Готово';
+  form.append(input, go);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = input.value.replace(/\s+/g, ' ').trim().slice(0, 40);
+    if (!name) { input.focus(); return; }
+    setAuthor(name);
+    hideMsg();
+    toast(`Для других участников вы — ${name}.`, 'plain', 5000);
+  });
+  host.appendChild(form);
+  input.focus();
+}
+
+function setAuthor(name) {
+  settings.author = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  saveSettings();
+  if (server && server.sync) server.sync.setAuthor(settings.author);
+}
+
+/** Имя документа в шапке: в серверном режиме это имя проекта — meta.name операциями не правится. */
+function docTitle() {
+  if (server && server.project) return server.project.name || 'Без названия';
+  return (state.doc && state.doc.meta && state.doc.meta.name) || 'Без названия';
+}
+
+async function renameProject(name) {
+  if (!server || !server.project) return;
+  const next = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Без названия';
+  if (next === server.project.name) return;
+  const was = server.project.name;
+  server.project.name = next;
+  setDocNameText(next);
+  try {
+    const got = await apiJson(`/api/projects/${encodeURIComponent(server.project.id)}`, { method: 'PATCH', body: { name: next } });
+    if (got && got.name) server.project.name = got.name;
+  } catch (e) {
+    server.project.name = was;
+    setDocNameText(was);
+    toast(`Имя не сохранилось: ${humanError(e)}`, 'error', 8000);
+  }
+  setDocNameText(server.project.name);
+}
+
+/** Строка состояния в шапке (SPEC §9.5) и кто в сети. */
+function renderSyncStatus() {
+  const host = dom['sync-status'];
+  if (!host || !server) return;
+  const s = server.status || {};
+  let text = '';
+  let kind = 'off';
+  const opened = !!(server.sync && server.sync.view);
+  if (s.error === 'engine') { text = 'версия движка устарела — обновите страницу'; kind = 'error'; }
+  else if (s.error === 'unreachable') { text = 'сервер недоступен'; kind = 'error'; }
+  else if (!opened) { text = 'открываю проект…'; kind = 'busy'; }
+  else if (!s.online) {
+    /* Сокет закрыт. Если браузер сам знает, что сети нет, — «не в сети»; если сеть есть,
+       а сокета нет — недоступен сервер. Правки в обоих случаях ждут в очереди. */
+    const noNet = typeof navigator !== 'undefined' && navigator.onLine === false;
+    const head = noNet ? 'не в сети' : 'сервер недоступен';
+    text = s.pending
+      ? `${head} · ${s.pending} ${plural(s.pending, 'правка ждёт', 'правки ждут', 'правок ждут')}`
+      : head;
+    kind = noNet ? 'off' : 'error';
+  } else if (s.syncing) { text = 'синхронизация…'; kind = 'busy'; }
+  else { text = 'в сети · всё сохранено'; kind = 'on'; }
+  const names = (server.others || []).map((p) => p.author || 'без имени');
+  const shown = names.slice(0, 3);
+  const more = names.length - shown.length;
+  const who = names.length ? ` · ${shown.join(', ')}${more > 0 ? ` и ещё ${more}` : ''}` : '';
+  host.textContent = '';
+  const dot = document.createElement('span');
+  dot.className = 'sync-dot';
+  dot.dataset.state = kind;
+  const label = document.createElement('span');
+  label.className = 'sync-text';
+  label.textContent = text + who;
+  host.append(dot, label);
+  host.dataset.state = kind;
+  const full = names.length ? `${text}. В сети: ${names.join(', ')}` : text;
+  host.title = full;
+  host.setAttribute('aria-label', `Состояние синхронизации: ${full}`);
+}
+
+/** Цвет участника — из его id: один и тот же у всех, кто его видит. */
+function presenceColor(client) {
+  let h = 0;
+  const s = String(client || '');
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 70% 52%)`;
+}
+
+/**
+ * Чужие выделения: цветная рамка с именем поверх холста. Слой свой, над сценой: сцена
+ * рисует только своё выделение, а координаты мы получаем через её toScreen по тем же
+ * прямоугольникам решателя, что и всё остальное.
+ */
+function renderPresence() {
+  const host = dom.presence;
+  if (!host) return;
+  const list = server ? server.others : [];
+  const rects = (state.geo && state.geo.rects) || {};
+  host.textContent = '';
+  if (!list.length || !stage || typeof stage.toScreen !== 'function') { host.hidden = true; return; }
+  let drawn = 0;
+  for (const p of list) {
+    const ids = (p.selection || []).filter((id) => rects[id]);
+    if (!ids.length) continue;
+    const box = boundsOf(ids);
+    if (!box) continue;
+    const a = stage.toScreen(box.x, box.y);
+    const b = stage.toScreen(box.x + box.w, box.y + box.h);
+    const el = document.createElement('div');
+    el.className = 'presence-box';
+    el.style.left = `${Math.round(a.x)}px`;
+    el.style.top = `${Math.round(a.y)}px`;
+    el.style.width = `${Math.max(2, Math.round(b.x - a.x))}px`;
+    el.style.height = `${Math.max(2, Math.round(b.y - a.y))}px`;
+    el.style.setProperty('--who', presenceColor(p.client));
+    const tag = document.createElement('span');
+    tag.className = 'presence-name';
+    tag.textContent = p.author || 'без имени';
+    el.appendChild(tag);
+    host.appendChild(el);
+    drawn += 1;
+  }
+  host.hidden = !drawn;
+}
+
+/** Своё выделение и доска — другим участникам; реплика сама режет частоту до 10/с. */
+function sharePresence() {
+  if (!server || !server.sync) return;
+  server.sync.presence({ selection: state.selection, board: activeArtboardId() });
+}
+
+/** «Когда менялся» — словами, а не ISO-строкой. */
+function whenWords(iso) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return '';
+  const d = Date.now() - t;
+  if (d < 60 * 1000) return 'только что';
+  const min = Math.round(d / 60000);
+  if (min < 60) return `${min} ${plural(min, 'минуту', 'минуты', 'минут')} назад`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `${h} ${plural(h, 'час', 'часа', 'часов')} назад`;
+  const days = Math.round(h / 24);
+  if (days < 7) return `${days} ${plural(days, 'день', 'дня', 'дней')} назад`;
+  return new Date(t).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+/** Шторка «Проекты»: список, новый, переименование, переход — без перезагрузки страницы. */
+async function openProjects() {
+  if (!server) return;
+  openSheet('Проекты', (body) => fillProjects(body, server.list, { loading: true }), { size: 'auto', key: 'projects' });
+  let list = null;
+  try {
+    const got = await apiJson('/api/projects');
+    list = Array.isArray(got && got.projects) ? got.projects : [];
+  } catch { list = null; }
+  if (state.sheetOpen !== 'projects') return;
+  if (list) server.list = list;
+  openSheet('Проекты', (body) => fillProjects(body, list, { loading: false }), { size: 'auto', key: 'projects' });
+}
+
+function fillProjects(body, list, { loading } = {}) {
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'btn subtle wide';
+  add.textContent = 'Новый проект';
+  add.addEventListener('click', async () => {
+    add.disabled = true;
+    try {
+      const p = await createProject('Новый проект');
+      closeSheet();
+      openProject(p);
+      toast('Открыт новый проект — имя правится в шапке.', 'plain', 6000);
+    } catch (e) {
+      add.disabled = false;
+      toast(`Проект не создался: ${humanError(e)}`, 'error', 8000);
+    }
+  });
+  body.appendChild(add);
+
+  const items = (list || []).filter((p) => p && p.id).slice();
+  items.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  if (loading) {
+    // пока свежий список в пути, показываем прежний — и говорим, что он может устареть
+    const p = document.createElement('div');
+    p.className = 'note';
+    p.dataset.loading = 'on';
+    p.textContent = 'Обновляю список…';
+    body.appendChild(p);
+  }
+  if (list === null && !loading) {
+    const p = document.createElement('div');
+    p.className = 'note';
+    p.textContent = 'Список не пришёл — сервер недоступен.';
+    body.appendChild(p);
+  }
+  if (!items.length) {
+    const p = document.createElement('div');
+    p.className = 'empty-note';
+    p.textContent = loading ? 'Загружаю…' : 'Проектов пока нет.';
+    body.appendChild(p);
+    return;
+  }
+  const current = server.project ? server.project.id : '';
+  for (const p of items) {
+    const item = document.createElement('div');
+    item.className = 'pitem';
+    item.dataset.current = String(p.id === current);
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'pname';
+    open.textContent = p.name || 'Без названия';
+    open.title = p.id === current ? 'Открыт сейчас' : 'Открыть проект';
+    open.addEventListener('click', () => {
+      if (p.id === current) { closeSheet(); return; }
+      closeSheet();
+      openProject(p);
+    });
+    const meta = document.createElement('span');
+    meta.className = 'pwhen';
+    const when = whenWords(p.updated_at);
+    meta.textContent = [p.kind === 'library' ? 'библиотека' : '', when ? `менялся ${when}` : ''].filter(Boolean).join(' · ');
+    const rename = document.createElement('button');
+    rename.type = 'button';
+    rename.className = 'btn ghost small';
+    rename.textContent = 'Переименовать';
+    rename.addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.className = 'field pname-edit';
+      input.value = p.name || '';
+      input.maxLength = 120;
+      input.setAttribute('aria-label', 'Новое имя проекта');
+      let done = false;
+      const finish = async (save) => {
+        if (done) return;
+        done = true;
+        const name = input.value.replace(/\s+/g, ' ').trim().slice(0, 120);
+        if (save && name && name !== p.name) {
+          try {
+            const got = await apiJson(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'PATCH', body: { name } });
+            p.name = (got && got.name) || name;
+            if (server.project && server.project.id === p.id) { server.project.name = p.name; setDocNameText(p.name); }
+          } catch (e) { toast(`Имя не сохранилось: ${humanError(e)}`, 'error', 8000); }
+        }
+        if (state.sheetOpen === 'projects') openProjects();
+      };
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      });
+      input.addEventListener('blur', () => finish(true));
+      open.replaceWith(input);
+      input.focus();
+      input.select();
+    });
+    const head = document.createElement('div');
+    head.className = 'phead';
+    head.append(open, rename);
+    item.append(head, meta);
+    body.appendChild(item);
+  }
 }
 
 /**
@@ -466,6 +1197,8 @@ function commit(opsList, label, who = 'human', extra = {}) {
   // обязан показывать документ (п.1)
   unpeekVariant();
   if (!opsList || !opsList.length) return { ok: true, empty: true };
+  // Круг 22: в серверном режиме транзакция уходит в реплику, а не в state.history + scheduleSave
+  if (server) return serverCommit(opsList, label, who, extra);
   const prevDoc = state.doc;
   const inverse = invertOps(state.doc, opsList);
   const res = applyOps(state.doc, opsList);
@@ -534,10 +1267,157 @@ function txId() {
 }
 
 /**
+ * Круг 22 (SPEC §8.3, §9.5). Транзакция в серверном режиме: оптимистично ложится в
+ * реплику (view меняется сразу), встаёт в очередь и уходит на сервер; в стек отмены —
+ * только свои содержательные правки (отмена и повтор — тоже транзакции, но записи
+ * истории не заводят: они меняют состояние той записи, которую отменяют или возвращают).
+ * Операции по узлам, которых уже нет (кто-то удалил раньше), отбрасываются реплика
+ * теми же правилами, что сервер, — и человеку об этом сказано одной строкой.
+ *
+ * extra: undoOf/redoOf — служебная транзакция отмены/повтора; system — миграция
+ * (author_kind:'system'); noHistory — без записи в стек; noRender — перерисует вызывающий
+ * (перемотка истории); quiet и noFrames — как у обычного commit.
+ */
+function serverCommit(opsList, label, who = 'human', extra = {}) {
+  const sync = server && server.sync;
+  if (!sync || !sync.view) {
+    if (!extra.noRender) showMsg('error', 'Проект ещё открывается — подождите секунду.');
+    return { ok: false, error: { code: 'not-found', message: 'проект не открыт' } };
+  }
+  const prevDoc = state.doc;
+  const prevGeo = state.geo;
+  const kind = extra.system ? 'system' : who === 'agent' ? 'agent' : 'human';
+  const r = sync.commit(opsList, {
+    title: label, author_kind: kind, undo_of: extra.undoOf, redo_of: extra.redoOf,
+  });
+  if (!r.tx) {
+    // ни одной применимой операции: узлов уже нет — правка ушла в никуда, о чём и говорим
+    const line = droppedLine(r.dropped);
+    // отмене и повтору о причине скажет serverStep — своими словами
+    if (!extra.noRender && kind !== 'system' && !extra.undoOf && !extra.redoOf) showMsg('warn', line, { ms: 9000 });
+    return { ok: false, error: { code: 'not-found', message: line }, dropped: r.dropped };
+  }
+  const inverse = invertOps(prevDoc, r.applied);
+  state.doc = r.view;
+  state.geo = solve(state.doc);
+  const service = !!(extra.undoOf || extra.redoOf || extra.noHistory);
+  const tx = {
+    id: r.tx.tx_id, kind: 'ops',
+    ops: r.applied, inverse, label, who, at: Date.now(), undone: false,
+    human: extra.human || describeOps(opsList, prevDoc),
+    pending: true,
+    predicted: r.dropped.map((d) => d.index).sort((a, b) => a - b),
+    ...extra,
+  };
+  if (!service) {
+    // новая правка обрывает хвост отменённых: вернуть их больше нечем (как и в прежнем режиме)
+    state.history.length = state.cursor;
+    state.history.push(tx);
+    state.cursor = state.history.length;
+  }
+  if (who === 'agent') dropUndoOffer();
+  const diff = extra.noFrames ? { created: [], changed: [], removed: [], moved: [] } : diffOf(r.applied, prevGeo);
+  if (!extra.noRender) {
+    const hadIssues = state.issues;
+    renderAll({ diff, prevGeo });
+    if (who === 'human' && !service) announceIssues(freshIssues(hadIssues, state.issues));
+    if (who === 'human' && !extra.quiet && !service) announceHuman(tx, diff);
+    if (r.dropped.length && kind !== 'system') showMsg('warn', droppedLine(r.dropped), { ms: 9000 });
+  }
+  scheduleSave();
+  refreshSheet();
+  renderSyncStatus();
+  return { ok: true, tx, diff, inverse, applied: r.applied };
+}
+
+/**
+ * Замена документа целиком (импорт JSON) в серверном режиме — одна транзакция операций:
+ * токены группами, снять всех детей корня, создать узлы нового документа сверху вниз
+ * (родитель раньше детей, порядок братьев тот же, `exact`, чтобы узлы легли ровно такими,
+ * какие они в файле). Корень остаётся свой: удалить его нельзя, а дети нового корня
+ * приписываются к нему. Отмена — как у любой транзакции: инверсия вернёт прежние узлы.
+ */
+function serverCommitDoc(nextDoc, label, humanText, who = 'human') {
+  const cur = state.doc;
+  const list = [];
+  const tokens = nextDoc.tokens && typeof nextDoc.tokens === 'object' ? nextDoc.tokens : {};
+  for (const group of Object.keys(tokens)) list.push(OPS.setToken(group, tokens[group]));
+  const rootNode = cur.nodes[cur.root];
+  for (const id of ((rootNode && rootNode.children) || [])) list.push(OPS.remove(id));
+  const nextRoot = nextDoc.nodes[nextDoc.root];
+  const stack = [];
+  const kidsOf = (n) => (n && Array.isArray(n.children) ? n.children : []);
+  for (let i = kidsOf(nextRoot).length - 1; i >= 0; i--) stack.push(kidsOf(nextRoot)[i]);
+  const seen = new Set();
+  while (stack.length) {
+    const id = stack.pop();
+    const n = nextDoc.nodes[id];
+    if (!n || typeof n !== 'object' || seen.has(id)) continue;
+    seen.add(id);
+    const node = { ...n, parent: n.parent === nextDoc.root ? cur.root : n.parent };
+    // дети придут своими операциями — узел создаём пустым, порядок даст порядок обхода
+    if (Array.isArray(n.children)) node.children = []; else delete node.children;
+    const op = OPS.create(node);
+    op.exact = true;
+    list.push(op);
+    const kids = kidsOf(n);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+  }
+  return commit(list, label, who, { human: humanText || label, quiet: true, noFrames: true, doc: true });
+}
+
+/**
+ * Шаг истории в серверном режиме (SPEC §8.3 «Отмена — новая транзакция, а не откат»):
+ * обратные операции своей записи уходят транзакцией с undo_of, повтор — с redo_of.
+ * Стек — только свои правки в порядке seq; отменённые всегда хвостом, как и раньше.
+ * После отмены запись помнит, чем её вернуть (инверсия транзакции отмены); после
+ * повтора — чем снова отменить. Подтверждение сервера уточняет и то и другое (settleHistory).
+ */
+function serverStep(back, { quiet = false } = {}) {
+  const what = back ? 'Отмена' : 'Повтор';
+  let guard = state.history.length + 1;
+  while (guard-- > 0) {
+    if (back ? state.cursor === 0 : state.cursor >= state.history.length) return false;
+    const i = back ? state.cursor - 1 : state.cursor;
+    const tx = state.history[i];
+    const list = back ? tx.inverse : tx.ops;
+    const r = serverCommit(list, `${what}: ${tx.label}`, 'human', {
+      [back ? 'undoOf' : 'redoOf']: tx.id, quiet: true, noRender: quiet,
+    });
+    if (r.ok) {
+      if (back) tx.ops = r.inverse; else tx.inverse = r.inverse;
+      tx.lastTx = r.tx.id;
+      tx.pending = true;
+      tx.undone = back;
+      state.cursor += back ? -1 : 1;
+      dropUndoOffer();
+      return true;
+    }
+    if (!r.dropped) return false;
+    /* Менять уже нечего: узлы этой записи удалил кто-то другой. Мёртвую запись убираем из
+       стека и идём к следующей — человек просил отменить последнюю ДЕЙСТВУЮЩУЮ правку, а
+       не нажать ещё раз. */
+    dropHistoryEntry(i);
+    refreshSheet();
+    if (!quiet) toast(`${what}: «${clip(tx.human || tx.label, 48)}» — менять уже нечего, ${droppedLine(r.dropped).replace(/^.*: /, '')}.`, 'plain', 6000);
+  }
+  return false;
+}
+
+/** Убрать запись из стека отмены, не сдвигая курсор мимо соседей. */
+function dropHistoryEntry(i) {
+  if (i < 0 || i >= state.history.length) return;
+  state.history.splice(i, 1);
+  if (state.cursor > i) state.cursor -= 1;
+}
+
+/**
  * Заменить документ целиком — и всё равно как транзакция: с шагом в истории и «Отменить».
  * Импорт раньше стирал документ и историю без возврата, а предупреждал серой строкой (п.1).
  */
 function commitDoc(nextDoc, nextGeo, label, humanText, who = 'human') {
+  // Круг 22: в серверном режиме документ целиком не заменить — только операциями (SPEC §8.3)
+  if (server) return serverCommitDoc(nextDoc, label, humanText, who);
   const before = state.doc;
   // версия приходит из файла и бывает любой — вплоть до меньшей, чем текущая. Проверка
   // «документ изменился, пока агент работал» опирается на неё, поэтому версию выдаём
@@ -574,6 +1454,8 @@ function docStamp(doc) {
 }
 
 function stepHistory(back, { quiet = false } = {}) {
+  // Круг 22: отмена в серверном режиме — новая транзакция с undo_of, а не откат журнала
+  if (server) return serverStep(back, { quiet });
   if (back ? state.cursor === 0 : state.cursor >= state.history.length) return false;
   const tx = back ? state.history[state.cursor - 1] : state.history[state.cursor];
   const what = back ? 'Отмена' : 'Повтор';
@@ -1948,7 +2830,10 @@ function renderAll(opts = {}) {
   renderHints();
   updateZoomLabel(stage.view);
   updateFitButton();
-  setDocNameText(state.doc.meta && state.doc.meta.name || 'Без названия');
+  setDocNameText(docTitle());
+  // чужие рамки считаются по той же геометрии — перерисовка холста перерисовывает и их;
+  // своё присутствие (выделение и активная доска) уходит другим — реплика не шлёт одно и то же дважды
+  if (server) { renderPresence(); sharePresence(); }
 }
 
 /**
@@ -2041,6 +2926,8 @@ function setSelection(ids, opts = {}) {
   revealLayerRow();
   // при выделении по итогу правки вид доводит revealChange — дёргать его дважды незачем
   if (!opts.quiet) ensureVisible(state.selection);
+  // круг 22: выделение видно другим участникам
+  if (server) sharePresence();
 }
 
 /**
@@ -4520,7 +5407,7 @@ async function runUtterance(text, { variants = false, toModel = false } = {}) {
         });
         return;
       }
-      if (docStamp(state.doc) !== baseStamp) { staleMsg(utterance); return; }
+      if (docChangedUnder(baseStamp)) { staleMsg(utterance); return; }
       // прогон могли остановить, пока считались раскладки вариантов: панель от снятой
       // команды на экране быть не должна — в одиночной ветке проверка есть, тут не было
       if (state.runSeq !== runId || ctrl.signal.aborted) return;
@@ -4589,7 +5476,7 @@ async function runUtterance(text, { variants = false, toModel = false } = {}) {
       return;
     }
 
-    if (docStamp(state.doc) !== baseStamp) { staleMsg(utterance); return; }
+    if (docChangedUnder(baseStamp)) { staleMsg(utterance); return; }
     // прогон могли остановить, пока считалась раскладка: коммитить его уже нельзя (п.29)
     if (state.runSeq !== runId || ctrl.signal.aborted) return;
 
@@ -5135,6 +6022,18 @@ function selectTouched(diff) {
 }
 
 /** Документ изменился, пока агент считал: операции легли бы поверх другого макета. */
+/**
+ * Устарела ли база, по которой считал агент. В прежнем режиме — да, если документ
+ * изменился: операции легли бы не туда. В серверном режиме (круг 22, SPEC §8.3 «Слияние не
+ * отказывает») транзакция всё равно перекладывается поверх чужих и своих правок теми же
+ * правилами, что на сервере, а что не легло — сказано словами (dropped). Отказ «документ
+ * изменился» там не нужен: с двумя людьми в проекте он срабатывал бы на каждой второй команде.
+ */
+function docChangedUnder(baseStamp) {
+  if (server) return false;
+  return docStamp(state.doc) !== baseStamp;
+}
+
 function staleMsg(utterance) {
   showMsg('error', 'Документ изменился, пока агент работал', {
     note: 'Правки считались по прежнему макету, поэтому я их не применил.',
@@ -5813,7 +6712,7 @@ function focusVariant(i) {
 
 function acceptVariant(v, utterance) {
   if (!state.variants) return false;   // вариант уже приняли — второй раз не применяем
-  if (state.variantsBase != null && docStamp(state.doc) !== state.variantsBase) {
+  if (state.variantsBase != null && docChangedUnder(state.variantsBase)) {
     hideVariants();
     staleMsg(utterance);
     return false;
@@ -7091,6 +7990,8 @@ function bindUi() {
   dom.docname.addEventListener('blur', () => {
     const name = dom.docname.textContent.trim() || 'Без названия';
     setDocNameText(name);
+    // круг 22: в серверном режиме имя — у проекта (PATCH), meta.name операциями не правится
+    if (server) { renameProject(name); return; }
     state.doc = { ...state.doc, meta: { ...state.doc.meta, name } };
     scheduleSave();
   });
@@ -7098,10 +7999,15 @@ function bindUi() {
     if (e.key === 'Enter') { e.preventDefault(); dom.docname.blur(); }
     if (e.key === 'Escape') {
       e.preventDefault();
-      setDocNameText(state.doc.meta && state.doc.meta.name || 'Без названия');
+      setDocNameText(docTitle());
       dom.docname.blur();
     }
   });
+  if (dom['btn-projects']) dom['btn-projects'].addEventListener('click', () => openProjects());
+  // окно вернулось в сеть — не ждать паузы переподключения; сеть пропала — закрыть сокет
+  // самим: иначе до таймаута TCP статус уверял бы «в сети»
+  globalThis.addEventListener('online', () => { if (server && server.sync) server.sync.reconnect(); });
+  globalThis.addEventListener('offline', () => { if (server && server.sync) server.sync.offline(); });
   // имя документа — строка, а не разметка: вставляем ровно текст (п.15)
   const plainInsert = (e, text) => {
     e.preventDefault();
@@ -7434,6 +8340,14 @@ function fillEdits(body) {
         : 'Значение записано, но раскладка его не использует.';
       foot.appendChild(tag);
     }
+    // круг 22: правка применена у нас, но сервер её ещё не подтвердил — это видно
+    if (server && tx.pending) {
+      const wait = document.createElement('span');
+      wait.className = 'tagpill wait';
+      wait.textContent = 'ждёт подтверждения';
+      wait.title = 'Правка применена здесь и отправлена на сервер; после подтверждения её увидят все.';
+      foot.appendChild(wait);
+    }
     if (current) {
       const now = document.createElement('span');
       now.className = 'hnow';
@@ -7721,7 +8635,7 @@ function openExport() {
  * «Рабочая-неделя.png» — и второй артборд затирал первый (круг 9, п.7).
  */
 function exportName(ext, abId) {
-  const doc = safeName(state.doc.meta && state.doc.meta.name);
+  const doc = safeName(server ? docTitle() : state.doc.meta && state.doc.meta.name);
   const ab = abId ? safeName(nodeTitleById(state.doc, abId)) : '';
   return ab && ab !== doc ? `${doc}-${ab}.${ext}` : `${doc}.${ext}`;
 }
@@ -7941,6 +8855,23 @@ function openSettings() {
 }
 
 function fillSettings(body) {
+  /* Круг 22: в серверном режиме имя участника — то, что видят другие у рамки выделения
+     и в истории. Спрашивается при первом входе, здесь меняется. */
+  if (server) {
+    const nameField = field('input', settings.author || '', (v) => {
+      setAuthor(v);
+      if (settings.author) toast(`Для других участников вы — ${settings.author}.`, 'plain', 5000);
+    }, 'Ваше имя для других участников');
+    nameField.placeholder = 'Как вас называть';
+    nameField.maxLength = 40;
+    const hint = document.createElement('div');
+    hint.className = 'note';
+    hint.textContent = server.project
+      ? `Проект «${server.project.name || 'Без названия'}» — правки уходят на сервер и видны всем участникам.`
+      : 'Правки уходят на сервер и видны всем участникам.';
+    body.appendChild(group('Участник', [row('Имя', nameField), hint]));
+  }
+
   const status = document.createElement('div');
   status.className = 'note';
   status.textContent = state.providerKind === 'claude'
@@ -8239,6 +9170,8 @@ function importJson() {
 }
 
 function docName(doc) {
+  // круг 22: у открытого документа в серверном режиме имя — имя проекта
+  if (server && server.project && doc === state.doc) return docTitle();
   return (doc && doc.meta && doc.meta.name) || 'Без названия';
 }
 
@@ -8394,6 +9327,10 @@ function plural(n, one, few, many) {
 /* -------------------------------- сохранение --------------------------------- */
 
 function scheduleSave() {
+  /* Круг 22: в серверном режиме документ живёт в реплике и её журнале; в db/localStorage
+     не пишем ничего. Оболочке остаётся пометить журнал: история и разговор лежат рядом
+     с документом (journalExtra), и реплика перепишет их вместе со своим состоянием. */
+  if (server) { if (server.sync) server.sync.touch(); return; }
   state.dirty = true;
   state.docRev += 1;   // номер правки: по нему видно, устарела ли запись в полёте (п.1)
   rearmSave();
@@ -8535,6 +9472,8 @@ async function saveNow() {
  * она успевает; запись в хранилище артефакта отправляем вдогонку, не дожидаясь ответа.
  */
 function saveOnExit() {
+  // круг 22: журнал реплики дописывается сейчас, не дожидаясь паузы в 200 мс
+  if (server) { if (server.sync) server.sync.flush(); return; }
   if (!state.dirty || state.saveBlocked) return;
   clearTimeout(saveTimer);
   const payload = savePayload();
@@ -8768,6 +9707,7 @@ function loadSettings() {
     railW: 0,             // круг 18, п.3: ручная ширина рельса, 0 — значение по умолчанию
     introSeen: false,
     voiceAlways: false,   // «слушать постоянно» — по выбору человека, не по умолчанию (п.9)
+    author: '',           // круг 22: имя для других участников (серверный режим)
     ...dflt,
     lmstudio: { enabled: false, baseUrl: 'http://localhost:1234/v1', model: 'local-model', ...(dflt.lmstudio || {}) },
   };
@@ -8992,6 +9932,13 @@ function applyTheme(theme) {
     dom['btn-theme'].setAttribute('aria-label', dom['btn-theme'].title);
   }
 }
+
+/* Прогонам в браузере (tools/smoke.mjs и проверка серверного режима) нужен взгляд внутрь:
+   документ, история и реплика. Только чтение — оболочка этим сама не пользуется. */
+Object.defineProperty(globalThis, '__imago', {
+  value: { state, hashDoc: CORE.hashDoc, get sync() { return server ? server.sync : null; }, get server() { return server; } },
+  enumerable: false, configurable: true,
+});
 
 /* Запуск — последней строкой: к этому моменту объявлены все константы модуля. */
 boot();

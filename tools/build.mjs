@@ -32,7 +32,7 @@ const defaults = `<script>
 `;
 writeFileSync(join(dist, 'index.html'), fullDoc({ top: defaults }), 'utf8');
 for (const f of ['styles.css', 'app.js']) copyFileSync(join(root, f), join(dist, f));
-for (const f of ['core.js', 'brain.js']) copyFileSync(join(root, 'src', f), join(dist, 'src', f));
+for (const f of ['core.js', 'brain.js', 'sync.js']) copyFileSync(join(root, 'src', f), join(dist, 'src', f));
 
 writeFileSync(join(dist, 'START.cmd'), [
   '@echo off',

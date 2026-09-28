@@ -3,6 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test \"test/**/*.test.mjs\""
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "test:server": "node --test \"test/server/*.test.mjs\"",
+    "server": "node server/document/index.js"
+  },
+  "dependencies": {
+    "pg": "^8.23.0",
+    "ws": "^8.22.0"
   }
 }

@@ -234,6 +234,56 @@ button, input, textarea { font: inherit; color: inherit; }
   text-overflow: clip; max-width: min(520px, 42vw);
 }
 
+/* Круг 22 (SPEC §9.5). Серверный режим: кнопка «Проекты» и состояние синхронизации
+   рядом с именем документа. Точка — тем же языком, что знак агента: сплошная «в сети»,
+   пульс «синхронизация», приглушённая «не в сети», красная «сервер недоступен». */
+#btn-projects { flex: none; width: 26px; height: 26px; padding: 0; }
+.sync-status {
+  display: inline-flex; align-items: center; gap: 6px; flex: none; min-width: 0;
+  font-size: var(--t-sm); color: var(--muted); white-space: nowrap; cursor: default;
+}
+.sync-text { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.sync-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--line-strong); flex: none; }
+.sync-dot[data-state="on"] { background: var(--agent); }
+.sync-dot[data-state="busy"] { background: var(--accent); animation: mark-pulse 1.1s ease-in-out infinite; }
+.sync-dot[data-state="off"] { background: var(--warn); }
+.sync-dot[data-state="error"] { background: var(--danger); }
+.sync-status[data-state="error"] { color: var(--danger); }
+
+/* Чужие выделения: рамка цвета участника и его имя над ней. Слой над сценой, клики
+   пропускает — это подпись, а не орган управления. */
+.presence-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 3; }
+.presence-box {
+  position: absolute; box-sizing: border-box;
+  border: 1.5px solid var(--who, var(--accent)); border-radius: 3px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--who, var(--accent)) 25%, transparent);
+}
+.presence-name {
+  position: absolute; left: -1.5px; bottom: 100%; margin-bottom: 2px;
+  font-size: var(--t-xs); line-height: 16px; padding: 0 6px; border-radius: 4px 4px 4px 0;
+  background: var(--who, var(--accent)); color: #fff; white-space: nowrap; max-width: 160px;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Шторка «Проекты»: имя — кнопка перехода, под ним когда менялся; текущий выделен. */
+.pitem {
+  display: flex; flex-direction: column; gap: 3px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2);
+}
+.pitem[data-current="true"] { border-color: var(--agent); }
+.phead { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pname {
+  flex: 1; min-width: 0; text-align: left; border: none; background: none; padding: 2px 0;
+  font-size: var(--t-md); color: var(--text); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pname:hover { color: var(--accent); }
+.pitem[data-current="true"] .pname { font-weight: 600; cursor: default; }
+.pname-edit { flex: 1; min-width: 0; }
+.pwhen { font-size: var(--t-xs); color: var(--muted); }
+/* правка ещё не подтверждена сервером — своя пилюля рядом с «без следа на экране» */
+.hfoot .tagpill.wait { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+
 .topbar-center {
   flex: 1; display: flex; gap: 4px; justify-content: flex-start; min-width: 0;
   overflow-x: auto; overflow-y: hidden; scrollbar-width: none; padding: 0 2px;
@@ -1368,6 +1418,8 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   .docname { display: inline-block; max-width: 96px; font-size: var(--t-xs); }
   .docname:focus { max-width: min(240px, 60vw); }
   .mark { display: none; }
+  /* круг 22: на узкой шапке от состояния остаётся точка — слова живут в title */
+  .sync-text { display: none; }
   /* панель вида прижата к краю и не занимает полэкрана над пустотой.
      Она неизбежно лежит на артборде, поэтому фон непрозрачный: фрост размывал
      текст макета под собой и читался как дефект макета, а не оболочки (п.13). */

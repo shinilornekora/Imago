@@ -177,17 +177,6 @@ function logOnce(key, ...args) {
   if (typeof console !== 'undefined' && console.warn) console.warn('[imago/core]', ...args);
 }
 
-/** Чтение значения по пути вида `style.fontSize`. */
-function getPath(obj, path) {
-  const parts = String(path).split('.');
-  let cur = obj;
-  for (const p of parts) {
-    if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
-    cur = cur[p];
-  }
-  return cur;
-}
-
 /** Иммутабельная запись по пути; value === undefined удаляет ключ. */
 function setPath(obj, path, value) {
   const parts = String(path).split('.');
@@ -1859,6 +1848,45 @@ function applyOps(doc, opList) {
   return { doc: draft };
 }
 
+/**
+ * Путь и прежнее значение для обратной операции set / setToken (SPEC §8.3,
+ * круг 22): инверсия считается НА УРОВНЕ ПУТИ операции — `set id a.b.c` ↔
+ * `set id a.b.c <было по этому пути>`. Раньше возвращалась голова пути целиком
+ * (`set id layout = <весь старый объект>`), и отмена своего «gap» затирала чужой
+ * «padding», записанный между правкой и отменой (дефект D1 ревью): на сервере
+ * пересечение правок решается по листьям (LWW, §9.6), и отмена обязана быть
+ * такой же узкой, как сама правка, — иначе она отменяет не своё.
+ *
+ * Шире листа — только там, где листовая запись не восстановила бы ФОРМУ:
+ *   • по промежуточному сегменту до правки лежал не объект (скаляр, строка,
+ *     отсутствие): setPath заменил его объектом, и обратно его вернёт лишь запись
+ *     этого уровня целиком — `fill:'accent'` + `set fill.token` ↔ `set fill 'accent'`,
+ *     а `set layout.gap` у фрейма без layout ↔ `set layout` без значения;
+ *   • операция снимает ключ: лист вернул бы значение, но не его место среди
+ *     соседей (порядок свотчей палитры после отмены «удалить accent»), поэтому
+ *     возвращается объект, в котором ключ лежал.
+ * Значение undefined = «ключа не было»: обратная операция без value снимает
+ * лист (setPath с undefined удаляет ключ, а не пишет undefined).
+ * @param {object} container узел или tokens ДО правки
+ * @param {string} path путь операции
+ * @param {any} opValue значение операции (undefined — снятие ключа)
+ * @returns {{path:string, value:any}}
+ */
+function inversePoint(container, path, opValue) {
+  const parts = String(path).split('.');
+  let cur = container && typeof container === 'object' ? container : {};
+  for (let i = 0; i < parts.length - 1; i++) {
+    const next = cur[parts[i]];
+    if (!next || typeof next !== 'object') return { path: parts.slice(0, i + 1).join('.'), value: next };
+    cur = next;
+  }
+  const leaf = cur[parts[parts.length - 1]];
+  if (opValue === undefined && leaf !== undefined && parts.length > 1) {
+    return { path: parts.slice(0, -1).join('.'), value: cur };
+  }
+  return { path, value: leaf };
+}
+
 /** Инверсия одной операции относительно состояния до неё. @returns {object[]} */
 function invertOne(doc, op) {
   switch (op && op.op) {
@@ -1940,15 +1968,16 @@ function invertOne(doc, op) {
     case 'set': {
       const node = nodeById(doc, op.id);
       if (!node) return [];
-      // setPath переписывает весь первый сегмент пути (скаляр превращается в объект),
-      // поэтому снимаем и возвращаем именно его целиком
-      const head = String(op.path).split('.')[0];
-      const prev = getPath(node, head);
-      const back = ops.set(op.id, head, prev === undefined ? undefined : deepClone(prev));
+      // круг 22: на уровне пути операции; голова целиком — только когда лист не
+      // восстановил бы форму (см. inversePoint). ops.set копирует значение сам
+      const at = inversePoint(node, op.path, op.value);
+      const back = ops.set(op.id, at.path, at.value);
       // Круг 16, п.1: отмена возвращает значение ровно тем, чем оно было, — включая
       // форму. Приведение формы (keepFieldForm) здесь молча оставило бы объект там,
       // где до правки лежала строка: `set fill.token='accent'` поверх fill:'accent'
       // делает {token:'accent'}, и обратная запись строки «совпала бы по смыслу».
+      // Круг 20: то же для шкал — число поверх ссылки на равный шаг оставило бы
+      // ссылку, а отмена обязана вернуть число, если до правки лежало число.
       back.exact = true;
       return [back];
     }
@@ -1960,10 +1989,11 @@ function invertOne(doc, op) {
       return [ops.move(op.id, node.parent, index < 0 ? 0 : index)];
     }
     case 'setToken': {
-      // восстанавливаем группу целиком — так не съезжает порядок ключей палитры
-      const head = String(op.path).split('.')[0];
-      const prev = getPath(doc.tokens, head);
-      return [ops.setToken(head, prev === undefined ? undefined : deepClone(prev))];
+      // круг 22: по пути операции — `setToken colors.accent` ↔ прежний accent, чужой
+      // surface цел; группу целиком возвращает только отмена снятия ключа, чтобы
+      // не съезжал порядок ключей палитры (см. inversePoint)
+      const at = inversePoint(doc.tokens, op.path, op.value);
+      return [ops.setToken(at.path, at.value)];
     }
     default:
       return [];
@@ -2138,9 +2168,13 @@ function rebase(doc, opList, opts) {
     const drop = (reason) => out.dropped.push({ index: i, op: raw, reason });
     if (!raw || typeof raw !== 'object') { drop('invalid'); continue; }
     let op = raw;
+    // «removed» — про узел, которого больше нет; операция без id — мусор, и
+    // автору об этом стоит сказать иначе, чем «узел уже удалён»
+    const hasId = typeof op.id === 'string' && op.id !== '';
     switch (op.op) {
       case 'set':
       case 'remove':
+        if (!hasId) { drop('invalid'); continue; }
         if (!cur.nodes[op.id]) { drop('removed'); continue; }
         break;
       case 'setToken':
@@ -2148,7 +2182,11 @@ function rebase(doc, opList, opts) {
       case 'create': {
         const node = op.node;
         if (!node || typeof node !== 'object') { drop('invalid'); continue; }
-        if (node.id && cur.nodes[node.id]) { drop('exists'); continue; }
+        // id узла даёт клиент (SPEC §8.3, §9.1): без него create не отличить от
+        // повтора и не отменить, а applyOps проставил бы случайный id прямо во
+        // входную операцию — два вызова rebase на одном входе разошлись бы
+        if (typeof node.id !== 'string' || !node.id) { drop('invalid'); continue; }
+        if (cur.nodes[node.id]) { drop('exists'); continue; }
         const needsParent = node.type !== 'page' || !!node.parent;
         if (needsParent) {
           let parentId = node.parent;
@@ -2163,7 +2201,12 @@ function rebase(doc, opList, opts) {
             parentId = alt;
           }
           if (Array.isArray(op.node.children)) {
-            const kids = op.node.children.filter((c) => cur.nodes[c]);
+            // дети, которых уже нет, вычёркиваются (§9.6). Туда же — ребёнок, который
+            // из-за чужого move стал предком родителя (или самим родителем): усыновить
+            // его — цикл, и applyOps отказал бы всему create; «сгруппировать» без него —
+            // то же, что без удалённого, а не потеря всей правки
+            const chain = ancestorIds(cur, parentId);
+            const kids = op.node.children.filter((c) => cur.nodes[c] && !chain.has(c));
             if (kids.length !== op.node.children.length) op = { ...op, node: { ...op.node, children: kids } };
           }
           op = withIndex(op, cur.nodes[parentId], null);
@@ -2174,6 +2217,7 @@ function rebase(doc, opList, opts) {
         break;
       }
       case 'move': {
+        if (!hasId) { drop('invalid'); continue; }
         if (!cur.nodes[op.id]) { drop('removed'); continue; }
         let parentId = op.parent;
         if (!cur.nodes[parentId]) {

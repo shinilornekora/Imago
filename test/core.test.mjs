@@ -11,7 +11,7 @@ import {
   expandInstance, MAX_INSTANCE_DEPTH,
   resolveScale, resolveLayout, resolveRadius, parseScaleRef, isScaleRef, scaleRef, scaleIndexOf, scaleSteps,
   keepFieldForm, ensureScaleRefs, ensureScaleRefsOps, scaleRefsIn, rewriteScaleRefsOps, insertScaleStep,
-  normalizeLayout, DEFAULT_TOKENS
+  normalizeLayout, DEFAULT_TOKENS, rebase
 } from '../src/core.js';
 
 /* Заглушка измерителя: ширина символа = 0.5 кегля (0.6 для моноширинного). */
@@ -5472,4 +5472,191 @@ test('круг20: property — операции со ссылками отмен
   }
   assert.ok(applied >= 800, 'операции в основном применяются: ' + applied);
   assert.ok(rejected >= 20, 'а мёртвые ссылки отклоняются: ' + rejected);
+});
+
+/* ------------------- круг 22 (SPEC §8.3): отмена на уровне пути ------------------- */
+
+/** Замораживает объект вглубь: любая запись в него бросит в strict-модуле. */
+function deepFreeze(v) {
+  if (v && typeof v === 'object' && !Object.isFrozen(v)) {
+    Object.freeze(v);
+    for (const k of Object.keys(v)) deepFreeze(v[k]);
+  }
+  return v;
+}
+
+test('круг22: отмена set gap — на уровне пути; параллельно изменённый padding цел', () => {
+  const doc = scene(() => [ops.create(frame('card', 'ab', { mode: 'column', gap: 4, padding: { t: 8, r: 8, b: 8, l: 8 } }, HUG))]);
+  const tx = [ops.set('card', 'layout.gap', 12)];
+  const inv = invertOps(doc, tx);
+  assert.equal(inv.length, 1);
+  assert.equal(inv[0].path, 'layout.gap', 'обратная операция адресует лист, а не голову');
+  assert.equal(inv[0].value, 4);
+  assert.equal(inv[0].exact, true);
+  const mine = applyOps(doc, tx).doc;
+  // чужая правка соседнего листа легла между моей правкой и моей отменой
+  const theirs = applyOps(mine, [ops.set('card', 'layout.padding.t', 24), ops.set('card', 'name', 'Чужое имя')]).doc;
+  const back = applyOps(theirs, inv);
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.equal(back.doc.nodes.card.layout.gap, 4, 'свой gap отменён');
+  assert.equal(back.doc.nodes.card.layout.padding.t, 24, 'чужой padding цел');
+  assert.equal(back.doc.nodes.card.name, 'Чужое имя');
+  // без чужих правок отмена по-прежнему возвращает узел байт в байт
+  assert.deepStrictEqual(applyOps(mine, inv).doc.nodes.card, doc.nodes.card);
+  // вложенные пути в других полях — то же самое
+  const t = scene(() => [ops.create(label('t', 'ab', 'Привет', { style: { token: 'body', fontSize: 15 } }))]);
+  const inv2 = invertOps(t, [ops.set('t', 'style.fontSize', 30)]);
+  assert.equal(inv2[0].path, 'style.fontSize');
+  assert.equal(inv2[0].value, 15);
+  const t2 = applyOps(applyOps(t, [ops.set('t', 'style.fontSize', 30)]).doc, [ops.set('t', 'style.fontWeight', 700)]).doc;
+  const t3 = applyOps(t2, inv2).doc;
+  assert.deepStrictEqual(t3.nodes.t.style, { token: 'body', fontSize: 15, fontWeight: 700 });
+});
+
+test('круг22: отмена setToken colors.accent не трогает изменённый colors.surface', () => {
+  const doc = createDoc('empty');
+  const tx = [ops.setToken('colors.accent', '#0000ff'), ops.setToken('type.body.fontSize', 17)];
+  const inv = invertOps(doc, tx);
+  assert.deepEqual(inv.map((o) => o.path), ['type.body.fontSize', 'colors.accent'], 'по пути операции, в обратном порядке');
+  assert.equal(inv[1].value, '#FF6B3D');
+  assert.equal(inv[0].value, 15);
+  const mine = applyOps(doc, tx).doc;
+  const theirs = applyOps(mine, [ops.setToken('colors.surface', '#000000'), ops.setToken('type.body.lineHeight', 26)]).doc;
+  const back = applyOps(theirs, inv);
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.equal(back.doc.tokens.colors.accent, '#FF6B3D', 'свой accent отменён');
+  assert.equal(back.doc.tokens.colors.surface, '#000000', 'чужой surface цел');
+  assert.equal(back.doc.tokens.type.body.fontSize, 15);
+  assert.equal(back.doc.tokens.type.body.lineHeight, 26, 'чужой lineHeight цел');
+  assert.deepEqual(Object.keys(back.doc.tokens.colors), Object.keys(doc.tokens.colors), 'порядок свотчей не прыгает');
+  // отмена снятия ключа возвращает группу целиком — иначе ключ встал бы в конец палитры
+  const unset = [ops.setToken('colors.accent')];
+  const inv2 = invertOps(doc, unset);
+  assert.equal(inv2[0].path, 'colors');
+  const back2 = applyOps(applyOps(doc, unset).doc, inv2).doc;
+  assert.deepEqual(Object.keys(back2.tokens.colors), Object.keys(doc.tokens.colors));
+  // …но не шире объекта, в котором ключ лежал: type.body, а не вся группа type
+  const inv3 = invertOps(doc, [ops.setToken('type.body.fontSize')]);
+  assert.equal(inv3[0].path, 'type.body');
+  assert.deepStrictEqual(inv3[0].value, doc.tokens.type.body);
+});
+
+test('круг22: смена формы скаляр→объект (и отсутствие→объект) отменяется головой целиком', () => {
+  const doc = scene(() => [
+    ops.create(label('t', 'ab', 'Привет', { style: 'display' })),
+    ops.create(box('b', 'ab', 10, 10, { fill: 'accent' })),
+    ops.create(bare('c', 'ab', 10, 10)),
+    ops.create(label('u', 'ab', 'Ещё'))
+  ]);
+  const cases = [
+    [ops.set('t', 'style.fontSize', 12), 'style', 'display', 'строка style стала объектом'],
+    [ops.set('b', 'fill.token', 'surface'), 'fill', 'accent', 'строка fill стала объектом'],
+    [ops.set('b', 'fill.token', 'accent'), 'fill', 'accent', 'то же имя, но объект поверх строки по вложенному пути — тоже смена формы'],
+    [ops.set('c', 'fill.token', 'surface'), 'fill', undefined, 'fill не было — снимается целиком'],
+    [ops.set('c', 'layout.padding.t', 12), 'layout', undefined, 'layout не было — снимается целиком'],
+    [ops.set('u', 'style.a.b', 1), 'style.a', undefined, 'глубже: снимается тот уровень, которого не было, — пустой объект не остаётся']
+  ];
+  for (const [op, path, value, why] of cases) {
+    const inv = invertOps(doc, [op]);
+    assert.equal(inv.length, 1, why);
+    assert.equal(inv[0].path, path, why);
+    assert.deepStrictEqual(inv[0].value, value, why);
+    const after = applyOps(doc, [op]);
+    assert.equal(after.error, undefined, why + ': ' + JSON.stringify(after.error));
+    const back = applyOps(after.doc, inv);
+    assert.equal(back.error, undefined, why + ': ' + JSON.stringify(back.error));
+    assert.deepStrictEqual(back.doc.nodes[op.id], doc.nodes[op.id], why);
+  }
+});
+
+test('круг22: листовая инверсия с exact хранит форму — число поверх ссылки на равный шаг возвращает число', () => {
+  const doc = scene(() => [
+    ops.create(frame('r', 'ab', { mode: 'row', gap: 'spacing.6', padding: { t: 'spacing.4', r: 8, b: 'spacing.4', l: 8 } }, HUG, { radius: 'radii.2' })),
+    ops.create(frame('n', 'ab', { mode: 'row', gap: 16 }, HUG))
+  ]);
+  const cases = [
+    [ops.set('r', 'layout.gap', 24), 'layout.gap', 'spacing.6'],
+    [ops.set('r', 'layout.gap', 'spacing.8'), 'layout.gap', 'spacing.6'],
+    [ops.set('r', 'layout.gap', 16), 'layout.gap', 'spacing.6'],      // «то же самое»: правка пустая, отмена тоже
+    [ops.set('r', 'layout.padding.t', 20), 'layout.padding.t', 'spacing.4'],
+    [ops.set('r', 'layout.padding.r', 'spacing.5'), 'layout.padding.r', 8],
+    [ops.set('r', 'layout.padding', 4), 'layout.padding', { t: 'spacing.4', r: 8, b: 'spacing.4', l: 8 }],
+    [ops.set('r', 'radius', 12), 'radius', 'radii.2'],
+    // ссылка поверх числа — настоящая правка (§6.4); отмена возвращает ЧИСЛО, хотя
+    // 16 равно spacing.6 и без exact keepFieldForm оставил бы ссылку
+    [ops.set('n', 'layout.gap', 'spacing.6'), 'layout.gap', 16]
+  ];
+  for (const [op, path, value] of cases) {
+    const why = `${op.id} ${op.path} = ${JSON.stringify(op.value)}`;
+    const inv = invertOps(doc, [op]);
+    assert.equal(inv[0].path, path, why);
+    assert.deepStrictEqual(inv[0].value, value, why);
+    assert.equal(inv[0].exact, true, why);
+    const after = applyOps(doc, [op]);
+    assert.equal(after.error, undefined, why + ': ' + JSON.stringify(after.error));
+    const back = applyOps(after.doc, inv);
+    assert.equal(back.error, undefined, why + ': ' + JSON.stringify(back.error));
+    assert.deepStrictEqual(back.doc.nodes[op.id], doc.nodes[op.id], why);
+  }
+  // отмена возвращает ссылку и тогда, когда шкалу успели укоротить — exact не проверяет живость
+  const shortened = applyOps(applyOps(doc, [ops.set('r', 'layout.gap', 24)]).doc, [ops.setToken('spacing', [0, 4])]).doc;
+  const back = applyOps(shortened, invertOps(doc, [ops.set('r', 'layout.gap', 24)]));
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.equal(back.doc.nodes.r.layout.gap, 'spacing.6');
+});
+
+test('круг22: undefined по пути = «ключа не было» — инверсия снимает лист, а не пишет undefined', () => {
+  const doc = scene(() => [ops.create(label('t', 'ab', 'Привет', { style: { token: 'body' } }))]);
+  const tx = [ops.set('t', 'style.fontSize', 20), ops.set('t', 'opacity', 0.5)];
+  const inv = invertOps(doc, tx);
+  assert.deepEqual(inv.map((o) => o.path), ['opacity', 'style.fontSize']);
+  assert.ok(inv.every((o) => o.value === undefined && o.exact === true));
+  const after = applyOps(doc, tx).doc;
+  const back = applyOps(after, inv);
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.ok(!('fontSize' in back.doc.nodes.t.style), 'лист снят, а не записан как undefined');
+  assert.ok(!('opacity' in back.doc.nodes.t));
+  assert.deepStrictEqual(back.doc.nodes.t, doc.nodes.t);
+  assert.equal(JSON.stringify(back.doc.nodes.t), JSON.stringify(doc.nodes.t), 'и через JSON байт в байт');
+  // токены: новый ключ снимается, порядок остальных не меняется
+  const tk = [ops.setToken('colors.fresh', '#123456'), ops.setToken('type.body.font', 'Inter')];
+  const tinv = invertOps(doc, tk);
+  assert.deepEqual(tinv.map((o) => o.path), ['type.body.font', 'colors.fresh']);
+  const tback = applyOps(applyOps(doc, tk).doc, tinv);
+  assert.equal(tback.error, undefined, JSON.stringify(tback.error));
+  assert.deepStrictEqual(tback.doc.tokens, doc.tokens);
+  assert.equal(JSON.stringify(tback.doc.tokens), JSON.stringify(doc.tokens));
+  // снятие существующего листа отменяется объектом, в котором он лежал
+  const del = [ops.set('t', 'style.token')];
+  const dinv = invertOps(doc, del);
+  assert.equal(dinv[0].path, 'style');
+  assert.deepStrictEqual(dinv[0].value, { token: 'body' });
+  const dafter = applyOps(doc, del);
+  assert.equal(dafter.error, undefined, JSON.stringify(dafter.error));
+  assert.deepStrictEqual(applyOps(dafter.doc, dinv).doc.nodes.t, doc.nodes.t);
+});
+
+test('круг22: applyOps, invertOps и rebase не мутируют входные операции — кроме id у create без id', () => {
+  const doc = scene(() => [ops.create(box('a', 'ab', 10, 10)), ops.create(frame('f', 'ab', { mode: 'row' }, HUG))]);
+  const list = deepFreeze([
+    ops.set('a', 'fill', '#ff0000'), ops.set('f', 'layout.gap', 8), ops.set('f', 'layout.padding', 4),
+    ops.move('a', 'f', 0), ops.create(label('t', 'f', 'x')), ops.create(frame('w', 'ab', { mode: 'none' }, HUG, { children: ['f'] })),
+    ops.setToken('colors.accent', '#000000'), ops.remove('a')
+  ]);
+  const before = JSON.stringify(list);
+  let res;
+  assert.doesNotThrow(() => { res = applyOps(doc, list); });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.doesNotThrow(() => invertOps(doc, list));
+  assert.doesNotThrow(() => rebase(doc, list));
+  assert.equal(JSON.stringify(list), before);
+  // единственная мутация — id у create без id, и только он
+  const raw = { op: 'create', node: { type: 'rect', parent: 'ab', size: fixed(5, 5) } };
+  const rawBefore = JSON.stringify(raw);
+  const r2 = applyOps(doc, [raw]);
+  assert.equal(r2.error, undefined, JSON.stringify(r2.error));
+  assert.equal(typeof raw.node.id, 'string');
+  assert.ok(r2.doc.nodes[raw.node.id], 'узел создан с проставленным id');
+  delete raw.node.id;
+  assert.equal(JSON.stringify(raw), rawBefore, 'сверх id ничего не изменилось');
 });

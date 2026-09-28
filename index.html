@@ -10,6 +10,11 @@
       <span class="mark" id="agent-dot" role="img" aria-label="Агент не подключён" title="Агент не подключён"></span>
       <span class="brand-sep" aria-hidden="true"></span>
       <span class="docname" id="docname" contenteditable="true" spellcheck="false">Без названия</span>
+      <!-- Круг 22 (SPEC §9.5). Серверный режим: рядом с именем — шторка «Проекты» и состояние
+           синхронизации («в сети · всё сохранено», «не в сети · N правок ждут», кто в сети).
+           Без сервера оба скрыты: артефакт и локальная статика работают по-прежнему. -->
+      <button class="btn ghost icon small" id="btn-projects" hidden title="Проекты" aria-label="Проекты"><span class="i" data-icon="folder"></span></button>
+      <span class="sync-status" id="sync-status" hidden role="status" aria-live="polite"></span>
     </div>
 
     <div class="topbar-center" id="artboard-tabs"></div>
@@ -45,6 +50,9 @@
 
   <main class="canvas-wrap">
     <div class="canvas" id="canvas"></div>
+    <!-- Круг 22. Чужие выделения — цветная рамка с именем участника поверх сцены. Свой слой,
+         а не сцена: она рисует только своё выделение, а координаты даёт её toScreen. -->
+    <div class="presence-layer" id="presence" hidden aria-hidden="true"></div>
 
     <div class="empty-state" id="empty-state" hidden>
       <div class="empty-card" id="empty-card">
