@@ -67,15 +67,37 @@ const MAX_SIZE = 100000;
 /** Предел глубины дерева: страховка от циклов и патологически глубоких документов. */
 const MAX_DEPTH = 256;
 
-let uidCounter = 0;
 /**
- * Короткий уникальный идентификатор узла.
+ * Версия формата движка (SPEC §8.3): в каждой транзакции и снимке. Меняется,
+ * когда старый журнал перестаёт применяться без миграции.
+ */
+const ENGINE_VERSION = 1;
+
+let uidCounter = 0;
+const UID_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
+/**
+ * Глобально уникальный идентификатор (SPEC §8.3, круг 22): id узлов и
+ * транзакций генерирует клиент, и два клиента не должны столкнуться —
+ * 12 случайных символов base36 (~62 бита) из криптографического источника плюс
+ * счётчик процесса как страховка от повторов в одном процессе. Длиннее нельзя
+ * без причины: id ходят в выжимке документа к модели, и каждый символ — токены
+ * на каждой команде. На проект в сто тысяч узлов вероятность столкновения ~10⁻⁹.
+ * Префикс — только для читаемости («f_» у фреймов).
  * @param {string} [prefix]
  * @returns {string}
  */
 function uid(prefix = 'n') {
   uidCounter += 1;
-  return prefix + '_' + uidCounter.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+  let rnd = '';
+  const c = globalThis.crypto;
+  if (c && typeof c.getRandomValues === 'function') {
+    const bytes = new Uint8Array(12);
+    c.getRandomValues(bytes);
+    for (let i = 0; i < 12; i++) rnd += UID_ALPHABET[bytes[i] % 36];
+  } else {
+    for (let i = 0; i < 12; i++) rnd += UID_ALPHABET[Math.floor(Math.random() * 36)];
+  }
+  return prefix + '_' + rnd + uidCounter.toString(36);
 }
 
 /**
@@ -1983,6 +2005,203 @@ function invertOps(doc, opList) {
 }
 
 /* ------------------------------------------------------------------ *
+ * 4b. Слияние транзакций (круг 22, SPEC §9.6)
+ *
+ * rebase(doc, ops, {tombstones}) — операции, построенные относительно более
+ * старой базы, превращаются в применимые к голове. Не бросает, детерминирован;
+ * после него строгий applyOps обязан пройти. Транзакция целиком не
+ * отклоняется никогда: отдельная операция отбрасывается только по правилам
+ * таблицы §9.6 — узел удалён (remove побеждает), повтор create, потерянный
+ * родитель без живых предков, перемещение в цикл. Одна и та же функция
+ * исполняется в DSLTS (перед записью) и на клиенте (view = replay(confirmed,
+ * pending)) — поэтому клиент почти всегда угадывает, что сделает сервер.
+ * ------------------------------------------------------------------ */
+
+/** JSON с отсортированными ключами — для устойчивых хэшей. */
+function stableJSON(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value === undefined ? null : value);
+  if (Array.isArray(value)) return '[' + value.map(stableJSON).join(',') + ']';
+  const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableJSON(value[k])).join(',') + '}';
+}
+
+/** Два независимых 32-битных счёта (FNV-1a + xxhash-подобный) → 64-битный ключ. */
+function fnv64(s) {
+  let h = 0x811c9dc5;
+  let g = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h ^= c;
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    g = Math.imul(g ^ c, 2246822519) >>> 0;
+  }
+  const hex = (v) => ('00000000' + v.toString(16)).slice(-8);
+  return hex(h) + hex(g) + '-' + s.length.toString(36);
+}
+
+/**
+ * Устойчивый хэш документа без геометрии: корень, узлы, токены. Порядок
+ * ключей нормализуется, чтобы одинаковые документы, собранные разными путями
+ * (переигрывание журнала, снимок, локальное применение), совпадали. `version`
+ * и `meta` не участвуют: это счётчики и служебное, а не содержание.
+ * @param {object} doc
+ * @returns {string}
+ */
+function hashDoc(doc) {
+  if (!doc || !doc.nodes) return '0';
+  return fnv64(stableJSON({ root: doc.root, nodes: doc.nodes, tokens: doc.tokens }));
+}
+
+/** Надгробия как Map: id удалённого узла → его последний родитель (или null). */
+function toTombMap(src) {
+  if (src instanceof Map) return src;
+  const m = new Map();
+  if (src && typeof src === 'object') for (const k of Object.keys(src)) m.set(k, src[k] === undefined ? null : src[k]);
+  return m;
+}
+
+/**
+ * Надгробия, которые оставит транзакция: для каждого `remove` — все узлы
+ * поддерева с их родителями НА МОМЕНТ ДО применения. Сервер и клиент ведут
+ * этим общий словарь, по которому rebase ищет живого предка потерянному узлу.
+ * @param {object} doc документ до применения
+ * @param {object[]} opList применённая форма операций
+ * @returns {[string, string|null][]}
+ */
+function collectTombstones(doc, opList) {
+  const out = [];
+  const list = Array.isArray(opList) ? opList : opList ? [opList] : [];
+  let cur = doc;
+  for (const op of list) {
+    if (op && op.op === 'remove' && cur && cur.nodes && cur.nodes[op.id]) {
+      for (const id of subtreeIds(cur, op.id)) {
+        const n = cur.nodes[id];
+        out.push([id, n && n.parent ? n.parent : null]);
+      }
+    }
+    const res = applyOps(cur, [op]);
+    if (res.error) break;
+    cur = res.doc;
+  }
+  return out;
+}
+
+/**
+ * `after` → индекс в списке детей родителя (без самого узла, как считает
+ * applyOps); соседа уже нет — берётся `index`, иначе конец. `after` из
+ * применённой формы убирается: в журнале лежит ровно то, что съел applyOps.
+ */
+function withIndex(op, parent, selfId) {
+  const kids = (parent && Array.isArray(parent.children) ? parent.children : []).filter((c) => c !== selfId);
+  let index;
+  if (op.after === null) index = 0;
+  else if (typeof op.after === 'string') {
+    const at = kids.indexOf(op.after);
+    index = at >= 0 ? at + 1 : (isNum(op.index) ? op.index : kids.length);
+  } else index = isNum(op.index) ? op.index : kids.length;
+  const next = { ...op, index: clamp(Math.round(index), 0, kids.length) };
+  delete next.after;
+  return next;
+}
+
+/**
+ * Слияние (SPEC §9.6): операции относительно старой базы → применимые к голове.
+ * @param {object} doc голова
+ * @param {object[]} opList
+ * @param {{tombstones?: Map<string,string|null>|Record<string,string|null>}} [opts]
+ * @returns {{ops: object[], dropped: {index:number, op:object, reason:string}[], notes: {index:number, note:string}[]}}
+ *   reason: removed · exists · orphan · cycle · invalid
+ */
+function rebase(doc, opList, opts) {
+  const list = Array.isArray(opList) ? opList : opList ? [opList] : [];
+  const out = { ops: [], dropped: [], notes: [] };
+  if (!doc || !doc.nodes) {
+    list.forEach((op, index) => out.dropped.push({ index, op, reason: 'invalid' }));
+    return out;
+  }
+  const tomb = toTombMap(opts && opts.tombstones);
+  let cur = doc;
+  /** ближайший живой предок по цепочке надгробий */
+  const liveAncestor = (id) => {
+    let p = id;
+    const seen = new Set();
+    let guard = 0;
+    while (p && guard++ < MAX_DEPTH && !seen.has(p)) {
+      if (cur.nodes[p]) return p;
+      seen.add(p);
+      p = tomb.has(p) ? tomb.get(p) : null;
+    }
+    return null;
+  };
+  for (let i = 0; i < list.length; i++) {
+    const raw = list[i];
+    const drop = (reason) => out.dropped.push({ index: i, op: raw, reason });
+    if (!raw || typeof raw !== 'object') { drop('invalid'); continue; }
+    let op = raw;
+    switch (op.op) {
+      case 'set':
+      case 'remove':
+        if (!cur.nodes[op.id]) { drop('removed'); continue; }
+        break;
+      case 'setToken':
+        break;
+      case 'create': {
+        const node = op.node;
+        if (!node || typeof node !== 'object') { drop('invalid'); continue; }
+        if (node.id && cur.nodes[node.id]) { drop('exists'); continue; }
+        const needsParent = node.type !== 'page' || !!node.parent;
+        if (needsParent) {
+          let parentId = node.parent;
+          if (!cur.nodes[parentId]) {
+            const alt = liveAncestor(parentId);
+            if (!alt) { drop('orphan'); continue; }
+            // место у старого родителя ничего не значит у нового — в конец
+            op = { ...op, node: { ...node, parent: alt } };
+            delete op.after;
+            delete op.index;
+            out.notes.push({ index: i, note: 'reparented' });
+            parentId = alt;
+          }
+          if (Array.isArray(op.node.children)) {
+            const kids = op.node.children.filter((c) => cur.nodes[c]);
+            if (kids.length !== op.node.children.length) op = { ...op, node: { ...op.node, children: kids } };
+          }
+          op = withIndex(op, cur.nodes[parentId], null);
+        } else if (op.after !== undefined) {
+          op = { ...op };
+          delete op.after;
+        }
+        break;
+      }
+      case 'move': {
+        if (!cur.nodes[op.id]) { drop('removed'); continue; }
+        let parentId = op.parent;
+        if (!cur.nodes[parentId]) {
+          const alt = liveAncestor(parentId);
+          if (!alt) { drop('orphan'); continue; }
+          op = { ...op, parent: alt };
+          delete op.after;
+          delete op.index;
+          out.notes.push({ index: i, note: 'reparented' });
+          parentId = alt;
+        }
+        if (parentId === op.id || ancestorIds(cur, parentId).has(op.id)) { drop('cycle'); continue; }
+        op = withIndex(op, cur.nodes[parentId], op.id);
+        break;
+      }
+      default:
+        drop('invalid');
+        continue;
+    }
+    const res = applyOps(cur, [op]);
+    if (res.error) { drop('invalid'); continue; }
+    cur = res.doc;
+    out.ops.push(op);
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
  * 4a. Шкалы: миграция на ссылки и правки шкалы со сдвигом (круг 20, SPEC §6.5)
  *
  * Всё здесь возвращает ОПЕРАЦИИ или применяет их через applyOps: документ не
@@ -2833,17 +3052,9 @@ function hashGeometry(geo) {
      макетов означает молчаливое «ничего не изменилось» там, где изменилось всё.
      Вероятность и на 32 битах ничтожна (2⁻³²), но цена второго счёта — один
      умножитель на символ (на 40 477 узлах +20 мс к 90), а цена ошибки — молчание,
-     которого не объяснишь. Сама строка s уже собрана — она и есть дорогая часть. */
-  let h = 0x811c9dc5;
-  let g = 0x01000193;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    h ^= c;
-    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
-    g = Math.imul(g ^ c, 2246822519) >>> 0;
-  }
-  const hex = (v) => ('00000000' + v.toString(16)).slice(-8);
-  return hex(h) + hex(g) + '-' + s.length.toString(36);
+     которого не объяснишь. Сама строка s уже собрана — она и есть дорогая часть.
+     Круг 22: тот же счёт вынесен в fnv64 — им же считается hashDoc. */
+  return fnv64(s);
 }
 
 /* ------------------------------------------------------------------ *
@@ -7079,6 +7290,8 @@ class Stage {
 
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
+  /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */
+  ENGINE_VERSION, rebase, collectTombstones, hashDoc, uid,
   resetMeasureCache, measureEpoch, onMeasureEpoch,
   hashGeometry, nodeById, ancestors, isArtboard, artboards, subtreeIds, cloneSubtree,
   resolveTarget, resolveColor, resolveTextStyle, contrastRatio, sizeSpec, normalizeLayout,
