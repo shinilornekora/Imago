@@ -1062,6 +1062,72 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 .pickpill-sample { margin-left: auto; color: var(--muted); font-size: var(--t-xs); flex: none; }
 /* Шторка объявления свойства: несколько групп подряд с тем же зазором, что в инспекторе. */
 .group-stack { display: flex; flex-direction: column; gap: 13px; }
+
+/* ---- круг 20: шкалы как ссылки (SPEC §6.7) -------------------------------------- */
+
+/* Поле по шкале в инспекторе: список шагов (+ своё число) и под ним подпись
+   «12 · по шкале» / «15 · мимо шкалы». Подпись — то, что человек читает; сам список
+   печатает только пиксели шагов, слов spacing/radii на экране нет. */
+.scalepick { display: flex; flex-direction: column; gap: 3px; flex: 1 1 auto; min-width: 0; }
+/* Подпись строки — на уровне списка, а не посередине двух строк контрола. */
+.row:has(> .scalepick) { align-items: flex-start; }
+.row:has(> .scalepick) > label { padding-top: 6px; }
+.scalepick-line { display: flex; gap: 6px; min-width: 0; }
+.scalepick-line > select.field { flex: 1 1 auto; min-width: 0; }
+.scalepick-line > input.field.scalepick-num { flex: 0 0 72px; }
+.scalepick-note {
+  font-size: var(--t-xs); color: var(--muted); line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+/* Мимо шкалы — не ошибка, а выбор: подпись остаётся приглушённой, но с тёплым знаком слева.
+   Мёртвая ссылка — поломка, о ней говорит цвет предупреждения. */
+.scalepick[data-state="off"] .scalepick-note::before {
+  content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--warn); margin: 0 5px 1px 0; vertical-align: middle;
+}
+.scalepick[data-state="dead"] .scalepick-note { color: var(--warn); }
+.scalepick[data-state="dead"] > .scalepick-line > select.field { border-color: var(--warn); }
+/* Ссылка на редактор шкал под группой: текстовая кнопка, а не третья рамка в панели. */
+.linkish {
+  align-self: flex-start; background: none; border: none; padding: 0;
+  color: var(--accent); font-size: var(--t-sm); cursor: pointer; text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  text-underline-offset: 2px;
+}
+.linkish:hover { text-decoration-color: var(--accent); }
+
+/* Шторка «Шкалы документа»: две шкалы, у каждой — строки «шаг i · значение · сколько узлов · +». */
+.scale-ed { display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
+.scale-ed + .scale-ed { border-top: 1px solid var(--line-soft); padding-top: 12px; margin-top: 4px; }
+.scale-ed-title {
+  margin: 0; font-family: var(--display); font-size: var(--t-lg); font-weight: 400;
+  letter-spacing: 0; text-transform: none; color: var(--text);
+}
+.scale-ed-sub { margin: -2px 0 2px; }
+.scale-rows { display: flex; flex-direction: column; gap: 4px; }
+.scale-row {
+  display: grid; grid-template-columns: 52px 84px minmax(0, 1fr) 28px;
+  align-items: center; gap: 8px;
+  border: 1px solid var(--line); border-radius: 9px; padding: 4px 6px 4px 10px;
+}
+.scale-row[data-unused="on"] { border-color: var(--line-soft); }
+.scale-idx { font-size: var(--t-xs); color: var(--muted); letter-spacing: .04em; white-space: nowrap; }
+.scale-row > input.field { flex: none; width: 84px; }
+/* Запертый ноль: вид поля, но не поле — замок нарисован словом в подсказке и знаком справа. */
+.scale-locked {
+  display: inline-flex; align-items: center; justify-content: space-between;
+  font-family: var(--mono); color: var(--muted); cursor: help;
+  background: transparent; border-style: dashed;
+}
+.scale-locked::after { content: 'заперт'; font-size: 10px; letter-spacing: .04em; font-family: var(--ui); }
+.scale-use {
+  font-size: var(--t-sm); color: var(--text); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.scale-row[data-unused="on"] .scale-use { color: var(--muted); }
+.scale-add { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.scale-add:hover { color: var(--accent); }
 /* Шаги плана в сообщении агента: план модели наконец виден (круг 11, п.17). */
 .msg-steps {
   margin: 6px 0 0; padding: 0 0 0 2px; list-style: none; counter-reset: step;
@@ -1341,6 +1407,10 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 @media (max-width: 560px) {
   .wordmark { display: none; }
   .docname { max-width: 120px; }
+  /* Круг 20, п.4. Пятая кнопка в шапке телефона сжимала имя документа до одной буквы
+     (41 → 12 px). На телефоне редактор шкал открывается ссылкой из инспектора
+     («Шкала отступов…»), а кнопка шапки уступает место имени. */
+  #btn-scales { display: none; }
   .docname:focus { max-width: min(240px, 62vw); }
   .variants { grid-template-columns: minmax(0, 1fr); width: 100%; }
   .empty-title { font-size: 26px; }

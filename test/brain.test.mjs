@@ -248,7 +248,9 @@ test('создание: дерево превращается в операци�
   assert.equal(root.parent, doc.root, 'новый артборд лежит в корне');
   assert.deepEqual(root.size.w, { mode: 'fixed', value: 390 });
   assert.deepEqual(root.size.h, { mode: 'hug' });
-  assert.deepEqual(root.layout.padding, { t: 24, r: 20, b: 24, l: 20 }, 'padding [v,h] развёрнут');
+  // круг 20 (SPEC §6.6): 24 — шаг шкалы [4,8,12,16,24,…] → ссылка; 20 — ровно между 16 и 24, остаётся числом
+  assert.deepEqual(root.layout.padding, { t: 'spacing.4', r: 20, b: 'spacing.4', l: 20 }, 'padding [v,h] развёрнут, вертикаль на шкале');
+  assert.ok(res.warnings.some((w) => /20 — мимо шкалы отступов/.test(w)), 'про 20 мимо шкалы сказано: ' + res.warnings.join(' | '));
   assert.ok(root.pos && root.pos.x > 0, 'артборд встал правее существующих');
   assert.deepEqual(root.children, [], 'дети приходят своими операциями');
 
@@ -311,7 +313,8 @@ test('правка: patch по имени цели превращается в s
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.equal(res.ops.length, 3, 'защищённый путь и ненайденная цель отброшены');
   assert.deepEqual(res.ops[0], { op: 'set', id: 't1', path: 'style', value: 'h1' });
-  assert.deepEqual(res.ops[1], { op: 'set', id: 'ab1', path: 'layout.gap', value: 24 }, 'строка «24» стала числом');
+  // круг 20 (SPEC §6.6): число, равное шагу шкалы отступов, становится ссылкой на этот шаг
+  assert.deepEqual(res.ops[1], { op: 'set', id: 'ab1', path: 'layout.gap', value: 'spacing.4' }, 'строка «24» стала ссылкой на шаг 24');
   assert.deepEqual(res.ops[2], { op: 'set', id: 'btn', path: 'size.w', value: { mode: 'hug' } });
   // круг 16, п.9: поле названо человеческим словом, а «type» — слово МОДЕЛИ, его и показываем
   assert.ok(res.warnings.some((w) => /Служебное поле «type» менять нельзя/.test(w)), 'предупреждение про служебное поле: ' + res.warnings.join(' | '));
@@ -650,12 +653,18 @@ test('coerceValue: строки модели приводятся к типам 
   const doc = makeDoc();
   assert.deepEqual(coerceValue('fill', 'size.w', doc), { mode: 'fill' });
   assert.deepEqual(coerceValue('320', 'size.h', doc), { mode: 'fixed', value: 320 });
-  assert.deepEqual(coerceValue('[12,24]', 'layout.padding', doc), { t: 12, r: 24, b: 12, l: 24 });
+  // круг 20 (SPEC §6.6): числа, равные шагам шкалы [4,8,12,16,24,…], становятся ссылками на шаги
+  assert.deepEqual(coerceValue('[12,24]', 'layout.padding', doc), { t: 'spacing.2', r: 'spacing.4', b: 'spacing.2', l: 'spacing.4' });
   assert.equal(coerceValue('true', 'layout.wrap', doc), true);
   assert.equal(coerceValue('#FFF', 'fill', doc), '#ffffff');
   assert.equal(coerceValue('accent', 'fill', doc), 'accent');
   assert.equal(coerceValue('Купить за 1 490 ₽', 'characters', doc), 'Купить за 1 490 ₽');
-  assert.equal(coerceValue('12', 'layout.gap', doc), 12);
+  assert.equal(coerceValue('12', 'layout.gap', doc), 'spacing.2');
+  // ссылка от модели идёт как есть; в документе без шкалы число остаётся числом
+  assert.equal(coerceValue('spacing.3', 'layout.gap', doc), 'spacing.3');
+  const bare = { ...doc, tokens: { ...doc.tokens, spacing: [] } };
+  assert.equal(coerceValue('12', 'layout.gap', bare), 12);
+  assert.deepEqual(coerceValue('[12,24]', 'layout.padding', bare), { t: 12, r: 24, b: 12, l: 24 });
 });
 
 /* ── 11. Провайдеры ──────────────────────────────────────────────────────── */
@@ -801,7 +810,8 @@ test('промпты несут правила DSL, токены, выжимку
   assert.match(tree, /Координат НЕТ/);
   assert.match(tree, /"hug"/);
   assert.match(tree, /colors: bg=#ffffff/);
-  assert.match(tree, /spacing: 4, 8, 12/);
+  // круг 20 (SPEC §6.6): шкалы печатаются с номерами шагов — модель отвечает ссылкой на номер
+  assert.match(tree, /spacing \(номер шага=значение px\): 0=4 1=8 2=12/);
   assert.match(tree, /Lorem ipsum/, 'запрет заглушек');
   assert.match(tree, /ДОСЛОВНО/, 'запрет выдумывать поверх заданного');
   assert.match(tree, /строго один JSON-объект/);
@@ -1117,7 +1127,8 @@ test('п.8: посторонние пути не проходят', async () => 
   const res = await runCommand({ doc, selection: ['card'], utterance: 'сделай отступ больше', provider, engine });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.equal(res.ops.length, 1);
-  assert.deepEqual(res.ops[0], { op: 'set', id: 'card', path: 'layout.gap', value: 24 });
+  // круг 20: 24 — шаг шкалы отступов документа, число становится ссылкой на него
+  assert.deepEqual(res.ops[0], { op: 'set', id: 'card', path: 'layout.gap', value: 'spacing.4' });
   assert.equal(res.preview.doc.nodes.card.visible, undefined);
   assert.equal(res.preview.doc.nodes.card.onclick, undefined);
   assert.ok(res.warnings.some((w) => /visible/.test(w)));
@@ -1901,7 +1912,8 @@ test('круг3 п.1: fill на тексте не применяется мол�
   });
   const res = await runCommand({ doc, selection: ['m0'], utterance: 'сделай значение акцентным', provider, engine });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
-  assert.deepEqual(res.ops, [{ op: 'set', id: 'm0', path: 'radius', value: 20 }], 'заливка текста отброшена, остальное применено');
+  // круг 20: 20 — шаг шкалы скруглений документа, число становится ссылкой на него
+  assert.deepEqual(res.ops, [{ op: 'set', id: 'm0', path: 'radius', value: 'radii.5' }], 'заливка текста отброшена, остальное применено');
   const w = res.warnings.join(' | ');
   // круг 16, п.9: поле названо словами инспектора, «fill»/«color» человек не читает
   assert.match(w, /У текста «Значение показателя» нет заливки/, w);
@@ -2149,8 +2161,12 @@ test('круг3 п.7: padding -12 и размер 500000 зажимаются, �
   const res = await runCommand({ doc, selection: [], utterance: 'собери блок с текстом', provider, engine, activeArtboardId: 'screen' });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   const root = res.ops[0].node;
-  assert.deepEqual(root.layout.padding, { t: 0, r: 100000, b: 0, l: 100000 });
+  /* Круг 20 (SPEC §6.6): зажатый ноль остаётся нулём («без отступа» — не число мимо шкалы), а
+   * зажатые 100000 — число, которого человек не называл, мимо шкалы: приводится к ближайшему
+   * шагу (48 = spacing.6), и об этом сказано. Команда всё равно не пропадает. */
+  assert.deepEqual(root.layout.padding, { t: 0, r: 'spacing.6', b: 0, l: 'spacing.6' });
   assert.equal(root.layout.gap, 0);
+  assert.ok(res.warnings.some((w) => /100000 — мимо шкалы отступов, взял ближайший шаг 48/.test(w)), res.warnings.join(' | '));
   assert.deepEqual(root.size.w, { mode: 'fixed', value: 100000 });
   assert.deepEqual(root.size.h, { mode: 'hug' }, 'фиксированный нулевой размер — всегда невидимый слой, лучше «по содержимому»');
   assert.equal(clampPx(-12), 0);
@@ -2158,7 +2174,7 @@ test('круг3 п.7: padding -12 и размер 500000 зажимаются, �
   // круг 9, п.2: значение без числа больше не становится нулём — правку пропускают со словами
   assert.equal(clampPx('не число'), undefined);
   assert.equal(coerceValue('-30', 'layout.gap'), 0);
-  assert.equal(coerceValue('900000', 'radius'), 100000);
+  assert.equal(coerceValue('900000', 'radius'), 100000);           // без документа шкалы нет — число как есть
 });
 
 /* п.8 — поток модели не копится в stages */
@@ -2900,7 +2916,8 @@ test('круг7 п.5: зазор, который раскладка не исп�
   });
   const res = await runCommand({ doc, selection: ['head'], utterance: 'сделай шапку компактнее', provider, engine });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
-  assert.equal(res.preview.doc.nodes.head.layout.gap, 8, 'в документе значение поменялось');
+  // круг 20: 8 — шаг 1 шкалы отступов документа → в документе ссылка на него
+  assert.equal(res.preview.doc.nodes.head.layout.gap, 'spacing.1', 'в документе значение поменялось');
   const w = res.warnings.join(' | ');
   assert.match(w, /на экране — нет/, w);
   // круг 16, п.9: причина названа словами инспектора, без «justify "between"»
@@ -3050,7 +3067,8 @@ test('круг7 п.1: зажатые числа, проценты прозрач
   const doc = makeDoc7();
   const w = [];
   const note = (m) => w.push(m);
-  assert.equal(coerceValue('900000', 'radius', doc, note), 100000, 'зажатие осталось — но со словами');
+  // круг 20: зажатые 100000 — число, которого человек не называл, мимо шкалы скруглений → ближайший шаг (20 = radii.5), со словами
+  assert.equal(coerceValue('900000', 'radius', doc, note), 'radii.5', 'зажатие осталось — но со словами');
   assert.equal(coerceValue('-30', 'layout.gap', doc, note), 0);
   assert.equal(coerceValue('50', 'opacity', doc, note), 0.5, '50 понято как проценты');
   assert.equal(coerceValue('300', 'opacity', doc, note), undefined);
@@ -3058,6 +3076,7 @@ test('круг7 п.1: зажатые числа, проценты прозрач
   assert.equal(coerceValue('да', 'clip', doc, () => {}), true);
   const text = w.join(' | ');
   assert.match(text, /зажал до 100000/);
+  assert.match(text, /100000 — мимо шкалы скруглений, взял ближайший шаг 20/);
   assert.match(text, /отрицательного размера не бывает/);
   assert.match(text, /50%/);
   assert.match(text, /от 0 до 1/);
@@ -3207,7 +3226,8 @@ test('круг9 п.2: «сделай у пунктов скругление во
   const provider = makeFakeProvider({ plan: PLAN_EDIT3, patch: [patch, patch] });
   const res = await runCommand({ doc, selection: [], utterance: 'сделай у пунктов скругление восемь', provider, engine, activeArtboardId: 'screen' });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
-  assert.equal(res.ops[0].value, 8, 'скругление 8, а не 0');
+  // круг 20: 8 — шаг 2 шкалы скруглений документа → ссылка; главное — не ноль
+  assert.equal(res.ops[0].value, 'radii.2', 'скругление 8 (шаг шкалы), а не 0');
   assert.ok(!/взял 0/.test(res.warnings.join(' | ')), res.warnings.join(' | '));
 });
 
@@ -3218,9 +3238,10 @@ test('круг9 п.2: «8px» в дереве от модели тоже чит�
     { type: 'frame', name: 'Плашка', radius: '8px', layout: { mode: 'column', gap: '12px', padding: '16px' }, children: [] },
     { doc, warn: (m) => w.push(m) },
   );
-  assert.equal(spec.radius, 8);
-  assert.equal(spec.layout.gap, 12);
-  assert.deepEqual(spec.layout.padding, { t: 16, r: 16, b: 16, l: 16 });
+  // круг 20: единицы сняты, числа на шагах шкал → ссылки на эти шаги (8 = radii.2, 12 = spacing.2, 16 = spacing.3)
+  assert.equal(spec.radius, 'radii.2');
+  assert.equal(spec.layout.gap, 'spacing.2');
+  assert.deepEqual(spec.layout.padding, { t: 'spacing.3', r: 'spacing.3', b: 'spacing.3', l: 'spacing.3' });
   assert.equal(w.length, 0, w.join(' | '));
 });
 
@@ -3796,8 +3817,11 @@ test('круг13 п.1: coerceValue на «пусто» просит СНЯТЬ �
     }
   }
   // у числовых полей ноль — настоящее значение, а не «снять»
-  assert.equal(coerceValue('0', 'radius', doc, () => {}), 0);
+  // круг 20: ноль скругления и зазора — это шаг 0 шкалы (миграция ядра переводит нули в ссылки,
+  // §6.5), а прозрачность шкалы не имеет и остаётся числом
+  assert.equal(coerceValue('0', 'radius', doc, () => {}), 'radii.0');
   assert.equal(coerceValue('0', 'opacity', doc, () => {}), 0);
+  // зазор 0 мозг оставляет числом («без отступа»); ядро при записи поверх spacing.0 сохранит ссылку (keepFieldForm)
   assert.equal(coerceValue('0', 'layout.gap', doc, () => {}), 0);
   // а словами — снять
   assert.equal(coerceValue('убрать', 'radius', doc, () => {}), UNSET);
@@ -5650,7 +5674,10 @@ test('круг19: выделен мастер — правка идёт в ко�
     edits: [{ op: 'set', target: 'selection', path: 'radius', value: '28' }],
   }, { doc: doc0, selection: [btn.id] });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
-  assert.deepEqual(res.ops, [{ op: 'set', id: btn.id, path: 'radius', value: 28 }]);
+  // круг 20: 28 модель придумала сама (в реплике этого числа нет) — мимо шкалы скруглений,
+  // поэтому берётся ближайший шаг (24 = radii.6), и человеку об этом сказано
+  assert.deepEqual(res.ops, [{ op: 'set', id: btn.id, path: 'radius', value: 'radii.6' }]);
+  assert.ok(res.warnings.some((w) => /мимо шкалы|ближайш|шаг/i.test(String(w))), 'о подмене числа шагом сказано словами');
   assert.match(res.warnings[0], /Это правка компонента «Кнопка»/);
   // и модель видит, что выделен компонент, а не слой на доске
   const scope = resolveScope(doc0, [btn.id], core, {});

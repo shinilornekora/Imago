@@ -11,6 +11,11 @@ import {
   isLibrary, libraryNode, ensureLibrary, components as libComponents,
   isMaster, masterOf, componentName, canMakeComponent, makeComponentOps, instanceOps,
   detachInstanceOps, instanceSummary, PROP_KINDS,
+  /* Круг 20 (SPEC §6): шкалы как ссылки. Зазор, отступы и скругление в документе — строки
+     'spacing.<i>' / 'radii.<i>'; числом их отдаёт ТОЛЬКО ядро (resolveLayout, resolveRadius,
+     resolveScale), и оболочка читает эти поля исключительно через него (§6.3). */
+  resolveScale, resolveLayout, resolveRadius, parseScaleRef, isScaleRef, scaleRef,
+  scaleIndexOf, scaleSteps, SCALE_NAMES, ensureScaleRefs, scaleRefsIn, insertScaleStep,
 } from './src/core.js';
 import * as CORE from './src/core.js';
 import { makeProvider, runCommand, runVariants } from './src/brain.js';
@@ -287,6 +292,8 @@ const ICONS = {
   ask: '<circle cx="8" cy="8" r="6"/><path d="M6.3 6.3A1.8 1.8 0 0 1 9.7 7c0 1.2-1.7 1.4-1.7 2.6"/><path d="M8 11.6v.2"/>',
   spark: '<path d="M8 2.5 9.4 6.6 13.5 8 9.4 9.4 8 13.5 6.6 9.4 2.5 8l4.1-1.4L8 2.5Z"/>',
   node: '<rect x="3" y="3" width="10" height="10" rx="2"/>',
+  // круг 20: линейка — шкала отступов и скруглений (кнопка «Шкалы» в шапке)
+  scale: '<rect x="2" y="5.25" width="12" height="5.5" rx="1.25"/><path d="M5 5.25v2.25"/><path d="M8 5.25v3.25"/><path d="M11 5.25v2.25"/>',
 };
 
 function iconMarkup(name) {
@@ -319,7 +326,7 @@ function cacheDom() {
     'work-label', 'work-detail', 'work-steps', 'btn-work-stop', 'variants', 'hints', 'toasts',
     'artboard-tabs', 'docname', 'sheet', 'sheet-body', 'sheet-title', 'sheet-tabs',
     'btn-zoom', 'btn-zoom-in', 'btn-zoom-out', 'btn-fit', 'btn-rail', 'btn-rail-close', 'scrim',
-    'btn-history', 'btn-export', 'btn-theme', 'btn-settings', 'rail-grip',
+    'btn-history', 'btn-export', 'btn-scales', 'btn-theme', 'btn-settings', 'rail-grip',
     'btn-insp-close', 'btn-sheet-close', 'btn-empty-artboard',
     'voicebar', 'voice-said', 'btn-voice-off',
     'dockmsg', 'dockmsg-text', 'dockmsg-note', 'dockmsg-issue', 'dockmsg-ask', 'dockmsg-chips', 'dockmsg-actions', 'btn-msg-close',
@@ -482,7 +489,10 @@ function commit(opsList, label, who = 'human', extra = {}) {
   // человек правит параллельно и всё равно вправе откатить агента — вопросом «было ещё N правок»
   if (who === 'agent') dropUndoOffer();
 
-  const diff = diffOf(opsList, prevGeo);
+  /* Круг 20, п.4. Вставка шага шкалы переписывает ссылки у десятков узлов, не сдвигая ни
+     одного пикселя: рамки на них врали бы про объём правки (см. diffOf). Такая транзакция
+     просит commit не рисовать рамок (extra.noFrames); история о ней говорит словами. */
+  const diff = extra.noFrames ? { created: [], changed: [], removed: [], moved: [] } : diffOf(opsList, prevGeo);
   const hadIssues = state.issues;
   renderAll({ diff, prevGeo });
   // о сломанной раскладке говорим, только когда её сломали руками: итог команды агенту
@@ -798,6 +808,10 @@ const TECH_PATH_RE = new RegExp(`(?<![\\w.])(?:${TECH_PATHS.map((p) => p.replace
 function humanizePaths(text) {
   let s = String(text == null ? '' : text);
   if (!/[a-z]/.test(s)) return s;
+  /* Круг 20 (SPEC §6.7). Ссылка на шаг в чужом тексте — у валидатора «шага «spacing.99»
+     нет — в шкале отступов 13 шагов (0..12)» — печатается номером шага: слов spacing/radii
+     человек не видит, а какая это шкала, фраза говорит сама. */
+  s = s.replace(/«(spacing|radii)\.(\d+)»/g, (all, sc, i) => `«№${i}»`);
   /* Круг 16, п.5. Сначала пара «путь» + значение: ««Дата»: «color» уже «muted»» —
      чинить только путь мало, рядом остаётся внутренний код значения. */
   s = s.replace(/«([a-z][a-zA-Z0-9]*(?:\.[a-zA-Z0-9]+)*)»(\s+(?:уже|и так|стоит)\s+)«([^»]{1,40})»/g,
@@ -820,6 +834,59 @@ function humanizePaths(text) {
   return s;
 }
 
+/* ---- круг 20 (SPEC §6.7): слова о шкалах -------------------------------------- */
+
+/* Названия шкал в косвенных падежах: SCALE_NAMES ядра даёт именительный («шкала отступов»),
+   а во фразах оболочки нужны «в шкале отступов» и «по шкале». Слов spacing/radii человек
+   не видит ни здесь, ни в инспекторе, ни в истории. */
+const SCALE_LOC = { spacing: 'шкале отступов', radii: 'шкале скруглений' };
+
+/**
+ * В какой шкале живёт поле по его пути: зазор и отступы — в шкале отступов, скругление —
+ * в шкале скруглений (SPEC §6.2). Тот же перечень, что у ядра (nodeScaleRefs), но оболочке
+ * он нужен для СЛОВ: значение такого поля печатается пикселями с пометкой «(шаг шкалы)»
+ * либо «(мимо шкалы)». Пути приходят и полными («layout.gap»), и короткими («gap»,
+ * «padding.t») — из предупреждений мозга.
+ * @returns {'spacing'|'radii'|null}
+ */
+function scaleOfPath(path) {
+  const p = String(path || '');
+  if (/^(layout\.)?(gap|padding)(\.|$)/.test(p)) return 'spacing';
+  if (/^radius(\.|$)/.test(p)) return 'radii';
+  return null;
+}
+
+/** Ссылка на шаг — числом шага для человека; мёртвая — честно «шага нет». */
+function scaleRefWord(value, doc) {
+  const ref = parseScaleRef(value);
+  if (!ref) return '';
+  const px = resolveScale(doc || state.doc, value, ref.scale);
+  return px === undefined ? `шаг №${ref.index} (в ${SCALE_LOC[ref.scale]} его нет)` : String(Math.round(px * 100) / 100);
+}
+
+/**
+ * Пометка к значению поля из шкалы (SPEC §6.7): «(шаг шкалы)» — записано ссылкой на живой
+ * шаг, «(мимо шкалы)» — числом, «(шага нет в шкале)» — ссылкой на несуществующий шаг.
+ * Отступ целиком ({t,r,b,l}) — по шкале, только если все четыре стороны — ссылки.
+ * @returns {string} пусто, если поле не из шкалы или значение не задано
+ */
+function scaleMark(value, scale, doc) {
+  if (!scale || value === undefined || value === null) return '';
+  const one = (v) => {
+    if (typeof v === 'number') return 'off';
+    const ref = parseScaleRef(v);
+    if (!ref) return '';
+    return resolveScale(doc || state.doc, v, scale) === undefined ? 'dead' : 'on';
+  };
+  let kind;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const sides = ['t', 'r', 'b', 'l'].map((k) => one(value[k])).filter(Boolean);
+    if (!sides.length) return '';
+    kind = sides.includes('dead') ? 'dead' : sides.every((k) => k === 'on') ? 'on' : 'off';
+  } else kind = one(value);
+  return kind === 'on' ? '(шаг шкалы)' : kind === 'off' ? '(мимо шкалы)' : kind === 'dead' ? '(шага нет в шкале)' : '';
+}
+
 function nodeTitle(node, doc) {
   return node ? String(displayName(doc || state.doc, node) || 'узел') : '';
 }
@@ -832,20 +899,26 @@ function nodeTitleById(doc, id) {
  * Значение свойства словами: числа как есть, режимы и токены — по-русски.
  * @param {*} value
  * @param {'w'|'h'} [axis] ось размера: от неё зависит, «во всю ширину» или «во всю высоту».
+ * @param {object} [doc] круг 20: документ, по чьим шкалам разрешать ссылки (по умолчанию текущий)
  */
-function humanValue(value, axis) {
+function humanValue(value, axis, doc) {
   if (value === undefined || value === null) return 'не задано';
   if (typeof value === 'number') return String(Math.round(value * 100) / 100);
   if (typeof value === 'boolean') return value ? 'да' : 'нет';
   if (typeof value === 'string') {
+    // круг 20 (SPEC §6.7): ссылка на шаг шкалы — пикселями, сырая строка 'spacing.6' не печатается
+    if (parseScaleRef(value)) return scaleRefWord(value, doc);
     return (axis && sizeLabels(axis)[value]) || VALUE_WORDS[value] || SWATCH_NAMES[value]
       || TYPE_LABELS[value] || (value.length > 36 ? `${value.slice(0, 34)}…` : value);
   }
-  if (Array.isArray(value)) return value.map((v) => humanValue(v, axis)).join(', ');
+  if (Array.isArray(value)) return value.map((v) => humanValue(v, axis, doc)).join(', ');
   if (typeof value === 'object') {
-    if (typeof value.t === 'number') {
-      const { t, r, b, l } = value;
-      return (t === r && r === b && b === l) ? String(t) : `${t}/${r}/${b}/${l}`;
+    /* Отступ {t,r,b,l}: стороны бывают числами и ссылками (круг 20) — сравниваем и печатаем
+       их пикселями, иначе «spacing.8/spacing.7/…» либо пустота вместо значения. */
+    if (value.t !== undefined && (typeof value.t === 'number' || parseScaleRef(value.t))) {
+      const side = (v) => (typeof v === 'number' ? String(v) : (parseScaleRef(v) ? scaleRefWord(v, doc) : String(v)));
+      const [t, r, b, l] = [value.t, value.r, value.b, value.l].map(side);
+      return (t === r && r === b && b === l) ? t : `${t}/${r}/${b}/${l}`;
     }
     /* Круг 16, п.4. Токен приходит и строкой («display»), и объектом ({token:'display'}) —
        ядро приводит одно к другому. Слово человеку обязано быть одним и тем же, иначе
@@ -901,14 +974,22 @@ const boolWord = (label, on) => {
     : ({ f: 'выключена', m: 'выключен' }[g] || 'выключено');
 };
 
-/** «Зазор 16 → 24»: внутри объекта находим тот ключ, который действительно поменялся. */
-function describeSet(op, doc, born) {
+/**
+ * «Зазор 16 → 24»: внутри объекта находим тот ключ, который действительно поменялся.
+ * @param {object} doc документ ДО транзакции — по нему «было»
+ * @param {Map} born узлы, созданные этой же транзакцией
+ * @param {object} [afterDoc] круг 20: документ с уже применёнными правками шкал этой же
+ *   транзакции — по нему разрешается «стало». Вставка шага (insertScaleStep) переписывает
+ *   ссылки вместе со шкалой, и «spacing.7» ПОСЛЕ вставки — прежние 16, а не 20 до неё.
+ */
+function describeSet(op, doc, born, afterDoc) {
   // узла, созданного этой же транзакцией, в документе ДО неё нет: берём его из операции,
   // иначе правка печаталась без имени — «Зазор 24» вместо «Зазор 24 в «Карточка»» (п.18)
   const node = nodeById(doc, op.id) || (born && born.get(op.id)) || null;
   let path = String(op.path || '');
   let before = readPath(node, path);
   let after = op.value;
+  const nextDoc = afterDoc || doc;
   if (before && after && typeof before === 'object' && typeof after === 'object'
       && !Array.isArray(before) && !Array.isArray(after)) {
     const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])]
@@ -925,16 +1006,22 @@ function describeSet(op, doc, born) {
   const axis = axisM ? axisM[2] : '';
   const head = path.split('.').slice(0, 2).join('.');
   const table = VALUE_TABLES[path] || VALUE_TABLES[head] || null;
-  const word = (v) => {
+  const word = (v, d) => {
     if (v === undefined || v === null) return notSetWord(label);
     if (table && table[v] !== undefined) return table[v];
-    return humanValue(v, axis);
+    return humanValue(v, axis, d);
   };
-  const to = word(after);
+  const to = word(after, nextDoc);
   // у узла в потоке положения не было: «было → стало» без первой половины непонятно (п.31)
   const wasFree = before === undefined && /^(pos|override)$/.test(path);
-  const from = wasFree ? 'по потоку' : (before === undefined ? '' : word(before));
+  const from = wasFree ? 'по потоку' : (before === undefined ? '' : word(before, doc));
   let value = from && from !== to ? `${from} → ${to}` : to;
+  /* Круг 20 (SPEC §6.7): у зазора, отступов и скругления к пикселям дописано, КАК записано
+     значение — «Зазор 16 → 24 (шаг шкалы)» либо «24 (мимо шкалы)». Одни и те же пиксели
+     ссылкой и числом — разные правки (§6.4), и без пометки они читались бы одинаково. */
+  const scale = scaleOfPath(path);
+  const mark = scale ? scaleMark(after, scale, nextDoc) : '';
+  if (mark) value = `${value} ${mark}`;
   /* Круг 16, п.5: «Обрезка да» — не по-русски, и «было → стало» для переключателя лишнее:
      человеку важно, ВКЛЮЧЕНО ли оно теперь. */
   if (typeof after === 'boolean') value = boolWord(label, after);
@@ -966,11 +1053,35 @@ function typeTokenBits(op, doc) {
   return { label, bits };
 }
 
-/** «Шкала отступов 0…64 → 0…72»: у шкал говорит их размах, а не перечень чисел. */
-function scaleTokenPhrase(word, op, prev) {
+/**
+ * «Шкала отступов 0…64 → 0…72»: у шкал говорит их размах, а не перечень чисел.
+ * Круг 20: шкалу правят и по одному шагу (`setToken spacing.6 = 20`) — тогда фраза про
+ * сам шаг и про цену правки: «шкала отступов: шаг 16 → 20, переверстано 17 узлов».
+ * Цена — по документу ДО правки: сколько узлов ссылалось на этот шаг, столько и поехало.
+ * @param {string} scale 'spacing' | 'radii'
+ */
+function scaleTokenPhrase(word, scale, op, doc) {
+  const tokensOf = (doc && doc.tokens) || {};
+  const prev = tokensOf[scale];
+  const seg = String(op.path || '').split('.');
+  if (seg.length === 2 && /^\d+$/.test(seg[1]) && typeof op.value === 'number') {
+    const i = Number(seg[1]);
+    const was = scaleSteps(doc, scale)[i];
+    const now = humanValue(op.value);
+    const change = typeof was === 'number' && was !== op.value ? `${humanValue(was)} → ${now}` : now;
+    const nodes = new Set(scaleRefsIn(doc, scale).filter((r) => r.index === i).map((r) => r.id)).size;
+    const tail = nodes
+      ? `, переверстано ${nodes} ${plural(nodes, 'узел', 'узла', 'узлов')}`
+      : ' — на него никто не ссылается';
+    return `${word}: шаг ${change}${tail}`;
+  }
   const next = Array.isArray(op.value) ? op.value : [];
   const was = Array.isArray(prev) ? prev : [];
   if (!next.length) return word;
+  // вставка шага (SPEC §6.1) меняет длину шкалы, а не размах — говорим о длине
+  if (was.length && next.length !== was.length) {
+    return `${word}: ${was.length} → ${next.length} ${plural(next.length, 'шаг', 'шага', 'шагов')}`;
+  }
   const span = (a) => (a.length ? `${a[0]}…${a[a.length - 1]}` : '');
   const a = span(was);
   const b = span(next);
@@ -1022,9 +1133,9 @@ function describeTokenOps(list, doc) {
     }
   }
 
-  const tokensOf = (doc && doc.tokens) || {};
-  if (bag.spacing.length) out.push(scaleTokenPhrase('шкала отступов', bag.spacing[0], tokensOf.spacing));
-  if (bag.radii.length) out.push(scaleTokenPhrase('шкала скруглений', bag.radii[0], tokensOf.radii));
+  // имена шкал — те же, что у ядра (SCALE_NAMES): «шкала отступов», «шкала скруглений»
+  if (bag.spacing.length) out.push(scaleTokenPhrase(SCALE_NAMES.spacing, 'spacing', bag.spacing[0], doc));
+  if (bag.radii.length) out.push(scaleTokenPhrase(SCALE_NAMES.radii, 'radii', bag.radii[0], doc));
   if (bag.other.length) {
     const n = bag.other.length;
     out.push(`оформление: ${n} ${plural(n, 'правка', 'правки', 'правок')}`);
@@ -1074,10 +1185,18 @@ function describeOps(opsList, doc) {
     phrases.push(`перенёс ${moves.length} ${plural(moves.length, 'узел', 'узла', 'узлов')}`);
   }
 
+  /* Круг 20. Ссылки в «стало» разрешаем по документу, в котором уже стоят новые шкалы этой
+     же транзакции: после вставки шага прежняя «spacing.7» — это новая «spacing.8», и обе
+     дают 16, а не 16 → 20 (см. describeSet). Правок шкал в транзакции обычно нет — тогда
+     это тот же документ. */
+  let afterDoc = doc;
+  if (tokens.length) {
+    try { const r = applyOps(doc, tokens); if (!r.error) afterDoc = r.doc; } catch { /* останемся на прежнем */ }
+  }
   // одинаковую правку у нескольких узлов сводим в одну строку
   const groups = new Map();
   for (const op of sets) {
-    const d = describeSet(op, doc, born);
+    const d = describeSet(op, doc, born, afterDoc);
     const g = groups.get(d.key) || { label: d.label, value: d.value, nodes: [] };
     if (d.node) g.nodes.push(d.node);
     groups.set(d.key, g);
@@ -1721,6 +1840,12 @@ const LOUD_ISSUES = new Set([
      Последний — единственный тихий: на холсте всё цело, просто правка не применяется,
      и сказать о нём тем более некому. Замечание держится, пока держится причина. */
   'dead-instance', 'unknown-prop', 'component-cycle', 'instance-too-deep',
+  /* Круг 20, п.5 (SPEC §6.1). dead-scale-ref — ссылка на шаг, которого в шкале нет: решатель
+     считает такой отступ нулём, и человек видит на холсте схлопнувшийся зазор, не понимая
+     почему. Замечание громкое — оно единственное объясняет картинку. Соседний off-scale
+     (число мимо шкалы, info) громким НЕ делаем: это не поломка, а выбор, и о нём говорит
+     сам инспектор пометкой «мимо шкалы» у поля — второй голос был бы нытьём. */
+  'dead-scale-ref',
 ]);
 
 /** Чем начинается фраза о замечании: раскладка и компоненты — разные разговоры (п.7). */
@@ -1753,7 +1878,9 @@ function layoutIssues(doc, geo) {
  * оставляем как есть: это и есть ответ на вопрос «чего именно нет».
  */
 function issueText(note) {
-  const t = shellWord(String((note && note.message) || note || ''));
+  // круг 20, п.5: dead-scale-ref пишет «layout.gap → шага «spacing.99» нет» — путь и ссылку
+  // переводим в слова инспектора («зазор», «№99») тем же переводчиком, что реплики агента
+  const t = humanizePaths(shellWord(String((note && note.message) || note || '')));
   if (!state.doc || !state.doc.nodes) return t;
   return t.replace(/«([A-Za-z0-9_]+)»/g, (all, id) => (
     state.doc.nodes[id] ? `«${nodeTitleById(state.doc, id)}»` : all));
@@ -2847,7 +2974,12 @@ function instancePropControl(node, prop) {
     return field(String(cur).includes('\n') ? 'textarea' : 'input', String(cur), (v) => put(v), prop.name);
   }
   if (prop.kind === 'number') {
-    const cur = typeof raw === 'number' ? raw : Number(masterPropValue(node, prop)) || 0;
+    /* Круг 20: у компонента скругление стоит ссылкой ('radii.4'), и Number() от неё давал 0.
+       Значение экземпляра по виду «число» ядро принимает только числом (propValue), поэтому
+       пишем число, а показываем пиксели, разрешив ссылку компонента через ядро. */
+    const master = masterPropValue(node, prop);
+    const fromMaster = resolveScale(state.doc, Array.isArray(master) ? master[0] : master);
+    const cur = typeof raw === 'number' ? raw : (typeof fromMaster === 'number' ? fromMaster : Number(master) || 0);
     return numberField(cur, (v) => put(v), { label: prop.name });
   }
   if (prop.kind === 'bool') {
@@ -3453,18 +3585,33 @@ function renderInspector() {
 
   if (node.type === 'frame') {
     const L = node.layout || {};
+    /* Круг 20, п.2 (SPEC §6.3, §6.7). Зазор и отступ в документе — ссылки на шаги шкалы
+       отступов (или числа мимо неё); читать их как числа нельзя — числовое поле показывало
+       для ссылки 0. Поле scaleField показывает пиксели через resolveLayout и признак
+       «по шкале» / «мимо шкалы», а пишет ссылку либо число. Отступ, как и прежде, правится
+       одним числом на все четыре стороны; когда стороны разные, это сказано в подписи. */
+    const R = resolveLayout(state.doc, node.layout);
+    // отступ бывает и краткой записью (число, ссылка, массив) — верх берём из любой формы
+    const padRaw = L.padding;
+    const pad = { t: padRaw && typeof padRaw === 'object' && !Array.isArray(padRaw) ? padRaw.t
+      : Array.isArray(padRaw) ? padRaw[0] : padRaw };
+    const sidesDiffer = R.padding.t !== R.padding.r || R.padding.t !== R.padding.b || R.padding.t !== R.padding.l;
+    const padNote = sidesDiffer
+      ? `стороны разные: ${R.padding.t}/${R.padding.r}/${R.padding.b}/${R.padding.l} — новое значение встанет на все четыре`
+      : '';
     body.appendChild(group('Раскладка', [
       row('Поток', segField(['column', 'row', 'none'], L.mode || 'column',
         (v) => setProp(node.id, 'layout.mode', v),
         ['column', 'row', 'none'].map((v) => MODE_LABELS[v]))),
-      row('Зазор', numberField(L.gap ?? 0, (v) => setProp(node.id, 'layout.gap', v), { label: 'Зазор' })),
-      row('Отступ', numberField(L.padding ? L.padding.t : 0, (v) => {
+      row('Зазор', scaleField(L.gap, 'spacing', (v) => setProp(node.id, 'layout.gap', v), { label: 'Зазор' })),
+      row('Отступ', scaleField(pad.t, 'spacing', (v) => {
         setProp(node.id, 'layout.padding', { t: v, r: v, b: v, l: v });
-      }, { label: 'Отступ' })),
+      }, { label: 'Отступ', note: padNote })),
       row('Выравн.', selectField(['start', 'center', 'end', 'stretch'], L.align || 'start',
         (v) => setProp(node.id, 'layout.align', v), ALIGN_LABELS)),
       row('Распред.', selectField(['start', 'center', 'end', 'between'], L.justify || 'start',
         (v) => setProp(node.id, 'layout.justify', v), JUSTIFY_LABELS)),
+      scaleLink('spacing'),
     ]));
   }
 
@@ -3482,8 +3629,14 @@ function renderInspector() {
     body.appendChild(group('Цвет текста', [swatches(node, 'color', 'Цвет текста')]));
   }
   if ('radius' in node) {
+    /* Круг 20, п.2: скругление — ссылка на шаг шкалы скруглений; покорнерный массив схема
+       принимает, но правится он тут как одно значение — по первому углу (сцена его и
+       рисует нулём, см. resolveRadius), и об этом сказано в подписи. */
+    const raw = Array.isArray(node.radius) ? node.radius[0] : node.radius;
+    const corners = Array.isArray(node.radius) ? 'скругление задано по углам — здесь правится как одно' : '';
     body.appendChild(group('Скругление', [
-      numberField(node.radius ?? 0, (v) => setProp(node.id, 'radius', v), { label: 'Скругление' }),
+      scaleField(raw, 'radii', (v) => setProp(node.id, 'radius', v), { label: 'Скругление', note: corners, bare: true }),
+      scaleLink('radii'),
     ]));
   }
 
@@ -3634,12 +3787,17 @@ function numberField(value, onChange, opts = {}) {
   inp.className = 'field'; inp.type = 'number';
   inp.min = String(min); inp.max = String(max);
   inp.value = numText(value);
+  /* Круг 20, п.4. Что в поле записано в документ: пока текст равен записанному, Ctrl+Z
+     в этом поле отменяет ПРАВКУ ДОКУМЕНТА, а не набор (набирать нечего — см. onKey).
+     Иначе после Enter в шаге шкалы фокус оставался в поле, и Ctrl+Z не делал ничего. */
+  inp.dataset.committed = inp.value;
   if (opts.label) inp.setAttribute('aria-label', opts.label);
   inp.addEventListener('change', () => {
     const raw = inp.value.trim();
     const n = raw === '' ? NaN : Number(raw);
     if (!Number.isFinite(n)) {
       inp.value = numText(value);
+      inp.dataset.committed = inp.value;
       toast('Тут нужно число — оставил прежнее значение.', 'plain', 5000);
       return;
     }
@@ -3648,10 +3806,122 @@ function numberField(value, onChange, opts = {}) {
       toast(`Допустимо от ${numText(min)} до ${numText(max)} — поставил ${numText(clamped)}.`, 'plain', 6000);
     }
     inp.value = numText(clamped);
+    inp.dataset.committed = inp.value;
     onChange(clamped);
   });
   return inp;
 }
+/**
+ * Круг 20, п.2 (SPEC §6.7). Поле зазора, отступа и скругления. В документе стоит ссылка
+ * на шаг шкалы ('spacing.6') или число мимо шкалы; человек шкалу знать не обязан: он видит
+ * ПИКСЕЛИ и признак «по шкале» / «мимо шкалы», а выбирает из шагов шкалы (список со
+ * значениями) либо «своё число». Выбран шаг — пишется ссылка; своё число — число.
+ *
+ * Своё число, ТОЧНО равное шагу, пишется ссылкой на этот шаг: так же поступает мозг с
+ * числом от модели (§6.6), и документ не обрастает числами, которые от шкалы ничем не
+ * отличаются, кроме записи. Человек это видит сразу — подпись под полем говорит «по шкале».
+ *
+ * Мёртвая ссылка (шага с таким номером в шкале нет) — отдельное состояние: решатель считает
+ * её нулём, и подпись говорит об этом прямо; выбор любого шага её лечит.
+ *
+ * @param {any} raw сырое значение поля: ссылка, число либо undefined (= 0)
+ * @param {'spacing'|'radii'} scale
+ * @param {(v:any)=>void} write что записать — ссылку или число
+ * @param {{label:string, note?:string}} opts note — приписка к подписи («стороны разные…»)
+ */
+function scaleField(raw, scale, write, opts = {}) {
+  const doc = state.doc;
+  const steps = scaleSteps(doc, scale);
+  const ref = parseScaleRef(raw);
+  const px = raw === undefined ? 0 : resolveScale(doc, raw, scale);   // undefined — мёртвая ссылка
+  const dead = !!ref && px === undefined;
+  const onScale = !!ref && !dead;
+  const shownPx = px === undefined ? 0 : px;
+  const label = opts.label || SCALE_NAMES[scale];
+
+  const wrap = document.createElement('div');
+  wrap.className = 'scalepick';
+  wrap.dataset.state = dead ? 'dead' : onScale ? 'scale' : 'off';
+  wrap.setAttribute('role', 'group');
+  wrap.setAttribute('aria-label', label);
+
+  const line = document.createElement('div');
+  line.className = 'scalepick-line';
+  const sel = document.createElement('select');
+  sel.className = 'field';
+  sel.setAttribute('aria-label', `${label}: шаг шкалы`);
+  steps.forEach((v, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = numText(v);
+    sel.appendChild(o);
+  });
+  const custom = document.createElement('option');
+  custom.value = 'custom';
+  custom.textContent = 'своё число';
+  sel.appendChild(custom);
+  if (dead) {
+    const o = document.createElement('option');
+    o.value = 'dead';
+    o.disabled = true;
+    o.textContent = `шаг №${ref.index} — нет`;
+    sel.appendChild(o);
+    sel.value = 'dead';
+  } else {
+    sel.value = onScale ? String(ref.index) : 'custom';
+  }
+  line.appendChild(sel);
+
+  // своё число: поле появляется рядом со списком, пока выбрано «своё число»
+  let num = null;
+  const showNum = (focus) => {
+    if (num) return;
+    num = numberField(shownPx, (v) => {
+      // круг 20: число, совпавшее с шагом, — ссылка на шаг (см. шапку функции)
+      const i = scaleIndexOf(state.doc, scale, v);
+      write(i >= 0 ? scaleRef(scale, i) : v);
+    }, { label: `${label}: своё число` });
+    num.classList.add('scalepick-num');
+    line.appendChild(num);
+    if (focus) { try { num.focus(); num.select(); } catch { /* поле могло не встать */ } }
+  };
+  if (!dead && !onScale) showNum(false);
+
+  sel.addEventListener('change', () => {
+    if (sel.value === 'custom') { showNum(true); return; }
+    if (sel.value === 'dead') return;
+    write(scaleRef(scale, Number(sel.value)));
+  });
+  wrap.appendChild(line);
+
+  /* Подпись — то, что человек читает: «12 · по шкале», «15 · мимо шкалы». Слово «шкала»
+     здесь без уточнения: какая именно, сказано в заголовке группы и в ссылке под ней. */
+  const note = document.createElement('div');
+  note.className = 'scalepick-note';
+  let text = dead
+    ? `шага №${ref.index} в ${SCALE_LOC[scale]} нет — считается 0`
+    : `${numText(shownPx)} · ${onScale ? 'по шкале' : 'мимо шкалы'}`;
+  if (opts.note) text += ` · ${opts.note}`;
+  note.textContent = text;
+  wrap.appendChild(note);
+  return wrap;
+}
+
+/**
+ * Круг 20, п.4. Ссылка на редактор шкал прямо из инспектора: человек читает «по шкале» и тут
+ * же может посмотреть, что это за шкала, и поправить её. Вторая дорога — кнопка «Шкалы»
+ * в шапке: она нужна, когда ничего не выделено.
+ */
+function scaleLink(scale) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'linkish';
+  b.textContent = `${SCALE_NAMES[scale].charAt(0).toUpperCase()}${SCALE_NAMES[scale].slice(1)}…`;
+  b.title = `Открыть ${SCALE_NAMES[scale].replace(/^шкала/, 'шкалу')}: значения шагов и сколько узлов на них ссылается`;
+  b.addEventListener('click', () => openScales(scale));
+  return b;
+}
+
 function selectField(values, current, onChange, labels) {
   const s = document.createElement('select');
   s.className = 'field';
@@ -5741,16 +6011,24 @@ function describeVariant(v) {
   const removed = list.filter((o) => o.op === 'remove').length;
   const changed = new Set(list.filter((o) => o.op === 'set' || o.op === 'move').map((o) => o.id)).size;
 
+  /* Круг 20: зазор, отступ и скругление в операциях варианта — ссылки на шаги шкалы, а не
+     числа; пиксели из них даёт только ядро (resolveScale). Шкалу берём из документа
+     варианта, если он есть: вариант вправе менять и её. */
+  const vdoc = (v.preview && v.preview.doc) || state.doc;
+  const pxOf = (val, doc) => {
+    const one = val && typeof val === 'object' && !Array.isArray(val) ? val.t : val;
+    const n = resolveScale(doc, one);
+    return typeof n === 'number' ? n : null;
+  };
   const nums = new Map();
   for (const o of list) {
     if (o.op !== 'set') continue;
-    const value = typeof o.value === 'number' ? o.value : (o.value && typeof o.value.t === 'number' ? o.value.t : null);
+    const value = pxOf(o.value, vdoc);
     if (value == null) continue;
     const key = String(o.path || '').split('.').pop();
     const label = NUM_LABELS[key];
     if (!label || nums.has(label)) continue;
-    const before = readPath(nodeById(state.doc, o.id), o.path);
-    const beforeNum = typeof before === 'number' ? before : (before && typeof before.t === 'number' ? before.t : null);
+    const beforeNum = pxOf(readPath(nodeById(state.doc, o.id), o.path), state.doc);
     nums.set(label, beforeNum != null && beforeNum !== value ? `${beforeNum} → ${value}` : String(value));
   }
 
@@ -6804,6 +7082,8 @@ function bindUi() {
   dom.sheet.addEventListener('keydown', trapSheetFocus);
   dom['btn-history'].addEventListener('click', () => openHistory());
   dom['btn-export'].addEventListener('click', openExport);
+  // круг 20, п.4: редактор шкал — шторка о документе, рядом с историей и экспортом
+  dom['btn-scales'].addEventListener('click', () => openScales());
   dom['btn-settings'].addEventListener('click', openSettings);
   // три состояния темы: тёмная, светлая и «как в системе» (п.13)
   dom['btn-theme'].addEventListener('click', () => cycleTheme());
@@ -6882,7 +7162,13 @@ function bindUi() {
       if (all.length) setSelection(all);
     }
     // отмена работает из любого места оболочки; сцена ловит своё событие раньше (capture) и ставит defaultPrevented
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !typing && !e.defaultPrevented) {
+    /* Круг 20, п.4. Числовое поле, в котором ничего не набрано сверх записанного (шаг шкалы
+       после Enter, зазор в инспекторе), для Ctrl+Z — не «печать»: набора, который можно
+       отменить, в нём нет, а правка документа есть. В остальных полях Ctrl+Z остаётся
+       за браузером — отменой набора. */
+    const numIdle = typing && e.target.type === 'number'
+      && e.target.dataset.committed !== undefined && e.target.value === e.target.dataset.committed;
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && (!typing || numIdle) && !e.defaultPrevented) {
       e.preventDefault();
       if (e.shiftKey) redo(); else undo();
     }
@@ -6970,12 +7256,17 @@ function addArtboard() {
   const abs = artboards(state.doc);
   const at = nextArtboardPos(abs);
   const id = `ab_${Date.now().toString(36)}`;
+  /* Круг 20 (SPEC §6.5): новая доска встаёт на шкалы документа — иначе единственный узел
+     с «голыми» числами заводила бы сама оболочка. Значения те же, что раньше; ссылкой
+     становится то, что в шкале есть, остальное остаётся числом (мимо шкалы). */
+  const onScale = (scale, n) => { const i = scaleIndexOf(state.doc, scale, n); return i >= 0 ? scaleRef(scale, i) : n; };
+  const sp = (n) => onScale('spacing', n);
   const node = {
     id, type: 'frame', name: `Доска ${abs.length + 1}`, parent: state.doc.root, children: [],
     pos: { x: at.x, y: at.y },
     size: { w: { mode: 'fixed', value: ARTBOARD_W }, h: { mode: 'fixed', value: ARTBOARD_H } },
-    layout: { mode: 'column', gap: 16, padding: { t: 24, r: 20, b: 24, l: 20 }, align: 'stretch', justify: 'start', wrap: false },
-    fill: { token: 'surface' }, radius: 16,
+    layout: { mode: 'column', gap: sp(16), padding: { t: sp(24), r: sp(20), b: sp(24), l: sp(20) }, align: 'stretch', justify: 'start', wrap: false },
+    fill: { token: 'surface' }, radius: onScale('radii', 16),
   };
   const r = commit([OPS.create(node)], 'Новая доска');
   if (r.ok) { setSelection([id]); fitAfterLayout([id]); }
@@ -6990,7 +7281,9 @@ let sheetReturnFocus = null;
 /* Круг 19, п.3 и п.6: обе шторки компонентов — тоже разговор о документе. В «Сделать
    компонентом» человек смотрит на узел, который называет; в «Объявить свойство» выбирает
    узел ВНУТРИ компонента и должен видеть, какой именно он выбрал на холсте. */
-const QUIET_SHEETS = new Set(['history', 'export', 'artboards', 'make-component', 'add-prop']);
+/* Круг 20, п.4: редактор шкал — тем более разговор о документе: правка шага переверстывает
+   холст, и человек должен видеть, как разъезжаются карточки, не закрывая шторку. */
+const QUIET_SHEETS = new Set(['history', 'export', 'artboards', 'make-component', 'add-prop', 'scales']);
 
 /** Шторка — модальный диалог: фокус внутрь, Esc и клик по затемнению закрывают. */
 function openSheet(title, fill, opts = {}) {
@@ -7232,8 +7525,191 @@ function gotoHistory(target) {
 
 /** Открытая шторка «История» устаревает при отмене извне — перерисуем её (п.18). */
 function refreshSheet() {
-  if (dom.sheet.hidden || state.sheetOpen !== 'history') return;
-  openHistory();
+  if (dom.sheet.hidden) return;
+  if (state.sheetOpen === 'history') openHistory();
+  // круг 20: у редактора шкал те же права — после Ctrl+Z шаг обязан показывать прежнее число
+  else if (state.sheetOpen === 'scales') openScales(scalesFocus, { keepFocus: true });
+}
+
+/* ------------------------------ круг 20: редактор шкал ------------------------------ */
+
+/** Какую шкалу человек открыл из инспектора — её и ставим первой. */
+let scalesFocus = null;
+
+/**
+ * Шторка «Шкалы» (SPEC §6.7, круг 20, п.4). Значения шагов правятся прямо здесь, и правка
+ * любого сразу переверстывает всё, что на него ссылается: это `setToken spacing.<i>`,
+ * обычный commit, отмена по Ctrl+Z даром. У каждого шага стоит, сколько узлов на него
+ * ссылается (scaleRefsIn) — цена правки видна до правки, а не после.
+ *
+ * Шаг 0 со значением 0 ЗАПЕРТ. Миграция (§6.5) превратила все нули документа в 'spacing.0':
+ * «отступа нет» и «отступ — нулевой шаг шкалы» в записи неотличимы, и правка нулевого
+ * шага дала бы отступы всему, у чего их никогда не было. Это осознанное решение круга 20,
+ * и подсказка у замка говорит о нём словами.
+ *
+ * Вставка шага — «+» у строки: новый шаг встаёт ПОСЛЕ неё со значением посередине до
+ * следующего (или на шаг выше последнего), ссылки переписываются ядром (insertScaleStep),
+ * так что ни один узел не меняет пикселей. Удаления шага в этом круге нет.
+ * @param {'spacing'|'radii'} [focus] какую шкалу показать первой
+ */
+function openScales(focus, opts = {}) {
+  if (focus && SCALE_NAMES[focus]) scalesFocus = focus;
+  // перерисовка по commit/refreshSheet: фокус возвращается на то же поле — кроме вставки
+  // шага, после которой под каретку встаёт новый шаг (scalesPendingFocus, см. fillScales)
+  const memo = opts.keepFocus && !scalesPendingFocus ? grabSheetFocus() : null;
+  openSheet('Шкалы документа', (body) => fillScales(body), { key: 'scales' });
+  if (memo) restoreSheetFocus(memo);
+}
+
+function grabSheetFocus() {
+  const a = document.activeElement;
+  if (!a || !dom['sheet-body'].contains(a) || !a.dataset || !a.dataset.skey) return null;
+  return { key: a.dataset.skey };
+}
+function restoreSheetFocus(memo) {
+  const f = dom['sheet-body'].querySelector(`[data-skey="${CSS.escape(memo.key)}"]`);
+  if (!f) return;
+  try { f.focus({ preventScroll: true }); } catch { f.focus(); }
+}
+
+/** Сколько узлов ссылается на каждый шаг шкалы: индекс → число узлов. */
+function scaleUsage(scale) {
+  const byStep = new Map();
+  for (const r of scaleRefsIn(state.doc, scale)) {
+    const set = byStep.get(r.index) || new Set();
+    set.add(r.id);
+    byStep.set(r.index, set);
+  }
+  return byStep;
+}
+
+/** Значение для нового шага после i-го: посередине до следующего, за последним — шаг вверх. */
+function nextStepValue(steps, i) {
+  const cur = Number(steps[i]) || 0;
+  const nxt = steps[i + 1];
+  if (typeof nxt === 'number' && nxt > cur) return Math.round((cur + nxt) / 2);
+  const prev = steps[i - 1];
+  const stride = typeof prev === 'number' && cur > prev ? cur - prev : (cur || 4);
+  return cur + stride;
+}
+
+function setScaleStep(scale, i, value) {
+  const steps = scaleSteps(state.doc, scale);
+  if (i === 0 && steps[0] === 0) return;   // запертый ноль — см. openScales
+  if (steps[i] === value) return;
+  const r = commit([OPS.setToken(`${scale}.${i}`, value)], 'Шаг шкалы', 'human', { quiet: true });
+  if (!r.ok) return;
+  // пересчитать нечего: холст перерисовал commit, шторку — refreshSheet
+}
+
+function insertStepAfter(scale, i) {
+  const steps = scaleSteps(state.doc, scale);
+  const value = nextStepValue(steps, i);
+  const list = insertScaleStep(state.doc, scale, i + 1, value);
+  if (!list.length) { toast('Шаг вставить не удалось.', 'error', 6000); return; }
+  const rewritten = list.length - 1;
+  const word = SCALE_NAMES[scale];
+  // новый шаг — под каретку: человек его вставил, чтобы поправить. Ставим ДО commit:
+  // шторку перерисует refreshSheet внутри него
+  scalesPendingFocus = `${scale}|${i + 1}|value`;
+  const r = commit(list, 'Новый шаг шкалы', 'human', {
+    quiet: true, noFrames: true,
+    // своя фраза: 50 переписанных ссылок — не 50 правок узлов, пиксели у них не менялись
+    human: `${word.charAt(0).toUpperCase()}${word.slice(1)}: новый шаг ${value} после ${humanValue(steps[i])}`
+      + (rewritten ? `, ссылки ${rewritten} ${plural(rewritten, 'поля', 'полей', 'полей')} переставлены без сдвига` : ''),
+  });
+  if (!r.ok) scalesPendingFocus = null;
+}
+let scalesPendingFocus = null;
+
+function fillScales(body) {
+  body.appendChild(noteEl('Зазоры, отступы и скругления в документе ссылаются на шаги этих шкал. '
+    + 'Правка шага переверстывает всё, что на него ссылается; отмена — Ctrl+Z.'));
+  const order = scalesFocus === 'radii' ? ['radii', 'spacing'] : ['spacing', 'radii'];
+  for (const scale of order) body.appendChild(scaleEditor(scale));
+  if (scalesPendingFocus) {
+    const f = body.querySelector(`[data-skey="${CSS.escape(scalesPendingFocus)}"]`);
+    scalesPendingFocus = null;
+    if (f) { try { f.focus({ preventScroll: true }); f.select(); } catch { /* не страшно */ } }
+  }
+}
+
+function scaleEditor(scale) {
+  const steps = scaleSteps(state.doc, scale);
+  const usage = scaleUsage(scale);
+  const name = SCALE_NAMES[scale];
+  const box = document.createElement('section');
+  box.className = 'scale-ed';
+  box.dataset.scale = scale;
+  box.setAttribute('aria-label', name);
+
+  const head = document.createElement('h4');
+  head.className = 'scale-ed-title';
+  head.textContent = name.charAt(0).toUpperCase() + name.slice(1);
+  box.appendChild(head);
+
+  const total = new Set([...usage.values()].flatMap((s) => [...s])).size;
+  const sub = noteEl(total
+    ? `${steps.length} ${plural(steps.length, 'шаг', 'шага', 'шагов')} · ${plural(total, 'ссылается', 'ссылаются', 'ссылаются')} ${total} ${plural(total, 'узел', 'узла', 'узлов')}`
+    : `${steps.length} ${plural(steps.length, 'шаг', 'шага', 'шагов')} · пока никто не ссылается`);
+  sub.className = 'note scale-ed-sub';
+  box.appendChild(sub);
+
+  const list = document.createElement('div');
+  list.className = 'scale-rows';
+  list.setAttribute('role', 'list');
+  steps.forEach((v, i) => list.appendChild(scaleRow(scale, steps, i, usage.get(i))));
+  box.appendChild(list);
+  return box;
+}
+
+function scaleRow(scale, steps, i, users) {
+  const v = steps[i];
+  const locked = i === 0 && v === 0;
+  const n = users ? users.size : 0;
+  const rowEl = document.createElement('div');
+  rowEl.className = 'scale-row';
+  rowEl.setAttribute('role', 'listitem');
+  if (locked) rowEl.dataset.locked = 'on';
+  if (!n) rowEl.dataset.unused = 'on';
+
+  const idx = document.createElement('span');
+  idx.className = 'scale-idx';
+  idx.textContent = `шаг ${i}`;
+
+  let val;
+  if (locked) {
+    val = document.createElement('span');
+    val.className = 'field scale-locked';
+    val.textContent = '0';
+    val.title = 'Нулевой шаг заперт: на него ссылается всё, у чего отступа нет вовсе, — '
+      + 'миграция превратила все нули документа в ссылки на него. Правка дала бы отступы там, где их не было.';
+    val.setAttribute('role', 'img');
+    val.setAttribute('aria-label', `Шаг 0, значение 0, заперт. ${val.title}`);
+    val.tabIndex = 0;
+  } else {
+    val = numberField(v, (next) => setScaleStep(scale, i, next), { label: `${SCALE_NAMES[scale]}, шаг ${i}: значение` });
+    val.dataset.skey = `${scale}|${i}|value`;
+  }
+
+  const use = document.createElement('span');
+  use.className = 'scale-use';
+  use.textContent = n ? `${n} ${plural(n, 'узел', 'узла', 'узлов')}` : 'не используется';
+  use.title = n
+    ? `На этот шаг ссылаются ${n} ${plural(n, 'узел', 'узла', 'узлов')}: правка значения переверстает их все`
+    : 'На этот шаг сейчас никто не ссылается: правка ничего не сдвинет';
+
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'btn ghost icon small scale-add';
+  add.title = `Вставить шаг после ${humanValue(v)}`;
+  add.setAttribute('aria-label', add.title);
+  add.appendChild(iconEl('plus'));
+  add.dataset.skey = `${scale}|${i}|add`;
+  add.addEventListener('click', () => insertStepAfter(scale, i));
+
+  rowEl.append(idx, val, use, add);
+  return rowEl;
 }
 
 function openExport() {
@@ -7642,11 +8118,23 @@ function adoptDoc(raw) {
      из хранилища (обе идут через adoptDoc). Вызов идемпотентен: если библиотека уже есть,
      ensureLibrary отдаёт тот же самый документ, и пересчитывать нечего. */
   const withLib = ensureLibrary(next);
-  if (withLib === next) return { doc: next, geo, lost, lostEdges };
-  // библиотека рисуется на холсте рядом с досками (SPEC §5.3) — геометрию считаем заново
-  const geoLib = solve(withLib);
-  if (!geoLib || !geoLib.rects) throw new Error('раскладка не считается');
-  return { doc: withLib, geo: geoLib, lost, lostEdges, migrated: true };
+  let out = { doc: withLib, geo, lost, lostEdges };
+  if (withLib !== next) {
+    // библиотека рисуется на холсте рядом с досками (SPEC §5.3) — геометрию считаем заново
+    const geoLib = solve(withLib);
+    if (!geoLib || !geoLib.rects) throw new Error('раскладка не считается');
+    out = { ...out, geo: geoLib, migrated: true };
+  }
+  /* Круг 20, п.1 (SPEC §6.5). Вторая миграция там же, где первая: число, точно равное шагу
+     шкалы, становится ссылкой на этот шаг, число мимо шкалы остаётся числом. Идёт ПОСЛЕ
+     библиотеки, чтобы её узлы тоже встали на шкалу. Геометрию не пересчитываем: миграция
+     меняет только запись значения, а не само значение — ссылка разрешается ровно в то
+     число, из которого выросла (это проверено на демо-документе круга 18: отпечаток
+     геометрии до и после совпадает). Идемпотентна: документ на ссылках возвращается тем же
+     объектом, и флага rescaled у него нет. */
+  const withScales = ensureScaleRefs(out.doc);
+  if (withScales !== out.doc) out = { ...out, doc: withScales, rescaled: true };
+  return out;
 }
 
 /* Круг 16, п.13. Порог «большого документа». Замеры круга: 3 077 узлов — validate 18…30 мс,
@@ -7717,7 +8205,14 @@ function importJson() {
       if (blank) bits.push('досок в файле не оказалось — холст пуст');
       // круг 19, п.1: файл из прежней версии библиотеки не имел — говорим об этом словами,
       // иначе в рельсе просто из ниоткуда появляется группа «Библиотека»
-      if (taken.migrated) bits.push('файл из прежней версии — завёл библиотеку компонентов');
+      if (taken.migrated || taken.rescaled) {
+        /* Круг 20, п.1: то же для шкал. Человек открыл файл, в котором стояли числа, а в
+           инспекторе теперь читает «по шкале» — откуда это взялось, надо сказать словами. */
+        const done = [];
+        if (taken.migrated) done.push('завёл библиотеку компонентов');
+        if (taken.rescaled) done.push('отступы и скругления перевёл на шкалы документа');
+        bits.push(`файл из прежней версии — ${done.join(', ')}`);
+      }
       /* Круг 16, п.13(б). На таком документе правка и отмена занимают заметное время, и
          честнее сказать об этом заранее, чем оставлять человека гадать, не завис ли
          редактор: во время самой правки поток занят и нарисовать предупреждение нечем. */

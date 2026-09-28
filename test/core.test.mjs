@@ -8,7 +8,10 @@ import {
   isLibrary, libraryId, libraryNode, ensureLibrary, ensureLibraryOps,
   components, componentSignature, instanceSummary, isMaster, masterOf,
   canMakeComponent, makeComponentOps, instanceOps, detachInstanceOps,
-  expandInstance, MAX_INSTANCE_DEPTH
+  expandInstance, MAX_INSTANCE_DEPTH,
+  resolveScale, resolveLayout, resolveRadius, parseScaleRef, isScaleRef, scaleRef, scaleIndexOf, scaleSteps,
+  keepFieldForm, ensureScaleRefs, ensureScaleRefsOps, scaleRefsIn, rewriteScaleRefsOps, insertScaleStep,
+  normalizeLayout, DEFAULT_TOKENS
 } from '../src/core.js';
 
 /* Заглушка измерителя: ширина символа = 0.5 кегля (0.6 для моноширинного). */
@@ -4736,4 +4739,737 @@ test('круг19: цена раскрытия — сотни экземпляр�
   // а правка мастера — рвёт, и все экземпляры перерисуются
   const master = applyOps(doc, [ops.set('btn', 'radius', 4)]).doc;
   assert.notEqual(solve(master, M).expanded['i7/lab'], geo.expanded['i7/lab'], 'правка мастера обновляет раскрытие');
+});
+
+/* ======================= круг 20: шкалы как ссылки (SPEC §6) ======================= */
+
+/** Число → ссылка на шаг (для сборки сцен на ссылках), как это делает миграция. */
+const ref20 = (scale, v) => {
+  const i = DEFAULT_TOKENS[scale].indexOf(v);
+  assert.ok(i >= 0, `${v} должно быть шагом ${scale}`);
+  return scaleRef(scale, i);
+};
+/** Все ссылки документа заменены их числами — «документ, как он считался до круга 20». */
+function numericTwin(doc) {
+  const twin = JSON.parse(JSON.stringify(doc));
+  for (const n of Object.values(twin.nodes)) {
+    if (n.layout && typeof n.layout === 'object') {
+      n.layout.gap = resolveScale(doc, n.layout.gap, 'spacing');
+      for (const k of ['t', 'r', 'b', 'l']) n.layout.padding[k] = resolveScale(doc, n.layout.padding[k], 'spacing');
+    }
+    if (n.radius !== undefined) n.radius = resolveRadius(doc, n.radius);
+  }
+  return twin;
+}
+/** Сколько в документе ссылок и сколько чисел в полях шкал. */
+function scaleCensus(doc) {
+  let refs = 0;
+  let nums = 0;
+  for (const n of Object.values(doc.nodes)) {
+    const vals = [];
+    if (n.layout && typeof n.layout === 'object') vals.push(n.layout.gap, ...Object.values(n.layout.padding));
+    if (n.radius !== undefined) vals.push(...(Array.isArray(n.radius) ? n.radius : [n.radius]));
+    for (const v of vals) (parseScaleRef(v) ? refs++ : nums++);
+  }
+  return { refs, nums };
+}
+
+test('круг20 п.1: ссылка на шаг — законное значение gap, padding и radius; форма проверяется схемой', () => {
+  const doc = scene(() => [
+    ops.create(frame('card', 'ab', { mode: 'column', gap: 'spacing.6', padding: { t: 'spacing.8', r: 'spacing.7', b: 'spacing.8', l: 'spacing.7' } },
+      { w: { mode: 'fixed', value: 300 }, h: { mode: 'hug' } }, { radius: 'radii.4' })),
+    ops.create(box('a', 'card', 40, 20, { radius: ['radii.1', 'radii.2', 0, 4] })),
+    ops.create(box('b', 'card', 40, 20))
+  ]);
+  assert.equal(doc.nodes.card.layout.gap, 'spacing.6', 'ссылка хранится строкой как есть');
+  assert.deepEqual(doc.nodes.card.layout.padding, { t: 'spacing.8', r: 'spacing.7', b: 'spacing.8', l: 'spacing.7' });
+  assert.equal(doc.nodes.card.radius, 'radii.4');
+  assert.deepEqual(doc.nodes.a.radius, ['radii.1', 'radii.2', 0, 4], 'покорнерный массив — тоже со ссылками');
+
+  // геометрия ровно та, что у чисел: gap 16, padding 24/20
+  const r = solve(doc, M).rects;
+  assert.equal(r.a.x, 20, 'padding.l = spacing.7 = 20');
+  assert.equal(r.a.y, 24, 'padding.t = spacing.8 = 24');
+  assert.equal(r.b.y, 24 + 20 + 16, 'gap = spacing.6 = 16');
+  assert.equal(r.card.h, 24 + 20 + 16 + 20 + 24);
+
+  // краткие записи: строка-ссылка на все стороны, [v,h], [t,r,b,l]
+  const short = applyOps(doc, [
+    ops.set('card', 'layout.padding', 'spacing.4'),
+    ops.create(frame('f2', 'ab', { mode: 'row', padding: ['spacing.2', 'spacing.3'] }, HUG)),
+    ops.create(frame('f3', 'ab', { mode: 'row', padding: ['spacing.1', 'spacing.2', 'spacing.3', 'spacing.4'] }, HUG))
+  ]);
+  assert.equal(short.error, undefined, JSON.stringify(short.error));
+  assert.deepEqual(short.doc.nodes.card.layout.padding, { t: 'spacing.4', r: 'spacing.4', b: 'spacing.4', l: 'spacing.4' });
+  assert.deepEqual(short.doc.nodes.f2.layout.padding, { t: 'spacing.2', r: 'spacing.3', b: 'spacing.2', l: 'spacing.3' });
+  assert.deepEqual(short.doc.nodes.f3.layout.padding, { t: 'spacing.1', r: 'spacing.2', b: 'spacing.3', l: 'spacing.4' });
+
+  // форма: не число и не ссылка — «вне диапазона», как раньше; ссылка не в ту шкалу — своя причина
+  const junk = applyOps(doc, [ops.create(frame('j', 'ab', { mode: 'row', gap: 'spacing.x' }, HUG))]);
+  assert.equal(junk.error, undefined, 'мусор в gap при create нормализуется в 0, как и раньше');
+  assert.equal(junk.doc.nodes.j.layout.gap, 0);
+  const wrong = applyOps(doc, [ops.set('card', 'layout.gap', 'radii.3')]);
+  assert.equal(wrong.error.code, 'bad-node');
+  assert.match(wrong.error.message, /layout\.gap: ссылка «radii\.3» ведёт не в шкалу отступов/);
+  const wrongR = applyOps(doc, [ops.set('a', 'radius', 'spacing.3')]);
+  assert.equal(wrongR.error.code, 'bad-node');
+  assert.match(wrongR.error.message, /spacing\.3/);
+  // число с ведущим нулём и отрицательный индекс — не ссылка
+  assert.equal(parseScaleRef('spacing.06'), null);
+  assert.equal(parseScaleRef('spacing.-1'), null);
+  assert.equal(parseScaleRef('spacing.'), null);
+  assert.equal(parseScaleRef(16), null);
+  assert.deepEqual(parseScaleRef('radii.7'), { scale: 'radii', index: 7 });
+  assert.equal(isScaleRef('spacing.6', 'spacing'), true);
+  assert.equal(isScaleRef('spacing.6', 'radii'), false);
+  assert.equal(isScaleRef('spacing.6'), true);
+});
+
+test('круг20 п.1: ссылка на несуществующий шаг отклоняется операцией (bad-node), инверсия проходит всегда', () => {
+  const doc = scene(() => [
+    ops.create(frame('card', 'ab', { mode: 'column', gap: 'spacing.6' }, HUG, { radius: 'radii.4' })),
+    ops.create(box('a', 'card', 40, 20))
+  ]);
+  const steps = doc.tokens.spacing.length;
+  for (const [id, path, value] of [
+    ['card', 'layout.gap', 'spacing.' + steps],
+    ['card', 'layout.padding.t', 'spacing.99'],
+    ['card', 'layout.padding', { t: 'spacing.99', r: 0, b: 0, l: 0 }],
+    ['card', 'layout', { mode: 'row', gap: 'spacing.99' }],
+    ['card', 'radius', 'radii.99'],
+    ['a', 'radius', ['radii.99', 0]]
+  ]) {
+    const bad = applyOps(doc, [ops.set(id, path, value)]);
+    assert.equal(bad.error && bad.error.code, 'bad-node', `${path}: ${JSON.stringify(bad.error)}`);
+    assert.match(bad.error.message, /нет/, path);
+    assert.match(bad.error.message, /шкале (отступов|скруглений)/, path);
+    assert.equal(bad.doc, doc, 'документ не тронут');
+  }
+  const badCreate = applyOps(doc, [ops.create(frame('f', 'ab', { mode: 'row', gap: 'spacing.99' }, HUG))]);
+  assert.equal(badCreate.error.code, 'bad-node');
+  assert.match(badCreate.error.message, /create: layout\.gap: шага «spacing\.99» нет/);
+
+  // в одной транзакции порядок важен: сначала удлинить шкалу, потом ссылаться на новый шаг
+  const longer = doc.tokens.spacing.concat([80]);
+  const ok = applyOps(doc, [ops.setToken('spacing', longer), ops.set('card', 'layout.gap', 'spacing.' + steps)]);
+  assert.equal(ok.error, undefined, JSON.stringify(ok.error));
+  assert.equal(solve(ok.doc, M).rects.a.y, 0, 'один ребёнок — зазор не виден, но значение живое');
+  const reversed = applyOps(doc, [ops.set('card', 'layout.gap', 'spacing.' + steps), ops.setToken('spacing', longer)]);
+  assert.equal(reversed.error.code, 'bad-node', 'ссылка раньше шкалы — транзакция отклоняется целиком');
+
+  // мёртвая ссылка в соседнем поле не запирает узел: правится заливка, имя, другой отступ
+  const shortDoc = applyOps(doc, [ops.setToken('spacing', [0, 4, 8])]).doc;
+  assert.equal(resolveScale(shortDoc, 'spacing.6', 'spacing'), undefined, 'ссылка умерла');
+  for (const [path, value] of [['fill', 'accent'], ['name', 'Карта'], ['layout.padding.t', 'spacing.2'], ['layout.align', 'center']]) {
+    const res = applyOps(shortDoc, [ops.set('card', path, value)]);
+    assert.equal(res.error, undefined, `${path}: ${JSON.stringify(res.error)}`);
+  }
+  // а сама мёртвая ссылка новой правкой не пишется
+  assert.equal(applyOps(shortDoc, [ops.set('a', 'layout', { mode: 'row', gap: 'spacing.6' })]).error?.code, 'bad-node');
+
+  // отмена после укорочения шкалы: инверсия пишет то, что было, включая мёртвые ссылки
+  const tx = [ops.set('card', 'layout.gap', 'spacing.2'), ops.remove('card')];
+  const inv = invertOps(shortDoc, tx);
+  const after = applyOps(shortDoc, tx);
+  assert.equal(after.error, undefined);
+  const back = applyOps(after.doc, inv);
+  assert.equal(back.error, undefined, 'отмена не отказывает: ' + JSON.stringify(back.error));
+  assert.deepStrictEqual(back.doc.nodes, shortDoc.nodes, 'документ восстановлен со ссылкой spacing.6');
+});
+
+test('круг20 п.2: resolveScale — единственная точка разрешения; resolveLayout и resolveRadius идут через неё', () => {
+  const doc = createDoc('empty');
+  assert.equal(resolveScale(doc, 16), 16, 'число проходит как есть');
+  assert.equal(resolveScale(doc, 'spacing.6'), 16);
+  assert.equal(resolveScale(doc, 'spacing.6', 'spacing'), 16);
+  assert.equal(resolveScale(doc, 'radii.7'), 999);
+  assert.equal(resolveScale(doc, 'spacing.6', 'radii'), undefined, 'не та шкала — undefined');
+  assert.equal(resolveScale(doc, 'spacing.13'), undefined, 'шага 13 нет — undefined');
+  assert.equal(resolveScale(doc, 'spacing.x'), undefined);
+  assert.equal(resolveScale(doc, null), undefined);
+  assert.equal(resolveScale(doc, { token: 'spacing.6' }), undefined);
+  assert.equal(resolveScale(null, 'spacing.6'), 16, 'без документа — шкала по умолчанию');
+  assert.equal(resolveScale({ tokens: { spacing: [0, 100] } }, 'spacing.1'), 100, 'своя шкала главнее умолчаний');
+  assert.equal(resolveScale({ tokens: { spacing: [0, 'много'] } }, 'spacing.1'), undefined, 'нечисло в шаге — мёртвая');
+  assert.equal(scaleIndexOf(doc, 'spacing', 16), 6);
+  assert.equal(scaleIndexOf(doc, 'spacing', 7), -1);
+  assert.equal(scaleIndexOf(doc, 'radii', 999), 7);
+  assert.equal(scaleIndexOf(doc, 'spacing', 'spacing.6'), -1, 'индекс ищется только по числу');
+  assert.deepEqual(scaleSteps(doc, 'spacing'), DEFAULT_TOKENS.spacing);
+
+  const L = resolveLayout(doc, { mode: 'row', gap: 'spacing.6', padding: { t: 'spacing.8', r: 4, b: 'spacing.99', l: 'radii.3' } });
+  assert.deepEqual(L, { mode: 'row', gap: 16, padding: { t: 24, r: 4, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false },
+    'мёртвая и чужая ссылка — 0, число — как есть');
+  assert.equal(resolveRadius(doc, 'radii.4'), 16);
+  assert.equal(resolveRadius(doc, 12), 12);
+  assert.equal(resolveRadius(doc, 'radii.99'), 0);
+  assert.equal(resolveRadius(doc, ['radii.4', 'radii.4']), 0, 'покорнерный массив рисуется как прежде — нулём');
+  assert.equal(resolveRadius(doc, undefined), 0);
+  // normalizeLayout — форма хранения: ссылки остаются строками
+  const N = normalizeLayout({ mode: 'row', gap: 'spacing.6', padding: 'spacing.4' });
+  assert.equal(N.gap, 'spacing.6');
+  assert.deepEqual(N.padding, { t: 'spacing.4', r: 'spacing.4', b: 'spacing.4', l: 'spacing.4' });
+});
+
+test('круг20 п.2+п.7: демо-документ целиком на ссылках и считается байт в байт как на числах', () => {
+  const doc = createDoc();
+  const census = scaleCensus(doc);
+  assert.equal(census.nums, 0, 'в демо нет ни одного числа в gap/padding/radius');
+  assert.ok(census.refs > 150, 'ссылок много: ' + census.refs);
+  // состав не поехал: доски, тексты, библиотека, экземпляры круга 19
+  assert.equal(artboards(doc).length, 2);
+  assert.ok(libraryNode(doc), 'библиотека на месте');
+  assert.equal(components(doc).length, 3, 'три компонента');
+  assert.equal(Object.values(doc.nodes).filter((n) => n.type === 'instance').length, 4, 'четыре экземпляра');
+  assert.ok(Object.values(doc.nodes).filter((n) => n.type === 'text').length >= 49, 'тексты на месте');
+
+  const twin = numericTwin(doc);
+  assert.equal(scaleCensus(twin).refs, 0, 'двойник — целиком на числах');
+  const geoRefs = solve(doc, M);
+  const geoNums = solve(twin, M);
+  assert.equal(hashGeometry(geoRefs), hashGeometry(geoNums), 'геометрия совпадает байт в байт');
+  assert.deepStrictEqual(geoRefs.rects, geoNums.rects);
+  assert.equal(Object.keys(geoRefs.expanded).length, Object.keys(geoNums.expanded).length, 'раскрытие экземпляров то же');
+  for (const id of Object.keys(doc.nodes)) if (id !== doc.root) assert.ok(geoRefs.rects[id], 'прямоугольник у ' + id);
+  const errors = validate(doc, geoRefs, M).filter((v) => v.severity === 'error');
+  assert.deepEqual(errors, [], 'валидатор молчит на здоровом документе');
+  assert.equal(validate(doc, geoRefs, M).filter((v) => v.code === 'off-scale').length, 0, 'ссылки по определению в шкале');
+  // JSON-круг через createDoc(seed) ссылки сохраняет
+  const round = createDoc(JSON.parse(JSON.stringify(doc)));
+  assert.equal(scaleCensus(round).nums, 0);
+  assert.equal(hashGeometry(solve(round, M)), hashGeometry(geoRefs));
+});
+
+test('круг20 п.2: раскрытые экземпляры считаются по ссылкам мастера', () => {
+  // мастер на ссылках → экземпляр раскрывается через resolveLayout/resolveRadius с теми же токенами
+  let doc = libScene((d, lib) => [
+    ops.set('btn', 'layout', { mode: 'row', gap: 'spacing.4', padding: { t: 'spacing.4', r: 'spacing.6', b: 'spacing.4', l: 'spacing.6' } }),
+    ops.set('btn', 'radius', 'radii.2'),
+    ops.create(inst('i1', 'ab', 'btn', { 'текст': 'Оплатить' }))
+  ]);
+  const geo = solve(doc, M);
+  assert.equal(geo.expanded['i1/lab'].parent, 'i1');
+  assert.equal(geo.rects['i1/lab'].x - geo.rects.i1.x, 16, 'padding.l мастера = spacing.6 = 16 внутри экземпляра');
+  assert.equal(geo.rects['i1/lab'].y - geo.rects.i1.y, 8, 'padding.t = spacing.4 = 8');
+  // смена шага переверстывает экземпляр — без правки узлов
+  const wider = applyOps(doc, [ops.setToken('spacing.6', 40)]).doc;
+  const geo2 = solve(wider, M);
+  assert.equal(geo2.rects['i1/lab'].x - geo2.rects.i1.x, 40, 'экземпляр подхватил новый шаг');
+  assert.equal(geo2.rects.i1.w, geo.rects.i1.w + 48, 'ширина кнопки выросла на 2×24');
+  // отсоединённая копия несёт те же ссылки
+  const det = applyOps(doc, detachInstanceOps(doc, 'i1'));
+  assert.equal(det.error, undefined, JSON.stringify(det.error));
+  const copy = Object.values(det.doc.nodes).find((n) => n.type === 'frame' && n.parent === 'ab' && n.id !== 'btn');
+  assert.equal(copy.layout.gap, 'spacing.4');
+  assert.equal(copy.radius, 'radii.2');
+});
+
+test('круг20 п.3: keepFieldForm — число, равное значению ссылки, оставляет ссылку; ссылка поверх числа — правка', () => {
+  const doc = scene(() => [
+    ops.create(frame('r', 'ab', { mode: 'column', gap: 'spacing.6', padding: { t: 'spacing.8', r: 'spacing.7', b: 'spacing.8', l: 'spacing.7' } },
+      HUG, { radius: 'radii.4' })),
+    ops.create(frame('n', 'ab', { mode: 'column', gap: 16, padding: { t: 24, r: 20, b: 24, l: 20 } }, HUG, { radius: 16 })),
+    ops.create(box('arr', 'ab', 10, 10, { radius: ['radii.4', 'radii.2', 0, 'radii.1'] }))
+  ]);
+  const R = doc.nodes.r;
+  const N = doc.nodes.n;
+  const same = (path, value, want, msg) => {
+    const res = applyOps(doc, [ops.set(R.id, path, value)]);
+    assert.equal(res.error, undefined, `${path}: ${JSON.stringify(res.error)}`);
+    const got = path.split('.').reduce((o, k) => (o ? o[k] : undefined), res.doc.nodes.r);
+    assert.deepStrictEqual(got, want, msg || `${path} = ${JSON.stringify(value)}`);
+    return res.doc.nodes.r;
+  };
+  // число, равное значению ссылки → поле байт в байт
+  same('layout.gap', 16, 'spacing.6', 'gap 16 при spacing.6 (16): остаётся ссылка');
+  same('layout.padding.t', 24, 'spacing.8');
+  same('radius', 16, 'radii.4');
+  same('layout.padding', 24, { t: 'spacing.8', r: 24, b: 'spacing.8', l: 24 },
+    'краткая запись: совпавшие стороны остаются ссылками, остальные — числа');
+  assert.deepStrictEqual(applyOps(doc, [ops.set('r', 'layout.padding', { t: 24, r: 20, b: 24, l: 20 })]).doc.nodes.r.layout.padding,
+    R.layout.padding, 'объект с теми же числами — padding байт в байт');
+  const whole = applyOps(doc, [ops.set('r', 'layout', { mode: 'column', gap: 16, padding: { t: 24, r: 20, b: 24, l: 20 }, align: 'center', justify: 'start', wrap: false })]);
+  assert.equal(whole.error, undefined);
+  assert.deepStrictEqual(whole.doc.nodes.r.layout, { ...R.layout, align: 'center' }, 'целый layout: ссылки целы, align сменился');
+  // другое число → число (поле становится «мимо шкалы» или другим шагом, но числом)
+  same('layout.gap', 20, 20, 'gap 20 при spacing.6 (16): настоящая правка, пишется число');
+  same('radius', 12, 12);
+  // ссылка поверх числа — настоящая правка
+  const overNum = applyOps(doc, [ops.set('n', 'layout.gap', 'spacing.6'), ops.set('n', 'radius', 'radii.4'), ops.set('n', 'layout.padding.t', 'spacing.8')]);
+  assert.equal(overNum.error, undefined);
+  assert.equal(overNum.doc.nodes.n.layout.gap, 'spacing.6', 'число 16 стало ссылкой — это смена смысла при той же картинке');
+  assert.equal(overNum.doc.nodes.n.radius, 'radii.4');
+  assert.equal(overNum.doc.nodes.n.layout.padding.t, 'spacing.8');
+  assert.equal(hashGeometry(solve(overNum.doc, M)), hashGeometry(solve(doc, M)), 'картинка не изменилась');
+  assert.notEqual(JSON.stringify(overNum.doc.nodes.n), JSON.stringify(N), 'а документ — изменился');
+  // ссылка поверх ссылки пишется буквально, даже при равных значениях шагов
+  const twoSteps = applyOps(doc, [ops.setToken('spacing', [0, 2, 4, 6, 8, 12, 16, 16, 24]), ops.set('r', 'layout.gap', 'spacing.7')]);
+  assert.equal(twoSteps.doc.nodes.r.layout.gap, 'spacing.7');
+  // exact: true пишет число буквально — так инверсия возвращает исходную форму
+  const exact = { ...ops.set('r', 'layout.gap', 16), exact: true };
+  assert.equal(applyOps(doc, [exact]).doc.nodes.r.layout.gap, 16);
+  // покорнерный массив — поэлементно
+  assert.deepStrictEqual(applyOps(doc, [ops.set('arr', 'radius', [16, 8, 0, 4])]).doc.nodes.arr.radius, ['radii.4', 'radii.2', 0, 'radii.1']);
+  assert.deepStrictEqual(applyOps(doc, [ops.set('arr', 'radius', [16, 8, 0, 5])]).doc.nodes.arr.radius, ['radii.4', 'radii.2', 0, 5]);
+  // инверсия «правки тем же значением» и настоящей правки восстанавливает форму
+  for (const tx of [[ops.set('r', 'layout.gap', 16)], [ops.set('r', 'layout.gap', 20)], [ops.set('n', 'layout.gap', 'spacing.6')], [ops.set('r', 'radius', 12)]]) {
+    const inv = invertOps(doc, tx);
+    const back = applyOps(applyOps(doc, tx).doc, inv);
+    assert.deepStrictEqual(back.doc.nodes, doc.nodes, JSON.stringify(tx));
+  }
+  // и сама функция — экспортирована, чтобы мозг мог звать её, а не догадываться
+  assert.equal(keepFieldForm(R, 'layout.gap', 16, doc), 'spacing.6');
+  assert.equal(keepFieldForm(R, 'layout.gap', 20, doc), 20);
+  assert.equal(keepFieldForm(R, 'layout.gap', 'spacing.6', doc), 'spacing.6');
+  assert.equal(keepFieldForm(N, 'layout.gap', 'spacing.6', doc), 'spacing.6');
+  assert.equal(keepFieldForm(N, 'layout.gap', 16, doc), 16);
+  assert.equal(keepFieldForm(R, 'radius', 16, doc), 'radii.4');
+  assert.deepEqual(keepFieldForm(R, 'layout.padding', 24, doc), { t: 'spacing.8', r: 24, b: 'spacing.8', l: 24 });
+  assert.equal(keepFieldForm(R, 'layout.padding.l', 20, doc), 'spacing.7');
+  assert.equal(keepFieldForm(R, 'layout.mode', 'row', doc), 'row', 'чужие пути — как есть');
+  assert.equal(keepFieldForm({ ...R, style: { token: 'body' } }, 'style', 'body', doc).token, 'body', 'круг 16 не сломан');
+  assert.equal(keepFieldForm(R, 'layout.gap', undefined, doc), undefined);
+});
+
+test('круг20 п.4: валидатор — dead-scale-ref (error) на мёртвую ссылку, off-scale (info) для чисел как был', () => {
+  let doc = scene(() => [
+    ops.create(frame('card', 'ab', { mode: 'column', gap: 'spacing.6', padding: { t: 'spacing.8', r: 7, b: 'spacing.8', l: 7 } }, HUG, { radius: 'radii.4' })),
+    ops.create(box('a', 'card', 40, 20, { radius: 'radii.7' })),
+    ops.create(box('b', 'card', 40, 20))
+  ]);
+  const codes = (d) => validate(d, solve(d, M), M);
+  const healthy = codes(doc);
+  assert.deepEqual(healthy.filter((v) => v.code === 'dead-scale-ref'), [], 'живые ссылки не тревожат');
+  const off = healthy.filter((v) => v.code === 'off-scale');
+  assert.equal(off.length, 1);
+  assert.equal(off[0].severity, 'info');
+  assert.match(off[0].message, /padding\.r 7, padding\.l 7/, 'число 7 мимо шкалы — info, ссылки не упомянуты');
+
+  // укоротили шкалу — ссылки умерли, решатель считает их нулём, валидатор говорит об этом
+  const short = applyOps(doc, [ops.setToken('spacing', [0, 4, 8]), ops.setToken('radii', [0, 4])]).doc;
+  const geo = solve(short, M);
+  assert.equal(geo.rects.a.y, 0, 'padding.t мёртв → 0');
+  assert.equal(geo.rects.b.y, 20, 'gap мёртв → 0');
+  const dead = codes(short).filter((v) => v.code === 'dead-scale-ref');
+  assert.equal(dead.length, 2, 'по строке на узел: card (gap, padding.t/b, radius) и a (radius)');
+  for (const v of dead) assert.equal(v.severity, 'error');
+  const card = dead.find((v) => v.nodeId === 'card');
+  assert.match(card.message, /layout\.gap → шага «spacing\.6» нет/);
+  assert.match(card.message, /layout\.padding\.t/);
+  assert.match(card.message, /radius → шага «radii\.4» нет/);
+  assert.match(card.message, /в шкале отступов 3 шага \(0\.\.2\)/);
+  assert.ok(!/padding\.r/.test(card.message), 'число 7 — не мёртвая ссылка');
+  assert.match(dead.find((v) => v.nodeId === 'a').message, /radii\.7/);
+  // библиотека — страница, но раскладка у неё есть, и мёртвую ссылку там тоже видно
+  const lib = ensureLibrary(doc);
+  const libShort = applyOps(lib, [ops.setToken('spacing', [0, 4])]).doc;
+  assert.ok(codes(libShort).some((v) => v.code === 'dead-scale-ref' && v.nodeId === libraryId(libShort)), 'зазор библиотеки spacing.8 умер');
+  // документ из файла с мёртвой ссылкой: узел остаётся (это не мусор), валидатор говорит
+  const raw = JSON.parse(JSON.stringify(doc));
+  raw.nodes.card.layout.gap = 'spacing.40';
+  raw.nodes.a.radius = 'radii.40';
+  raw.nodes.b.radius = 'spacing.2';            // не та шкала — снимается при импорте
+  raw.nodes.card.layout.padding.r = 'radii.1';  // не та шкала — ноль при импорте
+  const imported = createDoc(raw);
+  assert.equal(imported.nodes.card.layout.gap, 'spacing.40', 'мёртвая ссылка сохранена');
+  assert.equal(imported.nodes.a.radius, 'radii.40');
+  assert.equal(imported.nodes.b.radius, undefined, 'ссылка не в ту шкалу снята');
+  assert.equal(imported.nodes.card.layout.padding.r, 0, 'ссылка не в ту шкалу → 0');
+  const impDead = codes(imported).filter((v) => v.code === 'dead-scale-ref');
+  assert.deepEqual(impDead.map((v) => v.nodeId).sort(), ['a', 'card']);
+});
+
+test('круг20 п.5: ensureScaleRefs — идемпотентная миграция без мутации входа, геометрия та же, отменяемая', () => {
+  const doc = scene(() => [
+    ops.create(frame('card', 'ab', { mode: 'column', gap: 16, padding: { t: 24, r: 7, b: 24, l: 20 } }, HUG, { radius: 16 })),
+    ops.create(box('a', 'card', 40, 20, { radius: 999 })),
+    ops.create(box('b', 'card', 40, 20, { radius: [12, 5, 0, 4] })),
+    ops.create(label('t', 'card', 'текст')),
+    ops.create(frame('plain', 'ab', { mode: 'row', gap: 0 }, HUG))
+  ]);
+  const snapshot = JSON.stringify(doc);
+  const before = solve(doc, M);
+  const list = ensureScaleRefsOps(doc);
+  assert.ok(list.length >= 4, 'операции есть: ' + list.length);
+  assert.ok(list.every((o) => o.op === 'set' && /^(layout\.gap|layout\.padding\.[trbl]|radius(\.\d+)?)$/.test(o.path)),
+    'по операции на переводимое поле: ' + JSON.stringify(list.map((o) => o.path)));
+  assert.ok(!list.some((o) => o.id === 'card' && o.path === 'layout.padding.r'), '7 мимо шкалы — операции на него нет');
+  assert.ok(list.some((o) => o.id === 'b' && o.path === 'radius.3' && o.value === 'radii.1'), 'элемент покорнерного массива — своей операцией');
+  const migrated = ensureScaleRefs(doc);
+  assert.equal(JSON.stringify(doc), snapshot, 'вход не мутирован');
+  assert.notEqual(migrated, doc);
+  assert.equal(migrated.nodes.card.layout.gap, 'spacing.6');
+  assert.deepEqual(migrated.nodes.card.layout.padding, { t: 'spacing.8', r: 7, b: 'spacing.8', l: 'spacing.7' }, '7 мимо шкалы остаётся числом');
+  assert.equal(migrated.nodes.card.radius, 'radii.4');
+  assert.equal(migrated.nodes.a.radius, 'radii.7', '999 — шаг «круглый»');
+  assert.deepEqual(migrated.nodes.b.radius, ['radii.3', 5, 'radii.0', 'radii.1'], 'покорнерный массив поэлементно');
+  assert.equal(migrated.nodes.plain.layout.gap, 'spacing.0', 'ноль — тоже шаг');
+  assert.deepEqual(migrated.nodes.plain.layout.padding, { t: 'spacing.0', r: 'spacing.0', b: 'spacing.0', l: 'spacing.0' });
+  assert.equal(migrated.nodes.ab.layout.gap, 'spacing.0');
+  assert.equal(migrated.nodes.t.radius, undefined, 'у текста скругления не было — не появилось');
+  assert.equal(scaleCensus(migrated).nums, 2, 'остались ровно два числа мимо шкалы: 7 и 5');
+  assert.equal(hashGeometry(solve(migrated, M)), hashGeometry(before), 'геометрия не изменилась');
+  // идемпотентность
+  assert.equal(ensureScaleRefs(migrated), migrated, 'второй вызов возвращает тот же объект');
+  assert.deepEqual(ensureScaleRefsOps(migrated), []);
+  const demo = createDoc();
+  assert.equal(ensureScaleRefs(demo), demo, 'демо уже на ссылках');
+  // отменяемо как транзакция: инверсия возвращает числа
+  const inv = invertOps(doc, list);
+  const back = applyOps(applyOps(doc, list).doc, inv);
+  assert.equal(back.error, undefined);
+  assert.deepStrictEqual(back.doc.nodes, doc.nodes, 'узлы восстановлены с числами');
+  // соседнее поле с мёртвой ссылкой (файл, укороченная шкала) миграцию не останавливает
+  const raw = JSON.parse(JSON.stringify(doc));
+  raw.nodes.card.layout.gap = 'spacing.99';
+  const partly = ensureScaleRefs(raw);
+  assert.notEqual(partly, raw, 'миграция состоялась');
+  assert.equal(partly.nodes.card.layout.gap, 'spacing.99', 'мёртвая ссылка не тронута — о ней скажет валидатор');
+  assert.equal(partly.nodes.card.layout.padding.t, 'spacing.8', 'а соседнее число переведено');
+  assert.ok(validate(partly, solve(partly, M), M).some((v) => v.code === 'dead-scale-ref' && v.nodeId === 'card'));
+  // страница-библиотека из старого файла: раскладка числами → тоже на ссылки (у страницы set layout не нормализуется)
+  const withLib = applyOps(doc, [ops.create({ type: 'page', id: 'lib', role: 'library', parent: doc.root, children: [], layout: { mode: 'column', gap: 24, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false } })]).doc;
+  const libMigrated = ensureScaleRefs(withLib);
+  assert.equal(libMigrated.nodes.lib.layout.gap, 'spacing.8');
+  assert.equal(ensureScaleRefs(libMigrated), libMigrated);
+  assert.equal(hashGeometry(solve(libMigrated, M)), hashGeometry(solve(withLib, M)));
+  // мусорный вход не роняет
+  assert.deepEqual(ensureScaleRefsOps(null), []);
+  assert.equal(ensureScaleRefs(null), null);
+  // неполный документ (без корня) — без операций
+  assert.deepEqual(ensureScaleRefsOps({ nodes: {} }), []);
+});
+
+test('круг20 п.6: insertScaleStep вставляет шаг и переписывает ссылки — геометрия та же, отмена точная', () => {
+  const doc = ensureScaleRefs(scene(() => [
+    ops.create(frame('card', 'ab', { mode: 'column', gap: 16, padding: { t: 24, r: 8, b: 24, l: 8 } }, HUG, { radius: 16 })),
+    ops.create(box('a', 'card', 40, 20, { radius: 4 })),
+    ops.create(box('b', 'card', 40, 20, { radius: ['radii.7', 'radii.1', 0, 0] })),
+    ops.create(frame('loose', 'ab', { mode: 'row', gap: 7 }, HUG))
+  ]));
+  const before = solve(doc, M);
+  const refs = scaleRefsIn(doc, 'spacing');
+  assert.ok(refs.some((r) => r.id === 'card' && r.path === 'layout.gap' && r.index === 6 && r.ref === 'spacing.6'), JSON.stringify(refs));
+  assert.ok(refs.every((r) => r.scale === 'spacing'));
+  assert.ok(scaleRefsIn(doc).some((r) => r.id === 'b' && r.path === 'radius.0' && r.scale === 'radii' && r.index === 7), 'покорнерные элементы перечислены путём radius.<k>');
+  assert.equal(scaleRefsIn(doc, 'spacing').filter((r) => r.id === 'loose' && r.path === 'layout.gap').length, 0, 'gap 7 — число, в перечне его нет');
+  assert.equal(scaleRefsIn(doc, 'radii').filter((r) => r.path.startsWith('layout')).length, 0, 'фильтр по шкале держится');
+
+  // вставляем 14 между 12 (5) и 16 (6): все ссылки с индексом ≥ 6 сдвигаются на +1
+  const list = insertScaleStep(doc, 'spacing', 6, 14);
+  assert.equal(list[0].op, 'setToken');
+  assert.deepEqual(list[0].value, [0, 2, 4, 6, 8, 12, 14, 16, 20, 24, 32, 40, 48, 64]);
+  assert.ok(list.slice(1).every((o) => o.op === 'set'), 'дальше — перепись ссылок');
+  const after = applyOps(doc, list);
+  assert.equal(after.error, undefined, JSON.stringify(after.error));
+  assert.equal(after.doc.nodes.card.layout.gap, 'spacing.7', '16 теперь седьмой шаг');
+  assert.equal(after.doc.nodes.card.layout.padding.t, 'spacing.9', '24 — девятый');
+  assert.equal(after.doc.nodes.card.layout.padding.r, 'spacing.4', '8 — до вставки, не сдвинут');
+  assert.equal(after.doc.nodes.loose.layout.gap, 7, 'число мимо шкалы не трогается');
+  assert.equal(after.doc.nodes.card.radius, 'radii.4', 'другая шкала не трогается');
+  assert.equal(hashGeometry(solve(after.doc, M)), hashGeometry(before), 'картинка не изменилась ни на пиксель');
+  assert.deepEqual(validate(after.doc, solve(after.doc, M), M).filter((v) => v.code === 'dead-scale-ref'), []);
+  // теперь новый шаг можно взять
+  const use = applyOps(after.doc, [ops.set('card', 'layout.gap', 'spacing.6')]);
+  assert.equal(use.error, undefined);
+  assert.equal(solve(use.doc, M).rects.b.y - solve(use.doc, M).rects.a.y, 20 + 14);
+  // отмена: сначала возвращаются ссылки, потом шкала
+  const inv = invertOps(doc, list);
+  const back = applyOps(after.doc, inv);
+  assert.equal(back.error, undefined, JSON.stringify(back.error));
+  assert.deepStrictEqual(back.doc.nodes, doc.nodes);
+  assert.deepStrictEqual(back.doc.tokens, doc.tokens);
+  // скругления, включая покорнерный массив
+  const radiiList = insertScaleStep(doc, 'radii', 1, 2);
+  const r2doc = applyOps(doc, radiiList);
+  assert.equal(r2doc.error, undefined, JSON.stringify(r2doc.error));
+  assert.equal(r2doc.doc.nodes.card.radius, 'radii.5');
+  assert.equal(r2doc.doc.nodes.a.radius, 'radii.2', '4 сдвинулось с 1 на 2');
+  assert.deepEqual(r2doc.doc.nodes.b.radius, ['radii.8', 'radii.2', 'radii.0', 'radii.0'], 'нулевой шаг до вставки — на месте');
+  assert.equal(hashGeometry(solve(r2doc.doc, M)), hashGeometry(before));
+  const rback = applyOps(r2doc.doc, invertOps(doc, radiiList));
+  assert.deepStrictEqual(rback.doc.nodes, doc.nodes);
+  assert.deepStrictEqual(rback.doc.tokens, doc.tokens);
+  // в конец: ссылки не сдвигаются; в начало: сдвигаются все
+  const tail = insertScaleStep(doc, 'spacing', doc.tokens.spacing.length, 80);
+  assert.equal(tail.length, 1, 'только setToken');
+  const head = insertScaleStep(doc, 'spacing', 0, 1);
+  assert.equal(head.length - 1, scaleRefsIn(doc, 'spacing').length, 'каждая ссылка переписана');
+  assert.equal(applyOps(doc, head).doc.nodes.ab.layout.gap, 'spacing.1', 'нулевой шаг стал первым');
+  // негодный вход — пустой список
+  assert.deepEqual(insertScaleStep(doc, 'spacing', -1, 5), []);
+  assert.deepEqual(insertScaleStep(doc, 'spacing', 99, 5), []);
+  assert.deepEqual(insertScaleStep(doc, 'spacing', 1.5, 5), []);
+  assert.deepEqual(insertScaleStep(doc, 'spacing', 1, -5), []);
+  assert.deepEqual(insertScaleStep(doc, 'spacing', 1, NaN), []);
+  assert.deepEqual(insertScaleStep(doc, 'colors', 1, 5), []);
+  assert.deepEqual(insertScaleStep(null, 'spacing', 1, 5), []);
+  // общая заготовка: любое правило переписи индексов
+  const swap = rewriteScaleRefsOps(doc, 'spacing', (i) => (i === 6 ? 8 : i === 8 ? 6 : i));
+  assert.equal(applyOps(doc, swap).doc.nodes.card.layout.gap, 'spacing.8');
+  assert.equal(applyOps(doc, swap).doc.nodes.card.layout.padding.t, 'spacing.6');
+  assert.deepEqual(rewriteScaleRefsOps(doc, 'spacing', () => -1), [], 'правило без ответа ничего не пишет');
+});
+
+test('круг20 п.8: setToken spacing.<i> переверстывает всё, что ссылается на шаг, — главное обещание круга', () => {
+  const doc = createDoc();
+  const geo = solve(doc, M);
+  const byName = (name) => Object.values(doc.nodes).filter((n) => n.name === name);
+  const card = byName('Карточка встречи')[0];
+  assert.equal(card.layout.padding.t, 'spacing.6', 'у карточки отступ 16 — шестой шаг');
+  assert.equal(card.layout.gap, 'spacing.4');
+  const title = byName('Название встречи')[0];
+  const status = byName('Строка статуса')[0];
+  // шаг 6: 16 → 20
+  const next = applyOps(doc, [ops.setToken('spacing.6', 20)]);
+  assert.equal(next.error, undefined);
+  assert.deepEqual(next.doc.nodes, doc.nodes, 'ни один узел не тронут — сменился только шаг шкалы');
+  const geo2 = solve(next.doc, M);
+  assert.equal(geo2.rects[status.id].x - geo2.rects[card.id].x, 20, 'отступ карточки вырос до 20');
+  assert.equal(geo.rects[status.id].x - geo.rects[card.id].x, 16);
+  assert.equal(geo2.rects[status.id].y - geo2.rects[card.id].y, 20);
+  assert.equal(geo2.rects[title.id].y - geo2.rects[status.id].y, geo.rects[title.id].y - geo.rects[status.id].y, 'зазор 8 (шаг 4) не менялся');
+  // всё, что ссылается на шаг 6, изменилось; что не ссылается — нет
+  let moved = 0;
+  let still = 0;
+  for (const n of Object.values(doc.nodes)) {
+    if (!n.layout || n.type !== 'frame') continue;
+    const uses6 = n.layout.gap === 'spacing.6' || Object.values(n.layout.padding).includes('spacing.6');
+    const kids = n.children.filter((c) => doc.nodes[c] && !doc.nodes[c].override);
+    if (kids.length < 1) continue;
+    const a = geo.rects[kids[0].valueOf()];
+    const b = geo2.rects[kids[0].valueOf()];
+    const pa = geo.rects[n.id];
+    const pb = geo2.rects[n.id];
+    const same = a.x - pa.x === b.x - pb.x && a.y - pa.y === b.y - pb.y;
+    if (uses6 && !same) moved++;
+    if (uses6 && same && (n.layout.padding.t === 'spacing.6' || n.layout.padding.l === 'spacing.6')) assert.fail(`«${n.name}» ссылается на шаг 6, но первый ребёнок не сдвинулся`);
+    if (!uses6) still++;
+  }
+  assert.ok(moved >= 5, 'сдвинулись контейнеры со ссылкой на шаг 6: ' + moved);
+  assert.ok(still >= 5, 'контейнеры без ссылки проверены: ' + still);
+  // экземпляры круга 19: мастер «Метка» (hug) с padding r/l = spacing.5 — правим шаг 5 (12 → 40)
+  const tagInst = Object.values(doc.nodes).find((n) => n.type === 'instance' && n.props && n.props['текст'] === 'сегодня');
+  const tagMaster = doc.nodes[tagInst.of];
+  assert.equal(tagMaster.layout.padding.l, 'spacing.5', 'мастер метки на ссылках');
+  const g3 = solve(applyOps(doc, [ops.setToken('spacing.5', 40)]).doc, M);
+  const labelId = Object.keys(geo.expanded).find((id) => id.startsWith(tagInst.id + '/') && geo.expanded[id].type === 'text');
+  assert.equal(geo.rects[labelId].x - geo.rects[tagInst.id].x, 12, 'до правки подпись стоит на padding.l = 12');
+  assert.equal(g3.rects[labelId].x - g3.rects[tagInst.id].x, 40, 'подпись внутри экземпляра отъехала на новый шаг');
+  assert.equal(g3.rects[tagInst.id].w, geo.rects[tagInst.id].w + 56, 'метка стала шире на 2×28 — узлы экземпляра не менялись');
+  // скругление: шаг 4 шкалы radii (16 → 4) — рисуется по разрешённому значению
+  const r4 = applyOps(doc, [ops.setToken('radii.4', 4)]).doc;
+  assert.equal(resolveRadius(r4, card.radius), 4);
+  assert.equal(resolveRadius(doc, card.radius), 16);
+  // отмена возвращает и шкалу, и вёрстку
+  const inv = invertOps(doc, [ops.setToken('spacing.6', 20)]);
+  assert.equal(hashGeometry(solve(applyOps(next.doc, inv).doc, M)), hashGeometry(geo));
+});
+
+test('круг20 п.8: цена разрешения ссылок — solve на сотнях узлов', () => {
+  // документ из N карточек с зазорами и отступами: на ссылках и его двойник на числах
+  const N = 120;
+  const build = [];
+  for (let i = 0; i < N; i++) {
+    build.push(ops.create(frame('c' + i, 'ab', { mode: 'row', gap: 'spacing.4', padding: { t: 'spacing.5', r: 'spacing.6', b: 'spacing.5', l: 'spacing.6' } },
+      { w: { mode: 'fill' }, h: { mode: 'hug' } }, { radius: 'radii.3', fill: 'surfaceAlt' })));
+    build.push(ops.create(box('r' + i, 'c' + i, 24, 24, { radius: 'radii.7' })));
+    build.push(ops.create(label('t' + i, 'c' + i, 'Пункт ' + i)));
+    build.push(ops.create(frame('n' + i, 'c' + i, { mode: 'column', gap: 'spacing.1' }, { w: { mode: 'fill' }, h: { mode: 'hug' } })));
+    build.push(ops.create(label('u' + i, 'n' + i, 'подпись ' + i)));
+  }
+  const doc = scene(() => [
+    ops.set('ab', 'layout', { mode: 'column', gap: 'spacing.4', padding: { t: 'spacing.6', r: 'spacing.6', b: 'spacing.6', l: 'spacing.6' }, align: 'stretch' }),
+    ops.set('ab', 'size.h', { mode: 'hug' }),
+    ...build
+  ]);
+  const twin = numericTwin(doc);
+  assert.equal(Object.keys(doc.nodes).length, 2 + N * 5);
+  const time = (d) => {
+    const t0 = performance.now();
+    let h;
+    for (let k = 0; k < 5; k++) h = hashGeometry(solve(d, { measureText: (t, s) => measureText(t, s) }));   // свежая функция — без кеша ширин
+    return { ms: (performance.now() - t0) / 5, h };
+  };
+  time(doc); time(twin);   // прогрев
+  const a = time(twin);
+  const b = time(doc);
+  assert.equal(a.h, b.h, 'геометрия ссылок и чисел совпадает');
+  assert.ok(b.ms < 1500, `solve на ссылках: ${b.ms.toFixed(1)} мс`);
+  assert.ok(b.ms < Math.max(a.ms * 3, a.ms + 30), `ссылки не должны стоить втрое дороже чисел: ${a.ms.toFixed(1)} → ${b.ms.toFixed(1)} мс`);
+  if (process.env.IMAGO_PERF) console.log(`  [перф] ${Object.keys(doc.nodes).length} узлов: числа ${a.ms.toFixed(1)} мс, ссылки ${b.ms.toFixed(1)} мс`);
+});
+
+test('круг20 п.9: сцена, экспорт, инлайн-правка, ресайз и сдвиг стрелками работают на ссылках', async () => {
+  const doc = ensureScaleRefs(scene(() => [
+    ops.create(frame('card', 'ab', { mode: 'column', gap: 8, padding: { t: 8, r: 8, b: 8, l: 8 } },
+      { w: { mode: 'fixed', value: 200 }, h: { mode: 'fixed', value: 80 } }, { clip: true, radius: 12, fill: 'surfaceAlt' })),
+    ops.create(label('t', 'card', 'Планёрка', { size: { w: { mode: 'fill' }, h: { mode: 'hug' } } })),
+    ops.create(box('bx', 'card', 20, 20, { radius: 999 })),
+    ops.create(frame('free', 'ab', { mode: 'none', padding: { t: 12, r: 12, b: 12, l: 12 } },
+      { w: { mode: 'fixed', value: 100 }, h: { mode: 'fixed', value: 100 } })),
+    ops.create(box('p', 'free', 10, 10, { pos: { x: 5, y: 5 } }))
+  ]));
+  assert.equal(doc.nodes.card.radius, 'radii.3');
+  assert.equal(doc.nodes.card.layout.gap, 'spacing.4');
+  assert.equal(doc.nodes.free.layout.padding.l, 'spacing.5');
+  const geo = solve(doc, M);
+
+  // экспорт SVG: rx — разрешённые числа, ссылок в разметке нет
+  await withSvgDom(() => {
+    const st = bareStage({ rects: geo.rects });
+    st.doc = doc; st.geo = geo; st.activeArtboard = 'ab';
+    st.errors = []; st.opts = { onError: (i) => st.errors.push(i.where) };
+    const svg = st.toSVG('ab');
+    assert.deepEqual(st.errors, []);
+    assert.ok(/rx="12"/.test(svg), 'скругление карточки 12 (radii.3): ' + svg.slice(0, 300));
+    assert.ok(/rx="999"/.test(svg), 'скругление 999 у квадрата');
+    assert.ok(!/radii\.|spacing\./.test(svg), 'в разметке нет ссылок');
+    // подложка доски тоже через разрешение
+    const st2 = bareStage({ rects: geo.rects });
+    const d2 = applyOps(doc, [ops.set('ab', 'radius', 'radii.5')]).doc;
+    st2.doc = d2; st2.geo = solve(d2, M); st2.activeArtboard = 'ab';
+    st2.errors = []; st2.opts = { onError: (i) => st2.errors.push(i.where) };
+    assert.ok(/rx="20"/.test(st2.toSVG('ab')), 'подложка доски: radii.5 = 20');
+  });
+
+  // сдвиг стрелками в потоке → override от координат родителя (ссылки не мешают)
+  const st = gestureStage(doc, geo, ['t']);
+  const nudge = st._nudgeOps('t', 3, 0);
+  assert.equal(nudge.length, 1);
+  assert.equal(nudge[0].path, 'override');
+  assert.equal(nudge[0].value.x, geo.rects.t.x - geo.rects.card.x + 3);
+  assert.equal(nudge[0].value.x, 8 + 3, 'padding.l = spacing.4 = 8');
+  // в свободной раскладке — pos, из которого вычтен разрешённый отступ
+  const nudgeFree = st._nudgeOps('p', 0, 2);
+  assert.deepEqual(nudgeFree, [ops.set('p', 'pos', { x: 5, y: 7 })]);
+  const res = applyOps(doc, nudge.concat(nudgeFree));
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(solve(res.doc, M).rects.p.y, geo.rects.p.y + 2);
+
+  // ресайз с перемещением в свободной раскладке: pos считается от разрешённого padding
+  const st3 = gestureStage(doc, geo, ['p']);
+  st3.opts = { measureText };
+  const d = { mode: 'resize', id: 'p', handle: 'nw', start: { x: 0, y: 0 }, rect0: { ...geo.rects.p }, preview: { ...geo.rects.p } };
+  st3._updateResize(d, { x: -4, y: -4 }, { altKey: false, shiftKey: false });
+  const rs = st3._resizeOps(d);
+  const posOp = rs.find((o) => o.path === 'pos');
+  assert.ok(posOp, 'сдвиг ручки nw пишет pos: ' + JSON.stringify(rs));
+  assert.equal(posOp.value.x, 1, 'x = (12+5−4) − 12 = 1: padding = spacing.5 = 12 вычтен');
+  assert.equal(applyOps(doc, rs).error, undefined);
+
+  // перестановка в потоке: слоты и маркер вставки по разрешённому зазору
+  const st4 = gestureStage(doc, geo, ['bx']);
+  const mv = { mode: 'move', id: 'bx', start: { x: 50, y: geo.rects.bx.y + 5 }, rect0: { ...geo.rects.bx } };
+  st4._updateMove(mv, { x: 50, y: geo.rects.t.y - 1 }, {});
+  st4._commitMove(mv);
+  assert.equal(st4.commits.length, 1);
+  assert.deepEqual(applyOps(doc, st4.commits[0].ops).doc.nodes.card.children, ['bx', 't']);
+
+  // магниты: отступ родителя — разрешённое число
+  const snap = st._snap({ x: geo.rects.card.x + 9, y: geo.rects.card.y + 30, w: 20, h: 20 }, doc.nodes.bx);
+  assert.equal(snap.x, geo.rects.card.x + 8, 'прилипло к внутренней кромке padding.l = 8');
+
+  // инлайн-правка текста — set characters, ссылки узла-родителя не мешают применению
+  const edit = applyOps(doc, [ops.set('t', 'characters', 'Планёрка по редактору')]);
+  assert.equal(edit.error, undefined);
+  assert.equal(edit.doc.nodes.card.layout.gap, 'spacing.4', 'соседние поля не тронуты');
+  // дублирование сохраняет ссылки
+  const st5 = gestureStage(doc, geo, ['card']);
+  st5._duplicate(['card']);
+  const dup = applyOps(doc, st5.commits[0].ops);
+  assert.equal(dup.error, undefined, JSON.stringify(dup.error));
+  const copy = Object.values(dup.doc.nodes).find((n) => n.name === 'card копия');
+  assert.equal(copy.layout.gap, 'spacing.4');
+  assert.equal(copy.radius, 'radii.3');
+});
+
+test('круг20: property — операции со ссылками отменяются точно, решатель детерминирован (200 прогонов)', () => {
+  const rnd = mulberry32(20260927);
+  const pick = (arr) => arr[Math.floor(rnd() * arr.length) % arr.length];
+  const SET_CASES = [
+    ['radius', () => pick([0, 4, 12, 'radii.0', 'radii.3', 'radii.7', 'radii.9', ['radii.1', 0, 'radii.2', 8]])],
+    ['layout.gap', () => pick([0, 8, 16, 'spacing.0', 'spacing.4', 'spacing.6', 'spacing.12', 'spacing.40'])],
+    ['layout.padding', () => pick([8, 'spacing.4', ['spacing.2', 'spacing.3'], { t: 'spacing.1', r: 2, b: 'spacing.99', l: 0 }])],
+    ['layout.padding.t', () => pick([0, 12, 'spacing.5', 'spacing.99'])],
+    ['layout', () => pick([
+      { mode: 'row', gap: 'spacing.2', padding: 'spacing.3', align: 'center', justify: 'start', wrap: false },
+      { mode: 'column', gap: 4, padding: { t: 2, r: 2, b: 2, l: 2 }, align: 'start', justify: 'between', wrap: true }
+    ])],
+    ['fill', () => pick(['#ff0000', 'accent'])],
+    ['name', () => pick(['А', 'Б'])]
+  ];
+  const TOKEN_CASES = [
+    ['spacing', () => pick([[0, 4, 8, 16], [0, 2, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80]])],
+    ['spacing.6', () => pick([12, 20, 30])],
+    ['radii', () => pick([[0, 4], [0, 4, 8, 12, 16, 20, 24, 999, 1200]])],
+    ['radii.3', () => pick([10, 14])]
+  ];
+  let seq = 0;
+  const genOp = (d) => {
+    const ids = Object.keys(d.nodes).filter((id) => id !== d.root);
+    const roll = rnd();
+    if (roll < 0.5) { const [path, val] = pick(SET_CASES); return ops.set(pick(ids), path, val()); }
+    if (roll < 0.62) return ops.remove(pick(ids.filter((id) => id !== 'ab')));
+    if (roll < 0.78) {
+      const id = 'g' + (seq++);
+      return ops.create(frame(id, pick(ids.filter((x) => d.nodes[x].type === 'frame')), { mode: 'column', gap: pick([4, 'spacing.3', 'spacing.50']) }, HUG, { radius: pick([2, 'radii.2']) }));
+    }
+    if (roll < 0.86) { const [scale, index] = pick([['spacing', 6], ['radii', 2], ['spacing', 0]]); return insertScaleStep(d, scale, index, 3); }
+    if (roll < 0.92) return ensureScaleRefsOps(d);
+    const [path, val] = pick(TOKEN_CASES);
+    return ops.setToken(path, val());
+  };
+  let applied = 0;
+  let rejected = 0;
+  for (let run = 0; run < 200; run++) {
+    const doc = ensureScaleRefs(scene(() => [
+      ops.create(frame('card', 'ab', { mode: 'column', gap: 6, padding: { t: 8, r: 8, b: 8, l: 8 } }, fixed(200, 120), { radius: 12 })),
+      ops.create(label('t1', 'card', 'Первый текст')),
+      ops.create(frame('inner', 'card', { mode: 'row', gap: 4 }, { w: { mode: 'fill' }, h: { mode: 'hug' } }, { radius: [4, 4, 0, 0] })),
+      ops.create(box('bx', 'inner', 20, 20, { radius: 999 })),
+      ops.create(box('tail', 'ab', 40, 40, { radius: 7 }))
+    ]));
+    const tx = [];
+    let cur = doc;
+    for (let guard = 0; tx.length < 6 && guard < 80; guard++) {
+      const op = genOp(cur);
+      const list = Array.isArray(op) ? op : [op];
+      if (!list.length) continue;
+      const step = applyOps(cur, list);
+      if (step.error) { rejected++; continue; }
+      for (const o of list) tx.push(o);
+      cur = step.doc;
+      applied++;
+    }
+    if (tx.length < 6) continue;
+    const after = applyOps(doc, tx);
+    assert.equal(after.error, undefined, 'прогон ' + run + ': ' + JSON.stringify(after.error));
+    const geoA = solve(after.doc, M);
+    assert.equal(hashGeometry(solve(after.doc, M)), hashGeometry(geoA), 'прогон ' + run + ': детерминизм');
+    for (const id of Object.keys(geoA.rects)) for (const k of ['x', 'y', 'w', 'h']) assert.ok(Number.isFinite(geoA.rects[id][k]), `прогон ${run}: ${id}.${k}`);
+    // валидатор про ссылки не молчит зря и не врёт: dead-scale-ref ⇔ есть ссылка, которая не разрешается
+    const dead = validate(after.doc, geoA, M).filter((v) => v.code === 'dead-scale-ref').map((v) => v.nodeId).sort();
+    const expect = Object.keys(after.doc.nodes).filter((id) => {
+      const n = after.doc.nodes[id];
+      const vals = [];
+      const l = n.layout;
+      if (l && typeof l === 'object') {
+        vals.push(['spacing', l.gap]);
+        // у не-фрейма раскладка лежит сырой: padding может быть строкой или отсутствовать
+        if (l.padding && typeof l.padding === 'object') for (const v of Object.values(l.padding)) vals.push(['spacing', v]);
+        else vals.push(['spacing', l.padding]);
+      }
+      if (n.radius !== undefined) vals.push(...(Array.isArray(n.radius) ? n.radius : [n.radius]).map((v) => ['radii', v]));
+      return vals.some(([s, v]) => parseScaleRef(v) && resolveScale(after.doc, v, s) === undefined);
+    }).sort();
+    assert.deepEqual(dead, expect, 'прогон ' + run + ': dead-scale-ref ровно там, где мёртвые ссылки');
+    const back = applyOps(after.doc, invertOps(doc, tx));
+    assert.equal(back.error, undefined, 'прогон ' + run + ': ' + JSON.stringify(back.error));
+    assert.deepStrictEqual(back.doc.nodes, doc.nodes, 'прогон ' + run + ': узлы восстановлены\n' + JSON.stringify(tx));
+    assert.deepStrictEqual(back.doc.tokens, doc.tokens, 'прогон ' + run + ': токены восстановлены');
+    assert.equal(hashGeometry(solve(back.doc, M)), hashGeometry(solve(doc, M)), 'прогон ' + run + ': геометрия восстановлена');
+  }
+  assert.ok(applied >= 800, 'операции в основном применяются: ' + applied);
+  assert.ok(rejected >= 20, 'а мёртвые ссылки отклоняются: ' + rejected);
 });

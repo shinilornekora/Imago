@@ -500,10 +500,23 @@ const sizeSpecSchema = () => ({
   ],
 });
 
+/**
+ * Круг 20 (SPEC §6.1): отступ и скругление — число ИЛИ ссылка на шаг шкалы ("spacing.6").
+ * Строка в схеме нужна не «на всякий случай»: строгая грамматика провайдера иначе не даст
+ * модели ответить ссылкой, и всё правило §6.6 останется на бумаге.
+ */
+const scaleValueSchema = () => ({
+  anyOf: [
+    { type: 'number' },
+    { type: 'string' },
+  ],
+});
+
 const paddingSchema = () => ({
   anyOf: [
     { type: 'number' },
-    { type: 'array', items: { type: 'number' }, maxItems: 4 },
+    { type: 'string' },
+    { type: 'array', items: scaleValueSchema(), maxItems: 4 },
   ],
 });
 
@@ -514,7 +527,7 @@ function layoutSchema() {
     type: 'object',
     properties: {
       mode: { type: 'string', enum: LAYOUT_MODES },
-      gap: { type: 'number' },
+      gap: scaleValueSchema(),
       padding: paddingSchema(),
       align: { type: 'string', enum: ALIGNS },
       justify: { type: 'string', enum: JUSTIFIES },
@@ -536,7 +549,7 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
       fill: colorSchema(),
       stroke: colorSchema(),
       color: colorSchema(),
-      radius: { type: 'number' },
+      radius: scaleValueSchema(),
       text: { type: 'string' },
       style: { type: 'string' },
       align: { type: 'string', enum: ['left', 'center', 'right'] },
@@ -576,11 +589,12 @@ const TREE_HINT = `{
   of?: string,                         // ТОЛЬКО для type:"instance": ИМЯ компонента из библиотеки
   props?: [{name: string, value: string}],  // ТОЛЬКО для type:"instance": объявленные свойства компонента
   name?: string,                       // короткое русское имя слоя
-  layout?: { mode: "none"|"row"|"column", gap?: number, padding?: number | [v,h] | [t,r,b,l],
+  layout?: { mode: "none"|"row"|"column", gap?: "spacing.<шаг>" | number, padding?: "spacing.<шаг>" | number | [v,h] | [t,r,b,l],
              align?: "start"|"center"|"end"|"stretch", justify?: "start"|"center"|"end"|"between", wrap?: boolean },
+                                       // gap и padding — ССЫЛКОЙ на шаг шкалы отступов ("spacing.6"); число — только мимо шкалы
   size?: { w: number|"hug"|"fill", h: number|"hug"|"fill" },
   fill?: string,                       // имя токена цвета или #rrggbb
-  stroke?: string, color?: string, radius?: number,
+  stroke?: string, color?: string, radius?: "radii.<шаг>" | number,   // скругление — ссылкой на шаг шкалы скруглений
   text?: string,                       // только для type:"text"
   style?: string,                      // имя типографического токена, только для type:"text"
   align?: "left"|"center"|"right",   // выключка текста
@@ -591,7 +605,7 @@ const TREE_HINT = `{
 const TREE_EXAMPLE = {
   type: 'frame',
   name: 'Экран заказа',
-  layout: { mode: 'column', gap: 16, padding: [24, 20], align: 'stretch', justify: 'start', wrap: false },
+  layout: { mode: 'column', gap: 'spacing.6', padding: ['spacing.8', 'spacing.7'], align: 'stretch', justify: 'start', wrap: false },
   size: { w: 390, h: 'hug' },
   fill: 'canvas',
   children: [
@@ -703,7 +717,8 @@ export const SCHEMAS = {
                          // для op:"master" — ИМЯ компонента из библиотеки ("Кнопка")
   path?: string,         // для set: "characters" | "style" | "fill" | "size.w" | "layout.gap" | "layout.padding" | "radius" | "align" ...
                          // у экземпляра компонента — только "props.<имя свойства>"
-  value?: string,        // ВСЕГДА строка: "24", "fill", "hug", "#101418", "accent", "Купить".
+  value?: string,        // ВСЕГДА строка: "spacing.6", "radii.4", "fill", "hug", "#101418", "accent", "Купить".
+                         // зазор, отступы, скругление — ссылкой на шаг шкалы ("spacing.6"); число — только мимо шкалы
                          // value:"none" (или вовсе без value) = СНЯТЬ свойство: «без заливки»,
                          // «убери скругление». Снимаются fill, stroke, color, radius, opacity,
                          // src, clip, style, align, layout.*, override — но не characters и не size.
@@ -717,7 +732,7 @@ export const SCHEMAS = {
       summary: 'Крупнее заголовок и плотнее отступ',
       edits: [
         { op: 'set', target: 'Заголовок', path: 'style', value: 'title' },
-        { op: 'set', target: 'selection', path: 'layout.gap', value: '12' },
+        { op: 'set', target: 'selection', path: 'layout.gap', value: 'spacing.5' },
       ],
     },
   },
@@ -755,14 +770,17 @@ export const SCHEMAS = {
             required: ['name'],
           },
         },
-        spacing: { type: 'array', items: { type: 'number' }, maxItems: 12 },
-        radii: { type: 'array', items: { type: 'number' }, maxItems: 8 },
+        /* Круг 20 (SPEC §6.1): узлы ссылаются на шаги по номеру, поэтому тема обязана вернуть
+         * массив ТОЙ ЖЕ длины. Прежний предел 12 был короче демо-шкалы (13 шагов): модель
+         * физически не могла соблюсти правило, и каждая тема укорачивала бы шкалу. */
+        spacing: { type: 'array', items: { type: 'number' }, maxItems: 24 },
+        radii: { type: 'array', items: { type: 'number' }, maxItems: 16 },
       },
     },
     hint: `{ summary?: string,
   colors?: [{name: string, value: "#rrggbb"}],
   type?: [{name: string, fontSize?: number, fontWeight?: number, lineHeight?: number, letterSpacing?: number, font?: string}],
-  spacing?: number[], radii?: number[] }`,
+  spacing?: number[], radii?: number[] }   // шкалы — массивы ТОЙ ЖЕ длины, что сейчас: узлы ссылаются на шаги по номеру`,
     example: {
       summary: 'Тёмная палитра',
       colors: [{ name: 'canvas', value: '#0D0E12' }, { name: 'text', value: '#E8EAF0' }],
@@ -1276,7 +1294,7 @@ const DSL_RULES = `ПРАВИЛА МОДЕЛИ ДОКУМЕНТА (DSL)
 3. layout = {mode, gap, padding, align, justify, wrap}. padding — число, [v,h] или [t,r,b,l]. align: start|center|end|stretch (поперёк), justify: start|center|end|between (вдоль).
 4. Цвета (fill, stroke, color) — ИМЯ ТОКЕНА документа из списка выше или #rrggbb. Выдуманное имя токена будет отброшено. Предпочитай токены; голый #rrggbb — только если нужного токена нет.
 5. Типографика текста — style: имя типографического токена ИЗ СПИСКА ВЫШЕ. Не пиши fontSize числом в узле.
-6. gap, padding и radius бери из шкал документа (spacing, radii).
+6. gap, padding и radius — ССЫЛКОЙ на шаг шкалы документа ("spacing.6", "radii.4", см. раздел ШКАЛЫ), числом — только если нужно значение мимо шкалы.
 7. Типы узлов: frame (контейнер, только у него есть children), text, rect, ellipse, image.
 8. Глубина дерева ≤ ${MAX_TREE_DEPTH}, детей у узла ≤ ${MAX_CHILDREN}. Не плоди обёртки ради обёрток.
 9. Координаты (pos, override) задавать нельзя ни в дереве, ни правкой: место узла считает раскладка,
@@ -1311,6 +1329,8 @@ function header(ctx, role) {
   }
   lines.push(`ТЕКУЩИЙ ДОКУМЕНТ ЦЕЛИКОМ — все доски. Область работы: ${ctx.scopeLabel}`);
   lines.push(DIGEST_LEGEND);
+  // Круг 20 (SPEC §6.6): как читать «gap=spacing.6(16)» — только если шкалы в документе есть
+  if (ctx.scales) lines.push(SCALE_LEGEND);
   lines.push(ctx.digest);
   if (ctx.checks) {
     // Круг 3, п.5: валидатор звался только ПОСЛЕ применения, и на «проверь макет, что не так?»
@@ -1360,6 +1380,7 @@ export const PROMPTS = {
   Это не clarify (переспрашивать нечего) и не повод угадывать похожую правку.`,
       '',
       ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'plan')}\n` : '',
+      ctx.scales ? `${scaleRules(ctx.scales, 'plan')}\n` : '',
       `Локальный классификатор предполагает: ${ctx.guess}. Согласись, если он прав, иначе поставь свой intent.`,
       /**
        * Круг 16, п.5: НЕ прошедшее время. Эту строку лента стадий показывает, ПОКА агент
@@ -1401,6 +1422,7 @@ export const PROMPTS = {
       '',
       DSL_RULES,
       '',
+      ctx.scales ? `${scaleRules(ctx.scales, 'tree')}\n` : '',
       ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'tree')}\n` : '',
       CONTENT_RULES,
       '',
@@ -1421,6 +1443,7 @@ export const PROMPTS = {
       '',
       DSL_RULES,
       '',
+      ctx.scales ? `${scaleRules(ctx.scales, 'patch')}\n` : '',
       CONTENT_RULES,
       '',
       ctx.personaHint ? `ХАРАКТЕР — ТВОЙ И ТОЛЬКО ТВОЙ\n${ctx.personaHint}\n` : '',
@@ -1502,6 +1525,7 @@ export const PROMPTS = {
   это кегль 15 px, насыщенность 400, интерлиньяж 22 px). Интерлиньяж держи примерно в
   1.2-1.6 кегля и пиши числом пикселей, а не множителем.
 - spacing и radii — возрастающие ряды; не ломай существующий ритм без нужды.`,
+      ctx.scales ? `\n${scaleRules(ctx.scales, 'theme')}` : '',
       '',
       JSON_RULE,
     ].join('\n');
@@ -1656,6 +1680,8 @@ const RE = {
     rx('т[её]мн\\p{L}*\\s+тем'), rx('светл\\p{L}*\\s+тем'), rx('тем[ау]', true),
     rx('палитр'), rx('цветов\\p{L}*\\s+схем'), rx('токен'), rx('бренд'),
     rx('оформлени'), rx('стилистик'), rx('контраст'), rx('шрифт'), rx('типографик'),
+    // круг 20 (SPEC §6): «сделай шкалу отступов просторнее» — правка ТОКЕНОВ, а не узла
+    rx('шкал\\p{L}*\\s+(отступ|скруглен|радиус)'),
   ],
   create: [
     rx('созда(й|ть|йте)'), rx('св[её]рстай'), rx('собери'), rx('построй'),
@@ -2481,8 +2507,15 @@ export function describeTokens(doc) {
     ? 'type (имя(кегль px/насыщенность/интерлиньяж px)): '
       + types.map(([k, v]) => `${k}(${num(v && v.fontSize)}/${num(v && v.fontWeight)}/${num(v && v.lineHeight)})`).join(', ')
     : 'type: (нет)');
-  out.push('spacing: ' + (Array.isArray(t.spacing) && t.spacing.length ? t.spacing.join(', ') : '(нет)'));
-  out.push('radii: ' + (Array.isArray(t.radii) && t.radii.length ? t.radii.join(', ') : '(нет)'));
+  /* Круг 20 (SPEC §6.6): шкалы печатаются с НОМЕРАМИ шагов — «0=0 1=2 2=4 … 12=64» — один раз,
+   * здесь. Узлы ссылаются на шаги по номеру, и модель должна отвечать ссылкой «spacing.6»;
+   * без номеров ей пришлось бы считать позицию в списке самой, а это верный способ промахнуться
+   * на единицу. Значение рядом — чтобы рассуждать о пикселях там, где человек говорит о них. */
+  const scaled = scaleLines(doc, null);
+  const has = (k) => Array.isArray(t[k]) && t[k].length;
+  if (!has('spacing')) out.push('spacing: (нет)');
+  if (!has('radii')) out.push('radii: (нет)');
+  out.push(...scaled);
   return out.join('\n');
 }
 
@@ -2728,6 +2761,354 @@ function componentRules(list, role) {
 - Не выдумывай пути внутрь экземпляра: "characters" у экземпляра нет, есть его свойство (например "props.текст").`;
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * 6b. Шкалы как ссылки (круг 20, SPEC §6)
+ *
+ * В документе больше нет числа 16: зазор — это 'spacing.6', ссылка на шаг шкалы, и смена
+ * значения шага переверстывает всё, что на него ссылается. Для мозга из этого следует:
+ *   • МОДЕЛЬ должна видеть и ссылку, и число (выжимка: gap=spacing.6(16)), а шкалы — с
+ *     номерами шагов один раз в шапке; отвечать она должна ссылкой, «плотнее» — это шаг
+ *     вниз, а не минус четыре пикселя (§6.6);
+ *   • ЗНАЧЕНИЕ от модели проверяется тут же: ссылка — на ту ли шкалу и жив ли шаг; число,
+ *     точно равное шагу, становится ссылкой само (§6.6); число мимо шкалы — см. scaleValue;
+ *   • «ТО ЖЕ САМОЕ» решает ядро (keepFieldForm), а мозг его зеркалит (sameAsNow, §6.4):
+ *     число, равное значению текущей ссылки, — пустая правка; ссылка поверх числа — нет;
+ *   • ЧЕЛОВЕК шкалу знать не обязан (§6.7): в его строках — «зазор 16 px (шаг шкалы)»,
+ *     «шкала отступов», без spacing и radii.
+ *
+ * Функции ядра (resolveScale, scaleSteps, scaleIndexOf, scaleRefsIn) идут через движок,
+ * когда он их умеет: §6.3 требует одной точки разрешения ссылки в число. Заглушка движка
+ * в тестах их не знает — тогда работает зеркало на tokens документа; форма ссылки —
+ * копия core.SCALE_REF_RE, это контракт §6.1, а не догадка.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Форма ссылки (копия core.SCALE_REF_RE, §6.1): имя шкалы, точка, номер шага без ведущих нулей. */
+const SCALE_REF_RE = /^(spacing|radii)\.(0|[1-9]\d*)$/;
+
+/** Имена шкал для человека — копия core.SCALE_NAMES (§6.7) с падежами для фраз. */
+const SCALE_RU = {
+  spacing: { nom: 'шкала отступов', gen: 'шкалы отступов', loc: 'шкале отступов', acc: 'шкалу отступов' },
+  radii: { nom: 'шкала скруглений', gen: 'шкалы скруглений', loc: 'шкале скруглений', acc: 'шкалу скруглений' },
+};
+
+/** Какая шкала у какого пути (§6.2): зазор и поля — отступы, скругление — скругления; остальное — null. */
+function scaleOfPath(path) {
+  const p = String(path == null ? '' : path);
+  if (p === 'layout.gap' || p === 'layout.padding' || /^layout\.padding\.[trbl]$/.test(p)) return 'spacing';
+  if (p === 'radius' || /^radius\.\d+$/.test(p)) return 'radii';
+  return null;
+}
+
+/**
+ * Разбор ссылки на шаг. Принимает и то, чем модель ссылку ОБЫЧНО портит: регистр
+ * («Spacing.6»), скобки и пробелы («spacing[6]», «spacing 6»), эхо выжимки («spacing.6(16)»).
+ * Число в скобках — подсказка из выжимки, а не значение: ссылка сильнее.
+ * @returns {{scale:string, index:number, ref:string}|null}
+ */
+function parseRef(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim().toLowerCase();
+  let m = SCALE_REF_RE.exec(s);
+  if (!m) m = /^(spacing|radii)\s*[.\-_\[ ]\s*(\d+)\]?\s*(?:\(\s*-?\d+(?:[.,]\d+)?\s*(?:px)?\s*\))?$/.exec(s);
+  if (!m) return null;
+  const index = Number(m[2]);
+  if (!Number.isFinite(index)) return null;
+  return { scale: m[1], index, ref: `${m[1]}.${index}` };
+}
+
+/** Шаги шкалы документа: через движок (он знает умолчания), иначе — из tokens. */
+function stepsOf(doc, scale, engine) {
+  if (engine && typeof engine.scaleSteps === 'function') {
+    try {
+      const got = engine.scaleSteps(doc, scale);
+      if (Array.isArray(got)) return got;
+    } catch { /* зеркало ниже */ }
+  }
+  const own = doc && doc.tokens && doc.tokens[scale];
+  return Array.isArray(own) ? own : [];
+}
+
+/**
+ * Ссылка или число → число (та же семантика, что у core.resolveScale): число как есть,
+ * живая ссылка — значением шага, всё остальное — undefined.
+ */
+function scaleNum(doc, v, scale, engine) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
+  if (engine && typeof engine.resolveScale === 'function') {
+    try { return engine.resolveScale(doc, v, scale); } catch { /* зеркало ниже */ }
+  }
+  const ref = parseRef(v);
+  if (!ref || (scale && ref.scale !== scale)) return undefined;
+  const step = stepsOf(doc, ref.scale, engine)[ref.index];
+  return typeof step === 'number' && Number.isFinite(step) ? step : undefined;
+}
+
+/** Номер шага, ТОЧНО равного числу, или -1 (копия смысла core.scaleIndexOf). */
+function stepIndexOf(doc, scale, n, engine) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return -1;
+  if (engine && typeof engine.scaleIndexOf === 'function') {
+    try { return engine.scaleIndexOf(doc, scale, n); } catch { /* зеркало ниже */ }
+  }
+  return stepsOf(doc, scale, engine).indexOf(n);
+}
+
+/** Соседние шаги вокруг числа: ближайший снизу и сверху (null — шкала кончилась). */
+function nearestSteps(steps, n) {
+  let below = null, above = null;
+  steps.forEach((v, i) => {
+    if (typeof v !== 'number') return;
+    if (v <= n && (!below || v > below.v)) below = { i, v };
+    if (v >= n && (!above || v < above.v)) above = { i, v };
+  });
+  return { below, above };
+}
+
+/** Все ссылки документа на шкалу: через движок, иначе — обход полей §6.2 своими руками. */
+function refsInDoc(doc, scale, engine) {
+  if (engine && typeof engine.scaleRefsIn === 'function') {
+    try {
+      const got = engine.scaleRefsIn(doc, scale);
+      if (Array.isArray(got)) return got;
+    } catch { /* зеркало ниже */ }
+  }
+  const out = [];
+  for (const id of Object.keys((doc && doc.nodes) || {})) {
+    for (const r of nodeRefsOf(nodeOf(doc, id))) if (r.scale === scale) out.push({ id, ...r });
+  }
+  return out;
+}
+
+/** Ссылки в полях одного узла — перечень §6.2 (копия смысла core.nodeScaleRefs). */
+function nodeRefsOf(node) {
+  const out = [];
+  if (!node || typeof node !== 'object') return out;
+  const take = (path, v, scale) => { const ref = parseRef(v); if (ref) out.push({ path, ref: ref.ref, index: ref.index, scale, want: scale }); };
+  const l = node.layout;
+  if (l && typeof l === 'object') {
+    take('layout.gap', l.gap, 'spacing');
+    const p = l.padding;
+    if (p && typeof p === 'object' && !Array.isArray(p)) for (const k of ['t', 'r', 'b', 'l']) take(`layout.padding.${k}`, p[k], 'spacing');
+  }
+  if (Array.isArray(node.radius)) node.radius.forEach((v, i) => take(`radius.${i}`, v, 'radii'));
+  else take('radius', node.radius, 'radii');
+  return out;
+}
+
+/** Мёртвые ссылки узла: шаг, которого нет, или ссылка не в ту шкалу. */
+function deadRefsOf(doc, node, engine) {
+  return nodeRefsOf(node).filter((r) => scaleNum(doc, r.ref, r.want, engine) === undefined);
+}
+
+/**
+ * Значение отступа или скругления В ВЫЖИМКЕ (§6.6): «spacing.6(16)» — ссылка и число, чтобы
+ * модель могла и рассуждать о пикселях, и отвечать ссылкой; число мимо шкалы — с пометкой;
+ * число, равное шагу, — голым числом (мозг всё равно превратит его в ссылку при записи).
+ */
+function scaleWord(doc, v, scale, engine) {
+  if (v == null) return '0';
+  if (typeof v === 'number') {
+    if (!stepsOf(doc, scale, engine).length || stepIndexOf(doc, scale, v, engine) >= 0) return String(v);
+    return `${v}(мимо шкалы)`;
+  }
+  const ref = parseRef(v);
+  if (!ref) return String(v);
+  const n = scaleNum(doc, ref.ref, scale, engine);
+  return n === undefined ? `${ref.ref}(нет такого шага)` : `${ref.ref}(${n})`;
+}
+
+/**
+ * Значение отступа или скругления СЛОВАМИ ЧЕЛОВЕКА (§6.7): «16 px (шаг шкалы)», «24 px (мимо
+ * шкалы)». Ни spacing, ни radii здесь быть не должно — человек шкалу знать не обязан.
+ */
+function scaleValueWords(doc, v, scale, engine) {
+  if (typeof v === 'number') {
+    const steps = stepsOf(doc, scale, engine);
+    return `${v} px${steps.length && stepIndexOf(doc, scale, v, engine) < 0 ? ' (мимо шкалы)' : ''}`;
+  }
+  const ref = parseRef(v);
+  if (!ref) return `«${String(v)}»`;
+  const n = scaleNum(doc, ref.ref, scale, engine);
+  return n === undefined ? `шаг ${SCALE_RU[scale].gen}, которого нет` : `${n} px (шаг шкалы)`;
+}
+
+/**
+ * Значение отступа или скругления ИЗ ОТВЕТА МОДЕЛИ → то, что ляжет в документ (§6.6).
+ *
+ *   • ссылка → проверяем шкалу и живость шага (scaleSteps) и пропускаем КАК ЕСТЬ;
+ *   • число, точно равное шагу, → ссылка на этот шаг: продукт живёт на шкале, а число
+ *     «16» и «spacing.6» при равном значении — одно и то же намерение;
+ *   • число МИМО шкалы: если это число назвал сам человек (оно есть в его реплике) —
+ *     оставляем числом и говорим об этом; если число придумала модель — берём ближайший
+ *     шаг шкалы и тоже говорим. Почему так, а не «всегда как есть» и не «всегда к шагу»:
+ *     человек, сказавший «зазор 24», должен получить 24 — иначе агент подменяет просьбу;
+ *     а модель, приславшая 24 на «просторнее» (16 + 8 пикселей вместо шага вверх), нарушила
+ *     правило промпта, и пропустить это число значит впустить в документ значение мимо
+ *     системы, ради которой всё и делается. Равное расстояние до двух шагов — не решаем за
+ *     человека: оставляем число и называем оба шага. Ноль — «без отступа», а не число мимо
+ *     шкалы: к ближайшему шагу не тянется и не обсуждается.
+ * @param {*} raw значение от модели (строка, число, объект {value})
+ * @param {'spacing'|'radii'} scale шкала этого поля
+ * @param {object} doc
+ * @param {Function} note куда говорить словами
+ * @param {string} what как назвать поле в строке для человека («Правка «зазор»»)
+ * @param {{engine?:object, said?:string, quiet?:boolean}} [opts] quiet — значение наше
+ *   (умолчание характера), а не модели: без разговоров, число мимо шкалы остаётся числом
+ * @returns {number|string|undefined} undefined — значение не годится (о причине сказано)
+ */
+function scaleValue(raw, scale, doc, note, what, opts = {}) {
+  const say = opts.quiet ? () => {} : (note || (() => {}));
+  const engine = opts.engine || null;
+  const names = SCALE_RU[scale] || SCALE_RU.spacing;
+  const steps = stepsOf(doc, scale, engine);
+  const bare = raw && typeof raw === 'object' && !Array.isArray(raw) && raw.value !== undefined ? raw.value : raw;
+  const ref = parseRef(bare);
+  if (ref) {
+    if (ref.scale !== scale) {
+      say(`${what}: «${String(bare).trim()}» — это ссылка на ${SCALE_RU[ref.scale].acc}, а здесь нужна ${names.nom};`
+        + ' правка пропущена');
+      return undefined;
+    }
+    if (!steps.length) {
+      say(`${what}: в документе нет ${names.gen}, ссылаться не на что — скажите число; правка пропущена`);
+      return undefined;
+    }
+    if (typeof steps[ref.index] !== 'number') {
+      say(`${what}: шага номер ${ref.index} в ${names.loc} нет — в ней ${steps.length}`
+        + ` ${plural(steps.length, 'шаг', 'шага', 'шагов')} (номера 0…${steps.length - 1}); правка пропущена`);
+      return undefined;
+    }
+    return ref.ref;
+  }
+  const n = clampPx(bare, opts.quiet ? null : note, what);
+  if (n == null) return undefined;
+  if (!steps.length) return n;
+  const exact = stepIndexOf(doc, scale, n, engine);
+  if (exact >= 0) return `${scale}.${exact}`;
+  // ноль — это «без отступа», а не число мимо шкалы: к ближайшему шагу его не тянем и не обсуждаем
+  if (n === 0) return 0;
+  const { below, above } = nearestSteps(steps, n);
+  if (opts.quiet) return n;
+  const near = [below && below.v, above && above.v].filter((x) => x != null);
+  const nearWords = near.length === 2 ? `ближайшие шаги ${near[0]} и ${near[1]}` : near.length ? `ближайший шаг ${near[0]}` : 'шагов рядом нет';
+  const named = saidNumber(opts.said, n);
+  const tie = below && above && (n - below.v) === (above.v - n);
+  if (named || tie || !near.length) {
+    say(`${what}: ${n} — мимо ${names.gen} (${nearWords}). Оставил ${n}${named ? ', как просили' : ''}`
+      + (tie ? '; скажите, к какому шагу привести' : ''));
+    return n;
+  }
+  const pick = !below ? above : !above ? below : (n - below.v) < (above.v - n) ? below : above;
+  say(`${what}: ${n} — мимо ${names.gen}, взял ближайший шаг ${pick.v}. Скажите «ровно ${n}», если нужно именно это число`);
+  return `${scale}.${pick.i}`;
+}
+
+/** Назвал ли человек это число сам: «зазор 24», «отступ 12,5». */
+function saidNumber(said, n) {
+  const s = String(said == null ? '' : said);
+  if (!s) return false;
+  const nums = s.match(/\d+(?:[.,]\d+)?/g) || [];
+  return nums.some((x) => Number(x.replace(',', '.')) === n);
+}
+
+/** С прописной: «шкала отступов» → «Шкала отступов» — для начала предложения. */
+const cap = (s) => { const t = String(s == null ? '' : s); return t.charAt(0).toUpperCase() + t.slice(1); };
+
+/** Склонение по числу: plural(3, 'шаг', 'шага', 'шагов') → 'шага'. */
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+
+/** Наше собственное число (умолчание характера) → ссылка, если оно ровно на шаге; иначе число. */
+function onScale(doc, n, scale, engine) {
+  const i = stepIndexOf(doc, scale, n, engine);
+  return i >= 0 ? `${scale}.${i}` : n;
+}
+
+/** Отступы {t,r,b,l} нашими числами → ссылки там, где число ровно на шаге. */
+function paddingOnScale(doc, pad, engine) {
+  const out = {};
+  for (const k of ['t', 'r', 'b', 'l']) out[k] = onScale(doc, pad[k], 'spacing', engine);
+  return out;
+}
+
+/**
+ * Шкалы для промпта (§6.6): один раз, в шапке, с номерами шагов —
+ * «spacing: 0=0 1=2 2=4 … 12=64». Пусто, если шкал в документе нет.
+ */
+function scaleLines(doc, engine) {
+  const out = [];
+  for (const scale of ['spacing', 'radii']) {
+    const steps = stepsOf(doc, scale, engine);
+    if (!steps.length) continue;
+    out.push(`${scale} (номер шага=значение px): ${steps.map((v, i) => `${i}=${v}`).join(' ')}`);
+  }
+  return out;
+}
+
+/**
+ * Правила шкал для промпта (§6.6). Уходят ТОЛЬКО когда шкалы в документе есть: обещать
+ * модели ссылки на шаги, которых нет, значит получить ссылку в никуда.
+ * @param {{spacing:number[], radii:number[]}} scales шаги шкал документа
+ * @param {'tree'|'patch'|'plan'|'theme'} role
+ */
+function scaleRules(scales, role) {
+  if (!scales || (!scales.spacing.length && !scales.radii.length)) return '';
+  const ex = (scale, i) => {
+    const steps = scales[scale];
+    if (!steps.length) return null;
+    const at = Math.min(i, steps.length - 1);
+    return `"${scale}.${at}" (сейчас ${steps[at]} px)`;
+  };
+  const gapEx = ex('spacing', 6);
+  const radEx = ex('radii', 4);
+  const upDown = scales.spacing.length > 7
+    ? ` (spacing.6 → spacing.5 — плотнее, spacing.6 → spacing.7 — просторнее)` : '';
+  if (role === 'plan') {
+    return `ШКАЛЫ ОТСТУПОВ И СКРУГЛЕНИЙ
+- «Сделай шкалу отступов (скруглений) просторнее/плотнее» — это theme: меняются значения шагов ШКАЛЫ, разом на всех досках.
+- «Сделай карточку плотнее/просторнее» — это edit: у её отступов берётся шаг шкалы ниже/выше.`;
+  }
+  if (role === 'theme') {
+    const lens = ['spacing', 'radii'].filter((s) => scales[s].length).map((s) => `${s} — ${scales[s].length}`).join(', ');
+    return `ШКАЛЫ ОТСТУПОВ И СКРУГЛЕНИЙ
+- Узлы ссылаются на шаги шкал ПО НОМЕРУ («spacing.6» — шестой шаг), поэтому меняй ЗНАЧЕНИЯ шагов, а не
+  их число: верни массив ТОЙ ЖЕ ДЛИНЫ (шагов сейчас: ${lens}), возрастающий. Шкала короче сломает
+  ссылки — такая правка будет отброшена; длиннее — добавит шаги, на которые пока никто не ссылается.
+- «Сделай шкалу отступов просторнее/плотнее» — умножь или ужми значения шагов (например, ×1,25 или ×0,8),
+  сохранив порядок и число шагов. Узлы менять не нужно и нельзя: они переверстаются сами.`;
+  }
+  const lines = [
+    'ШКАЛЫ ОТСТУПОВ И СКРУГЛЕНИЙ (шаги и их значения — в «ТОКЕНЫ ДОКУМЕНТА» выше)',
+    `- gap, padding и radius задавай ССЫЛКОЙ на шаг шкалы: ${[gapEx && `gap ${gapEx}`, radEx && `radius ${radEx}`].filter(Boolean).join(', ')}.`
+    + ' В выжимке так и написано: gap=spacing.6(16) — ссылка и её значение в px.',
+    `- «Плотнее», «компактнее», «теснее», «ближе» — шаг ВНИЗ по шкале; «просторнее», «воздушнее», «свободнее»,`
+    + ` «больше воздуха» — шаг ВВЕРХ${upDown}. Не прибавляй и не отнимай пиксели. Если сейчас там число мимо`
+    + ' шкалы (в выжимке помечено), возьми ближайший шаг в нужную сторону.',
+    '- Число вместо ссылки — только если нужно именно значение мимо шкалы (человек назвал число, которого в'
+    + ' шкале нет). Число, равное шагу, приложение само превратит в ссылку; число мимо шкалы дойдёт до человека'
+    + ' с предупреждением, а число, которого человек не называл, будет приведено к ближайшему шагу.',
+    '- padding: одна ссылка на все стороны ("spacing.6"), [верт, гориз] или [верх, право, низ, лево].'
+    + ' В выжимке pad=A/B — это [верт, гориз], pad=A — со всех сторон; нулевые поля не печатаются.',
+  ];
+  if (role === 'tree') {
+    lines.push('- Шаги подбирай по роли: мелкие зазоры внутри строки — нижние шаги, между блоками — средние,'
+      + ' поля экрана — верхние. Один и тот же шаг у одинаковых по смыслу отступов.');
+  }
+  return lines.join('\n');
+}
+
+/** Шкалы документа для контекста промпта (или null, если их нет). */
+function scalesOf(doc, engine) {
+  const spacing = stepsOf(doc, 'spacing', engine).filter((v) => typeof v === 'number');
+  const radii = stepsOf(doc, 'radii', engine).filter((v) => typeof v === 'number');
+  return spacing.length || radii.length ? { spacing, radii } : null;
+}
+
 const sizeWord = (spec) => {
   if (!spec || typeof spec !== 'object') return '?';
   if (spec.mode === 'fixed') return String(spec.value);
@@ -2762,6 +3143,15 @@ export const DIGEST_LEGEND = [
   'Последняя строка «РАБОТАЕМ С:» говорит, куда вносить правку по умолчанию. Остальные доски даны для справки:',
   'по ним можно СРАВНИВАТЬ и с них можно КОПИРОВАТЬ («как в сводке недели», «шапка со второго экрана»), но менять их без просьбы нельзя.',
 ].join('\n');
+
+/**
+ * Круг 20 (SPEC §6.6): как читать отступы и скругления в строках выжимки. Отдельной строкой,
+ * а не внутри DIGEST_LEGEND: она уходит только документам со шкалами.
+ */
+export const SCALE_LEGEND = 'Отступы и скругления: «gap=spacing.6(16)» — ссылка на шаг шкалы отступов и её значение в px;'
+  + ' «r=radii.4(16)» — то же для шкалы скруглений; «pad=A/B» — поля [верт, гориз], «pad=A» — со всех сторон,'
+  + ' нулевые поля не печатаются. Голое число с пометкой «(мимо шкалы)» задано числом, не шагом.'
+  + ' Новые значения задавай ссылкой на шаг — шкалы с номерами шагов даны в «ТОКЕНЫ ДОКУМЕНТА».';
 
 /** Геометрия бывает {rects,…} (core.solve) или плоской картой id → прямоугольник. */
 function rectsOf(geo) {
@@ -2822,9 +3212,27 @@ function digestLine(doc, id, depth, rects, engine) {
   const bits = [`${pad}#${id} ${n.type}`];
   if (n.name) bits.push(`"${n.name}"`);
   if (n.type === 'frame' && n.layout) {
-    bits.push(n.layout.mode === 'none' ? 'free' : `${n.layout.mode} gap=${n.layout.gap == null ? 0 : n.layout.gap}`);
+    /**
+     * Круг 20 (SPEC §6.6): отступы печатаются и ссылкой, и числом — «gap=spacing.6(16)». Поля —
+     * в краткой записи, которую модель уже знает по DSL: одно значение, если все стороны равны,
+     * [верт, гориз], если равны попарно, иначе все четыре; нулевые поля не печатаются вовсе
+     * (это умолчание раскладки). Так ссылки с их номерами не раздувают выжимку: замер на демо —
+     * 9 214 знаков числами в круге 19, 9 575 с ссылками здесь (+3,9 %).
+     */
+    const sw = (v) => scaleWord(doc, v == null ? 0 : v, 'spacing', engine);
+    bits.push(n.layout.mode === 'none' ? 'free' : `${n.layout.mode} gap=${sw(n.layout.gap)}`);
     const p = n.layout.padding;
-    if (p) bits.push(`pad=${[p.t, p.r, p.b, p.l].join('/')}`);
+    if (p && typeof p === 'object') {
+      const px = (v) => scaleNum(doc, v == null ? 0 : v, 'spacing', engine);
+      const sides = ['t', 'r', 'b', 'l'].map((k) => p[k]);
+      const zero = sides.every((v) => px(v) === 0);
+      if (!zero) {
+        const same = (a, b) => a === b || (a == null && b == null);
+        if (sides.every((v) => same(v, sides[0]))) bits.push(`pad=${sw(sides[0])}`);
+        else if (same(p.t, p.b) && same(p.r, p.l)) bits.push(`pad=${sw(p.t)}/${sw(p.r)}`);
+        else bits.push(`pad=${sides.map(sw).join('/')}`);
+      }
+    }
     if (n.layout.align && n.layout.align !== 'start') bits.push(`align=${n.layout.align}`);
     if (n.layout.justify && n.layout.justify !== 'start') bits.push(`justify=${n.layout.justify}`);
     if (n.layout.wrap) bits.push('wrap');
@@ -2839,7 +3247,12 @@ function digestLine(doc, id, depth, rects, engine) {
   }
   if (n.fill) bits.push(`fill=${refWord(n.fill)}`);
   if (n.stroke) bits.push(`stroke=${refWord(n.stroke)}`);
-  if (n.radius) bits.push(`r=${n.radius}`);
+  /* Круг 20: скругление — «r=radii.4(16)»; нулевое (числом или ссылкой на нулевой шаг) не
+   * печатается, как и раньше не печатался ноль. Мёртвая ссылка печатается с пометкой. */
+  if (n.radius != null && n.radius !== 0 && !Array.isArray(n.radius)) {
+    const rv = scaleNum(doc, n.radius, 'radii', engine);
+    if (rv !== 0) bits.push(`r=${scaleWord(doc, n.radius, 'radii', engine)}`);
+  }
   if (n.override) bits.push('override');
   const rect = rects && rects[id];
   if (rect && Number.isFinite(Number(rect.w))) {
@@ -3220,6 +3633,8 @@ function buildContext({ doc, scope, engine, guess, persona, placement, geo, hist
     /* Круг 19, п.1 (SPEC §5.9): СЛОВАРЬ идёт перед документом. Не «ещё одна доска в выжимке»,
      * а отдельный блок: из него модель выбирает, чем собирать, и его узлов в выжимке нет. */
     comps,
+    // круг 20 (SPEC §6.6): шкалы документа — правила про ссылки на шаги уходят, только когда они есть
+    scales: scalesOf(doc, engine),
     library: describeLibrary(doc, engine, { selected: scope.ids }),
     // выжимка — весь документ; scope.ids задаёт лишь подсветку области работы (круг 2, п.1)
     digest: describeDoc(doc, scope.ids, { engine, geo, scopeKind: scope.kind }),
@@ -3552,21 +3967,32 @@ function normSizeSpec(raw) {
   return parsePx(s) ? fixedOrHug(s) : undefined;   // «370px», «24 пикселя», «1rem» — это размер
 }
 
-function normPadding(raw, note, what) {
+/**
+ * Отступы из ответа модели → {t,r,b,l}. Круг 20 (SPEC §6): каждая сторона идёт через scaleValue,
+ * то есть может быть и ссылкой на шаг («spacing.6»), и числом; одинаковые замечания по четырём
+ * сторонам схлопываются в одно — иначе «24 мимо шкалы» читалось бы четыре раза.
+ * @param {{doc?:object, engine?:object, said?:string, quiet?:boolean}} [opts]
+ */
+function normPadding(raw, note, what, opts = {}) {
   // каждая сторона зажимается отдельно: «padding: -12» и «padding: [0, 500000]» больше не
   // роняют всю команду через checkNode, а становятся допустимыми 0 и 100000 (п.7).
   // Круг 7, п.1: о каждом таком зажиме говорим словами, если есть кому.
   // Круг 9, п.2: сторона, в которой числа НЕТ, отменяет всю правку отступов (а не становится
   // нулём): «padding: "как у карточки"» — это непонятая команда, а не «поля по нулям».
   let bad = false;
+  const seen = new Set();
+  const once = (m) => { if (seen.has(m)) return; seen.add(m); if (note) note(m); };
+  const doc = opts.doc || null;
   const px = (v) => {
-    const n = clampPx(v, note, what || 'Отступ');
+    const n = doc && stepsOf(doc, 'spacing', opts.engine).length
+      ? scaleValue(v, 'spacing', doc, once, what || 'Отступ', { engine: opts.engine, said: opts.said, quiet: opts.quiet })
+      : clampPx(v, once, what || 'Отступ');
     if (n == null) bad = true;
     return n;
   };
   const done = (v) => (bad ? undefined : v);
   if (raw == null) return undefined;
-  if (typeof raw === 'number' || (typeof raw === 'string' && parsePx(raw))) {
+  if (typeof raw === 'number' || (typeof raw === 'string' && (parsePx(raw) || parseRef(raw)))) {
     const v = px(raw);
     return done({ t: v, r: v, b: v, l: v });
   }
@@ -3687,10 +4113,16 @@ const NODE_TYPE_ALIASES = {
  * Дерево модели → спецификации узлов. Невалидные узлы отбрасываются с предупреждением,
  * валидные соседи сохраняются.
  */
-export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engine = null } = {}) {
+export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engine = null, said = '' } = {}) {
   const P = (persona && persona.defaults) || { gap: 16, padding: 24, radius: 8 };
   const note = warn || (() => {});
   const bud = budget || makeNodeBudget(note);
+  /* Круг 20 (SPEC §6.6): зазор, поля и скругление от модели идут через scaleValue — ссылка
+   * проверяется, число на шаге становится ссылкой, число мимо шкалы решается по правилу
+   * scaleValue. Наши собственные умолчания (характер варианта) — тоже на шкалу, но молча:
+   * это не ответ модели, предупреждать человеку не о чём. */
+  const scaleOpts = { engine, said };
+  const onScaleQuiet = (n, scale) => (doc ? onScale(doc, n, scale, engine) : n);
   /**
    * Круг 13, п.1: у СОЗДАВАЕМОГО узла «снять цвет» и «не задавать цвет» — одно и то же, поэтому
    * fill:"none" (и «прозрачный», «нет», «без заливки») значит «без заливки», а не «неизвестный
@@ -3810,12 +4242,15 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     const stroke = treeColor(raw.stroke, `Обводка «${name || type}»`);
     if (stroke) spec.stroke = stroke;
     // круг 9, п.2: «radius: "8px"» — обычный ответ модели, и раньше он давал «непонятно — оставил 0»
+    // круг 20: «radius: "radii.4"» — ссылка на шаг шкалы скруглений, принимается как есть
     const radius = parsePx(raw.radius);
-    const defRadius = type === 'frame' ? 0 : P.radius;
-    if (raw.radius != null && raw.radius !== '' && !(radius && radius.n >= 0)) {
-      note(`Узел «${name || type}»: скругление «${raw.radius}» непонятно — оставил ${defRadius}`);
+    const radiusRef = parseRef(raw.radius);
+    const defRadius = onScaleQuiet(type === 'frame' ? 0 : P.radius, 'radii');
+    if (raw.radius != null && raw.radius !== '' && !radiusRef && !(radius && radius.n >= 0)) {
+      note(`Узел «${name || type}»: скругление «${raw.radius}» непонятно — оставил ${scaleValueWords(doc, defRadius, 'radii', engine)}`);
     }
-    const radiusPx = radius && radius.n >= 0 ? clampPx(raw.radius, note, `Узел «${name || type}», скругление`) : null;
+    const radiusPx = radiusRef || (radius && radius.n >= 0)
+      ? scaleValue(raw.radius, 'radii', doc, note, `Узел «${name || type}», скругление`, scaleOpts) : null;
     spec.radius = radiusPx == null ? defRadius : radiusPx;
     if (type === 'image' && raw.src != null) {
       const src = safeSrc(raw.src, note, `Картинка «${name || 'без имени'}»`);
@@ -3833,8 +4268,12 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
       spec.layout = {
         mode: enumOr('layout.mode', l.mode, 'column'),
         // круг 9, п.2: «gap: "8px"» раньше молча падало на умолчание — единицы теперь снимаются
-        gap: (l.gap == null || l.gap === '' ? null : clampPx(l.gap, note, `${who} (зазор)`)) ?? P.gap,
-        padding: normPadding(l.padding, note, `${who} (поля)`) || { t: P.padding, r: P.padding, b: P.padding, l: P.padding },
+        // круг 20: «gap: "spacing.6"» — ссылка на шаг, число на шаге само становится ссылкой
+        gap: (l.gap == null || l.gap === '' ? null : scaleValue(l.gap, 'spacing', doc, note, `${who} (зазор)`, scaleOpts))
+          ?? onScaleQuiet(P.gap, 'spacing'),
+        padding: normPadding(l.padding, note, `${who} (поля)`, { doc, engine, said })
+          || (doc ? paddingOnScale(doc, { t: P.padding, r: P.padding, b: P.padding, l: P.padding }, engine)
+            : { t: P.padding, r: P.padding, b: P.padding, l: P.padding }),
         align: enumOr('layout.align', l.align, 'stretch'),
         justify: enumOr('layout.justify', l.justify, 'start'),
         wrap: !!l.wrap,
@@ -3865,7 +4304,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     }
     spec.children = [];
     for (const kid of kids) {
-      const norm = normalizeTree(kid, { doc, warn: note, persona, depth: depth + 1, budget: bud, engine });
+      const norm = normalizeTree(kid, { doc, warn: note, persona, depth: depth + 1, budget: bud, engine, said });
       if (norm) spec.children.push(norm);
     }
   }
@@ -3953,18 +4392,22 @@ function wideTarget(doc, placement, fullWidth, note) {
 }
 
 /** Дерево → массив операций core.ops (родитель раньше детей). */
-export function treeToOps({ doc, tree, parentId, index, engine, warn, persona, asArtboard, artboardSize }) {
+export function treeToOps({ doc, tree, parentId, index, engine, warn, persona, asArtboard, artboardSize, said = '' }) {
   const note = warn || (() => {});
-  let spec = normalizeTree(tree, { doc, warn: note, persona, budget: makeNodeBudget(note), engine });
+  let spec = normalizeTree(tree, { doc, warn: note, persona, budget: makeNodeBudget(note), engine, said });
   if (!spec) throw ERR('schema', 'Модель не вернула ни одного пригодного узла');
 
   if (asArtboard && spec.type !== 'frame') {
     note('Корень дерева не фрейм — завернул в доску');
+    // круг 20: наша обёртка — тоже на шкале документа, если её числа ровно на шагах
     spec = {
       type: 'frame', name: spec.name || 'Артборд',
-      layout: { mode: 'column', gap: (persona && persona.defaults.gap) || 16, padding: { t: 24, r: 24, b: 24, l: 24 }, align: 'stretch', justify: 'start', wrap: false },
+      layout: {
+        mode: 'column', gap: onScale(doc, (persona && persona.defaults.gap) || 16, 'spacing', engine),
+        padding: paddingOnScale(doc, { t: 24, r: 24, b: 24, l: 24 }, engine), align: 'stretch', justify: 'start', wrap: false,
+      },
       size: { w: { mode: 'fixed', value: 390 }, h: { mode: 'hug' } },
-      radius: 0, children: [spec],
+      radius: onScale(doc, 0, 'radii', engine), children: [spec],
     };
   }
 
@@ -4777,9 +5220,9 @@ function parentInner(doc, id, axis, geo) {
   const own = parent.size && parent.size[axis];
   if (own && own.mode === 'hug') return null;       // родитель растянется сам
   const pad = ((parent.layout && parent.layout.padding) || null);
-  const eaten = !pad ? 0 : axis === 'w'
-    ? (Number(pad.l) || 0) + (Number(pad.r) || 0)
-    : (Number(pad.t) || 0) + (Number(pad.b) || 0);
+  // круг 20 (SPEC §6.3): отступы — ссылки на шаги шкалы; Number('spacing.7') дал бы NaN и «без отступов»
+  const side = (k) => { const n = scaleNum(doc, pad[k] == null ? 0 : pad[k], 'spacing', null); return Number.isFinite(n) ? n : 0; };
+  const eaten = !pad ? 0 : axis === 'w' ? side('l') + side('r') : side('t') + side('b');
   if (!(eaten > 0)) return null;                    // без отступов и предупреждать не о чем
   const rects = rectsOf(geo);
   let box = rects && rects[pid] && Number(rects[pid][axis]) > 0 ? Number(rects[pid][axis]) : null;
@@ -5069,11 +5512,23 @@ export function ruEnum(field, value) {
   return (table && table[key]) || key;
 }
 
-/** Значение для человека: «по содержимому», «350 px», «приглушённый». */
-function valueWords(v, path) {
+/** Значение для человека: «по содержимому», «350 px», «приглушённый», «16 px (шаг шкалы)». */
+function valueWords(v, path, doc = null, engine = null) {
   if (v === UNSET || v === undefined || v === null) return '«не задано»';
   const p = String(path == null ? '' : path);
   if (typeof v === 'boolean') return v ? '«да»' : '«нет»';
+  /* Круг 20 (SPEC §6.7): ссылка на шаг человеку показывается ЧИСЛОМ с пометкой «шаг шкалы» —
+   * слов spacing и radii в его строках нет. Отступы — одним числом, если стороны равны. */
+  const scale = scaleOfPath(p);
+  if (scale && (typeof v === 'number' || typeof v === 'string')) return scaleValueWords(doc, v, scale, engine);
+  if (scale === 'spacing' && v && typeof v === 'object' && !Array.isArray(v)) {
+    const sides = ['t', 'r', 'b', 'l'].map((k) => v[k]);
+    const nums = sides.map((x) => scaleNum(doc, x == null ? 0 : x, 'spacing', engine));
+    const refs = sides.filter((x) => parseRef(x)).length;
+    const tail = refs === 4 ? ' (шаги шкалы)' : refs ? ' (частью по шкале)' : '';
+    const shown = nums.map((n) => (n === undefined ? '?' : Math.round(n)));
+    return (shown.every((n) => n === shown[0]) ? `${shown[0]} px` : `${shown.join('/')} px`) + tail;
+  }
   const en = ENUM_RU[p];
   if (en && typeof v === 'string' && en[v]) return `«${en[v]}»`;
   // токен вместо внутреннего имени: «style» уже «крупный», а не «display» (круг 16, п.9)
@@ -5143,8 +5598,60 @@ export function coerceValue(raw, path, doc, warn, ctx = null) {
     const h = v && v.h !== undefined ? sizeValue(v.h, 'size.h', doc, note, ctx) : undefined;
     return w || h ? { ...(w ? { w } : {}), ...(h ? { h } : {}) } : undefined;
   }
-  if (p === 'layout.padding') return normPadding(v, note, 'Правка «отступ»');
-  if (p === 'layout.gap' || p === 'radius') return clampPx(v, note, `Правка «${ruPath(p)}»`);
+  /* Круг 20 (SPEC §6.6): зазор, поля и скругление живут на шкале. Ссылка от модели проверяется
+   * (та ли шкала, жив ли шаг) и идёт как есть; число на шаге становится ссылкой; число мимо
+   * шкалы — по правилу scaleValue (см. там же, почему). clampPx строку-ссылку не понимает —
+   * поэтому сюда, до него. */
+  const scaleOpts = { engine: ctx && ctx.engine, said: ctx && ctx.said };
+  /**
+   * Число от модели, РАВНОЕ числу, которое уже стоит в узле, остаётся числом (§6.4): «сделай
+   * скругление 12», когда там и так число 12, — пустая правка, а не «перевод поля на шкалу».
+   * Перевести число в ссылку модель может явно — прислав ссылку. Ссылку от модели это правило
+   * не трогает: ссылка поверх равного числа — настоящая правка по §6.4.
+   */
+  const curAt = ctx && ctx.id ? currentValue(nodeOf(doc, ctx.id), p) : undefined;
+  const keepNumber = (cur, rawSide, got, scale) => {
+    if (typeof cur !== 'number' || typeof got !== 'string' || parseRef(rawSide)) return got;
+    return scaleNum(doc, got, scale, scaleOpts.engine) === cur ? cur : got;
+  };
+  const rawSides = (r) => {
+    const box = paddingShorthandMirror(typeof r === 'string' && /^[[{]/.test(r.trim()) ? (tryParse(r.trim()) ?? r) : r);
+    return box || { t: r, r, b: r, l: r };
+  };
+  if (p === 'layout.padding') {
+    const got = normPadding(v, note, 'Правка «отступ»', { doc, ...scaleOpts });
+    if (!got || !curAt || typeof curAt !== 'object') return got;
+    const rs = rawSides(raw);
+    const out = {};
+    for (const k of ['t', 'r', 'b', 'l']) out[k] = keepNumber(curAt[k], rs[k], got[k], 'spacing');
+    return out;
+  }
+  if (/^layout\.padding\.[trbl]$/.test(p)) {
+    return keepNumber(curAt, raw, scaleValue(v, 'spacing', doc, note, `Правка «${ruPath(p)}»`, scaleOpts), 'spacing');
+  }
+  if (p === 'layout.gap' || p === 'radius') {
+    const scale = scaleOfPath(p);
+    return keepNumber(curAt, raw, scaleValue(v, scale, doc, note, `Правка «${ruPath(p)}»`, scaleOpts), scale);
+  }
+  if (p === 'layout' && v && typeof v === 'object' && !Array.isArray(v)) {
+    // раскладка целиком: зазор и поля внутри неё — по тому же правилу, остальное как есть
+    const out = { ...v };
+    const curL = curAt && typeof curAt === 'object' ? curAt : {};
+    if (v.gap !== undefined) {
+      const gap = scaleValue(v.gap, 'spacing', doc, note, 'Правка «зазор»', scaleOpts);
+      if (gap === undefined) return undefined;
+      out.gap = keepNumber(curL.gap, v.gap, gap, 'spacing');
+    }
+    if (v.padding !== undefined) {
+      const padding = normPadding(v.padding, note, 'Правка «отступ»', { doc, ...scaleOpts });
+      if (padding === undefined) return undefined;
+      const curP = curL.padding && typeof curL.padding === 'object' ? curL.padding : {};
+      const rs = rawSides(v.padding);
+      out.padding = {};
+      for (const k of ['t', 'r', 'b', 'l']) out.padding[k] = keepNumber(curP[k], rs[k], padding[k], 'spacing');
+    }
+    return out;
+  }
   if (p === 'layout.wrap' || p === 'clip') {
     if (typeof v === 'boolean') return v;
     if (typeof v === 'number') return v !== 0;
@@ -5282,6 +5789,116 @@ function wrapperKeeps(field, cur, next) {
   return sameJSON(cur, next);
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * Поля на шкале: зеркало core.keepFieldForm для круга 20 (SPEC §6.4)
+ *
+ * Правило ядра НЕсимметрично, и зеркало повторяет его буквально:
+ *   • число, РАВНОЕ значению текущей ссылки (set gap=16 при 'spacing.6' = 16) — «то же»:
+ *     поле остаётся ссылкой байт в байт;
+ *   • ссылка поверх числа (set gap='spacing.6' при 16) — НЕ «то же»: число становится ссылкой,
+ *     смысл меняется при той же картинке;
+ *   • ссылка поверх ссылки — буквально: 'spacing.6' поверх 'spacing.6' то же, поверх 'spacing.5' нет,
+ *     даже если шаги равны по значению.
+ * Для целого layout и целого padding — по полям, а затем сверка с тем, что ядро запишет после
+ * своей нормализации (normalizeLayout): недостающая сторона становится нулём, недостающий режим —
+ * «none». Инвариант «sameAsNow === поле осталось байт в байт» закреплён тестом на настоящем
+ * applyOps (круг 16, расширен здесь на все эти формы).
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Копии перечислений ядра — для нормализации целого layout. */
+const MIRROR_LAYOUT_MODES = new Set(['none', 'row', 'column']);
+const MIRROR_ALIGNS = new Set(['start', 'center', 'end', 'stretch']);
+const MIRROR_JUSTIFIES = new Set(['start', 'center', 'end', 'between']);
+const MIRROR_MAX_SIZE = 100000;
+
+/** Что ядро запишет по правилу keepScaleForm: число, равное значению текущей ссылки, → ссылка. */
+function keepScaleMirror(doc, cur, value, scale, engine) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return value;
+  const ref = parseRef(cur);
+  if (!ref || ref.scale !== scale || ref.ref !== cur) return value;
+  return scaleNum(doc, cur, scale, engine) === value ? cur : value;
+}
+
+/** Копия core.spacingField: ссылка остаётся, число зажимается в 0..MAX_SIZE, мусор → 0. */
+function spacingFieldMirror(v) {
+  if (typeof v === 'string' && SCALE_REF_RE.test(v)) return v;
+  if (typeof v !== 'number' || Number.isNaN(v)) return 0;
+  return v < 0 ? 0 : v > MIRROR_MAX_SIZE ? MIRROR_MAX_SIZE : v;
+}
+
+/** Копия core.paddingShorthand: краткая запись → {t,r,b,l} без приведения значений. */
+function paddingShorthandMirror(p) {
+  const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
+  if (isNum(p) || (typeof p === 'string' && SCALE_REF_RE.test(p))) return { t: p, r: p, b: p, l: p };
+  if (Array.isArray(p)) {
+    if (p.length === 2) return { t: p[0], r: p[1], b: p[0], l: p[1] };
+    if (p.length === 4) return { t: p[0], r: p[1], b: p[2], l: p[3] };
+    if (p.length === 1) return { t: p[0], r: p[0], b: p[0], l: p[0] };
+    return null;
+  }
+  if (p && typeof p === 'object') return { t: p.t, r: p.r, b: p.b, l: p.l };
+  return null;
+}
+
+/** Копия core.normalizeLayout — порядок ключей тот же, это важно для сверки байт в байт. */
+function normalizeLayoutMirror(l) {
+  const src = l && typeof l === 'object' ? l : {};
+  const padding = paddingShorthandMirror(src.padding) || { t: 0, r: 0, b: 0, l: 0 };
+  for (const k of ['t', 'r', 'b', 'l']) padding[k] = spacingFieldMirror(padding[k]);
+  return {
+    mode: MIRROR_LAYOUT_MODES.has(src.mode) ? src.mode : 'none',
+    gap: spacingFieldMirror(src.gap),
+    padding,
+    align: MIRROR_ALIGNS.has(src.align) ? src.align : 'start',
+    justify: MIRROR_JUSTIFIES.has(src.justify) ? src.justify : 'start',
+    wrap: !!src.wrap,
+  };
+}
+
+/** Одно поле на шкале (gap, padding.t, radius): останется ли байт в байт. */
+function scaleKeeps(doc, cur, next, scale, engine) {
+  if (next === undefined) return false;
+  return keepScaleMirror(doc, cur, next, scale, engine) === cur;
+}
+
+/** Скругление, в том числе покорнерный массив (поэлементно при равной длине). */
+function radiusKeeps(doc, cur, next, engine) {
+  if (Array.isArray(next)) {
+    if (!Array.isArray(cur) || cur.length !== next.length) return false;
+    return next.every((v, i) => keepScaleMirror(doc, cur[i], v, 'radii', engine) === cur[i]);
+  }
+  return scaleKeeps(doc, cur, next, 'radii', engine);
+}
+
+/** Целые поля отступов: то, что ядро запишет и затем нормализует, против того, что лежит. */
+function paddingKeeps(doc, cur, next, engine) {
+  const box = paddingShorthandMirror(next);
+  if (!box || !cur || typeof cur !== 'object') return sameJSON(cur, next);
+  const kept = {};
+  for (const k of ['t', 'r', 'b', 'l']) if (box[k] !== undefined) kept[k] = keepScaleMirror(doc, cur[k], box[k], 'spacing', engine);
+  // после set ядро прогоняет layout через normalizeLayout: сторона без значения становится нулём
+  const norm = normalizeLayoutMirror({ padding: kept }).padding;
+  return sameJSON(norm, cur);
+}
+
+/** Целый layout: gap и padding по правилу шкал, остальное как есть, затем нормализация ядра. */
+function layoutKeeps(doc, cur, next, engine) {
+  if (!next || typeof next !== 'object' || Array.isArray(next)) return sameJSON(cur, next);
+  if (!cur || typeof cur !== 'object') return false;
+  const out = { ...next };
+  if (next.gap !== undefined) out.gap = keepScaleMirror(doc, cur.gap, next.gap, 'spacing', engine);
+  if (next.padding !== undefined) {
+    const box = paddingShorthandMirror(next.padding);
+    if (box) {
+      const curPad = cur.padding && typeof cur.padding === 'object' ? cur.padding : {};
+      const kept = {};
+      for (const k of ['t', 'r', 'b', 'l']) if (box[k] !== undefined) kept[k] = keepScaleMirror(doc, curPad[k], box[k], 'spacing', engine);
+      out.padding = kept;
+    }
+  }
+  return sameJSON(normalizeLayoutMirror(out), cur);
+}
+
 /**
  * Круг 16, п.1: сравнение стало СМЫСЛОВЫМ и ПО ПОЛЮ. «Сделай заголовок сводки крупным» при
  * уже стоящем style {token:"display"} даёт от модели set style="display" — то же значение в
@@ -5296,11 +5913,16 @@ function wrapperKeeps(field, cur, next) {
  * отсутствующую обрезку как «нет». set opacity=1 у узла без прозрачности документ меняет,
  * а экран — нет; это тот же заведомо пустой случай.
  */
-export function sameAsNow(cur, next, path) {
+export function sameAsNow(cur, next, path, doc = null, engine = null) {
   const p = String(path == null ? '' : path);
   if (WRAPPED_FIELDS[p]) return wrapperKeeps(p, cur, next);
   if (p === 'opacity' && cur === undefined) return Number(next) === 1;
   if (p === 'clip' && cur === undefined) return next === false;
+  /* Круг 20 (SPEC §6.4): поля на шкале — зеркало core.keepFieldForm (см. scaleKeeps ниже). */
+  if (p === 'layout.gap' || /^layout\.padding\.[trbl]$/.test(p)) return scaleKeeps(doc, cur, next, 'spacing', engine);
+  if (p === 'radius') return radiusKeeps(doc, cur, next, engine);
+  if (p === 'layout.padding') return paddingKeeps(doc, cur, next, engine);
+  if (p === 'layout') return layoutKeeps(doc, cur, next, engine);
   if (cur === next) return true;
   if (cur == null || next == null) return false;
   if (typeof cur === 'object' && typeof next !== 'object') {
@@ -5321,7 +5943,7 @@ export function sameAsNow(cur, next, path) {
  * @returns {Array<{id:string,path:string,cleared:boolean}>|null} совпавшие правки, либо null —
  *   в патче есть что-то ещё (создание, удаление, сдвиг или настоящее изменение значения)
  */
-function allSetsIdle(doc, ops) {
+function allSetsIdle(doc, ops, engine = null) {
   const list = asArray(ops);
   if (!list.length) return null;
   const same = [];
@@ -5331,7 +5953,7 @@ function allSetsIdle(doc, ops) {
     if (!node) return null;                        // узел создан этим же патчем — судить не о чем
     const cur = currentValue(node, String(o.path));
     const cleared = !Object.prototype.hasOwnProperty.call(o, 'value');
-    if (cleared ? cur !== undefined : !sameAsNow(cur, o.value, String(o.path))) return null;
+    if (cleared ? cur !== undefined : !sameAsNow(cur, o.value, String(o.path), doc, engine)) return null;
     same.push({ id: o.id, path: String(o.path), cleared });
   }
   return same;
@@ -5763,7 +6385,8 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         }
         const before = notes;
         // ctx: цель и посчитанная геометрия — по ним видно, во что узел вложен (круг 7, п.8)
-        const value = coerceValue(edit.value, aimed.path, doc, note, { id: aimed.id, geo });
+        // круг 20: движок и реплика человека нужны шкалам — проверить ссылку и понять, кто назвал число
+        const value = coerceValue(edit.value, aimed.path, doc, note, { id: aimed.id, geo, engine, said: utterance });
         if (value === undefined) {
           if (notes === before) {
             note(edit.value === undefined
@@ -5800,8 +6423,8 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         }
         if (target && clearing && cur === undefined) {
           note(`У ${nameOrId(doc, aimed.id)} и так нет ${ruPathGen(aimed.path)} — эта правка ничего не меняет`);
-        } else if (target && !clearing && sameAsNow(cur, value, aimed.path)) {
-          note(`${nameOrId(doc, aimed.id)}: ${ruPath(aimed.path)} уже ${valueWords(value, aimed.path)}`
+        } else if (target && !clearing && sameAsNow(cur, value, aimed.path, doc, engine)) {
+          note(`${nameOrId(doc, aimed.id)}: ${ruPath(aimed.path)} уже ${valueWords(value, aimed.path, doc, engine)}`
             + ' — эта правка ничего не меняет');
         }
         ops.push(mkOp(engine, 'set', clearing
@@ -6219,14 +6842,49 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
   // asArray здесь нельзя: он выбрасывает falsy, а 0 — законное значение шкалы
   const scale = (list) => (Array.isArray(list) ? list : []).map((x) => (parsePx(x) || {}).n)
     .filter((n) => Number.isFinite(n) && n >= 0).sort((a, b) => a - b);
-  if (Array.isArray(theme && theme.spacing) && theme.spacing.length) {
-    const v = scale(theme.spacing);
-    if (v.length) push('spacing', v);
-  }
-  if (Array.isArray(theme && theme.radii) && theme.radii.length) {
-    const v = scale(theme.radii);
-    if (v.length) push('radii', v);
-  }
+  /**
+   * Круг 20 (SPEC §6.1): узлы ссылаются на шаги шкалы ПО НОМЕРУ, и шкала короче самой дальней
+   * ссылки убила бы эти ссылки (dead-scale-ref, отступы в ноль) — молча, под видом «тёмной темы».
+   *
+   * Решение — сохранять НОМЕРА шагов, а не переписывать ссылки. Почему не rewriteScaleRefsOps:
+   * переписывание ссылок «по ближайшему значению» — это догадка о том, какой старый шаг стал
+   * каким новым, и десятки операций по узлам в транзакции, которая обещала поменять только
+   * оформление. Смена значений шагов — ровно та «самая частая правка», ради которой индексы и
+   * выбраны (§6.1): она не трогает ни одного узла, и всё переверстывается само.
+   * Поэтому: массив длиннее — годится (новые шаги добавляются в хвост, старые номера целы);
+   * короче, но не короче самой дальней ссылки — годится; короче ссылок — отброшен со словами.
+   * И человеку говорится правда о том, что изменилось: значения шагов, а не узлы.
+   */
+  const scaleOps = (name, list) => {
+    if (!Array.isArray(list) || !list.length) return;
+    const v = scale(list);
+    if (!v.length) return;
+    const names = SCALE_RU[name];
+    const cur = stepsOf(doc, name, engine);
+    const refs = refsInDoc(doc, name, engine);
+    const farthest = refs.reduce((m, r) => Math.max(m, Number(r.index) || 0), -1);
+    if (v.length <= farthest) {
+      note(`${cap(names.nom)}: модель прислала ${v.length} ${plural(v.length, 'шаг', 'шага', 'шагов')} вместо ${cur.length},`
+        + ` а на шаги вплоть до ${farthest}-го ссылаются узлы (${refs.length} ${plural(refs.length, 'значение', 'значения', 'значений')}).`
+        + ' Укоротить шкалу значило бы сломать эти ссылки, поэтому правка шкалы пропущена — скажите значения'
+        + ` всех ${cur.length} шагов`);
+      return;
+    }
+    push(name, v);
+    if (!refs.length) return;
+    const changed = [];
+    cur.forEach((old, i) => { if (i < v.length && v[i] !== old) changed.push(`${old} → ${v[i]}`); });
+    const grew = v.length - cur.length;
+    const sample = changed.slice(0, 3).join(', ') + (changed.length > 3 ? ` и ещё ${changed.length - 3}` : '');
+    note(`${cap(names.nom)}: ${changed.length
+      ? `изменены значения ${changed.length} ${plural(changed.length, 'шага', 'шагов', 'шагов')} из ${cur.length} (${sample})`
+      : 'значения шагов остались прежними'}`
+      + (grew > 0 ? `, добавлено шагов в конец: ${grew}` : grew < 0 ? `, шагов стало ${v.length} вместо ${cur.length}` : '')
+      + `. Узлы не правились: на шаги этой шкалы ссылаются ${refs.length} ${plural(refs.length, 'значение', 'значения', 'значений')}`
+      + ' отступов, и они переверстались сами');
+  };
+  scaleOps('spacing', theme && theme.spacing);
+  scaleOps('radii', theme && theme.radii);
 
   if (!ops.length) throw ERR('schema', 'Модель не предложила ни одного корректного изменения токенов');
 
@@ -6304,6 +6962,8 @@ const WARN_RANKS = [
   ].join('|'), 'iu')],
   [2, new RegExp([
     'понял как', 'понят как', 'оставил «', 'уже ', 'нельзя', 'вместо', 'зажал',
+    // круг 20: число мимо шкалы — оставлено или приведено к шагу; что поменялось в шкале
+    'мимо шкалы', 'ближайший шаг', 'переверстались сами',
   ].join('|'), 'iu')],
 ];
 
@@ -6401,7 +7061,38 @@ function formatViolation(v, doc) {
   if (v.code === 'zero-size') return `Слой ${who} не виден: ${text}`;
   if (v.code === 'out-of-parent') return `Слой ${who} вылез за рамки: ${text}`;
   if (v.code === 'empty-frame') return `Фрейм ${who} пуст — внутри ничего нет`;
-  if (v.code === 'off-scale') return `Отступы ${who} не по шкале документа: ${text}`;
+  /**
+   * Круг 20 (SPEC §6.7): человек шкалу знать не обязан — ни spacing, ни radii, ни gap в его строках.
+   * Ядро пишет «layout.gap → шага «spacing.99» нет — в шкале отступов 13 шагов (0..12)»; мёртвые
+   * ссылки считаем по самому узлу (документу они принадлежат, а не тексту), и называем поля
+   * словами инспектора: «зазор», «отступ сверху».
+   */
+  if (v.code === 'dead-scale-ref') {
+    const dead = node ? deadRefsOf(doc, node, null) : [];
+    if (dead.length) {
+      const byScale = new Map();
+      for (const d of dead) { if (!byScale.has(d.want)) byScale.set(d.want, []); byScale.get(d.want).push(d); }
+      const parts = [...byScale.entries()].map(([scale, list]) => {
+        const steps = stepsOf(doc, scale, null);
+        const fields = list.map((d) => ruPath(d.path)).join(', ');
+        const many = list.length > 1;
+        return `${fields} ссыла${many ? 'ются' : 'ется'} на шаг ${SCALE_RU[scale].gen}, которого нет`
+          + (steps.length ? ` (в шкале ${steps.length} ${plural(steps.length, 'шаг', 'шага', 'шагов')}, номера 0…${steps.length - 1})` : ' (шкала пуста)')
+          + ` — ${many ? 'считаются нулями' : 'считается нулём'}`;
+      });
+      return `${who ? `${cap(who)}: ` : ''}${parts.join('; ')}. Задайте значение заново или добавьте шаг в шкалу`;
+    }
+    return `${who ? `${who}: ` : ''}ссылка на шаг шкалы, которого нет — считается нулём. Задайте значение заново или добавьте шаг в шкалу`;
+  }
+  if (v.code === 'off-scale') {
+    // ядро: «вне шкалы отступов: gap 24, padding.t 10» → «зазор 24, отступ сверху 10»
+    const fields = [];
+    const re = /\b(gap|padding\.[trbl]|padding|radius)\s+(-?\d+(?:\.\d+)?)/g;
+    let m;
+    while ((m = re.exec(text))) fields.push(`${ruPath(m[1] === 'gap' ? 'layout.gap' : m[1] === 'radius' ? 'radius' : `layout.${m[1]}`)} ${m[2]}`);
+    if (fields.length) return `${who || 'Узел'}: мимо шкалы отступов — ${fields.join(', ')}`;
+    return `Отступы ${who} мимо шкалы документа: ${text.replace(/\bgap\b/g, 'зазор').replace(/\bpadding\.([trbl])\b/g, (_, k) => `отступ ${SIDE_RU[k]}`)}`;
+  }
   return who ? `${who}: ${text}` : text;
 }
 
@@ -6412,8 +7103,10 @@ const VIOLATION_KIND = {
   'zero-size': 'невидимые (нулевые) слои',
   overlap: 'наложения',
   'low-contrast': 'плохо читается текст',
-  'off-scale': 'отступы вне шкалы',
+  'off-scale': 'отступы мимо шкалы',
   'empty-frame': 'пустые фреймы',
+  // круг 20 (SPEC §6.1)
+  'dead-scale-ref': 'ссылки на шаги шкалы, которых нет',
   // круг 19, п.7 (SPEC §5.8)
   'dead-instance': 'экземпляры без компонента',
   'unknown-prop': 'свойства, которых компонент не объявлял',
@@ -7993,7 +8686,7 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
         ? wideTarget(doc, placement, wantsFullWidth(data && data.size), warn)
         : null;
       const built = treeToOps({
-        doc, tree: data, engine, warn, persona,
+        doc, tree: data, engine, warn, persona, said,
         parentId: wide ? wide.parentId : placement.parentId,
         // место названо в самой команде («добавь в список пункт») — вставляем именно туда (круг 3, п.3)
         index: wide ? wide.index : (placement.insert && placement.index != null ? placement.index : undefined),
@@ -8096,7 +8789,7 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
    * геометрии остаётся обязательным: оно и есть доказательство, что на экране ничего не
    * сдвинулось, — а без доказательства объявлять правку пустой нельзя.
    */
-  const idleSets = allSetsIdle(doc, out.ops);
+  const idleSets = allSetsIdle(doc, out.ops, engine);
   if ((docSame || idleSets) && geoSame) {
     out.nothingChanged = true;
     if (idleSets) {
@@ -8148,7 +8841,7 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
       return null;
     };
     const idle = out.ops.filter((o) => o && o.op === 'set'
-      && !sameAsNow(currentValue(nodeOf(doc, o.id), String(o.path)), o.value, String(o.path))
+      && !sameAsNow(currentValue(nodeOf(doc, o.id), String(o.path)), o.value, String(o.path), doc, engine)
       && idleFact(o));
     if (idle.length) {
       out.geometryUnchanged = idle.map((o) => ({ id: o.id, path: String(o.path) }));

@@ -18,6 +18,15 @@
  *     canMakeComponent / makeComponentOps / instanceOps / detachInstanceOps —
  *       возвращают ОПЕРАЦИИ, документ не меняют: оболочка применяет их транзакцией;
  *     solve(doc).expanded — раскрытые узлы экземпляров (в doc.nodes их нет).
+ *   Шкалы как ссылки (круг 20, SPEC §6):
+ *     layout.gap, layout.padding.* и radius хранятся числом ЛИБО ссылкой на шаг
+ *       шкалы — 'spacing.<i>' / 'radii.<i>'. Число даёт ТОЛЬКО resolveScale
+ *       (обёртки resolveLayout, resolveRadius); читать поля как числа нельзя.
+ *     ensureScaleRefs(doc) — МИГРАЦИЯ: точные совпадения со шкалой → ссылки,
+ *       идемпотентно, без мутации входа; звать рядом с ensureLibrary.
+ *     keepFieldForm — правило «то же самое» (§6.4), его зеркалит мозг.
+ *     insertScaleStep / rewriteScaleRefsOps / scaleRefsIn — правки шкалы со
+ *       сдвигом ссылок; возвращают операции, отменяются как всё остальное.
  *   resetMeasureCache, measureEpoch, onMeasureEpoch — кеш измерений текста:
  *     ширины живут между вызовами solve, и без сброса первая раскладка, померенная
  *     системным шрифтом, залипает навсегда. Модуль сбрасывает кеш сам по событиям
@@ -217,6 +226,260 @@ const DEFAULT_LAYOUT = Object.freeze({
   mode: 'none', gap: 0, padding: { t: 0, r: 0, b: 0, l: 0 },
   align: 'start', justify: 'start', wrap: false
 });
+const PAD_KEYS = ['t', 'r', 'b', 'l'];
+
+/* ------------------------------------------------------------------ *
+ * 2a. Шкалы как ссылки (круг 20, SPEC §6)
+ *
+ * Отступ и скругление в документе — либо число («мимо шкалы»), либо ССЫЛКА
+ * на шаг шкалы: строка 'spacing.<i>' для layout.gap и layout.padding.{t,r,b,l},
+ * 'radii.<i>' для radius (и его покорнерного массива), где i — позиция в
+ * tokens.spacing / tokens.radii. Индекс, а не имя и не значение: индексы
+ * устойчивы при самой частой правке шкалы — смене значений шагов (§6.1), и
+ * ровно ради этого всё делается: `setToken spacing.6 = 20` переверстывает
+ * всё, что ссылается на шестой шаг, без единой правки узлов.
+ *
+ * Читать layout.gap или radius как число напрямую больше нельзя нигде (§6.3):
+ * решатель, валидатор, сцена, экспорт, мозг и оболочка идут через resolveScale
+ * либо его обёртки resolveLayout / resolveRadius. Тест на демо-документе, где
+ * все отступы и скругления — ссылки, ловит любое прямое чтение.
+ *
+ * Живость ссылки (есть ли такой шаг) — свойство ДОКУМЕНТА, а не узла: шкалу
+ * можно укоротить одним setToken, и ссылки умрут без правки узлов. Поэтому
+ * схема (checkNode) проверяет только ФОРМУ ссылки и её шкалу, живость
+ * проверяет операция, которая ссылку пишет (create/set → bad-node), а всё,
+ * что уже лежит в документе — из файла или после укорочения шкалы, — ловит
+ * валидатор кодом dead-scale-ref (error). Так узел с мёртвой ссылкой остаётся
+ * правимым (заливка, имя), а решатель считает мёртвый шаг нулём.
+ * ------------------------------------------------------------------ */
+
+/** Шкалы, на шаги которых можно ссылаться, и их имена для человека (§6.7). */
+const SCALE_NAMES = Object.freeze({ spacing: 'шкала отступов', radii: 'шкала скруглений' });
+/** Те же имена в винительном и предложном падежах — для сообщений об ошибках. */
+const SCALE_CASES = Object.freeze({
+  spacing: { acc: 'шкалу отступов', loc: 'шкале отступов' },
+  radii: { acc: 'шкалу скруглений', loc: 'шкале скруглений' }
+});
+/** Форма ссылки: имя шкалы, точка, неотрицательное целое без ведущих нулей. */
+const SCALE_REF_RE = /^(spacing|radii)\.(0|[1-9]\d*)$/;
+
+/**
+ * Разбор ссылки на шаг шкалы.
+ * @param {any} value
+ * @returns {{scale:string, index:number}|null} null — это не ссылка
+ */
+function parseScaleRef(value) {
+  if (typeof value !== 'string') return null;
+  // разных строк-ссылок в документе десятки, а разборов на solve — тысячи
+  // (по пять на каждый фрейм): результат разбора помним, регулярку не гоняем
+  let hit = refParseCache.get(value);
+  if (hit === undefined) {
+    const m = SCALE_REF_RE.exec(value);
+    hit = m ? { scale: m[1], index: Number(m[2]) } : null;
+    if (refParseCache.size >= REF_CACHE_LIMIT) refParseCache.clear();
+    refParseCache.set(value, hit);
+  }
+  // наружу — своя копия: соседи вправе менять её, кеш от этого не должен портиться
+  return hit && { scale: hit.scale, index: hit.index };
+}
+/** Кеш разбора ссылок: строка → {scale,index} | null. Чужие строки (мусор) сюда тоже попадают, поэтому предел. */
+const refParseCache = new Map();
+const REF_CACHE_LIMIT = 512;
+
+/** Ссылка ли это (при заданной шкале — именно на неё). @returns {boolean} */
+function isScaleRef(value, scale) {
+  const ref = parseScaleRef(value);
+  return !!ref && (scale === undefined || ref.scale === scale);
+}
+
+/** Строка ссылки: scaleRef('spacing', 6) → 'spacing.6'. @returns {string} */
+function scaleRef(scale, index) {
+  return scale + '.' + index;
+}
+
+/** Шаги шкалы документа; без своей шкалы — умолчания. @returns {number[]} */
+function scaleSteps(doc, scale) {
+  const own = doc && doc.tokens && doc.tokens[scale];
+  return Array.isArray(own) ? own : (DEFAULT_TOKENS[scale] || []);
+}
+
+/**
+ * ЕДИНСТВЕННАЯ точка, где ссылка становится числом (§6.3).
+ * Число возвращается как есть (это значение «мимо шкалы»); ссылка — значением
+ * шага; всё остальное — undefined: мёртвая ссылка (шага с таким индексом нет
+ * или в нём не число), ссылка не в ту шкалу, мусор. Вызывающий решает, чем
+ * заменить undefined: решатель и сцена — нулём, валидатор — ошибкой
+ * dead-scale-ref, мозг — предупреждением человеку.
+ * @param {object} doc документ (нужны tokens; без них — умолчания)
+ * @param {any} value число либо 'spacing.<i>' / 'radii.<i>'
+ * @param {string} [scale] какая шкала здесь ожидается ('spacing' | 'radii');
+ *   ссылка в другую шкалу — undefined. Без аргумента шкала берётся из ссылки
+ * @returns {number|undefined}
+ */
+function resolveScale(doc, value, scale) {
+  if (isNum(value)) return value;
+  const ref = parseScaleRef(value);
+  if (!ref || (scale !== undefined && ref.scale !== scale)) return undefined;
+  const v = scaleSteps(doc, ref.scale)[ref.index];
+  return isNum(v) ? v : undefined;
+}
+
+/**
+ * Индекс шага, ТОЧНО равного числу, или -1 (при дублях — первый). Этим
+ * миграция решает, что становится ссылкой (§6.5), а мозг — совпало ли число
+ * от модели с шагом шкалы (§6.6).
+ * @returns {number}
+ */
+function scaleIndexOf(doc, scale, value) {
+  if (!isNum(value)) return -1;
+  return scaleSteps(doc, scale).indexOf(value);
+}
+
+/** Отступ или зазор ЧИСЛОМ в границах схемы: ссылка разрешается, мёртвая — 0. */
+const scaleNum = (doc, v, scale) => numIn(resolveScale(doc, v, scale), 0, MAX_SIZE, 0);
+
+/**
+ * Раскладка узла В ЧИСЛАХ — для решателя, валидатора, сцены и всего, что
+ * считает геометрию. Та же форма, что у normalizeLayout, но gap и padding.*
+ * здесь всегда числа. Хранить результат в документе нельзя: он теряет ссылки.
+ * @param {object} doc
+ * @param {any} layout сырое поле layout узла
+ * @returns {{mode:string,gap:number,padding:{t:number,r:number,b:number,l:number},align:string,justify:string,wrap:boolean}}
+ */
+function resolveLayout(doc, layout) {
+  const L = normalizeLayout(layout);
+  const p = L.padding;
+  return {
+    ...L,
+    gap: scaleNum(doc, L.gap, 'spacing'),
+    padding: {
+      t: scaleNum(doc, p.t, 'spacing'), r: scaleNum(doc, p.r, 'spacing'),
+      b: scaleNum(doc, p.b, 'spacing'), l: scaleNum(doc, p.l, 'spacing')
+    }
+  };
+}
+
+/**
+ * Скругление ЧИСЛОМ: ссылка разрешается, мёртвая ссылка и мусор — 0.
+ * Покорнерный массив схема принимает, но рисуется он как и прежде — нулём:
+ * этот круг форму скругления не меняет, только его запись.
+ * @returns {number}
+ */
+function resolveRadius(doc, radius) {
+  return numIn(resolveScale(doc, radius, 'radii'), 0, MAX_SIZE, 0);
+}
+
+/**
+ * Проверка поля, живущего в шкале: число в границах либо ссылка в НУЖНУЮ
+ * шкалу. Живость ссылки здесь не проверяется — см. deadScaleRefs.
+ * @returns {string|null} причина или null
+ */
+function checkScaleValue(v, scale, what) {
+  if (isNum(v)) return v < 0 || v > MAX_SIZE ? `${what} вне диапазона` : null;
+  const ref = parseScaleRef(v);
+  if (!ref) return `${what} вне диапазона`;
+  if (ref.scale !== scale) return `${what}: ссылка «${v}» ведёт не в ${SCALE_CASES[scale].acc} (нужна ${scale}.<шаг>)`;
+  return null;
+}
+
+/** Скругление по схеме: число, ссылка на radii либо массив таких. @returns {string|null} */
+function checkRadiusValue(v) {
+  if (v === undefined) return null;
+  if (Array.isArray(v)) {
+    for (const e of v) {
+      const err = checkScaleValue(e, 'radii', 'radius');
+      if (err) return err;
+    }
+    return null;
+  }
+  return checkScaleValue(v, 'radii', 'radius');
+}
+
+/**
+ * Ссылки на шкалы в полях ОДНОГО узла: [{path, value, scale}], где scale —
+ * шкала, которую это поле ожидает. Числа пропускаются. Единственный перечень
+ * «какие поля живут в шкалах и в каких» — им пользуются валидатор
+ * (dead-scale-ref), проверка операций и правки шкалы со сдвигом
+ * (scaleRefsIn → insertScaleStep); миграция знает те же поля через
+ * layoutToRefs / radiusToRefs.
+ * @returns {Array<{path:string, value:string, scale:string}>}
+ */
+function nodeScaleRefs(node) {
+  const out = [];
+  const take = (path, v, scale) => { if (parseScaleRef(v)) out.push({ path, value: v, scale }); };
+  if (!node || typeof node !== 'object') return out;
+  const l = node.layout;
+  if (l && typeof l === 'object') {
+    take('layout.gap', l.gap, 'spacing');
+    const p = l.padding;
+    if (p && typeof p === 'object' && !Array.isArray(p)) {
+      for (const k of PAD_KEYS) take('layout.padding.' + k, p[k], 'spacing');
+    } else if (Array.isArray(p)) {
+      p.forEach((v, i) => take('layout.padding.' + i, v, 'spacing'));
+    } else take('layout.padding', p, 'spacing');
+  }
+  if (Array.isArray(node.radius)) node.radius.forEach((v, i) => take('radius.' + i, v, 'radii'));
+  else take('radius', node.radius, 'radii');
+  return out;
+}
+
+/**
+ * Мёртвые ссылки узла: те, что не разрешаются в число для своей шкалы.
+ * @param {object} doc @param {object} node
+ * @param {string} [under] только пути, равные этому или лежащие под ним ('layout.padding')
+ * @returns {Array<{path:string, value:string, scale:string, reason:string}>}
+ */
+function deadScaleRefs(doc, node, under) {
+  const out = [];
+  for (const r of nodeScaleRefs(node)) {
+    if (under !== undefined && r.path !== under && r.path.indexOf(under + '.') !== 0) continue;
+    if (resolveScale(doc, r.value, r.scale) !== undefined) continue;
+    const ref = parseScaleRef(r.value);
+    const steps = scaleSteps(doc, r.scale);
+    const reason = ref.scale !== r.scale
+      ? `«${r.value}» — это не ${SCALE_NAMES[r.scale]}`
+      : `шага «${r.value}» нет — в ${SCALE_CASES[r.scale].loc} ${steps.length} ${plural(steps.length, 'шаг', 'шага', 'шагов')}`
+        + (steps.length ? ` (0..${steps.length - 1})` : '');
+    out.push({ ...r, reason });
+  }
+  return out;
+}
+
+/** Склонение по числу: plural(3, 'шаг', 'шага', 'шагов') → 'шага'. */
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+
+/**
+ * Отступы из краткой записи в {t,r,b,l} БЕЗ приведения значений: число или
+ * ссылка — на все четыре стороны, [v,h], [t,r,b,l], [v] и объект. Не разобрать —
+ * null. Одна функция на normalizeLayout и keepFieldForm: обе должны понимать
+ * краткую запись одинаково.
+ * @returns {{t:any,r:any,b:any,l:any}|null}
+ */
+function paddingShorthand(p) {
+  if (isNum(p) || parseScaleRef(p)) return { t: p, r: p, b: p, l: p };
+  if (Array.isArray(p)) {
+    if (p.length === 2) return { t: p[0], r: p[1], b: p[0], l: p[1] };
+    if (p.length === 4) return { t: p[0], r: p[1], b: p[2], l: p[3] };
+    if (p.length === 1) return { t: p[0], r: p[0], b: p[0], l: p[0] };
+    return null;
+  }
+  if (p && typeof p === 'object') return { t: p.t, r: p.r, b: p.b, l: p.l };
+  return null;
+}
+
+/**
+ * Отступ или зазор в ФОРМЕ ХРАНЕНИЯ: ссылка на шаг (любой шкалы — не в ту
+ * шкалу отклонит checkNode, и человек прочтёт причину, а не увидит молчаливый
+ * ноль) остаётся ссылкой; число зажимается в границы схемы; мусор → 0.
+ */
+const spacingField = (v) => (parseScaleRef(v) ? v : numIn(v, 0, MAX_SIZE, 0));
 
 /** @returns {{w:{mode:string,value?:number},h:{mode:string,value?:number}}} */
 function sizeSpec(w, h) {
@@ -230,24 +493,21 @@ function sizeSpec(w, h) {
   return { w: one(w), h: one(h) };
 }
 
+/**
+ * Раскладка в ФОРМЕ ХРАНЕНИЯ: краткие записи раскрыты, режимы проверены,
+ * числа зажаты в границы схемы. Круг 20 (SPEC §6.1): gap и padding.* здесь
+ * могут быть ссылками на шаг шкалы — они остаются строками как есть. Числа
+ * для геометрии даёт resolveLayout, и только он.
+ */
 function normalizeLayout(l) {
   const src = l && typeof l === 'object' ? l : {};
-  const p = src.padding;
-  let padding = { t: 0, r: 0, b: 0, l: 0 };
-  if (isNum(p)) padding = { t: p, r: p, b: p, l: p };
-  else if (Array.isArray(p)) {
-    if (p.length === 2) padding = { t: p[0], r: p[1], b: p[0], l: p[1] };
-    else if (p.length === 4) padding = { t: p[0], r: p[1], b: p[2], l: p[3] };
-    else if (p.length === 1) padding = { t: p[0], r: p[0], b: p[0], l: p[0] };
-  } else if (p && typeof p === 'object') {
-    padding = { t: p.t, r: p.r, b: p.b, l: p.l };
-  }
+  const padding = paddingShorthand(src.padding) || { t: 0, r: 0, b: 0, l: 0 };
   // отступы и зазор приводим к диапазону схемы (0..MAX_SIZE): NaN и 1e308
   // здесь — вторая дверь в нечисловую геометрию, её закрываем на входе
-  for (const k of ['t', 'r', 'b', 'l']) padding[k] = numIn(padding[k], 0, MAX_SIZE, 0);
+  for (const k of PAD_KEYS) padding[k] = spacingField(padding[k]);
   return {
     mode: LAYOUT_MODES.has(src.mode) ? src.mode : 'none',
-    gap: numIn(src.gap, 0, MAX_SIZE, 0),
+    gap: spacingField(src.gap),
     padding,
     align: ALIGNS.has(src.align) ? src.align : 'start',
     justify: JUSTIFIES.has(src.justify) ? src.justify : 'start',
@@ -295,19 +555,91 @@ function bareWrapper(v, keys) {
  * (то же имя токена), поле остаётся ровно таким, каким жило, — байт в байт.
  * Настоящая смена значения идёт как раньше, поэтому инверсия любой операции
  * по-прежнему возвращает исходное значение в исходной форме.
- * @returns {any} значение, которое стоит записать
+ *
+ * Круг 20 (SPEC §6.4) — то же правило для шкал, и оно намеренно НЕсимметрично:
+ *   • число, РАВНОЕ значению текущей ссылки (`set layout.gap = 16` при
+ *     'spacing.6' = 16), — правка тем же значением: остаётся ссылка, байт в байт;
+ *   • ссылка поверх числа (`set layout.gap = 'spacing.6'` при 16) — настоящая
+ *     правка: число становится ссылкой, это смена смысла при той же картинке;
+ *   • ссылка поверх ссылки пишется буквально, даже если шаги равны по значению.
+ * Действует на путях radius, layout, layout.gap, layout.padding,
+ * layout.padding.{t,r,b,l} (и покорнерном массиве radius) — для целого
+ * объекта layout / padding правило применяется к каждому полю в отдельности.
+ * Мозг зеркалит именно эту функцию (sameAsNow): любое расхождение выходит
+ * человеку ложной строкой «правка ничего не меняет».
+ *
+ * @param {object} node узел ДО правки
+ * @param {string} path путь, как в операции set
+ * @param {any} value новое значение
+ * @param {object} [doc] документ — нужен, чтобы разрешить ссылку в число
+ * @returns {any} значение, которое стоит записать по этому пути
  */
-function keepFieldForm(node, field, value) {
-  const keys = WRAPPED_FIELDS[field];
-  if (!keys || value === undefined) return value;
-  const cur = node[field];
-  const a = wrappedName(cur, keys);
-  if (a === undefined || a !== wrappedName(value, keys)) return value;
-  // строка поверх объекта: объект остаётся (соседние stroke.width, style.fontSize целы)
-  if (typeof value === 'string' && cur && typeof cur === 'object') return cur;
-  // объект поверх строки: только если объект — голая обёртка и сверх имени ничего не несёт
-  if (typeof cur === 'string' && bareWrapper(value, keys)) return cur;
+function keepFieldForm(node, path, value, doc) {
+  if (value === undefined || !node) return value;
+  const parts = String(path).split('.');
+  const field = parts[0];
+  if (parts.length === 1) {
+    const keys = WRAPPED_FIELDS[field];
+    if (keys) {
+      const cur = node[field];
+      const a = wrappedName(cur, keys);
+      if (a === undefined || a !== wrappedName(value, keys)) return value;
+      // строка поверх объекта: объект остаётся (соседние stroke.width, style.fontSize целы)
+      if (typeof value === 'string' && cur && typeof cur === 'object') return cur;
+      // объект поверх строки: только если объект — голая обёртка и сверх имени ничего не несёт
+      if (typeof cur === 'string' && bareWrapper(value, keys)) return cur;
+      return value;
+    }
+    if (field === 'radius') return keepRadiusForm(doc, node.radius, value);
+    if (field === 'layout') return keepLayoutForm(doc, node.layout, value);
+    return value;
+  }
+  if (field === 'layout' && node.layout && typeof node.layout === 'object') {
+    const cur = node.layout;
+    if (parts.length === 2 && parts[1] === 'gap') return keepScaleForm(doc, cur.gap, value, 'spacing');
+    if (parts[1] === 'padding') {
+      const pad = cur.padding && typeof cur.padding === 'object' && !Array.isArray(cur.padding) ? cur.padding : {};
+      if (parts.length === 2) return keepPaddingForm(doc, pad, value);
+      if (parts.length === 3 && PAD_KEYS.indexOf(parts[2]) >= 0) return keepScaleForm(doc, pad[parts[2]], value, 'spacing');
+    }
+  }
   return value;
+}
+
+/** Число, равное значению текущей ссылки, — «то же самое»: остаётся ссылка. */
+function keepScaleForm(doc, cur, value, scale) {
+  if (!isNum(value) || !isScaleRef(cur, scale)) return value;
+  return resolveScale(doc, cur, scale) === value ? cur : value;
+}
+
+/** То же для скругления, включая покорнерный массив (поэлементно при равной длине). */
+function keepRadiusForm(doc, cur, value) {
+  if (Array.isArray(value)) {
+    if (!Array.isArray(cur) || cur.length !== value.length) return value;
+    const out = value.map((v, i) => keepScaleForm(doc, cur[i], v, 'radii'));
+    return out.every((v, i) => v === cur[i]) ? cur : out;
+  }
+  return keepScaleForm(doc, cur, value, 'radii');
+}
+
+/** Отступы: краткая запись раскрывается, каждая сторона решается отдельно. */
+function keepPaddingForm(doc, curPad, value) {
+  const box = paddingShorthand(value);
+  if (!box) return value;
+  const cur = curPad && typeof curPad === 'object' ? curPad : {};
+  const out = {};
+  for (const k of PAD_KEYS) if (box[k] !== undefined) out[k] = keepScaleForm(doc, cur[k], box[k], 'spacing');
+  return out;
+}
+
+/** Целый объект layout: gap и padding — по правилу шкал, остальное как есть. */
+function keepLayoutForm(doc, cur, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  if (!cur || typeof cur !== 'object') return value;
+  const out = { ...value };
+  if (value.gap !== undefined) out.gap = keepScaleForm(doc, cur.gap, value.gap, 'spacing');
+  if (value.padding !== undefined) out.padding = keepPaddingForm(doc, cur.padding, value.padding);
+  return out;
 }
 
 /**
@@ -362,14 +694,22 @@ function checkNode(node, doc) {
     if (l !== undefined) {
       if (!l || typeof l !== 'object') return 'layout должен быть объектом';
       if (!LAYOUT_MODES.has(l.mode)) return `layout.mode: «${l.mode}»`;
-      if (l.gap !== undefined && (!isNum(l.gap) || l.gap < 0 || l.gap > MAX_SIZE)) return 'layout.gap вне диапазона';
+      /* Круг 20 (SPEC §6.1): зазор и отступы — число в границах ЛИБО ссылка на
+         шаг шкалы отступов ('spacing.<i>'). Ссылка не в ту шкалу отклоняется
+         здесь; есть ли такой шаг — проверяет операция (см. deadScaleRefs). */
+      if (l.gap !== undefined) {
+        const err = checkScaleValue(l.gap, 'spacing', 'layout.gap');
+        if (err) return err;
+      }
       if (l.align !== undefined && !ALIGNS.has(l.align)) return `layout.align: «${l.align}»`;
       if (l.justify !== undefined && !JUSTIFIES.has(l.justify)) return `layout.justify: «${l.justify}»`;
       if (l.padding !== undefined) {
         if (!l.padding || typeof l.padding !== 'object') return 'layout.padding должен быть объектом';
-        for (const k of ['t', 'r', 'b', 'l']) {
+        for (const k of PAD_KEYS) {
           const v = l.padding[k];
-          if (v !== undefined && (!isNum(v) || v < 0 || v > MAX_SIZE)) return `layout.padding.${k} вне диапазона`;
+          if (v === undefined) continue;
+          const err = checkScaleValue(v, 'spacing', `layout.padding.${k}`);
+          if (err) return err;
         }
       }
     }
@@ -391,8 +731,9 @@ function checkNode(node, doc) {
     }
     if (node.align !== undefined && !['left', 'center', 'right'].includes(node.align)) return 'text.align';
   }
-  if (node.radius !== undefined && !isNum(node.radius) && !Array.isArray(node.radius)) return 'radius';
-  if (isNum(node.radius) && (node.radius < 0 || node.radius > MAX_SIZE)) return 'radius вне диапазона';
+  // круг 20 (SPEC §6.1): скругление — число, ссылка 'radii.<i>' или массив таких
+  const radErr = checkRadiusValue(node.radius);
+  if (radErr) return radErr;
   if (node.pos !== undefined) {
     if (!node.pos || !isNum(node.pos.x) || !isNum(node.pos.y)) return 'pos: нужны числа x,y';
     // без верхнего предела pos.x = 1e308 превращает геометрию в Infinity — тот же
@@ -851,8 +1192,9 @@ function libraryTemplate(doc) {
   return {
     type: 'page', id: uid('lib'), name: 'Библиотека', role: LIBRARY_ROLE,
     parent: doc.root, children: [], pos: libraryPlace(doc),
-    // колонкой, а не по pos: мастера не должны наезжать друг на друга
-    layout: normalizeLayout({ mode: 'column', gap: 24, align: 'start' })
+    // колонкой, а не по pos: мастера не должны наезжать друг на друга;
+    // круг 20: зазор — ссылкой на шаг шкалы, как всё в документе
+    layout: layoutToRefs(doc, { mode: 'column', gap: 24, align: 'start' })
   };
 }
 
@@ -1293,6 +1635,15 @@ function applyOne(draft, op) {
       }
       const err = checkNode(node, draft);
       if (err) return opErr('bad-node', `create: ${err}`);
+      /* Круг 20 (SPEC §6.1): ссылка на шаг, которого нет в шкале, операцией
+         не проходит — как неизвестный пропс в круге 19. Инверсия удаления
+         (create с exact) восстанавливает узел таким, каким он был, даже если
+         шкалу успели укоротить: об этом скажет валидатор, а отмена не должна
+         отказывать. */
+      if (!op.exact) {
+        const dead = deadScaleRefs(draft, node);
+        if (dead.length) return opErr('bad-node', `create: ${dead[0].path}: ${dead[0].reason}`);
+      }
 
       // заранее перечисленные дети: проверяем всё до единой записи в черновик
       const kids = Array.isArray(node.children) ? node.children.slice() : [];
@@ -1358,8 +1709,9 @@ function applyOne(draft, op) {
       const unsafe = parts.find((p) => UNSAFE_KEYS.has(p));
       if (unsafe) return opErr('protected-path', `set: путь «${unsafe}» защищён`);
       // круг 16, п.1: строка поверх объекта-обёртки (style, stroke, fill, color) не
-      // должна плодить второй вид того же значения — см. keepFieldForm
-      const value = parts.length === 1 && !op.exact ? keepFieldForm(node, parts[0], op.value) : op.value;
+      // должна плодить второй вид того же значения — см. keepFieldForm; круг 20:
+      // там же число, равное значению текущей ссылки на шаг шкалы, оставляет ссылку
+      const value = !op.exact ? keepFieldForm(node, path, op.value, draft) : op.value;
       let next = setPath(node, path, value);
       // круг 16, п.3: раскладку нормализуем, только если поле осталось в узле.
       // Раньше сюда попадала и инверсия «удалить ключ layout» ({op:'set',path:'layout'}
@@ -1370,6 +1722,15 @@ function applyOne(draft, op) {
       }
       const err = checkNode(next, draft);
       if (err) return opErr('bad-node', `set ${path}: ${err}`);
+      /* Круг 20 (SPEC §6.1): ссылка на шаг, которого в шкале нет, операцией не
+         проходит. Проверяем только то, что пишет ЭТА операция (путь и всё под
+         ним): мёртвая ссылка, уже лежащая в соседнем поле (файл, укороченная
+         шкала), не должна запирать узел от правки заливки или имени — о ней
+         скажет валидатор. Инверсия (exact) пишет то, что было, без проверки. */
+      if (!op.exact && (parts[0] === 'layout' || parts[0] === 'radius')) {
+        const dead = deadScaleRefs(draft, next, path);
+        if (dead.length) return opErr('bad-node', `set ${path}: ${dead[0].reason}`);
+      }
       draft.nodes[op.id] = next;
       return null;
     }
@@ -1546,7 +1907,11 @@ function invertOne(doc, op) {
         // дети будут воссозданы своими операциями — создаём узел пустым
         const node2 = { ...n, children: n.children ? [] : undefined };
         if (node2.children === undefined) delete node2.children;
-        out.push(ops.create(node2, index));
+        const back = ops.create(node2, index);
+        // круг 20: отмена возвращает узел ровно таким, каким он был, — и с
+        // ссылкой на шаг, которого в шкале уже может не быть (см. applyOne/create)
+        back.exact = true;
+        out.push(back);
       }
       return out;
     }
@@ -1615,6 +1980,178 @@ function invertOps(doc, opList) {
     for (let j = 0; j < chunk.length; j++) out.push(chunk[j]);
   }
   return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * 4a. Шкалы: миграция на ссылки и правки шкалы со сдвигом (круг 20, SPEC §6.5)
+ *
+ * Всё здесь возвращает ОПЕРАЦИИ или применяет их через applyOps: документ не
+ * мутируется, отмена — как у любой транзакции, новых операций нет.
+ * ------------------------------------------------------------------ */
+
+const sameJSON = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Число, ТОЧНО равное шагу шкалы, → ссылка на него; иначе значение как есть. */
+function toScaleRef(doc, scale, v) {
+  if (!isNum(v)) return v;
+  const i = scaleIndexOf(doc, scale, v);
+  return i < 0 ? v : scaleRef(scale, i);
+}
+
+/** Раскладка в форме хранения, где все точные совпадения со шкалой — ссылки. */
+function layoutToRefs(doc, layout) {
+  const L = normalizeLayout(layout);
+  const p = L.padding;
+  return {
+    ...L,
+    gap: toScaleRef(doc, 'spacing', L.gap),
+    padding: {
+      t: toScaleRef(doc, 'spacing', p.t), r: toScaleRef(doc, 'spacing', p.r),
+      b: toScaleRef(doc, 'spacing', p.b), l: toScaleRef(doc, 'spacing', p.l)
+    }
+  };
+}
+
+/** Скругление (или покорнерный массив), где точные совпадения — ссылки. */
+function radiusToRefs(doc, radius) {
+  if (Array.isArray(radius)) return radius.map((v) => toScaleRef(doc, 'radii', v));
+  return toScaleRef(doc, 'radii', radius);
+}
+
+/**
+ * Операции миграции (SPEC §6.5): число, точно совпадающее с шагом шкалы,
+ * становится ссылкой на этот шаг; число мимо шкалы остаётся числом; ссылки не
+ * трогаются. Пустой массив — документ уже целиком на ссылках (идемпотентность).
+ * По операции на КАЖДОЕ переводимое поле (`set layout.gap`, `set
+ * layout.padding.t`, `set radius`, `set radius.<k>`), а не на узел целиком:
+ * так миграция пишет ровно то, что переводит, и не спотыкается о соседнее
+ * поле с мёртвой ссылкой (её место — в валидаторе, а не в отказе мигрировать).
+ * Узлы без layout его не получают: отсутствие раскладки равно умолчанию, а
+ * миграция не должна менять форму документа сверх необходимого.
+ * @param {object} doc
+ * @returns {object[]}
+ */
+function ensureScaleRefsOps(doc) {
+  const list = [];
+  if (!doc || !doc.nodes) return list;
+  for (const id of Object.keys(doc.nodes)) {
+    const n = doc.nodes[id];
+    if (!n || typeof n !== 'object') continue;
+    const l = n.layout;
+    if (l && typeof l === 'object' && CONTAINER_TYPES.has(n.type)) {
+      const gap = toScaleRef(doc, 'spacing', l.gap);
+      if (gap !== l.gap) list.push(ops.set(id, 'layout.gap', gap));
+      const p = l.padding;
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        for (const k of PAD_KEYS) {
+          const v = toScaleRef(doc, 'spacing', p[k]);
+          if (v !== p[k]) list.push(ops.set(id, 'layout.padding.' + k, v));
+        }
+      } else if (p !== undefined) {
+        // краткая запись (число, массив) — только у страницы, фреймам её раскрывает схема
+        const box = paddingShorthand(p);
+        const next = box && { t: toScaleRef(doc, 'spacing', box.t), r: toScaleRef(doc, 'spacing', box.r), b: toScaleRef(doc, 'spacing', box.b), l: toScaleRef(doc, 'spacing', box.l) };
+        if (next && !sameJSON(next, p)) list.push(ops.set(id, 'layout.padding', next));
+      }
+    }
+    if (Array.isArray(n.radius)) {
+      n.radius.forEach((v, k) => {
+        const next = toScaleRef(doc, 'radii', v);
+        if (next !== v) list.push(ops.set(id, 'radius.' + k, next));
+      });
+    } else if (n.radius !== undefined) {
+      const next = toScaleRef(doc, 'radii', n.radius);
+      if (next !== n.radius) list.push(ops.set(id, 'radius', next));
+    }
+  }
+  return list;
+}
+
+/**
+ * МИГРАЦИЯ (SPEC §6.5): один вызов, идемпотентный, вход не мутируется.
+ * Возвращает ТОТ ЖЕ документ, если переводить нечего. Оболочка зовёт её там
+ * же, где ensureLibrary — после загрузки из `db` и после импорта JSON.
+ * Демо-документ createDoc() уже на ссылках и в миграции не нуждается.
+ * @param {object} doc
+ * @returns {object} Doc
+ */
+function ensureScaleRefs(doc) {
+  const list = ensureScaleRefsOps(doc);
+  if (!list.length) return doc;
+  const res = applyOps(doc, list);
+  if (res.error) {
+    logOnce('ensureScaleRefs:' + res.error.code, `ensureScaleRefs: отступы не перевести на шкалу — ${res.error.message}`);
+    return doc;
+  }
+  return res.doc;
+}
+
+/**
+ * Все ссылки на шаги шкал в документе — где какая лежит. Заготовка для любой
+ * правки шкалы «со сдвигом»: вставка шага (insertScaleStep), удаление, смена
+ * лестницы целиком. Порядок — порядок узлов в doc.nodes, внутри узла — как в
+ * nodeScaleRefs.
+ * @param {object} doc
+ * @param {string} [scale] только эта шкала ('spacing' | 'radii')
+ * @returns {Array<{id:string, path:string, scale:string, index:number, ref:string}>}
+ */
+function scaleRefsIn(doc, scale) {
+  const out = [];
+  if (!doc || !doc.nodes) return out;
+  for (const id of Object.keys(doc.nodes)) {
+    for (const r of nodeScaleRefs(doc.nodes[id])) {
+      const ref = parseScaleRef(r.value);
+      // ссылка не в ту шкалу — не ссылка этой шкалы: её сдвигать нельзя, о ней скажет валидатор
+      if (ref.scale !== r.scale) continue;
+      if (scale !== undefined && ref.scale !== scale) continue;
+      out.push({ id, path: r.path, scale: ref.scale, index: ref.index, ref: r.value });
+    }
+  }
+  return out;
+}
+
+/**
+ * Операции, переписывающие ссылки одной шкалы по правилу index → mapIndex(index).
+ * Правило, вернувшее не целое ≥ 0, оставляет ссылку как есть. Сама шкала здесь
+ * не меняется — её меняет вызывающий (setToken), и ПЕРЕД этими операциями:
+ * новые индексы должны существовать, когда set их проверяет.
+ * @param {object} doc
+ * @param {string} scale
+ * @param {(index:number)=>number} mapIndex
+ * @returns {object[]}
+ */
+function rewriteScaleRefsOps(doc, scale, mapIndex) {
+  const list = [];
+  for (const r of scaleRefsIn(doc, scale)) {
+    const to = mapIndex(r.index);
+    if (!Number.isInteger(to) || to < 0 || to === r.index) continue;
+    list.push(ops.set(r.id, r.path, scaleRef(scale, to)));
+  }
+  return list;
+}
+
+/**
+ * Вставка шага В СЕРЕДИНУ шкалы (SPEC §6.1): одна транзакция — новая шкала
+ * (setToken) плюс перепись всех ссылок с индексом ≥ index на +1, чтобы каждая
+ * по-прежнему указывала на прежнее значение. Индекс от 0 до длины шкалы
+ * включительно (длина — добавить в конец, ссылки не сдвигаются). Отменяется
+ * как всё остальное через invertOps: сначала возвращаются ссылки, затем шкала.
+ * @param {object} doc
+ * @param {string} scale 'spacing' | 'radii'
+ * @param {number} index куда встаёт новый шаг
+ * @param {number} value значение шага (0..MAX_SIZE)
+ * @returns {object[]} пустой массив, если вход не годится
+ */
+function insertScaleStep(doc, scale, index, value) {
+  if (!doc || !doc.tokens || !SCALE_NAMES[scale]) return [];
+  const steps = scaleSteps(doc, scale);
+  if (!isNum(value) || value < 0 || value > MAX_SIZE) return [];
+  if (!Number.isInteger(index) || index < 0 || index > steps.length) return [];
+  const next = steps.slice();
+  next.splice(index, 0, value);
+  const list = [ops.setToken(scale, next)];
+  for (const op of rewriteScaleRefsOps(doc, scale, (i) => (i >= index ? i + 1 : i))) list.push(op);
+  return list;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1999,7 +2536,10 @@ function flowLayout(ctx, node, boxW, boxH) {
   const key = node.id + '@' + (boxW === null ? '-' : r2(boxW)) + '@' + (boxH === null ? '-' : r2(boxH));
   const hit = ctx.flowCache.get(key);
   if (hit) return hit;
-  const L = normalizeLayout(node.layout);
+  // круг 20 (SPEC §6.3): ссылки на шаги шкалы становятся числами здесь, на входе
+  // решателя, и только через resolveLayout — раскрытые узлы экземпляров идут
+  // тем же путём (мастер на ссылках → экземпляры на ссылках)
+  const L = resolveLayout(ctx.doc, node.layout);
   const pad = L.padding;
   // круг 19: детей берём из карты РАСКРЫТОГО документа — у раскрытого узла
   // экземпляра дети синтетические, в doc.nodes их нет (SPEC §5.6)
@@ -2362,7 +2902,10 @@ function contrastRatio(hexA, hexB) {
 /* Круг 19, п.7 (SPEC §5.8): четыре кода про компоненты. Первые три блокирующие —
    документ с ними нельзя показать как верный; вложенность глубже предела — warn:
    макет при этом рисуется, просто дальше предела не раскрывается. */
-const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info' };
+/* Круг 20 (SPEC §6.1): dead-scale-ref — ссылка на шаг, которого в шкале нет;
+   блокирующая: решатель считает такой шаг нулём, и макет уже не тот, что задуман.
+   off-scale для чисел остаётся как был — мягкое замечание. */
+const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'dead-scale-ref': 'error', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info' };
 const SEV_RANK = { error: 0, warn: 1, info: 2 };
 
 function nearestFill(doc, node) {
@@ -2491,6 +3034,15 @@ function validate(doc, geo, opts) {
   for (const id of ids) {
     const node = doc.nodes[id];
     const rect = geo.rects[id];
+    /* Круг 20 (SPEC §6.1): мёртвые ссылки на шкалу — до всего остального и для
+       любого узла, включая страницу-библиотеку (у неё есть раскладка). Это
+       свойство документа, а не геометрии: шкалу укоротили или файл принёс
+       ссылку в никуда — решатель считает такой шаг нулём, человек видит
+       сжатый макет и должен прочесть, почему. Одна строка на узел. */
+    const dead = deadScaleRefs(doc, node);
+    if (dead.length) {
+      add('dead-scale-ref', id, `«${displayName(doc, node)}»: ${dead.map((d) => `${d.path} → ${d.reason}`).join('; ')}`);
+    }
     if (node.type === 'page') continue;
     if (!rect) {
       /* Круг 16, п.4: узел есть в документе, а геометрии у него нет — решатель
@@ -2542,13 +3094,15 @@ function validate(doc, geo, opts) {
     }
 
     if (node.type === 'frame') {
+      // форма хранения: ссылка на шаг по определению в шкале (inScale пропускает
+      // нечисла), число проверяется на совпадение с шагом — как и раньше
       const L = normalizeLayout(node.layout);
       if (kidsOf(node).length === 0) {
         add('empty-frame', id, `фрейм «${node.name || id}» пуст`);
       }
       const bad = [];
       if (!inScale(L.gap)) bad.push('gap ' + L.gap);
-      for (const k of ['t', 'r', 'b', 'l']) if (!inScale(L.padding[k])) bad.push('padding.' + k + ' ' + L.padding[k]);
+      for (const k of PAD_KEYS) if (!inScale(L.padding[k])) bad.push('padding.' + k + ' ' + L.padding[k]);
       if (bad.length) add('off-scale', id, `вне шкалы отступов: ${bad.join(', ')}`);
       if (L.mode === 'none') {
         const kids = kidsOf(node).map((c) => doc.nodes[c]).filter(Boolean);
@@ -2584,7 +3138,7 @@ function validate(doc, geo, opts) {
            * бокса родителя, и {x:0,y:0} в контейнере с отступом — законное место,
            * а не нарушение. Отдельный код, а не расширение out-of-parent: «выходит
            * за родителя» про такой узел было бы неправдой. */
-          const pad = normalizeLayout(parent.layout).padding;
+          const pad = resolveLayout(doc, parent.layout).padding;
           const eats = [];
           if (pad.l && pr.x + pad.l - rect.x > 0.5) eats.push(`слева на ${r2(pr.x + pad.l - rect.x)}`);
           if (pad.t && pr.y + pad.t - rect.y > 0.5) eats.push(`сверху на ${r2(pr.y + pad.t - rect.y)}`);
@@ -2832,6 +3386,17 @@ function buildDemo(doc) {
   I(tags.id, tagM, { 'текст': '2 задачи' });
   I(mob.id, btnM, { 'текст': 'Открыть день', 'вид': 'surface' });
 
+  /* Круг 20 (SPEC §6.5): демо целиком на ссылках — в документе нет числа 16.
+     Конструкторы выше пишут числа (так читается вёрстка), а здесь каждый
+     отступ, зазор и скругление, совпадающий с шагом шкалы, становится ссылкой
+     на него. Все значения демо лежат в шкалах по построению, поэтому чисел не
+     остаётся (это закреплено тестом); геометрия не меняется байт в байт. */
+  for (const id of Object.keys(nodes)) {
+    const n = nodes[id];
+    if (n.layout) n.layout = layoutToRefs(doc, n.layout);
+    if (n.radius !== undefined) n.radius = radiusToRefs(doc, n.radius);
+  }
+
   return doc;
 }
 
@@ -2973,7 +3538,17 @@ function repairNode(n, doc) {
     }
     n.size = size;
   }
-  if (n.type === 'frame') n.layout = normalizeLayout(n.layout);
+  if (n.type === 'frame') {
+    n.layout = normalizeLayout(n.layout);
+    /* Круг 20: ссылка не в ту шкалу ('radii.3' в зазоре) схему не проходит —
+       вместо неё безопасный ноль, с пометкой. Ссылка на шаг, которого НЕТ,
+       остаётся как есть: это документное свойство, о нём скажет валидатор
+       (dead-scale-ref), а узел останется правимым. */
+    if (checkScaleValue(n.layout.gap, 'spacing', 'layout.gap')) { n.layout.gap = 0; mark('layout.gap'); }
+    for (const k of PAD_KEYS) {
+      if (checkScaleValue(n.layout.padding[k], 'spacing', 'layout.padding')) { n.layout.padding[k] = 0; mark('layout.padding.' + k); }
+    }
+  }
   if (n.pos !== undefined) {
     const p = n.pos && typeof n.pos === 'object' ? n.pos : null;
     const next = nodePos(n);
@@ -2994,11 +3569,9 @@ function repairNode(n, doc) {
     delete n.opacity;   // прозрачность «из ниоткуда» — лучше её отсутствие
     mark('opacity');
   }
-  if (n.radius !== undefined) {
-    const bad = (!isNum(n.radius) && !Array.isArray(n.radius))
-      || (isNum(n.radius) && (n.radius < 0 || n.radius > MAX_SIZE));
-    if (bad) { delete n.radius; mark('radius'); }
-  }
+  // круг 20: число вне границ, мусор, ссылка не в ту шкалу — скругление снимается;
+  // живая или мёртвая ссылка на radii остаётся (мёртвую покажет валидатор)
+  if (n.radius !== undefined && checkRadiusValue(n.radius)) { delete n.radius; mark('radius'); }
   if (n.type === 'text') {
     if (typeof n.characters !== 'string') {
       n.characters = n.characters === undefined || n.characters === null ? '' : String(n.characters);
@@ -4196,7 +4769,7 @@ class Stage {
       const plate = resolveColor(doc, ab.fill);
       const plateEl = svgEl('rect', {
         class: 'imago-ab-plate', x: r2(rect.x), y: r2(rect.y),
-        width: r2(rect.w), height: r2(rect.h), rx: isNum(ab.radius) ? ab.radius : 0,
+        width: r2(rect.w), height: r2(rect.h), rx: resolveRadius(doc, ab.radius),
         fill: plate || '#ffffff',
         stroke: plate ? undefined : 'var(--line,#E2DED6)',
         'stroke-width': plate ? undefined : 1
@@ -4340,7 +4913,7 @@ class Stage {
     attr(e.plate, 'y', r2(rect.y));
     attr(e.plate, 'width', r2(rect.w));
     attr(e.plate, 'height', r2(rect.h));
-    attr(e.plate, 'rx', isNum(ab.radius) ? ab.radius : 0);
+    attr(e.plate, 'rx', resolveRadius(this.doc, ab.radius));
     attr(e.plate, 'fill', plate || '#ffffff');
     attr(e.plate, 'stroke', plate ? undefined : 'var(--line,#E2DED6)');
     attr(e.plate, 'stroke-width', plate ? undefined : 1);
@@ -4368,7 +4941,7 @@ class Stage {
     if (opacity !== 1) c.el.setAttribute('opacity', opacity);
     else c.el.removeAttribute('opacity');
     if (c.clip) {
-      const radius = isNum(node.radius) ? node.radius : 0;
+      const radius = resolveRadius(this.doc, node.radius);
       c.clip.rect.setAttribute('x', r2(rect.x));
       c.clip.rect.setAttribute('y', r2(rect.y));
       c.clip.rect.setAttribute('width', r2(rect.w));
@@ -4447,7 +5020,7 @@ class Stage {
     const fill = resolveColor(doc, node.fill);
     const stroke = node.stroke ? resolveColor(doc, node.stroke.color || node.stroke) : null;
     const strokeW = node.stroke && isNum(node.stroke.width) ? node.stroke.width : 1;
-    const radius = isNum(node.radius) ? node.radius : 0;
+    const radius = resolveRadius(doc, node.radius);
 
     if (node.type === 'ellipse') {
       out.push(svgEl('ellipse', {
@@ -4527,7 +5100,7 @@ class Stage {
       if (node.clip) {
         const x = r2(rect.x + dx);
         const y = r2(rect.y + dy);
-        const radius = isNum(node.radius) ? node.radius : 0;
+        const radius = resolveRadius(doc, node.radius);
         const cid = (this._clipPrefix || 'imago-clip-') + (this._clipSeq++);
         const cp = svgEl('clipPath', { id: cid });
         const cr = svgEl('rect', { x, y, width: r2(rect.w), height: r2(rect.h), rx: radius });
@@ -5503,7 +6076,7 @@ class Stage {
       .filter((id) => id !== node.id)
       .map((id) => this.geo.rects[id])
       .filter(Boolean);
-    const L = normalizeLayout(parent.layout);
+    const L = resolveLayout(doc, parent.layout);
     const gapSet = new Set([L.gap].filter((g) => g > 0));
     const sortedX = sibs.slice().sort((a, b) => a.x - b.x);
     for (let i = 1; i < sortedX.length; i++) {
@@ -5774,7 +6347,7 @@ class Stage {
     this._clearShift();
     const parent = doc.nodes[node.parent];
     const isRoot = !parent || parent.id === doc.root;
-    const L = parent ? normalizeLayout(parent.layout) : DEFAULT_LAYOUT;
+    const L = parent ? resolveLayout(doc, parent.layout) : DEFAULT_LAYOUT;
     const flow = !isRoot && (L.mode === 'row' || L.mode === 'column') && !node.override;
     const total = Math.hypot(dx, dy);
     const main = L.mode === 'row' ? dx : dy;
@@ -6116,7 +6689,7 @@ class Stage {
     const pr = this.geo.rects[parent.id];
     if (!pr) return;
     if (res.kind === 'pos') {
-      const L = normalizeLayout(parent.layout);
+      const L = resolveLayout(doc, parent.layout);
       this._commit([ops.set(d.id, 'pos', {
         x: r2(res.x - pr.x - L.padding.l), y: r2(res.y - pr.y - L.padding.t)
       })], `Сдвинуть «${name}»`);
@@ -6156,7 +6729,7 @@ class Stage {
       const moved = Math.abs(p.x - d.rect0.x) > 0.5 || Math.abs(p.y - d.rect0.y) > 0.5;
       if (moved && parent) {
         const pr = this.geo.rects[parent.id] || { x: 0, y: 0 };
-        const L = normalizeLayout(parent.layout);
+        const L = resolveLayout(doc, parent.layout);
         if (parent.id === doc.root) list.push(ops.set(d.id, 'pos', { x: r2(p.x), y: r2(p.y) }));
         else if (L.mode === 'none') {
           list.push(ops.set(d.id, 'pos', { x: r2(p.x - pr.x - L.padding.l), y: r2(p.y - pr.y - L.padding.t) }));
@@ -6452,7 +7025,7 @@ class Stage {
       const o = node.override;
       return [ops.set(id, 'override', { ...o, x: r2(o.x + dx), y: r2(o.y + dy) })];
     }
-    const L = normalizeLayout(parent.layout);
+    const L = resolveLayout(doc, parent.layout);
     if (L.mode === 'none') {
       const pos = nodePos(node);
       return [ops.set(id, 'pos', { x: r2(pos.x + dx), y: r2(pos.y + dy) })];
@@ -6485,7 +7058,7 @@ class Stage {
         if (flat.children) flat.children = [];
         if (i === 0) {
           flat.name = (flat.name || 'Узел') + ' копия';
-          const L = parent ? normalizeLayout(parent.layout) : DEFAULT_LAYOUT;
+          const L = parent ? resolveLayout(doc, parent.layout) : DEFAULT_LAYOUT;
           if (parent.id === doc.root || L.mode === 'none') {
             const pos = flat.pos || { x: 0, y: 0 };
             flat.pos = { x: r2(pos.x + 16), y: r2(pos.y + 16) };
@@ -6518,5 +7091,14 @@ export {
   /* правки (возвращают ОПЕРАЦИИ, документ не меняют) — */
   canMakeComponent, makeComponentOps, instanceOps, detachInstanceOps,
   /* раскрытие и пределы — */
-  expandInstance, expandDoc, MAX_INSTANCE_DEPTH, PROP_KINDS, LIBRARY_ROLE
+  expandInstance, expandDoc, MAX_INSTANCE_DEPTH, PROP_KINDS, LIBRARY_ROLE,
+  /* Круг 20 (SPEC §6): шкалы как ссылки. Разрешение — ЕДИНСТВЕННЫЙ способ
+     прочитать отступ или скругление числом (мозгу, оболочке, экспорту) — */
+  resolveScale, resolveLayout, resolveRadius,
+  /* ссылка как значение: разбор, проверка, сборка, поиск шага по числу — */
+  parseScaleRef, isScaleRef, scaleRef, scaleIndexOf, scaleSteps, SCALE_NAMES,
+  /* «то же самое» — правило формы поля, которое мозг зеркалит (§6.4) — */
+  keepFieldForm,
+  /* миграция (§6.5), перечень ссылок и правки шкалы со сдвигом (§6.1) — */
+  ensureScaleRefs, ensureScaleRefsOps, scaleRefsIn, rewriteScaleRefsOps, insertScaleStep
 };
