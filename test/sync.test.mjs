@@ -433,3 +433,69 @@ test('sync: extra оболочки пишется в журнал и возвр�
   assert.deepEqual(a2.sync.extra, { chat: ['привет'] });
   await a2.sync.close();
 });
+
+test('sync: open() без сети — журнал есть → view из журнала сразу, status.online=false; сервер вернулся → очередь дошла', async () => {
+  const server = new FakeServer(seedDoc());
+  const storage = memoryStorage();
+  // прошлый сеанс: правка ушла в очередь, журнал записан, вкладка закрыта
+  const a = client(server, 'A', { storage });
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  server.down = true;
+  server.dropAll();
+  await until(() => !a.sync.status.online);
+  a.sync.commit([ops.set('r1', 'name', 'Из журнала')]);
+  await a.sync.close();
+  assert.equal(storage.map.get('p1').pending.length, 1);
+
+  // новый сеанс без сети: сервер молчит и на HTTP, и на сокете
+  const a2 = client(server, 'A', { storage });
+  const v = await a2.sync.open();
+  assert.ok(v, 'view есть без единого ответа сервера');
+  assert.equal(a2.log.changes[0].reason, 'open');
+  assert.equal(a2.log.changes[0].from, 'local');
+  assert.equal(a2.sync.view.nodes.r1.name, 'Из журнала', 'очередь переиграна поверх confirmed');
+  await tick(40);
+  const st = a2.sync.status;
+  assert.equal(st.online, false);
+  assert.equal(st.pending, 1);
+  assert.equal(st.syncing, false, 'без живого сокета «синхронизации» нет');
+  assert.equal(st.error, null, 'локальная копия есть — это не «недоступен без копии»');
+  // сервер вернулся: переподключение по паузе, очередь досылается
+  server.down = false;
+  await until(() => a2.sync.status.online && a2.sync.status.pending === 0, 'дослано после возвращения сервера');
+  assert.equal(server.doc.nodes.r1.name, 'Из журнала');
+  assert.equal(hashDoc(a2.sync.view), hashDoc(server.doc));
+  await a2.sync.close();
+});
+
+test('sync: open() без сети и без журнала — status.error=unreachable, снимок приходит, когда сервер появился', async () => {
+  const server = new FakeServer(seedDoc());
+  server.down = true;
+  const a = client(server, 'A');
+  const opening = a.sync.open();
+  await until(() => a.log.statuses.some((s) => s.error === 'unreachable'), 'статус «недоступен»');
+  assert.equal(a.sync.view, null, 'показывать нечего — и view нет');
+  server.down = false;
+  a.sync.reconnect();   // «Повторить сейчас» будит ожидание раньше паузы
+  const v = await opening;
+  assert.ok(v && v.nodes.r1);
+  assert.equal(a.log.changes[0].from, 'server');
+  await until(() => a.sync.status.online);
+  assert.equal(a.sync.status.error, null);
+  await a.sync.close();
+});
+
+test('sync: потеря сокета обнуляет чужое присутствие, «в сети» — только после hello', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  const b = client(server, 'B');
+  await a.sync.open(); await b.sync.open();
+  await until(() => a.sync.status.online && a.log.presence.some((l) => l.some((p) => p.client === 'B')));
+  a.sync.offline();
+  const last = a.log.presence[a.log.presence.length - 1];
+  assert.deepEqual(last, [], 'присутствие протухло вместе с сокетом');
+  assert.equal(a.sync.status.online, false);
+  await until(() => a.sync.status.online, 'переподключился');
+  await a.sync.close(); await b.sync.close();
+});

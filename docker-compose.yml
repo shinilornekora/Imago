@@ -1,0 +1,48 @@
+# Imago Studio — совместная работа (SPEC §8.1): PostgreSQL + Document service + NGINX.
+#   docker compose up --build -d      → http://localhost:8123/
+#   docker compose down               (данные остаются в томе imago-db)
+#   docker compose down -v            (стереть базу)
+# Агент в этом круге работает в браузере и ходит в LM Studio на http://localhost:1234/v1
+# с машины пользователя — контейнерам LM Studio не нужен.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: imago
+      POSTGRES_PASSWORD: imago
+      POSTGRES_DB: imago
+    volumes:
+      - imago-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imago -d imago"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  document:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.document
+    environment:
+      DATABASE_URL: postgres://imago:imago@db:5432/imago
+      PORT: "8080"
+      SNAPSHOT_EVERY: "50"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "${IMAGO_PORT:-8123}:80"
+    depends_on:
+      - document
+    restart: unless-stopped
+
+volumes:
+  imago-db:

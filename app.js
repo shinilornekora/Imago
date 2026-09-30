@@ -89,6 +89,10 @@ let saveTimer = null;
 let server = null;   // {engine, project, sync, status, others, migrated, list}
 let serverProbe = null;
 const CLIENT_KEY = 'imago.client.v1';   // id вкладки-браузера: по нему свои транзакции узнаются в рассылке
+/* Отметка «последний раз работали с сервером»: {projectId, name, at}. По ней (или по ?project=
+   в ссылке) оболочка входит в серверный режим, даже когда /api/health молчит: документ и
+   очередь правок лежат в журнале IndexedDB, показать их можно и без сервера (SPEC §9.5). */
+const SERVER_MODE_KEY = 'imago.server.v1';
 
 const SETTINGS_KEY = 'imago.settings.v1';
 const LOCAL_DOC_KEY = 'imago.doc.v1';
@@ -145,7 +149,9 @@ async function boot() {
   applyRailWidth(settings.railW);   // ручная ширина рельса (круг 18, п.3)
   syncPanelModes();
 
-  state.doc = createDoc();
+  // серверный режим ожидается (ссылка или отметка) — демо-документу на холсте делать нечего:
+  // документ придёт из журнала или от сервера, а до того холст пуст
+  state.doc = serverAnticipated() ? createDoc('empty') : createDoc();
   state.geo = solve(state.doc);
 
   stage = new Stage(dom.canvas, {
@@ -392,7 +398,9 @@ async function initCapabilities() {
      дальше проект открывает initServer, и прежний путь восстановления не трогается вовсе.
      Агент (brain) при этом остаётся в браузере: его результат тоже уходит транзакцией. */
   const health = await serverProbe;
-  if (health) { await initServer(health); return; }
+  // сервер молчит, но ссылка или отметка говорят, что проект серверный: открываем из журнала,
+  // сокет переподключится сам — прежний режим тут был бы подменой документа демо-макетом
+  if (health || serverAnticipated()) { await initServer(health); return; }
 
   const restored = db ? await restoreFromDb() : await restoreFromLocal();
   maybeShowIntro(restored);
@@ -460,6 +468,26 @@ function setProjectUrl(id) {
   } catch { /* history недоступна — ссылку не меняем */ }
 }
 
+/** Отметка последнего серверного проекта — или null. */
+function serverMark() {
+  try {
+    const raw = localStorage.getItem(SERVER_MODE_KEY);
+    const m = raw ? JSON.parse(raw) : null;
+    return m && typeof m === 'object' && typeof m.projectId === 'string' && m.projectId ? m : null;
+  } catch { return null; }
+}
+
+function rememberServerMode(project) {
+  try {
+    localStorage.setItem(SERVER_MODE_KEY, JSON.stringify({ projectId: project.id, name: project.name || '', at: Date.now() }));
+  } catch { /* памяти нет — в следующий раз решит ссылка или /api/health */ }
+}
+
+/** Ждать ли серверный режим ещё до ответа /api/health: ссылка с проектом или отметка. */
+function serverAnticipated() {
+  return !!(projectIdFromUrl() || serverMark());
+}
+
 /** Последний по updated_at — тот, что откроется без ?project= в ссылке. */
 function latestProject(list) {
   const items = (list || []).filter((p) => p && p.id);
@@ -478,14 +506,24 @@ async function createProject(name) {
  */
 async function initServer(health) {
   server = {
-    engine: health.engine, project: null, sync: null, others: [], migrated: false, list: [],
+    engine: health ? health.engine : null, project: null, sync: null, others: [], migrated: false, list: [],
     status: { online: false, pending: 0, syncing: true, error: null },
-    authorAsked: false,
+    authorAsked: false, metaFresh: false, waiting: false,
   };
   if (dom['btn-projects']) dom['btn-projects'].hidden = false;
   if (dom['sync-status']) dom['sync-status'].hidden = false;
   renderSyncStatus();
   const wanted = projectIdFromUrl();
+  const mark = serverMark();
+  /* Сервер молчит, а проект известен — из ссылки или отметки: открываем его из журнала
+     IndexedDB, не спрашивая список. Имя берём из отметки, свежее придёт с hello/списком. */
+  const knownId = wanted || (mark && mark.projectId) || '';
+  const knownName = mark && mark.projectId === knownId ? mark.name : '';
+  if (!health) {
+    if (!knownId) return;   // сюда не попадаем: без health и без отметки работает прежний режим
+    openProject({ id: knownId, name: knownName });
+    return;
+  }
   let project = null;
   try {
     const got = await apiJson('/api/projects');
@@ -498,7 +536,10 @@ async function initServer(health) {
     }
     if (!project) project = latestProject(server.list);
     if (!project) project = await createProject('Новый проект');
+    server.metaFresh = true;
   } catch (e) {
+    // health ответил, а список — нет (сервер упал между ними): известный проект открываем из журнала
+    if (knownId) { openProject({ id: knownId, name: knownName }); return; }
     server.status = { ...server.status, error: 'unreachable' };
     renderSyncStatus();
     showMsg('error', 'Сервер недоступен', {
@@ -511,6 +552,27 @@ async function initServer(health) {
 }
 
 /**
+ * Имя и прочее о проекте, открытом без сервера, — как только сервер ответил. Список
+ * легче снимка, а больше ничего и не нужно.
+ */
+async function refreshProjectMeta() {
+  if (!server || !server.project || server.metaFresh) return;
+  server.metaFresh = true;
+  const id = server.project.id;
+  try {
+    const got = await apiJson('/api/projects');
+    server.list = Array.isArray(got && got.projects) ? got.projects : [];
+    const p = server.list.find((x) => x && x.id === id);
+    if (p && server.project && server.project.id === id) {
+      server.project.name = p.name || server.project.name;
+      server.project.kind = p.kind || server.project.kind;
+      rememberServerMode(server.project);
+      setDocNameText(docTitle());
+    }
+  } catch { server.metaFresh = false; /* попробуем при следующем выходе в сеть */ }
+}
+
+/**
  * Открыть проект в реплике. Прежняя реплика закрывается (журнал дописывается), состояние
  * оболочки — история, разговор, выделение — начинается заново: всё это принадлежит проекту.
  */
@@ -520,8 +582,10 @@ function openProject(project) {
   server.project = { id: project.id, name: project.name || '', kind: project.kind || 'design', updated_at: project.updated_at || '' };
   server.migrated = false;
   server.others = [];
+  server.waiting = false;
   server.status = { online: false, pending: 0, syncing: true, error: null };
   setProjectUrl(project.id);
+  rememberServerMode(server.project);
   state.selection = [];
   state.collapsed = null;
   state.history = [];
@@ -531,6 +595,10 @@ function openProject(project) {
   state.saveBlocked = null;
   hideVariants();
   hideMsg();
+  // до открытия холст пуст: документ придёт из журнала или от сервера, демо здесь не место
+  state.doc = createDoc('empty');
+  state.geo = solve(state.doc);
+  renderAll();
   setDocNameText(docTitle());
   renderSyncStatus();
   renderPresence();
@@ -605,6 +673,7 @@ function onSyncChange(view, info = {}) {
       state.doc = view;
       state.geo = solve(view);
       adoptJournalExtra(info.extra);
+      if (server.waiting) { server.waiting = false; hideMsg(); }
       renderAll();
       state.userView = false;
       fitSmart();
@@ -648,6 +717,21 @@ function onSyncStatus(s) {
   if (!server) return;
   server.status = s;
   renderSyncStatus();
+  const opened = !!(server.sync && server.sync.view);
+  /* Ни сервера, ни локальной копии: показать нечего, и говорим об этом честно. Реплика
+     сама пробует снова по нарастающей паузе; кнопка будит её раньше срока. */
+  if (s.error === 'unreachable' && !opened && !server.waiting) {
+    server.waiting = true;
+    showMsg('error', 'Проект недоступен', {
+      note: 'Нет связи с сервером и нет локальной копии. Пробую снова…',
+      role: 'server-wait',
+      actions: [
+        { label: 'Повторить сейчас', primary: true, onClick: () => { if (server && server.sync) server.sync.reconnect(); } },
+        { label: 'Проекты', onClick: () => openProjects() },
+      ],
+    });
+  }
+  if (s.online) refreshProjectMeta();
   // локальная копия могла отстать: миграцию шлём, когда реплика догнала сервер
   if (s.online && !s.syncing && !s.error) maybeMigrate();
 }
@@ -2976,6 +3060,8 @@ function activeArtboardIsEmpty() {
 function renderEmptyState() {
   const host = dom['empty-state'];
   if (!host) return;
+  // круг 22: проект ещё не открыт (ждём журнал или сервер) — холст пуст не потому, что нечего строить
+  if (server && !(server.sync && server.sync.view)) { host.hidden = true; return; }
   const empty = docIsEmpty();
   const blank = !empty && activeArtboardIsEmpty();
   host.hidden = !(empty || blank);

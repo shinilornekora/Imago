@@ -26,6 +26,7 @@ const PRESENCE_GAP = 100;         // присутствие — не чаще 10
 const PRESENCE_TTL = 90 * 1000;   // чужое присутствие без вестей столько — считаем ушедшим
 const ACK_TIMEOUT = 8 * 1000;     // подтверждение не пришло — дослать (идемпотентно), потом переподключиться
 const OPS_PAGE = 500;             // сколько транзакций просить за один GET …/ops
+const HELLO_TIMEOUT = 8 * 1000;   // сокет открыт, а hello нет — это не сервер (или зомби): закрыть и подключиться заново
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
@@ -165,6 +166,9 @@ export function createSync(o) {
   let closed = false;
   let opened = false;
   let helloHead = -1;          // голова по последнему hello: пока не догнали — «синхронизация…»
+  let ready = false;           // hello получен: сервер до него ничего не принимает (Hub), и «в сети» — только с него
+  let helloTimer = null;
+  let openRetry = null;        // ожидание повтора в open() без сервера — reconnect() будит его раньше срока
   let inflight = null;         // tx_id отправленной и ещё не подтверждённой транзакции
   let inflightTimer = null;
   let inflightRetries = 0;
@@ -421,7 +425,7 @@ export function createSync(o) {
 
   /** pending[0] уходит, как только сокет открыт и ничего не в полёте (§9.5). */
   function sendNext() {
-    if (halted || inflight || !pending.length || !socketOpen()) return;
+    if (halted || inflight || !pending.length || !socketOpen() || !ready) return;
     const tx = pending[0];
     if (!sendJson({ type: 'tx', tx })) return;
     inflight = tx.tx_id;
@@ -465,14 +469,19 @@ export function createSync(o) {
     let ws;
     try { ws = new WS(wsUrl()); } catch (e) { report('connect', e); scheduleReconnect(); return; }
     socket = ws;
+    ready = false;
     ws.onopen = () => {
       if (ws !== socket) return;
-      online = true;
       helloHead = -1;
-      emitStatus();
-      // pending[0] уходит, как только сокет открыт; hello придёт следом (§9.3)
-      sendNext();
-      sendPresence();
+      /* Открытый сокет — ещё не сервер: Hub до hello сообщения не принимает, а прокси
+         может принять соединение и без живого сервера за спиной. Поэтому «в сети»,
+         отправка очереди и присутствие ждут hello; не пришёл за HELLO_TIMEOUT — закрываем
+         сами, переподключение назначит onclose. */
+      if (helloTimer) clearTimeout(helloTimer);
+      helloTimer = setT(() => {
+        helloTimer = null;
+        if (ws === socket && !ready) { try { ws.close(); } catch { /* уже закрыт */ } }
+      }, HELLO_TIMEOUT);
     };
     ws.onmessage = (ev) => {
       if (ws !== socket) return;
@@ -484,11 +493,19 @@ export function createSync(o) {
     ws.onclose = () => {
       if (ws !== socket) return;
       socket = null;
-      online = false;
-      clearInflight();
-      emitStatus();
+      dropSocketState();
       if (!closed) scheduleReconnect();
     };
+  }
+
+  /** Сокет потерян: не в сети, ничего не в полёте, чужое присутствие протухло вместе с ним. */
+  function dropSocketState() {
+    online = false;
+    ready = false;
+    if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
+    clearInflight();
+    if (others.size) { others.clear(); emitPresence(); }
+    emitStatus();
   }
 
   /** Экспоненциальная пауза: 1 с → 2 → 4 … → 30 с. Сбрасывается по hello. */
@@ -503,6 +520,9 @@ export function createSync(o) {
     switch (msg.type) {
       case 'hello': {
         attempt = 0;
+        ready = true;
+        online = true;
+        if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
         helloHead = isNum(msg.head_seq) ? msg.head_seq : -1;
         // сервер ответил — «недоступен» и «разошлись» больше не про него; отказ по версии остаётся
         if (!halted) error = null;
@@ -519,13 +539,16 @@ export function createSync(o) {
           }).catch((e) => report('resync', e));
         }
         emitStatus();
+        // очередь и присутствие — только теперь: до hello Hub их выбрасывает
         sendNext();
+        sendPresence();
         break;
       }
       case 'tx':
         handleTx(msg.tx);
         break;
       case 'gone':
+        if (!ready) { ready = true; online = true; if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; } }
         gone(msg.snapshot, msg.head_seq);
         if (isNum(msg.head_seq) && msg.head_seq > confirmed.seq) catchUp();
         else sendNext();
@@ -581,7 +604,7 @@ export function createSync(o) {
   }
 
   function sendPresence() {
-    if (!presenceLast || !socketOpen()) return;
+    if (!presenceLast || !socketOpen() || !ready) return;
     presenceSentAt = Date.now();
     presenceSentKey = JSON.stringify([presenceLast, author]);
     sendJson({ type: 'presence', selection: presenceLast.selection, board: presenceLast.board, author });
@@ -684,7 +707,10 @@ export function createSync(o) {
         error = 'unreachable';
         emitStatus();
         const delay = Math.min(reconnectMax, reconnectMin * Math.pow(2, Math.min(guard++, 12)));
-        await new Promise((r) => setT(r, delay));
+        await new Promise((r) => {
+          openRetry = () => { openRetry = null; r(); };
+          setT(() => { if (openRetry) { openRetry = null; r(); } }, delay);
+        });
       }
     }
     if (closed) return null;
@@ -699,6 +725,8 @@ export function createSync(o) {
     if (closed) return;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     attempt = 0;
+    // open() ждёт паузу перед новой попыткой взять снимок — не ждать
+    if (openRetry) { const wake = openRetry; openRetry = null; wake(); return; }
     if (!socketOpen()) connect();
   }
 
@@ -716,9 +744,7 @@ export function createSync(o) {
     // некоторые реализации не зовут onclose при закрытии без сети — переводим сами
     if (socket === ws) {
       socket = null;
-      online = false;
-      clearInflight();
-      emitStatus();
+      dropSocketState();
       scheduleReconnect();
     }
   }
@@ -727,6 +753,7 @@ export function createSync(o) {
     closed = true;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (presenceTimer) { clearTimeout(presenceTimer); presenceTimer = null; }
+    if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
     clearInflight();
     const ws = socket;
     socket = null;
