@@ -708,3 +708,59 @@ DropReason = 'removed' | 'exists' | 'orphan' | 'cycle' | 'invalid'
   список присутствующих — новичок узнаёт о других по их ответному присутствию; две вкладки
   одного браузера делят `clientId`; id библиотеки при миграции выводится из id проекта
   (иначе два клиента заведут две) — перенести в сервер при `POST /api/projects`.
+
+## 10. Контракт Orchestrator (круг 23)
+
+Нормативен для `server/orchestrator/` и для клиента `src/agent.js`. Orchestrator — второй
+процесс (§8.1): ведёт команду по шагам 3–13 с доски. **К базе не прикасается**: стейт
+читает у Document service (`GET /api/projects/:id`, стрелки 4a/5a), пишет транзакцией
+(`POST /api/projects/:id/tx`, стрелки 12/13) с `author_kind:'agent'`. Движок, промпты и
+компилятор патча — те же `src/core.js` и `src/brain.js`, что раньше работали в браузере.
+
+### 10.1 Модули
+
+| Модуль | Каталог | Обязанность |
+|---|---|---|
+| JEV | `server/orchestrator/jev/` | «команда оболочки или работа для модели»: `classifyUtterance` из `brain.js` (§7) за интерфейсом `classify(text, ctx) → {kind:'shell', action, args} \| {kind:'model'} \| {kind:'variants', n}` |
+| DSLR (клиент) | `server/orchestrator/dslr/` | чтение стейта и головы у Document service; кеш по `(project, head_seq)` |
+| DUIL | `server/orchestrator/duil/` | срез библиотек: проекты вида `library` (через тот же DSLR) → словарь компонентов (`describeLibrary`) |
+| DSLV | `server/orchestrator/dslv/` | патч → операции на копии стейта, раскладка, `validate`; тяжёлое — в `worker_threads` |
+| LLM | `server/orchestrator/llm/` | клиент к модели: OpenAI-совместимый (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`) или Anthropic (`LLM_KIND=anthropic`); адрес собирается через `URL`, ключ никогда не попадает в ответы, трассы и логи |
+| DSLTS (клиент) | `server/orchestrator/dslts/` | запись транзакции в Document service, повтор по тому же `tx_id` при сетевой ошибке |
+| pipeline | `server/orchestrator/pipeline.js` | шаги 4→13, очередь команд на проект (по одной), «стоп» |
+
+### 10.2 HTTP (`/agent`)
+
+| Метод и путь | Тело | Ответ |
+|---|---|---|
+| `GET /agent/health` | — | `200 {ok, engine, llm: 'up'\|'down'\|'unconfigured', document: 'up'\|'down', model?}` |
+| `POST /agent/command` | `{command_id, project, text, selection?: NodeId[], board?: NodeId, base_seq?, client?, author?, mode?: 'run'\|'variants', n?}` | `200 text/event-stream` (§10.3) |
+| `POST /agent/stop` | `{command_id}` | `200 {stopped: bool}` |
+| `POST /agent/apply` | `{command_id, variant}` | выбранный вариант → транзакция; `200` событие `result` одним JSON |
+
+Ошибки — единое тело `{error: true, code, message, retryable, detail?}`; коды: `400 bad_request`,
+`404 not_found`, `405`, `413 too_large`, `429 busy` (очередь проекта полна), `502 llm_failed`,
+`503 document_down`/`llm_down` с `Retry-After`.
+
+### 10.3 Поток событий (стрелка 7b)
+
+SSE, каждое событие — `event: <тип>\ndata: <JSON>\n\n`:
+
+* `queued {position}` — команда ждёт очереди проекта;
+* `stage {key, label, at}` — `key` из `jev, read, library, llm, validate, repair, write`;
+* `shell {action, args}` — JEV узнал команду оболочки (отмена, выделение, масштаб…): её
+  исполняет клиент сам, модель не зовётся;
+* `variants {items: [{key, label, description, ops_count, preview}]}` — режим вариантов,
+  ничего не записано; выбор — `POST /agent/apply`;
+* `result {tx_id, seq, applied, dropped, summary, warnings, select?: NodeId[]}` — записано;
+  клиент получит ту же транзакцию по своему сокету Hub;
+* `error {code, message, retryable}`; последним всегда `done {}`.
+
+Разрыв SSE командой не управляет: команда доводится до конца (или до «стоп»), результат
+приходит клиенту по сокету как обычная транзакция.
+
+### 10.4 Трассы
+
+Каждая команда оставляет трассу (шаги, длительности, число вызовов модели, без ключей и без
+полных промптов): Orchestrator шлёт её в Document service `POST /api/internal/traces` с
+заголовком `X-Internal-Token: $INTERNAL_TOKEN`; nginx снаружи отдаёт на `/api/internal/` `403`.
