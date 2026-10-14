@@ -1,0 +1,444 @@
+/**
+ * Устойчивость Document service (SPEC §9.9, круг 24):
+ *   · обрыв LISTEN-соединения (pg_terminate_backend), пока другой экземпляр пишет, —
+ *     экземпляр переподключает слушателя и дочитывает пропущенное без таймера сверки;
+ *   · обрыв всех соединений экземпляра под нагрузкой реплик — все сходятся;
+ * и находки критического прохода по server/document:
+ *   · сокет, закрытый до hello, не остаётся в комнате (утечка комнаты и головы);
+ *   · кеш кадров ограничен байтами (на комнату и на экземпляр);
+ *   · прежний клиент (без tip/epoch/proto) вместо ack получает error duplicate;
+ *   · страница журнала режется по байтам одинаково у pg и памяти; потерянные записи
+ *     журнала — 410/gone, а не `more: true` с пустой страницей; догон сокета не
+ *     читает снимок по кругу;
+ *   · выгрузка головы по бездействию посреди медленных записей ничего не теряет;
+ *   · медленный читатель закрывается (4503), а не копит память экземпляра.
+ */
+
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import WebSocket from 'ws';
+import * as core from '../../src/core.js';
+import { createSync, memoryStorage } from '../../src/sync.js';
+import { start } from '../../server/document/index.js';
+import { createMemoryStorage } from '../../server/document/storage/memory.js';
+import { backends, startFor, startTwin, api, connect, wsUrl, waitFor, quiet } from './helpers.mjs';
+
+const { artboards, ops, uid, hashDoc, applyOps, ENGINE_VERSION: E } = core;
+const tx = (base_seq, list, extra = {}) => ({ tx_id: uid('tx'), base_seq, ops: list, engine: E, ...extra });
+const text = (parent, characters) => ({
+  type: 'text', id: uid('n'), name: characters.slice(0, 40), parent, characters,
+  style: { token: 'body' }, align: 'left', color: '#14161C'
+});
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Журнал целиком (страницами). */
+async function journal(http, id) {
+  const txs = [];
+  let since = 0;
+  for (;;) {
+    const r = await http.get(`/api/projects/${id}/ops?since=${since}&limit=500`);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    txs.push(...r.body.txs);
+    if (!r.body.more || !r.body.txs.length) break;
+    since = r.body.txs[r.body.txs.length - 1].seq;
+  }
+  return txs;
+}
+function replay(doc, txs) {
+  let cur = doc;
+  for (const t of txs) {
+    const res = applyOps(cur, t.ops);
+    assert.equal(res.error, undefined, `seq ${t.seq} обязана применяться`);
+    cur = res.doc;
+  }
+  return cur;
+}
+
+/** Обёртка хранилища: те же методы, часть подменена (замедление, потеря записей). */
+function wrap(storage, over) {
+  const out = {};
+  for (const k of Object.keys(storage)) out[k] = typeof storage[k] === 'function' ? storage[k].bind(storage) : storage[k];
+  return Object.assign(out, over);
+}
+
+const list = await backends();
+const pgUp = list.find((b) => b.name === 'pg').available;
+
+/* ------------------------------ обрыв LISTEN (pg) ------------------------------ */
+
+describe('обрыв LISTEN и соединений · pg', { skip: pgUp ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
+  let i1;
+  let i2;
+  before(async () => {
+    // сверка по таймеру выключена: пропущенное обязано прийти именно после переподключения слушателя
+    i1 = await startFor('pg', { verifyMs: 0 }, { listenRetryMs: 2500, applicationName: 'r24_i1' });
+    i2 = await startTwin('pg', i1, { verifyMs: 0 }, { applicationName: 'r24_i2' });
+  });
+  after(async () => {
+    await i2.close();
+    await i1.close();
+  });
+
+  const listeners = async (name) => (await i2.storage.pool.query(
+    'SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = $1', [name]
+  )).rows[0].n;
+
+  it('pg_terminate_backend слушателя, другой экземпляр пишет за время обрыва — переподключение и дочитывание (3 круга)', async () => {
+    const http2 = api(i2.url);
+    const created = await http2.post('/api/projects', { name: 'LISTEN' });
+    const id = created.body.id;
+    const seedDoc = (await http2.get('/api/projects/' + id)).body.snapshot.doc;
+    const board = artboards(seedDoc)[0];
+    const S = connect(wsUrl(i1, id, { since: 0, client: 'S', proto: 2 }));
+    await S.opened;
+    assert.equal((await S.next()).type, 'hello');
+    const P = connect(wsUrl(i2, id, { client: 'P' }));
+    await P.opened;
+    await P.next();
+    assert.equal(await listeners('r24_i1:listen'), 1);
+
+    let seq = 0;
+    for (let round = 0; round < 3; round++) {
+      const pid = i1.storage.listenerPid;
+      assert.ok(pid > 0);
+      await i2.storage.pool.query('SELECT pg_terminate_backend($1)', [pid]);
+      await waitFor(() => !i1.storage.listening, 'слушатель потерян');
+      for (let k = 0; k < 15; k++) {
+        const r = await http2.post(`/api/projects/${id}/tx`, tx(seq, [ops.create(text(board.id, `круг ${round} · ${k}`))]));
+        assert.equal(r.status, 201);
+        seq = r.body.seq;
+      }
+      assert.equal(i1.storage.listening, false, 'все записи — за время обрыва');
+      // ни одной пропущенной не пришло до переподключения: сверка выключена
+      for (let s = seq - 14; s <= seq; s++) {
+        const m = await S.until((x) => x.type === 'tx', 8000);
+        assert.equal(m.tx.seq, s, 'по порядку, без дыр');
+      }
+      assert.equal(i1.storage.listening, true, 'слушатель вернулся');
+      assert.equal(i1.storage.listenerPid !== pid, true);
+      assert.equal(await listeners('r24_i1:listen'), 1, 'слушатель один (повтор назначается один раз)');
+      // шина присутствия тоже вернулась
+      P.send({ type: 'presence', selection: ['r' + round] });
+      assert.deepEqual((await S.until((x) => x.type === 'presence', 5000)).selection, ['r' + round]);
+    }
+    const head = await i1.dslts.headOf(id);
+    assert.equal(head.head_seq, 45);
+    const log = await journal(http2, id);
+    assert.equal(hashDoc(head.doc), hashDoc(replay(seedDoc, log)), 'голова i1 = переигрывание журнала');
+    await Promise.all([S.close(), P.close()]);
+  });
+
+  it('обрыв всех соединений экземпляра (пул и слушатель) под нагрузкой реплик — все сходятся, без дублей и дыр', async () => {
+    const http1 = api(i1.url);
+    const id = (await http1.post('/api/projects', { name: 'Обрыв' })).body.id;
+    const seedDoc = (await i1.storage.latestSnapshot(id)).doc;
+    const board = artboards(seedDoc)[0];
+    const mk = (svc, clientId) => createSync({
+      core, baseUrl: svc.url, projectId: id, clientId, author: clientId, storage: memoryStorage(),
+      WebSocketImpl: WebSocket, fetchImpl: (...a) => fetch(...a), reconnectMin: 20, reconnectMax: 300
+    });
+    const reps = [mk(i1, 'a1'), mk(i1, 'a2'), mk(i2, 'b1'), mk(i2, 'b2')];
+    await Promise.all(reps.map((r) => r.open()));
+    await waitFor(() => reps.every((r) => r.status.online), 'в сети');
+    const written = [];
+    let stop = false;
+    const workers = reps.map(async (r, n) => {
+      for (let k = 0; !stop && k < 40; k++) {
+        const node = text(board.id, `${r.clientId} · ${k}`);
+        const res = r.commit([ops.create(node)]);
+        if (res.tx) written.push(res.tx.tx_id);
+        await delay(10 + n * 3);
+      }
+    });
+    for (let cut = 0; cut < 2; cut++) {
+      await delay(120);
+      await i2.storage.pool.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name LIKE 'r24_i1%' AND pid <> pg_backend_pid()");
+    }
+    await Promise.all(workers);
+    stop = true;
+    await waitFor(async () => {
+      const h = (await http1.get(`/api/projects/${id}?head=1`)).body;
+      return reps.every((r) => r.status.online && r.status.pending === 0 && r.confirmed.seq === h.head_seq);
+    }, 'все догнали голову без очереди', 30000);
+    const log = await journal(http1, id);
+    const ids = log.map((t) => t.tx_id);
+    assert.equal(new Set(ids).size, ids.length, 'ни одна не записана дважды');
+    assert.deepEqual(log.map((t) => t.seq), log.map((_, k) => k + 1), 'без дыр');
+    for (const t of written) assert.ok(ids.includes(t), 'правка не потеряна');
+    const truth = hashDoc(replay(seedDoc, log));
+    for (const r of reps) assert.equal(hashDoc(r.view), truth);
+    const [h1, h2] = await Promise.all([i1.dslts.headOf(id), i2.dslts.headOf(id)]);
+    assert.equal(hashDoc(h1.doc), truth);
+    assert.equal(hashDoc(h2.doc), truth);
+    await waitFor(() => i1.storage.listening, 'слушатель i1 вернулся', 10000);
+    assert.equal(await listeners('r24_i1:listen'), 1);
+    await Promise.all(reps.map((r) => r.close()));
+  });
+});
+
+/* ------------------------------ страница журнала по байтам ------------------------------ */
+
+for (const backend of list) {
+  describe(`страница журнала по байтам · ${backend.name}`, { skip: backend.available ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
+    let svc;
+    before(async () => { svc = await startFor(backend.name, { verifyMs: 0 }); });
+    after(async () => { await svc.close(); });
+
+    it('первая запись — всегда, дальше — пока сумма не больше maxBytes (pg и память режут одинаково)', async () => {
+      const http = api(svc.url);
+      const { id } = (await http.post('/api/projects', { name: 'Страницы' })).body;
+      const board = artboards((await svc.storage.latestSnapshot(id)).doc)[0];
+      for (let k = 0; k < 5; k++) assert.equal((await http.post(`/api/projects/${id}/tx`, tx(k, [ops.set(board.id, 'name', 'x'.repeat(1000) + k)]))).status, 201);
+      const seqs = async (limit, maxBytes) => (await svc.storage.txsAfter(id, 0, limit, { maxBytes })).map((t) => t.seq);
+      // запись ≈ 1,1 КБ: в 2500 байт входят две, третья перешла бы предел — не входит
+      assert.deepEqual(await seqs(500, 2500), [1, 2]);
+      assert.deepEqual(await seqs(500, 10), [1], 'первая — даже больше предела');
+      assert.deepEqual(await seqs(3, 1e9), [1, 2, 3]);
+      assert.deepEqual(await seqs(500, 1e9), [1, 2, 3, 4, 5]);
+      assert.deepEqual((await svc.storage.txsAfter(id, 3, 500, { maxBytes: 2500 })).map((t) => t.seq), [4, 5]);
+      assert.deepEqual(await svc.storage.txsAfter(id, 5, 500, { maxBytes: 2500 }), []);
+    });
+  });
+}
+
+/* ------------------------------ одновременная запись двух экземпляров ------------------------------ */
+
+for (const backend of list) {
+  describe(`одновременная запись двух экземпляров в один проект · ${backend.name}`, { skip: backend.available ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
+    let i1;
+    let i2;
+    before(async () => {
+      i1 = await startFor(backend.name, { verifyMs: 0 });
+      i2 = await startTwin(backend.name, i1, { verifyMs: 0 });
+    });
+    after(async () => {
+      await i2.close();
+      await i1.close();
+    });
+
+    it('2 × 60 параллельных транзакций (в том числе одни и те же tx_id в оба экземпляра) — без дыр, без дублей, головы = журнал', async () => {
+      const h1 = api(i1.url);
+      const h2 = api(i2.url);
+      const { id } = (await h1.post('/api/projects', { name: 'Гонка' })).body;
+      const seed = (await i1.storage.latestSnapshot(id)).doc;
+      const board = artboards(seed)[0];
+      const same = Array.from({ length: 10 }, (_, k) => tx(0, [ops.create(text(board.id, 'общая ' + k))]));
+      const jobs = [];
+      for (let k = 0; k < 60; k++) {
+        jobs.push(h1.post(`/api/projects/${id}/tx`, tx(0, [ops.create(text(board.id, 'i1 · ' + k))])));
+        jobs.push(h2.post(`/api/projects/${id}/tx`, tx(0, [ops.create(text(board.id, 'i2 · ' + k))])));
+      }
+      // одна и та же транзакция — в оба экземпляра сразу (клиент переключился посреди отправки)
+      for (const t of same) jobs.push(h1.post(`/api/projects/${id}/tx`, t), h2.post(`/api/projects/${id}/tx`, t));
+      const res = await Promise.all(jobs);
+      const statuses = res.map((r) => r.status);
+      // 503 допустим (повторяемый: голову двигает другой экземпляр — клиент повторит)
+      assert.ok(statuses.every((st) => st === 201 || st === 200 || st === 503), statuses.join(','));
+      const log = await journal(h1, id);
+      const ids = log.map((t) => t.tx_id);
+      assert.equal(new Set(ids).size, ids.length, 'ни одна не записана дважды');
+      assert.deepEqual(log.map((t) => t.seq), log.map((_, k) => k + 1), 'без дыр');
+      for (const r of res) if (r.status !== 503) assert.ok(ids.includes(r.body.tx_id), 'принятая — в журнале');
+      for (const t of same) assert.ok(ids.filter((x) => x === t.tx_id).length <= 1, 'общая записана не больше раза');
+      // ответы на одну и ту же транзакцию из двух экземпляров — одна и та же запись
+      for (let k = 0; k < same.length; k++) {
+        const a = res[120 + 2 * k];
+        const b = res[121 + 2 * k];
+        if (a.status !== 503 && b.status !== 503) assert.equal(a.body.seq, b.body.seq);
+      }
+      const truth = hashDoc(replay(seed, log));
+      const [g1, g2] = await Promise.all([i1.dslts.headOf(id), i2.dslts.headOf(id)]);
+      assert.equal(hashDoc(g1.doc), truth);
+      assert.equal(hashDoc(g2.doc), truth);
+      const st = [i1.dslts.stats(), i2.dslts.stats()];
+      assert.ok(st[0].staleRetries + st[1].staleRetries > 0, 'гонка действительно была: ' + JSON.stringify(st));
+    });
+  });
+}
+
+/* ------------------------------ находки прохода (память) ------------------------------ */
+
+describe('находки прохода по server/document', () => {
+  const services = [];
+  const boot = async (opts = {}, storage = createMemoryStorage()) => {
+    const svc = await start({ port: 0, storage, pingInterval: 0, log: quiet, ...opts });
+    services.push(svc);
+    return svc;
+  };
+  after(async () => {
+    for (const s of services) await s.close();
+  });
+  const seedOf = async (svc, id) => (await svc.storage.latestSnapshot(id)).doc;
+
+  it('сокет, закрытый до hello (проект ещё проверяется), не остаётся в комнате и не держит голову', async () => {
+    const mem = createMemoryStorage();
+    const svc = await boot({}, wrap(mem, { getProject: async (id) => { await delay(150); return mem.getProject(id); } }));
+    const { id } = (await api(svc.url).post('/api/projects', { name: 'Утечка' })).body;
+    for (let k = 0; k < 3; k++) {
+      const s = connect(wsUrl(svc, id, { since: 0, client: 'z' + k }));
+      await s.opened;
+      s.ws.terminate();
+      await s.closed;
+    }
+    await delay(400);
+    assert.equal(svc.hub.roomCount(), 0, 'комнат нет');
+    assert.equal(svc.dslts.isLoaded(id), false, 'голова не загружена ради мёртвого сокета');
+    // живой сокет после этого работает как обычно
+    const ok = connect(wsUrl(svc, id, { since: 0, client: 'ok' }));
+    await ok.opened;
+    assert.equal((await ok.next()).type, 'hello');
+    assert.equal(svc.hub.roomSize(id), 1);
+    await ok.close();
+    assert.equal(svc.hub.roomCount(), 0);
+  });
+
+  it('кеш кадров ограничен байтами: на комнату и на экземпляр; большой кадр не кешируется, но доходит', async () => {
+    const svc = await boot({ frameCache: { roomBytes: 64 * 1024, totalBytes: 96 * 1024 } });
+    const http = api(svc.url);
+    const p1 = (await http.post('/api/projects', { name: 'К1' })).body.id;
+    const p2 = (await http.post('/api/projects', { name: 'К2' })).body.id;
+    const b1 = artboards(await seedOf(svc, p1))[0];
+    const b2 = artboards(await seedOf(svc, p2))[0];
+    const s1 = connect(wsUrl(svc, p1, { client: 's1' }));
+    const s2 = connect(wsUrl(svc, p2, { client: 's2' }));
+    await Promise.all([s1.opened, s2.opened]);
+    await s1.next();
+    await s2.next();
+    for (let k = 0; k < 40; k++) {
+      const r = await http.post(`/api/projects/${p1}/tx`, tx(k, [ops.create(text(b1.id, 'x'.repeat(3000) + k))]));
+      assert.equal(r.status, 201);
+    }
+    for (let k = 0; k < 40; k++) assert.equal((await s1.until((m) => m.type === 'tx')).tx.seq, k + 1);
+    assert.ok(svc.hub.cacheBytes(p1) <= 64 * 1024, 'комната: ' + svc.hub.cacheBytes(p1));
+    assert.ok(svc.hub.cachedFrames(p1).length < 40 && svc.hub.cachedFrames(p1).length > 5);
+    for (let k = 0; k < 40; k++) await http.post(`/api/projects/${p2}/tx`, tx(k, [ops.create(text(b2.id, 'y'.repeat(3000) + k))]));
+    for (let k = 0; k < 40; k++) await s2.until((m) => m.type === 'tx');
+    assert.ok(svc.hub.cacheBytes() <= 96 * 1024, 'экземпляр: ' + svc.hub.cacheBytes());
+    assert.equal(svc.hub.cacheBytes(), svc.hub.cacheBytes(p1) + svc.hub.cacheBytes(p2), 'учёт сходится');
+    // кадр больше четверти предела комнаты не кешируется, но доходит
+    const big = await http.post(`/api/projects/${p1}/tx`, tx(40, [ops.create(text(b1.id, 'z'.repeat(20000)))]));
+    const got = await s1.until((m) => m.type === 'tx');
+    assert.equal(got.tx.seq, big.body.seq);
+    assert.equal(svc.hub.cachedFrames(p1).includes(`${big.body.seq}:${big.body.chain}`), false);
+    await Promise.all([s1.close(), s2.close()]);
+    assert.equal(svc.hub.cacheBytes(), 0, 'комнаты закрыты — кеш пуст');
+  });
+
+  it('повтор уже полученной: клиенту с proto/epoch — ack, прежнему (без них) — error duplicate, retryable:false', async () => {
+    const svc = await boot();
+    const http = api(svc.url);
+    const created = (await http.post('/api/projects', { name: 'ack' })).body;
+    const board = artboards(await seedOf(svc, created.id))[0];
+    const t = tx(0, [ops.set(board.id, 'name', 'Один раз')]);
+    const r = await http.post(`/api/projects/${created.id}/tx`, t);
+    assert.equal(r.status, 201);
+    const legacy = connect(wsUrl(svc, created.id, { since: 0, client: 'old' }));
+    const modern = connect(wsUrl(svc, created.id, { since: 0, client: 'new', epoch: created.epoch }));
+    await Promise.all([legacy.opened, modern.opened]);
+    for (const s of [legacy, modern]) {
+      assert.equal((await s.next()).type, 'hello');
+      assert.equal((await s.next()).tx.seq, 1);
+      s.send({ type: 'tx', tx: t });
+    }
+    const dup = await legacy.next();
+    assert.equal(dup.type, 'error');
+    assert.equal(dup.code, 'duplicate');
+    assert.equal(dup.retryable, false);
+    assert.equal(dup.existing, true);
+    assert.equal(dup.tx_id, t.tx_id);
+    assert.equal(dup.seq, 1);
+    assert.deepEqual(await modern.next(), { type: 'ack', tx_id: t.tx_id, seq: 1, chain: r.body.chain, existing: true });
+    assert.equal((await http.get(`/api/projects/${created.id}?head=1`)).body.head_seq, 1, 'второй записи нет');
+    await Promise.all([legacy.close(), modern.close()]);
+  });
+
+  it('потерянные записи журнала: GET ops — 410 со снимком (а не more:true с пустой страницей); догон сокета не читает снимок по кругу', async () => {
+    const mem = createMemoryStorage();
+    let hide = false;
+    let goneReads = 0;
+    const svc = await boot({}, wrap(mem, {
+      txsAfter: async (id, seq, limit, o) => (await mem.txsAfter(id, seq, limit, o)).filter((t) => !hide || t.seq < 3),
+      latestSnapshot: async (id) => { goneReads++; return mem.latestSnapshot(id); }
+    }));
+    const http = api(svc.url);
+    const { id } = (await http.post('/api/projects', { name: 'Дыра' })).body;
+    const board = artboards(await seedOf(svc, id))[0];
+    for (let k = 0; k < 5; k++) await http.post(`/api/projects/${id}/tx`, tx(k, [ops.create(text(board.id, 't' + k))]));
+    hide = true;   // записи 3..5 «потеряны»: голова базы — 5
+    const first = await http.get(`/api/projects/${id}/ops?since=0`);
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.body.txs.map((t) => t.seq), [1, 2]);
+    assert.equal(first.body.more, true);
+    const next = await http.get(`/api/projects/${id}/ops?since=2`);
+    assert.equal(next.status, 410, 'дальше догнать нечем — снимок');
+    assert.equal(next.body.code, 'gone');
+    assert.equal(next.body.head_seq, 5);
+
+    goneReads = 0;
+    const s = connect(wsUrl(svc, id, { since: 2, client: 'g' }));
+    await s.opened;
+    const types = [];
+    const closed = await Promise.race([
+      (async () => {
+        for (;;) {
+          let m;
+          try { m = await s.next(2000); } catch (_) { break; }
+          types.push(m.type === 'error' ? 'error:' + m.code : m.type);
+        }
+        return s.closed;
+      })(),
+      delay(4000).then(() => null)
+    ]);
+    assert.ok(closed, 'сокет закрыт, а не крутится');
+    assert.equal(closed.code, 4503);
+    assert.ok(types.filter((t) => t === 'gone').length <= 2, types.slice(0, 20).join(','));
+    assert.ok(types.includes('error:unavailable'), types.slice(0, 20).join(','));
+    assert.ok(goneReads <= 3, 'снимок прочитан ' + goneReads + ' раз');
+  });
+
+  it('выгрузка головы по бездействию посреди медленных записей: ничего не потеряно, голова = журнал', async () => {
+    const mem = createMemoryStorage();
+    const svc = await boot({ idleMs: 5 }, wrap(mem, {
+      commitTx: async (...a) => { await delay(30); return mem.commitTx(...a); }
+    }));
+    const http = api(svc.url);
+    const { id } = (await http.post('/api/projects', { name: 'Простой' })).body;
+    const seed = await seedOf(svc, id);
+    const board = artboards(seed)[0];
+    for (let round = 0; round < 3; round++) {
+      const res = await Promise.all(Array.from({ length: 6 }, (_, k) => http.post(`/api/projects/${id}/tx`, tx(0, [ops.create(text(board.id, `r${round}k${k}`))]))));
+      for (const r of res) assert.equal(r.status, 201, JSON.stringify(r.body));
+      await delay(30);   // голова успевает выгрузиться между кругами
+    }
+    const log = await journal(http, id);
+    assert.deepEqual(log.map((t) => t.seq), Array.from({ length: 18 }, (_, k) => k + 1));
+    const head = await svc.dslts.headOf(id);
+    assert.equal(head.head_seq, 18);
+    assert.equal(hashDoc(head.doc), hashDoc(replay(seed, log)));
+  });
+
+  it('медленный читатель: неотправленного больше предела — сокет закрыт 4503, остальные получают всё', async () => {
+    const svc = await boot({ maxBuffered: 64 * 1024 });
+    const http = api(svc.url);
+    const { id } = (await http.post('/api/projects', { name: 'Медленный' })).body;
+    const board = artboards(await seedOf(svc, id))[0];
+    const slow = connect(wsUrl(svc, id, { client: 'slow' }));
+    const fast = connect(wsUrl(svc, id, { client: 'fast' }));
+    await Promise.all([slow.opened, fast.opened]);
+    await slow.next();
+    await fast.next();
+    slow.ws._socket.pause();
+    const N = 24;
+    for (let k = 0; k < N; k++) {
+      const r = await http.post(`/api/projects/${id}/tx`, tx(k, [ops.create(text(board.id, 'w'.repeat(300 * 1024) + k))]));
+      assert.equal(r.status, 201);
+    }
+    for (let k = 0; k < N; k++) assert.equal((await fast.until((m) => m.type === 'tx', 5000)).tx.seq, k + 1);
+    slow.ws._socket.resume();
+    const res = await Promise.race([slow.closed, delay(8000).then(() => null)]);
+    assert.ok(res, 'медленный сокет закрыт');
+    assert.equal(res.code, 4503);
+    await waitFor(() => svc.hub.roomSize(id) === 1, 'в комнате остался быстрый');
+    await fast.close();
+  });
+});

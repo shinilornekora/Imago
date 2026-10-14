@@ -15,12 +15,22 @@
  *   knownEpoch(projectId, epoch) → boolean · bumpEpoch(projectId, fromEpoch, cause, origin) → {status:'bumped'|'moved', epoch, cause}
  *   addTrace({projectId, commandId, body}) → {id, created_at}|null · listTraces(projectId, limit) → Trace[]
  *   onNotify(fn) → отписка: {k:'tx', p, s, c, e, i} · {k:'epoch', p, e, i} · {k:'resync'}
+ *     и эфемерное (канал `<channel>_presence`): {k:'presence', p, i, c, …} · {k:'left', p, i, c} · {k:'bye', i}
+ *   publish(msg) → boolean   эфемерное сообщение всем экземплярам (присутствие); не записывается,
+ *     теряется без слушателя — это не журнал
  *
  * Уведомления: запись транзакции и смена эпохи шлют `pg_notify` В ТОЙ ЖЕ транзакции
  * базы — уведомление уходит ровно тогда, когда запись видна. Каждый экземпляр
  * слушает канал отдельным соединением (LISTEN); после его переподключения
  * слушатели получают `{k:'resync'}` — уведомления за время разрыва потеряны,
  * головы надо сверить с базой.
+ *
+ * Присутствие (SPEC §9.9) — отдельный канал `<channel>_presence`: эфемерные
+ * сообщения уходят через соединение слушателя (`SELECT pg_notify`) — не через
+ * пул, чтобы поток выделений не отнимал соединения у записи транзакций; нет
+ * слушателя или очередь отправки длиннее PUBLISH_QUEUE — сообщение теряется
+ * (следующее сердцебиение его заменит). Полезная нагрузка NOTIFY — меньше 8000 байт;
+ * больше — не отправляется (Hub режет выделение заранее).
  *
  * Дедлайны: обычные запросы — statement_timeout и query_timeout = DB_TIMEOUT_MS;
  * миграции — отдельным соединением без дедлайна (`SET LOCAL statement_timeout = 0`),
@@ -45,7 +55,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MIGRATION_LOCK = 728208;
 /** Имя файла миграции: номер, имя, .sql или .mjs. */
 const MIGRATION_RE = /^\d{3,}_[\w.-]+\.(sql|mjs)$/;
-const CHANNEL_RE = /^[a-z_][a-z0-9_]{0,62}$/;
+const CHANNEL_RE = /^[a-z_][a-z0-9_]{0,53}$/;
+/** Полезная нагрузка NOTIFY по умолчанию в Postgres — меньше 8000 байт. */
+export const NOTIFY_MAX_BYTES = 7999;
+/** Эфемерных сообщений в очереди соединения слушателя — больше не копим (база не успевает). */
+const PUBLISH_QUEUE = 256;
 
 /**
  * bigint (oid 20) node-pg отдаёт строкой, чтобы не терять точность; seq и
@@ -85,6 +99,8 @@ function projectOf(row) {
  *   migrationsDir?: string,
  *   channel?: string,              // канал LISTEN/NOTIFY (imago_doc)
  *   listen?: boolean,              // слушать уведомления (по умолчанию — да, если есть connectionString)
+ *   applicationName?: string,      // application_name сеансов (слушатель — с суффиксом «:listen»); видно в pg_stat_activity
+ *   listenRetryMs?: number,        // первая пауза переподключения слушателя (200 мс; дальше — вдвое, до 10 с)
  *   log?: {warn:Function, info:Function}
  * }} opts
  */
@@ -94,10 +110,13 @@ export function createPgStorage(opts = {}) {
   const migrationsDir = opts.migrationsDir || MIGRATIONS_DIR;
   const channel = opts.channel || 'imago_doc';
   if (!CHANNEL_RE.test(channel)) throw new Error('channel: имя канала NOTIFY — [a-z_][a-z0-9_]*');
+  const presenceChannel = channel + '_presence';
+  const listenRetryMs = opts.listenRetryMs > 0 ? opts.listenRetryMs : 200;
   const base = {
     connectionString: opts.connectionString,
     types,
     ...(opts.options ? { options: opts.options } : {}),
+    ...(opts.applicationName ? { application_name: String(opts.applicationName).slice(0, 56) } : {}),
     // сервер без базы должен отвечать 503, а не висеть: ждём подключения не дольше 5 с
     connectionTimeoutMillis: opts.connectionTimeoutMillis || 5000
   };
@@ -116,6 +135,9 @@ export function createPgStorage(opts = {}) {
   let listener = null;
   let listenTimer = null;
   let listenAttempt = 0;
+  let listenerPid = null;
+  /** эфемерные отправки в полёте: close() их дожидается (bye должен успеть уйти) */
+  const publishing = new Set();
   let closing = false;
   let initing = null;
 
@@ -131,11 +153,20 @@ export function createPgStorage(opts = {}) {
 
   async function connectListener(isRetry) {
     if (closing) return;
-    const client = new pg.Client(base);
+    const client = new pg.Client(opts.applicationName ? { ...base, application_name: base.application_name + ':listen' } : base);
+    // у соединения одна судьба: error, end и сбой подключения приходят вперемешку, а
+    // переподключение должно назначиться один раз — иначе поздний end старого клиента
+    // заводил бы второго слушателя (две копии каждого уведомления и утечка соединения)
+    let retried = false;
     const retry = () => {
+      if (retried) return;
+      retried = true;
+      if (listener === client) {
+        listener = null;
+        listenerPid = null;
+      }
       if (closing || listenTimer) return;
-      if (listener === client) listener = null;
-      const delay = Math.min(10000, 200 * Math.pow(2, Math.min(listenAttempt++, 6)));
+      const delay = Math.min(10000, listenRetryMs * Math.pow(2, Math.min(listenAttempt++, 6)));
       listenTimer = setTimeout(() => {
         listenTimer = null;
         connectListener(true).catch(() => {});
@@ -143,7 +174,7 @@ export function createPgStorage(opts = {}) {
       if (listenTimer.unref) listenTimer.unref();
     };
     client.on('notification', (m) => {
-      if (m.channel !== channel || !m.payload) return;
+      if ((m.channel !== channel && m.channel !== presenceChannel) || !m.payload) return;
       let msg;
       try {
         msg = JSON.parse(m.payload);
@@ -161,6 +192,7 @@ export function createPgStorage(opts = {}) {
     try {
       await client.connect();
       await client.query(`LISTEN ${channel}`);
+      await client.query(`LISTEN ${presenceChannel}`);
     } catch (e) {
       client.end().catch(() => {});
       if (!isRetry) throw e;
@@ -171,7 +203,9 @@ export function createPgStorage(opts = {}) {
       await client.end().catch(() => {});
       return;
     }
+    if (retried) return;   // соединение умерло, пока мы подписывались: переподключение уже назначено
     listener = client;
+    listenerPid = client.processID || null;
     listenAttempt = 0;
     // пока соединения не было, уведомления терялись: головы сверяются с базой
     if (isRetry) dispatch({ k: 'resync' });
@@ -179,6 +213,19 @@ export function createPgStorage(opts = {}) {
 
   async function notify(client, msg) {
     await client.query('SELECT pg_notify($1, $2)', [channel, JSON.stringify(msg)]);
+  }
+
+  /** Эфемерное сообщение (присутствие) через соединение слушателя; не вышло — потеряно. */
+  function publish(msg) {
+    const l = listener;
+    if (!l || closing || publishing.size >= PUBLISH_QUEUE) return false;
+    const text = JSON.stringify(msg);
+    if (Buffer.byteLength(text, 'utf8') > NOTIFY_MAX_BYTES) return false;
+    const p = l.query('SELECT pg_notify($1, $2)', [presenceChannel, text])
+      .catch(() => { /* эфемерное: следующее сердцебиение заменит */ })
+      .finally(() => publishing.delete(p));
+    publishing.add(p);
+    return true;
   }
 
   /* -------------------------------- миграции -------------------------------- */
@@ -193,6 +240,8 @@ export function createPgStorage(opts = {}) {
    */
   async function migrate() {
     const client = new pg.Client(base);
+    // разрыв посреди миграции — отказ запроса (и старта), а не необработанный error процесса
+    client.on('error', (e) => log.warn('[document/pg] соединение миграций оборвалось:', e && e.message));
     await client.connect();
     let locked = false;
     try {
@@ -239,9 +288,34 @@ export function createPgStorage(opts = {}) {
     }
   }
 
+  /**
+   * Соединение из пула на время транзакции. Пока соединение выдано, пул его ошибок не
+   * слушает (pg-pool снимает свой обработчик), а `error` без обработчика роняет процесс:
+   * разрыв между запросами транзакции (pg_terminate_backend, перезапуск базы, сеть)
+   * иначе убивал бы экземпляр. Здесь ошибка запоминается, соединение возвращается в
+   * пул сломанным (пул его выбросит), а запрос получит отказ → 503, клиент повторит.
+   */
+  async function checkout() {
+    const client = await pool.connect();
+    let broken = null;
+    const onError = (e) => {
+      broken = e;
+      log.warn('[document/pg] соединение оборвалось посреди транзакции:', e && e.message);
+    };
+    client.on('error', onError);
+    let released = false;
+    client.release = ((release) => (err) => {
+      if (released) return;
+      released = true;
+      client.removeListener('error', onError);
+      release(err || broken || undefined);
+    })(client.release);
+    return client;
+  }
+
   /** Запрос в транзакции базы на соединении из пула. */
   async function inTx(fn) {
-    const client = await pool.connect();
+    const client = await checkout();
     try {
       await client.query('BEGIN');
       const out = await fn(client);
@@ -262,12 +336,33 @@ export function createPgStorage(opts = {}) {
 
   const okId = (id) => UUID_RE.test(String(id));
 
+  /** Хвост после seq — на любом исполнителе запросов (пул или соединение транзакции). */
+  async function txsAfterOn(q, projectId, seq, limit, maxBytes) {
+    if (!okId(projectId)) return [];
+    const res = await q.query(
+      `SELECT ${OP_COLUMNS} FROM (
+         SELECT l.*,
+                row_number() OVER (ORDER BY l.seq) AS rn,
+                sum(octet_length(l.ops::text) + octet_length(l.dropped::text)) OVER (ORDER BY l.seq ROWS UNBOUNDED PRECEDING) AS run_bytes
+           FROM (SELECT ${OP_COLUMNS} FROM operations WHERE project_id = $1 AND seq > $2 ORDER BY seq LIMIT $3) l
+       ) t WHERE rn = 1 OR run_bytes <= $4 ORDER BY seq`,
+      [projectId, seq, limit, maxBytes]
+    );
+    return res.rows.map(toCommitted);
+  }
+
   return {
     kind: 'pg',
     /** Пул наружу — тестам, чтобы чистить таблицы; сервису он не нужен. */
     pool,
     channel,
+    presenceChannel,
     migrate,
+    publish,
+    /** Слушатель уведомлений подключён (тестам и /health-отладке). */
+    get listening() { return !!listener; },
+    /** pid серверного процесса слушателя (тестам: pg_terminate_backend). */
+    get listenerPid() { return listenerPid; },
 
     /** Миграции и слушатель уведомлений; повторный вызов (второй экземпляр на том же адаптере) — тот же промис. */
     init() {
@@ -282,6 +377,8 @@ export function createPgStorage(opts = {}) {
     },
 
     async close() {
+      // последние эфемерные (bye остановки) — до закрытия слушателя, но не дольше секунды
+      if (publishing.size) await Promise.race([Promise.allSettled([...publishing]), new Promise((r) => setTimeout(r, 1000).unref())]);
       closing = true;
       if (listenTimer) clearTimeout(listenTimer);
       listenTimer = null;
@@ -366,20 +463,13 @@ export function createPgStorage(opts = {}) {
 
     /**
      * Хвост после seq: не больше limit записей и — мягко — maxBytes JSON (первая
-     * запись входит всегда, даже если одна больше предела).
+     * запись входит всегда, даже если одна больше предела; дальше — только те, с
+     * которыми сумма не больше maxBytes; так же режет адаптер в памяти). Окно
+     * считается ПОСЛЕ LIMIT: иначе сумма шла бы по всему хвосту проекта, и
+     * дочитывание длинного журнала страницами стоило бы квадрат.
      */
     async txsAfter(projectId, seq, limit = 500, { maxBytes = PAGE_BYTES } = {}) {
-      if (!okId(projectId)) return [];
-      const res = await pool.query(
-        `SELECT ${OP_COLUMNS} FROM (
-           SELECT ${OP_COLUMNS},
-                  octet_length(ops::text) + octet_length(dropped::text) AS row_bytes,
-                  sum(octet_length(ops::text) + octet_length(dropped::text)) OVER (ORDER BY seq) AS run_bytes
-             FROM operations WHERE project_id = $1 AND seq > $2 ORDER BY seq LIMIT $3
-         ) t WHERE run_bytes - row_bytes < $4 ORDER BY seq`,
-        [projectId, seq, limit, maxBytes]
-      );
-      return res.rows.map(toCommitted);
+      return txsAfterOn(pool, projectId, seq, limit, maxBytes);
     },
 
     async chainAt(projectId, seq) {
@@ -404,7 +494,7 @@ export function createPgStorage(opts = {}) {
     async commitTx(projectId, tx, { expectSeq, expectChain, origin } = {}) {
       if (!okId(projectId)) return { status: 'missing' };
       const c = txColumns(tx);
-      const client = await pool.connect();
+      const client = await checkout();
       try {
         await client.query('BEGIN');
         const up = await client.query(

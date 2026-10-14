@@ -50,12 +50,12 @@ async function resetPg(storage) {
 }
 
 /**
- * Поднять сервис. `opts` — как у start(); `warn` — куда писать предупреждения
+ * Поднять сервис. `opts` — как у start(); `storageOpts` — адаптеру pg; `warn` — куда писать предупреждения
  * (по умолчанию глушим, тесты о них не спрашивают).
  */
-export async function startFor(backend, opts = {}) {
+export async function startFor(backend, opts = {}, storageOpts = {}) {
   const storage = backend === 'pg'
-    ? createPgStorage({ connectionString: DB_URL, log: quiet })
+    ? createPgStorage({ connectionString: DB_URL, log: quiet, ...storageOpts })
     : createMemoryStorage();
   const svc = await start({ port: 0, storage, snapshotEvery: 50, pingInterval: 0, log: quiet, ...opts });
   if (backend === 'pg') await resetPg(storage);
@@ -215,9 +215,9 @@ export async function restoreBackup(storage, projectId, backup) {
 }
 
 /** Второй экземпляр сервиса над той же базой: память — то же хранилище, pg — свой пул и свой LISTEN. */
-export async function startTwin(backend, first, opts = {}) {
+export async function startTwin(backend, first, opts = {}, storageOpts = {}) {
   const storage = backend === 'pg'
-    ? createPgStorage({ connectionString: DB_URL, log: quiet })
+    ? createPgStorage({ connectionString: DB_URL, log: quiet, ...storageOpts })
     : first.storage;
   const svc = await start({ port: 0, storage, snapshotEvery: 50, pingInterval: 0, log: quiet, ...opts });
   const close = () => svc.close({ closeStorage: backend === 'pg' });

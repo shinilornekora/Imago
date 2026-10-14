@@ -1,0 +1,9 @@
+# Контекст сборки образов (docker compose build): только то, что копируют Dockerfile-ы.
+# Зависимости ставит npm ci внутри образа; сборку клиента делает Dockerfile.web сам.
+node_modules
+**/node_modules
+.git
+dist
+dev.html
+.env
+test

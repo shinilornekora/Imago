@@ -27,6 +27,28 @@ export const MAX_VARIANTS = 6;
 export const DOC_TIMEOUT_MS = 10000;
 export const DOC_HEALTH_TIMEOUT_MS = 1500;
 export const WRITE_ATTEMPTS = 3;
+/**
+ * 503 сервиса документов с `Retry-After` (семафор тяжёлых чтений, база недоступна): ждём
+ * указанный срок, но не дольше этого — команда не должна висеть минутами.
+ */
+export const DOC_RETRY_AFTER_MAX_S = 5;
+/** Запись: суммарное ожидание по Retry-After на одну транзакцию. */
+export const WRITE_WAIT_BUDGET_MS = 12000;
+/**
+ * Пределы транзакции Document service (SPEC §9.8, `server/document/limits.js` —
+ * MAX_OPS_PER_TX, MAX_BODY_BYTES). Образ агента server/document не содержит, поэтому
+ * числа повторены здесь; test/orchestrator/dslr.test.mjs сверяет их с сервисом.
+ * Правку больше предела агент не пишет вовсе (никакой частичной записи): ошибка
+ * `too_large` с объяснением человеку.
+ */
+export const DOC_MAX_OPS_PER_TX = 5000;
+export const DOC_MAX_BODY_BYTES = 4 * 1024 * 1024;
+/** Страница журнала, которую просим (сервис режет ещё и по байтам; конец — по `more`). */
+export const DOC_PAGE_LIMIT = 5000;
+/** Страниц на одно дочитывание — страховка от бесконечного цикла. */
+export const DSLR_MAX_PAGES = 2000;
+/** Сколько раз подряд читать стейт целиком, если журнал переписывается прямо под чтением. */
+export const DSLR_FULL_ATTEMPTS = 3;
 /** Сеть до модели: проверка здоровья. */
 export const LLM_HEALTH_TIMEOUT_MS = 3000;
 export const LLM_HEALTH_CACHE_MS = 10000;

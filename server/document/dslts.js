@@ -253,6 +253,9 @@ export function createSequencer({
   /** Hub говорит, кого он держит открытым: такие головы по бездействию не выгружаются */
   let watched = () => false;
   let closed = false;
+  /** круги заново из-за гонки с другим экземпляром и исчерпанные попытки (тестам, отладке) */
+  let staleRetries = 0;
+  let exhausted = 0;
 
   /**
    * Мьютекс проекта: очередь промисов. Отказ одной транзакции не должен запирать
@@ -557,6 +560,8 @@ export function createSequencer({
       }
       if (closed) throw unavailable('сервис останавливается');
       return withLock(projectId, async () => {
+        // очередь мьютекса могла дождаться остановки: голову после close() не загружаем
+        if (closed) throw unavailable('сервис останавливается');
         let head = await ensureHead(projectId);
         // tx_id известен → сохранённое (идемпотентность, §8.3). Здесь только память:
         // всё старше RECENT_LIMIT ловит UNIQUE(project_id, tx_id) в commitTx, а лишний
@@ -588,6 +593,7 @@ export function createSequencer({
             return { committed: res.committed, existing: true };
           }
           if (res.status === 'stale') {
+            staleRetries += 1;
             if (res.reason === 'chain' || res.head_seq < head.head_seq) {
               // номер тот же, а журнал под ним другой, или база позади: откат базы
               await rollback(projectId, head, { epoch: res.epoch, head_seq: res.head_seq }, res.reason === 'chain' ? 'цепочка на записи другая' : 'номер записи позади головы');
@@ -605,10 +611,14 @@ export function createSequencer({
           head.head_seq = res.committed.seq;
           head.chain = res.committed.chain;
           remember(head, res.committed);
+          // бездействие считается от конца записи, а не от её начала: долгая запись
+          // (медленная база, длинная очередь) не должна выгружать голову сразу после себя
+          touch(projectId, head);
           emit({ kind: 'tx', projectId, committed: res.committed });
           if (snapshotEvery > 0 && res.committed.seq % snapshotEvery === 0) scheduleSnapshot(projectId, res.committed.seq, head.doc, head.chain);
           return { committed: res.committed, existing: false };
         }
+        exhausted += 1;
         throw unavailable('голову проекта двигает другой экземпляр — повторите позже');
       });
     },
@@ -624,6 +634,11 @@ export function createSequencer({
         const head = await ensureHead(projectId);
         return { doc: head.doc, head_seq: head.head_seq, chain: head.chain, epoch: head.epoch, tombstones: new Map(head.tombstones), recent: head.recent.slice() };
       });
+    },
+
+    /** Гонки с другими экземплярами: сколько кругов заново, сколько раз попытки кончились (503). */
+    stats() {
+      return { staleRetries, exhausted, heads: heads.size };
     },
 
     /** Загружена ли голова (после выгрузки по бездействию — нет). */

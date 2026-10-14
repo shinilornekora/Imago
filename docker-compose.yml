@@ -36,7 +36,11 @@ services:
     environment:
       DATABASE_URL: postgres://imago:imago@db:5432/imago
       PORT: "8080"
-      SNAPSHOT_EVERY: "50"
+      SNAPSHOT_EVERY: ${SNAPSHOT_EVERY:-50}
+      # сколько последних снимков хранить (снимок seq 0 остаётся всегда)
+      SNAPSHOT_KEEP: ${SNAPSHOT_KEEP:-5}
+      # дедлайн обычного запроса к базе, мс: просрочка — 503, клиент повторит (миграции — без него)
+      DB_TIMEOUT_MS: ${DB_TIMEOUT_MS:-8000}
       # общий с orchestrator секрет для /api/internal/traces; заглушку change-me сервис
       # не принимает — тогда трассы просто не пишутся (см. deploy/env.example)
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-change-me}

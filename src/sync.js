@@ -27,6 +27,12 @@
  * переоткрывается, берёт снимок, а свою очередь — и свои транзакции, подтверждённые
  * в прежней эпохе (`mine`), — переигрывает поверх: сервер узнает уцелевшие по tx_id,
  * потерянные запишет заново. Правки не теряются.
+ *
+ * Круг 24 (SPEC §9.9): присутствие — сердцебиением раз в 15 с (сервер без вестей 45 с
+ * объявляет `left`, присутствие ходит между экземплярами сервиса), с полями `busy` /
+ * `queued` (агент работает над командой этого человека) — как их дала оболочка;
+ * в адресе сокета `proto=2` — клиент знает `ack` (прежнему сервер вместо `ack` шлёт
+ * `error {code:'duplicate'}`, его реплика тоже понимает).
  */
 
 const WRITE_DELAY = 200;          // пауза между изменением и записью журнала
@@ -52,6 +58,8 @@ export const LIMITS = Object.freeze({
   opsPerTx: 5000,
   docBytes: 24 * 1024 * 1024,
   docNodes: 20000,
+  presenceSelection: 200,        // id в выделении присутствия — больше сервер обрежет (truncated)
+  presenceHeartbeatMs: 15000,    // сердцебиение присутствия: сервер считает ушедшим после 45 с тишины
 });
 
 /** Причины отброшенных операций — словами человека (SPEC §9.1 DropReason, §9.8 limit). */
@@ -129,6 +137,8 @@ function retryAfterOf(res, body) {
 }
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+/** busy/queued присутствия (§9.9): булево или число. */
+const isFlag = (v) => typeof v === 'boolean' || isNum(v);
 
 /** Глубокая копия JSON-совместимых данных: операции и документ наружу и внутрь не делим. */
 function clone(v) {
@@ -248,6 +258,8 @@ export function createSync(o) {
   const reconnectMin = isNum(o.reconnectMin) ? o.reconnectMin : 1000;
   const reconnectMax = isNum(o.reconnectMax) ? o.reconnectMax : 30000;
   const epochReopenMs = isNum(o.epochReopenMs) ? o.epochReopenMs : EPOCH_REOPEN_MS;
+  const heartbeatMs = isNum(o.presenceHeartbeatMs) ? o.presenceHeartbeatMs : LIMITS.presenceHeartbeatMs;
+  const presenceTtl = isNum(o.presenceTtl) ? o.presenceTtl : PRESENCE_TTL;
   const setT = (fn, ms) => {
     const id = setTimeout(fn, ms);
     // в Node таймер держит процесс: тесты не должны ждать паузу переподключения
@@ -297,6 +309,7 @@ export function createSync(o) {
   // смене имени; пустое выделение — тоже присутствие
   let presenceLast = { selection: [], board: null };
   let presenceTimer = null;
+  let heartbeatTimer = null;   // сердцебиение присутствия (и уборка протухших чужих)
   let presenceSentAt = 0;
   let presenceSentKey = '';    // что ушло последним: то же самое второй раз не шлём
   const others = new Map();    // client → {client, author, selection, board, at}
@@ -630,7 +643,7 @@ export function createSync(o) {
   function wsUrl() {
     // имя — и в query: браузер не ставит заголовков при upgrade, а Hub подписывает им присутствие
     const q = `project=${encodeURIComponent(projectId)}&since=${confirmed.seq}&client=${encodeURIComponent(clientId)}`
-      + (author ? `&author=${encodeURIComponent(author)}` : '') + anchorQuery();
+      + (author ? `&author=${encodeURIComponent(author)}` : '') + anchorQuery() + '&proto=2';
     if (/^wss?:/i.test(baseUrl)) return `${baseUrl}/ws?${q}`;
     if (/^https?:/i.test(baseUrl)) return `${baseUrl.replace(/^http/i, 'ws')}/ws?${q}`;
     if (typeof location !== 'undefined' && location.host) {
@@ -692,6 +705,7 @@ export function createSync(o) {
     online = false;
     ready = false;
     if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
+    stopHeartbeat();
     clearInflight();
     if (others.size) { others.clear(); emitPresence(); }
     emitStatus();
@@ -723,6 +737,25 @@ export function createSync(o) {
     serverWait = 0;
     attempt += 1;
     reconnectTimer = setT(() => { reconnectTimer = null; connect(); }, delay);
+  }
+
+  /**
+   * Повтор уже записанной транзакции, которую этот сокет уже видел (SPEC §9.8 `ack`,
+   * §9.9 `error duplicate`): если она в confirmed — снять с очереди; если впереди —
+   * придёт кадром tx.
+   */
+  function takeAck(msg) {
+    const i = msg.tx_id ? pending.findIndex((p) => p.tx_id === msg.tx_id) : -1;
+    if (i >= 0 && isNum(msg.seq) && msg.seq <= confirmed.seq && !catchingUp) {
+      const own = pending.splice(i, 1)[0];
+      if (inflight === own.tx_id) clearInflight();
+      rememberMine(own, msg.seq);
+      replayAll();
+      scheduleWrite();
+      emitStatus();
+      call(o.onChange, view, { reason: 'ack', tx: own, seq: msg.seq });
+      sendNext();
+    }
   }
 
   function handleMessage(msg) {
@@ -763,6 +796,7 @@ export function createSync(o) {
         // очередь и присутствие — только теперь: до hello Hub их выбрасывает
         sendNext();
         sendPresence();
+        startHeartbeat();
         break;
       }
       case 'tx':
@@ -770,22 +804,9 @@ export function createSync(o) {
         if (epochMoved && ready) { epochMoved = false; for (const m of mine) m.epoch = epoch; }
         handleTx(msg.tx);
         break;
-      case 'ack': {
-        // повтор уже записанной транзакции, которую этот сокет уже видел (SPEC §9.8):
-        // если она в confirmed — снять с очереди; если впереди — придёт кадром tx
-        const i = msg.tx_id ? pending.findIndex((p) => p.tx_id === msg.tx_id) : -1;
-        if (i >= 0 && isNum(msg.seq) && msg.seq <= confirmed.seq && !catchingUp) {
-          const own = pending.splice(i, 1)[0];
-          if (inflight === own.tx_id) clearInflight();
-          rememberMine(own, msg.seq);
-          replayAll();
-          scheduleWrite();
-          emitStatus();
-          call(o.onChange, view, { reason: 'ack', tx: own, seq: msg.seq });
-          sendNext();
-        }
+      case 'ack':
+        takeAck(msg);
         break;
-      }
       case 'gone':
         if (!ready) { ready = true; online = true; if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; } }
         if (inflight) clearInflight();   // очередь досылается с начала поверх снимка
@@ -797,6 +818,8 @@ export function createSync(o) {
         const code = String(msg.code || 'error');
         // эпоха сменилась — следом сервер закроет сокет кодом 4410, реплика переоткроется сама
         if (code === 'epoch') { epochMoved = true; break; }
+        // «уже записана» (сервер считает клиента прежним, §9.9) — то же, что ack
+        if (code === 'duplicate' && msg.existing === true) { takeAck(msg); break; }
         const i = msg.tx_id ? pending.findIndex((p) => p.tx_id === msg.tx_id) : -1;
         const tx = i >= 0 ? pending[i] : null;
         if (/engine|426/i.test(code)) { halted = true; error = 'engine'; }
@@ -829,13 +852,18 @@ export function createSync(o) {
         // новичок объявился — ответим своим присутствием, иначе он о нас не узнает,
         // пока мы что-нибудь не выделим (сервер списка присутствующих не хранит)
         const newcomer = !others.has(String(msg.client));
-        others.set(String(msg.client), {
+        const entry = {
           client: String(msg.client),
           author: String(msg.author || ''),
-          selection: Array.isArray(msg.selection) ? msg.selection.filter((x) => typeof x === 'string').slice(0, 200) : [],
+          selection: Array.isArray(msg.selection) ? msg.selection.filter((x) => typeof x === 'string').slice(0, LIMITS.presenceSelection) : [],
           board: typeof msg.board === 'string' ? msg.board : null,
-          at: isNum(msg.at) ? msg.at : Date.now(),
-        });
+          // время получения: часы сервера и вкладки не сверены, а TTL считается здесь
+          at: Date.now(),
+        };
+        if (msg.truncated === true) entry.truncated = true;
+        if (isFlag(msg.busy)) entry.busy = msg.busy;
+        if (isFlag(msg.queued)) entry.queued = msg.queued;
+        others.set(String(msg.client), entry);
         emitPresence();
         if (newcomer) presence(presenceLast, true);
         break;
@@ -850,9 +878,16 @@ export function createSync(o) {
 
   /* ---- присутствие ---- */
 
-  function emitPresence() {
+  /** Чужие без вестей дольше TTL — ушли (сервер скажет left сам; это — на случай, если не сказал). */
+  function sweepOthers() {
     const now = Date.now();
-    for (const [k, p] of others) if (now - p.at > PRESENCE_TTL) others.delete(k);
+    let changed = false;
+    for (const [k, p] of others) if (now - p.at > presenceTtl) { others.delete(k); changed = true; }
+    return changed;
+  }
+
+  function emitPresence() {
+    sweepOthers();
     call(o.onPresence, [...others.values()].map((p) => ({ ...p, selection: p.selection.slice() })));
   }
 
@@ -860,7 +895,28 @@ export function createSync(o) {
     if (!presenceLast || !socketOpen() || !ready) return;
     presenceSentAt = Date.now();
     presenceSentKey = JSON.stringify([presenceLast, author]);
-    sendJson({ type: 'presence', selection: presenceLast.selection, board: presenceLast.board, author });
+    const msg = { type: 'presence', selection: presenceLast.selection, board: presenceLast.board, author };
+    if (isFlag(presenceLast.busy)) msg.busy = presenceLast.busy;
+    if (isFlag(presenceLast.queued)) msg.queued = presenceLast.queued;
+    sendJson(msg);
+  }
+
+  /**
+   * Сердцебиение: своё присутствие — раз в heartbeatMs, даже если не менялось (сервер
+   * без вестей 45 с объявляет нас ушедшими); заодно уборка протухших чужих.
+   */
+  function startHeartbeat() {
+    stopHeartbeat();
+    if (!(heartbeatMs > 0)) return;
+    const beat = () => {
+      heartbeatTimer = setT(beat, heartbeatMs);
+      if (Date.now() - presenceSentAt >= heartbeatMs * 0.9 && !presenceTimer) sendPresence();
+      if (sweepOthers()) emitPresence();
+    };
+    heartbeatTimer = setT(beat, heartbeatMs);
+  }
+  function stopHeartbeat() {
+    if (heartbeatTimer) { clearTimeout(heartbeatTimer); heartbeatTimer = null; }
   }
 
   /**
@@ -869,9 +925,12 @@ export function createSync(o) {
    */
   function presence(p, force = false) {
     const next = {
-      selection: Array.isArray(p && p.selection) ? p.selection.filter((x) => typeof x === 'string').slice(0, 200) : [],
+      selection: Array.isArray(p && p.selection) ? p.selection.filter((x) => typeof x === 'string').slice(0, LIMITS.presenceSelection) : [],
       board: p && typeof p.board === 'string' ? p.board : null,
     };
+    // агент работает над командой этого человека (§9.9): как дала оболочка — булево или число
+    if (p && isFlag(p.busy)) next.busy = p.busy;
+    if (p && isFlag(p.queued)) next.queued = p.queued;
     if (!force && !presenceTimer && JSON.stringify([next, author]) === presenceSentKey) return;
     presenceLast = next;
     if (presenceTimer) return;
@@ -1033,6 +1092,7 @@ export function createSync(o) {
     closed = true;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (presenceTimer) { clearTimeout(presenceTimer); presenceTimer = null; }
+    stopHeartbeat();
     if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
     if (resendTimer) { clearTimeout(resendTimer); resendTimer = null; }
     clearInflight();

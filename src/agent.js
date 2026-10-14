@@ -345,6 +345,7 @@ function parseData(raw) {
  *   project: string, text: string, selection?: string[], board?: string|null,
  *   base_seq?: number, client?: string, author?: string,
  *   mode?: 'run'|'variants', n?: number, command_id?: string,
+ *   history?: {utterance: string, summary?: string}[],
  *   signal?: AbortSignal, onEvent?: (ev: {type: string, data: object}) => void,
  *   baseUrl?: string, fetch?: typeof fetch, retries?: number, maxRetryWaitMs?: number,
  *   idleMs?: number
@@ -374,6 +375,16 @@ export async function runServerCommand(p = {}) {
   if (p.author) body.author = p.author;
   if (p.mode) body.mode = p.mode;
   if (Number.isFinite(p.n)) body.n = p.n;
+  // память разговора (§10.5): до пяти пар, строки не длиннее 500 символов — сервер
+  // отверг бы больше (400), а планировщику хватает и этого
+  if (Array.isArray(p.history) && p.history.length) {
+    const cut = (v) => { const t = String(v == null ? '' : v); return t.length > 500 ? t.slice(0, 500) : t; };
+    const list = p.history
+      .filter((h) => h && typeof h.utterance === 'string' && h.utterance.trim())
+      .slice(-5)
+      .map((h) => ({ utterance: cut(h.utterance), summary: cut(h.summary) }));
+    if (list.length) body.history = list;
+  }
 
   const stopQuietly = () => stop(commandId, { baseUrl: p.baseUrl, fetch: p.fetch, author: p.author });
 

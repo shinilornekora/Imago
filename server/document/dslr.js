@@ -163,7 +163,8 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
     /**
      * Догон (SPEC §9.2 `ops?since=`, §9.3 `hello` → `tx`…): страница транзакций с
      * `seq > since`. `gone` — когда с `since` догнать нельзя и клиенту нужен снимок
-     * (since < 0, впереди головы, хвост не начинается сразу за since).
+     * (since < 0, впереди головы, хвост не начинается сразу за since или пуст при
+     * голове впереди since).
      * @param {string} projectId
      * @param {number} since
      * @param {number} [limit]
@@ -174,7 +175,10 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
       const lim = Math.max(1, Math.min(MAX_LIMIT, Number(limit) || PAGE_TXS));
       if (since < 0 || since > p.head_seq) return this.gone(projectId, p);
       const txs = await page(projectId, since, lim);
-      if (txs.length && txs[0].seq !== since + 1) return this.gone(projectId, p);
+      // хвост не начинается сразу за since — или его нет вовсе, хотя голова впереди
+      // (записи журнала потеряны): догнать нечем, только снимок. Иначе `more: true` с
+      // пустой страницей — и догоняющий крутился бы на месте
+      if (txs.length ? txs[0].seq !== since + 1 : since < p.head_seq) return this.gone(projectId, p);
       const last = txs.length ? txs[txs.length - 1].seq : since;
       const head_seq = Math.max(p.head_seq, last);
       return { head_seq, txs, more: last < head_seq, project: p };

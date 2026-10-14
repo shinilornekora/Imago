@@ -43,6 +43,7 @@ export function createTraces({ doc: net, token = '', path = '/api/internal/trace
       ...(t.tx_id ? { tx_id: t.tx_id, seq: t.seq, ops: t.ops, dropped: t.dropped } : {}),
       ...(t.variants != null ? { variants: t.variants } : {}),
       ...(t.libraries != null ? { libraries: t.libraries } : {}),
+      ...(t.library_components != null ? { library_components: t.library_components } : {}),
       engine: t.engine,
       ...(t.model ? { model: s(t.model, 120) } : {}),
       ...(t.llm_kind ? { llm_kind: t.llm_kind } : {}),

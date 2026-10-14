@@ -15,6 +15,9 @@
  *                engine?, history?, geo?, activeArtboardId?, selectionBy?})
  *     -> [{key, label, description, ops, preview, plan, warnings, error?}]
  *   SCHEMAS = {plan, tree, patch, theme, answer}
+ *   Круг 24: у runCommand и runVariants есть library — внешний словарь компонентов
+ *   (DUIL, SPEC §10.6): [{doc, name?, id?}]; имена документа главнее, использованные
+ *   мастера переносятся в библиотеку документа (libraryAdded). id новых узлов — core.uid.
  *
  * Новое в контракте:
  *   history           — [{utterance, summary}], до 5 последних обменов (старые первыми);
@@ -1768,15 +1771,22 @@ const UNDO_PHRASES = new Set([
   'отмени изменения', 'отмени последнее изменение', 'отмени последние изменения', 'отмени что сделал',
   'откати', 'откатить', 'откат', 'откати назад', 'откати последнее', 'откати правку', 'откатись',
   'назад', 'шаг назад', 'на шаг назад', 'вернись назад', 'верни назад',
-  'верни как было', 'верни как раньше', 'верни обратно', 'верни как до этого',
+  'верни как было', 'верни как раньше', 'верни как до этого',
   'сделай как было', 'сделай как раньше', 'пусть будет как было', 'как было', 'как было раньше',
   'не так', 'не то', 'не туда', 'не это', 'не надо', 'не нужно было',
   'undo', 'ctrl z', 'ctrl+z', 'отмени это действие',
 ]);
 
-/** Возврат отменённого. «Вернуть» — то же слово, что на кнопке отмены в интерфейсе. */
+/**
+ * Возврат отменённого. «Вернуть» — то же слово, что на кнопке отмены в интерфейсе.
+ * Круг 24: «верни обратно» — тоже ПОВТОР, как в оболочке (app.js shellIntent, RE_REDO_BARE):
+ * после отмены оболочка сама предлагает кнопку «Вернуть обратно», и эти же слова голосом
+ * обязаны делать то же, что кнопка. Раньше brain читал их как отмену, а оболочка — как
+ * повтор: одна реплика давала разное в браузере и на сервере агента (JEV).
+ * «Верни назад» и «верни как было» остаются отменой.
+ */
 const REDO_PHRASES = new Set([
-  'вернуть', 'верни отмененное', 'верни отменённое', 'верни отмену', 'отмени отмену',
+  'вернуть', 'верни обратно', 'верни отмененное', 'верни отменённое', 'верни отмену', 'отмени отмену',
   'повтори отмененное', 'повтори отменённое', 'повтори отмену', 'повтори правку', 'повтори последнюю правку',
   'сделай снова', 'сделай заново', 'верни правку', 'верни то что отменил', 'верни что отменил',
   'вперед', 'вперёд', 'шаг вперед', 'шаг вперёд', 'redo', 'ctrl shift z', 'ctrl+shift+z',
@@ -3694,27 +3704,61 @@ function opMatches(out, name, payload) {
   return true;
 }
 
-function makeIdFactory(doc, extraTaken = []) {
+/**
+ * Глобально уникальный id без движка — та же форма, что у core.uid (SPEC §8.3): префикс,
+ * «_», 12 случайных символов base36 и счётчик процесса. Нужен, только если подменённый
+ * движок (тесты) не умеет uid.
+ */
+let localUidCounter = 0;
+function localUid(prefix = 'n') {
+  const abc = '0123456789abcdefghijklmnopqrstuvwxyz';
+  localUidCounter += 1;
+  let rnd = '';
+  const c = globalThis.crypto;
+  if (c && typeof c.getRandomValues === 'function') {
+    const bytes = new Uint8Array(12);
+    c.getRandomValues(bytes);
+    for (let i = 0; i < 12; i++) rnd += abc[bytes[i] % 36];
+  } else {
+    for (let i = 0; i < 12; i++) rnd += abc[Math.floor(Math.random() * 36)];
+  }
+  return `${prefix}_${rnd}${localUidCounter.toString(36)}`;
+}
+
+/**
+ * Фабрика id новых узлов (круг 24, SPEC §10.6): id ГЛОБАЛЬНО уникальны — через `core.uid`
+ * движка. Раньше здесь выдавались короткие `f1`, `t2`, уникальные лишь в документе: в
+ * общем журнале (§8.3) такой id после чужого удаления мог вернуться к жизни и столкнуться с
+ * отменой этого удаления, и Orchestrator переименовывал их перед записью (globalizeIds).
+ * id, предложенный моделью (`id` в дереве), больше не берётся как есть — он лишь псевдоним
+ * (`aliases`: как модель назвала → какой id выдан), по нему патч находит созданное.
+ */
+function makeIdFactory(doc, extraTaken = [], engine = null) {
   const taken = new Set(Object.keys((doc && doc.nodes) || {}));
   for (const id of extraTaken) taken.add(id);
-  let seq = 0;
   const prefix = { frame: 'f', text: 't', rect: 'r', ellipse: 'e', image: 'i', instance: 'i' };
+  const gen = engine && typeof engine.uid === 'function' ? engine.uid : localUid;
+  const aliases = new Map();
   const mint = (type) => {
     const p = prefix[type] || 'n';
+    for (let i = 0; i < 100; i++) {
+      const id = String(gen(p));
+      if (id && !taken.has(id)) { taken.add(id); return id; }
+    }
+    // движок вернул занятое сто раз подряд — значит, его uid не случаен; страхуемся своим
     for (;;) {
-      seq++;
-      const id = `${p}${seq.toString(36)}`;
+      const id = localUid(p);
       if (!taken.has(id)) { taken.add(id); return id; }
     }
   };
-  /** Санитизация id от модели: только [A-Za-z0-9_-], без коллизий с существующими. */
+  /** id от модели — только псевдоним: узел получает свежий глобальный id. */
   const adopt = (raw, type) => {
-    const clean = String(raw == null ? '' : raw).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
-    if (!clean || taken.has(clean)) return mint(type);
-    taken.add(clean);
-    return clean;
+    const id = mint(type);
+    const clean = String(raw == null ? '' : raw).trim().slice(0, 80);
+    if (clean && !aliases.has(clean)) aliases.set(clean, id);
+    return id;
   };
-  return { mint, adopt, taken };
+  return { mint, adopt, taken, aliases };
 }
 
 const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
@@ -4411,7 +4455,7 @@ export function treeToOps({ doc, tree, parentId, index, engine, warn, persona, a
     };
   }
 
-  const ids = makeIdFactory(doc);
+  const ids = makeIdFactory(doc, [], engine);
   const nodes = [];
   const rootId = specToNodes(spec, parentId, ids, nodes);
 
@@ -6319,7 +6363,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
     work.push({ ...raw, op: 'set', target: `#${info.id}` });
   }
   const ops = [];
-  const ids = makeIdFactory(doc);
+  const ids = makeIdFactory(doc, [], engine);
   const created = new Map();                       // «имя из этого патча» → новый id (п.9)
   const createdParents = new Map();                // новый id → его родитель (узлов ещё нет в doc)
   /**
@@ -6564,6 +6608,8 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
       if (nodes.length) {
         registerCreated(created, spec.name, nodes[0].id);
         registerCreated(created, spec.$id, nodes[0].id);
+        // id, которые модель дала узлам дерева, — псевдонимы выданных глобальных id (makeIdFactory)
+        for (const [raw, fresh] of ids.aliases) registerCreated(created, raw, fresh);
         if (!isSelfRef(edit.target)) registerCreated(created, edit.target, nodes[0].id);
       }
     } else if (op === 'move') {
@@ -7330,11 +7376,303 @@ function componentIntent({ engine, doc, scope, utterance, ask, geo, emit }) {
     isComp ? 'componentRename' : 'component', plan);
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * Внешняя библиотека (круг 24, SPEC §10.6): словарь компонентов от DUIL
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Пределы переноса внешних мастеров: узлов в одном мастере и всего. */
+const EXT_MASTER_NODES = 400;
+const EXT_TOTAL_NODES = 4000;
+
+const compKey = (name) => String(name == null ? '' : name).trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+
+/** Есть ли что брать: `library` — непустой массив документов-библиотек. */
+function hasExternalLibrary(library) {
+  return asArray(library).some((e) => e && e.doc && e.doc.nodes && e.doc.root);
+}
+
 /**
- * Одна команда пользователя: classify → plan → generate → materialize → validate →
- * (repair ≤ 1) → done. Входной doc не мутируется.
+ * Документ-библиотека → его минимальная выжимка для передачи: корень, страница библиотеки и
+ * мастера с поддеревьями (остальные доски словарю не нужны). DUIL зовёт это перед тем, как
+ * отдать словарь в прогон (и в воркер), чтобы не возить по потокам целые проекты.
+ * @param {object} doc
+ * @param {object} engine
+ * @returns {object|null} документ или null, если библиотеки в нём нет
+ */
+export function libraryDocOf(doc, engine) {
+  if (!doc || !doc.nodes || !doc.root) return null;
+  const libId = libraryIdOf(doc, engine);
+  if (!libId) return null;
+  const keep = libraryIds(doc, engine);
+  const nodes = {};
+  for (const id of keep) if (doc.nodes[id]) nodes[id] = doc.nodes[id];
+  const root = doc.nodes[doc.root];
+  nodes[doc.root] = { ...root, children: [libId] };
+  return { ...doc, nodes };
+}
+
+/**
+ * Внешний словарь → «документ плюс»: стейт, в библиотеку которого временно положены мастера
+ * внешних компонентов (свежие глобальные id), чтобы весь конвейер — выжимка, сборка
+ * экземпляров, проверка — работал с ними как со своими. Имена документа главнее: внешний
+ * компонент с тем же именем (без учёта регистра) не берётся; среди внешних — первый по
+ * порядку библиотек. Компонент, внутри которого экземпляр мастера, которого не перенести,
+ * не берётся вовсе.
+ * @param {object} doc
+ * @param {Array<{doc: object, name?: string, id?: string}>} library
+ * @param {object} engine
+ * @returns {null | {doc: object, libId: string, libOps: object[], masters: Array<{rootId, name, source, ops, ids: Set<string>, deps: Set<string>}>}}
+ */
+export function externalLibraryPlan(doc, library, engine) {
+  if (!hasExternalLibrary(library) || !engine || typeof engine.applyOps !== 'function') return null;
+  const own = componentList(engine, doc);
+  const ownByKey = new Map(own.map((c) => [compKey(c.name), c.id]));
+  const seen = new Set(ownByKey.keys());
+
+  /* кандидаты по порядку библиотек */
+  const cands = [];
+  for (const entry of asArray(library)) {
+    const lib = entry && entry.doc;
+    if (!lib || !lib.nodes || !lib.root) continue;
+    for (const info of componentList(engine, lib)) {
+      const key = compKey(info && info.name);
+      if (!key || seen.has(key) || !lib.nodes[info.id]) continue;
+      seen.add(key);
+      cands.push({ name: info.name, key, source: String(entry.name || entry.id || ''), lib, rootId: info.id });
+    }
+  }
+  if (!cands.length) return null;
+
+  /* поддеревья и свежие id: ключ — библиотека + её id (у двух библиотек id могут совпасть) */
+  const fresh = new Map();            // lib → Map(old → new)
+  const freshOf = (lib) => { let m = fresh.get(lib); if (!m) { m = new Map(); fresh.set(lib, m); } return m; };
+  const prefixOf = (t) => ({ frame: 'f', text: 't', rect: 'r', ellipse: 'e', image: 'i', instance: 'i' }[t] || 'n');
+  const gen = typeof engine.uid === 'function' ? engine.uid : localUid;
+  let total = 0;
+  for (const c of cands) {
+    const order = [];
+    const walk = (id, depth) => {
+      const n = c.lib.nodes[id];
+      if (!n || order.length > EXT_MASTER_NODES || depth > MAX_TREE_DEPTH * 4 || order.includes(id)) return;
+      order.push(id);
+      for (const k of n.children || []) walk(k, depth + 1);
+    };
+    walk(c.rootId, 0);
+    if (order.length > EXT_MASTER_NODES || total + order.length > EXT_TOTAL_NODES) { c.skip = true; continue; }
+    total += order.length;
+    c.order = order;
+    const m = freshOf(c.lib);
+    for (const id of order) m.set(id, String(gen(prefixOf(c.lib.nodes[id].type))));
+  }
+
+  /* вложенные экземпляры: свой перенесённый мастер, иначе мастер документа с тем же именем */
+  const byLibRoot = new Map();        // lib → Map(rootId → cand)
+  for (const c of cands) {
+    if (c.skip) continue;
+    let m = byLibRoot.get(c.lib);
+    if (!m) { m = new Map(); byLibRoot.set(c.lib, m); }
+    m.set(c.rootId, c);
+  }
+  const nameOfMaster = (lib, id) => {
+    const n = lib.nodes[id];
+    return n && n.component && typeof n.component.name === 'string' ? n.component.name : null;
+  };
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const c of cands) {
+      if (c.skip) continue;
+      c.deps = new Set();
+      c.ofMap = new Map();
+      for (const id of c.order) {
+        const n = c.lib.nodes[id];
+        if (!n || n.type !== 'instance' || typeof n.of !== 'string') continue;
+        const dep = (byLibRoot.get(c.lib) || new Map()).get(n.of);
+        if (dep && !dep.skip) { c.deps.add(dep.rootId); c.ofMap.set(n.of, freshOf(c.lib).get(n.of)); continue; }
+        const ownId = ownByKey.get(compKey(nameOfMaster(c.lib, n.of)));
+        if (ownId) { c.ofMap.set(n.of, ownId); continue; }
+        c.skip = true;
+        changed = true;
+        break;
+      }
+    }
+  }
+  const take = cands.filter((c) => !c.skip);
+  if (!take.length) return null;
+
+  /* библиотека документа: есть — кладём в неё, нет — заводим (её создание — тоже кандидат в префикс) */
+  let libId = libraryIdOf(doc, engine);
+  let libOps = [];
+  if (!libId) {
+    if (typeof engine.ensureLibraryOps !== 'function') return null;
+    libOps = asArray(engine.ensureLibraryOps(doc));
+    const made = libOps[0] && libOps[0].node;
+    if (!made || !made.id) return null;
+    libId = made.id;
+  }
+
+  const masters = take.map((c) => {
+    const m = freshOf(c.lib);
+    let component = null;
+    const ops = c.order.map((oldId, i) => {
+      const src = c.lib.nodes[oldId];
+      const node = JSON.parse(JSON.stringify(src));
+      node.id = m.get(oldId);
+      node.parent = i === 0 ? libId : m.get(src.parent);
+      if (Array.isArray(node.children)) node.children = [];   // дети встают в родителя своими операциями
+      if (i === 0) { delete node.pos; delete node.override; }
+      if (node.type === 'instance' && c.ofMap.has(node.of)) node.of = c.ofMap.get(node.of);
+      if (node.component && typeof node.component === 'object') {
+        const comp = {
+          ...node.component,
+          ...(Array.isArray(node.component.props)
+            ? { props: node.component.props.map((p) => (p && typeof p === 'object' && m.has(p.target) ? { ...p, target: m.get(p.target) } : p)) }
+            : {}),
+        };
+        // цели пропсов — узлы внутри мастера: их ещё нет, поэтому `component` ставится последним
+        if (i === 0) { component = comp; delete node.component; } else node.component = comp;
+      }
+      return mkOp(engine, 'create', { node });
+    });
+    if (component) ops.push(mkOp(engine, 'set', { id: m.get(c.rootId), path: 'component', value: component }));
+    return {
+      rootId: m.get(c.rootId), name: c.name, source: c.source, ops,
+      ids: new Set(c.order.map((id) => m.get(id))),
+      deps: new Set([...(c.deps || [])].map((id) => m.get(id))),
+    };
+  });
+
+  let res;
+  try { res = engine.applyOps(doc, [...libOps, ...masters.flatMap((x) => x.ops)]); } catch { res = null; }
+  if (!res || res.error || !res.doc) return null;
+  return { doc: res.doc, libId, libOps, masters };
+}
+
+/** Все id, на которые ссылается операция (узел, родитель, сосед, мастер, цели пропсов). */
+function opRefs(op) {
+  const out = [];
+  if (!op || typeof op !== 'object') return out;
+  for (const k of ['id', 'parent', 'after']) if (typeof op[k] === 'string') out.push(op[k]);
+  const n = op.node;
+  if (n && typeof n === 'object') {
+    for (const k of ['id', 'parent', 'of']) if (typeof n[k] === 'string') out.push(n[k]);
+    if (n.component && Array.isArray(n.component.props)) for (const p of n.component.props) if (p && typeof p.target === 'string') out.push(p.target);
+  }
+  if (op.op === 'set' && op.path === 'of' && typeof op.value === 'string') out.push(op.value);
+  if (op.op === 'set' && op.path === 'component' && op.value && Array.isArray(op.value.props)) {
+    for (const p of op.value.props) if (p && typeof p.target === 'string') out.push(p.target);
+  }
+  return out;
+}
+
+/**
+ * Операции, построенные над «документом плюс», → операции над настоящим документом:
+ * спереди — перенос тех внешних мастеров, на которые правка ссылается (и тех, что в них
+ * вложены), и, если надо, создание страницы библиотеки. Неиспользованные не переносятся.
+ * @returns {{ops: object[], added: Array<{name, source}>}}
+ */
+function materializeExternal(plan, ops) {
+  const refs = new Set(ops.flatMap(opRefs));
+  const byRoot = new Map(plan.masters.map((m) => [m.rootId, m]));
+  const used = new Set();
+  const stack = plan.masters.filter((m) => [...m.ids].some((id) => refs.has(id))).map((m) => m.rootId);
+  while (stack.length) {
+    const id = stack.pop();
+    if (used.has(id)) continue;
+    used.add(id);
+    for (const d of (byRoot.get(id) || { deps: [] }).deps) stack.push(d);
+  }
+  const take = plan.masters.filter((m) => used.has(m.rootId));
+  const needLib = plan.libOps.length && (take.length || refs.has(plan.libId));
+  return {
+    ops: [...(needLib ? plan.libOps : []), ...take.flatMap((m) => m.ops), ...ops],
+    added: take.map((m) => ({ name: m.name, source: m.source })),
+  };
+}
+
+/** Превью над настоящим документом (геометрия — заново: «плюс» рисовал лишние мастера). */
+function previewOf(engine, doc) {
+  let geo = null;
+  try { geo = typeof engine.solve === 'function' ? engine.solve(doc) : null; } catch { geo = null; }
+  return { doc, geo };
+}
+
+/**
+ * Результат прогона над «документом плюс» → результат над настоящим документом. Операции —
+ * с переносом использованных мастеров; превью — настоящий документ после них. Если перенос
+ * не лёг (так не бывает, но движок строгий) — пробуем перенести все мастера; не легло и
+ * так — ошибка, а не тихо битая правка.
+ */
+function finishExternal(res, doc, plan, engine) {
+  if (!res || typeof res !== 'object') return res;
+  const ops = Array.isArray(res.ops) ? res.ops : [];
+  if (!ops.length) {
+    return res.preview ? { ...res, preview: previewOf(engine, doc) } : res;
+  }
+  let out = materializeExternal(plan, ops);
+  let applied = engine.applyOps(doc, out.ops);
+  if (applied.error) {
+    out = { ops: [...plan.libOps, ...plan.masters.flatMap((m) => m.ops), ...ops], added: plan.masters.map((m) => ({ name: m.name, source: m.source })) };
+    applied = engine.applyOps(doc, out.ops);
+  }
+  if (applied.error) {
+    const why = applied.error.message || String(applied.error);
+    return {
+      ...res, ops: [], preview: previewOf(engine, doc),
+      error: { kind: 'model', message: `Не удалось перенести компоненты внешней библиотеки в документ: ${why}` },
+    };
+  }
+  return {
+    ...res,
+    ops: out.ops,
+    preview: res.preview ? previewOf(engine, applied.doc) : res.preview,
+    ...(out.added.length ? { libraryAdded: out.added } : {}),
+  };
+}
+
+/**
+ * Прогон с внешним словарём: «документ плюс» → прогон → перенос использованного. Без
+ * словаря (или если из него нечего взять) — обычный прогон, без единой лишней операции.
+ */
+async function withExternalLibrary(options, run, finish) {
+  if (!hasExternalLibrary(options.library)) return run({ ...options, library: null });
+  let engine;
+  try { engine = await useEngine(options.engine); } catch { return run({ ...options, library: null }); }
+  let plan = null;
+  try { plan = externalLibraryPlan(options.doc, options.library, engine); } catch { plan = null; }
+  if (!plan) return run({ ...options, library: null });
+  // геометрия «плюса» другая (страница библиотеки) — пусть конвейер посчитает её сам
+  const res = await run({ ...options, doc: plan.doc, geo: null, engine, library: null });
+  return finish(res, options.doc, plan, engine);
+}
+
+/**
+ * Одна команда пользователя (SPEC §1.6). Новое в круге 24: `library` — внешний словарь
+ * компонентов (DUIL, §10.6): `[{doc, name?, id?}]`, документы-библиотеки (или их выжимки
+ * `libraryDocOf`). Он дополняет библиотеку документа (имена документа главнее); мастер,
+ * на который правка сослалась, переносится в библиотеку документа теми же операциями
+ * (`libraryAdded: [{name, source}]` — что перенесено).
  */
 export async function runCommand(options = {}) {
+  return withExternalLibrary(options, runCommandCore, finishExternal);
+}
+
+/** Варианты (SPEC §1.6) — с тем же внешним словарём, что runCommand: перенос — у каждого свой. */
+export async function runVariants(options = {}) {
+  return withExternalLibrary(options, runVariantsCore, (list, doc, plan, engine) => asArray(list).map((v) => {
+    const fixed = finishExternal(v, doc, plan, engine);
+    if (fixed !== v && fixed.preview && fixed.preview.doc) {
+      fixed.fingerprint = shortHash(visibleFingerprint(fixed.preview.doc));
+    }
+    return fixed;
+  }));
+}
+
+/**
+ * Одна команда пользователя: classify → plan → generate → materialize → validate →
+ * (repair ≤ 1) → done. Входной doc не мутируется. Вход — runCommand (внешний словарь — там).
+ */
+async function runCommandCore(options = {}) {
   const {
     doc, selection, utterance, provider, onStage, signal,
     engine: engineOpt, persona = null, plan: presetPlan = null, modelTier,
@@ -9030,7 +9368,7 @@ function baselineViolations(list) {
  * Итого 1 + n вызовов и ровно два последовательных обращения вместо 2n.
  * Общий план ещё и отвечает сразу за всех, когда вариантов не нужно вовсе (переспрос, отказ).
  */
-export async function runVariants(options = {}) {
+async function runVariantsCore(options = {}) {
   const {
     doc, selection, utterance, provider, n = 3, onStage, signal,
     engine: engineOpt, personas = PERSONAS, activeArtboardId = null, history = null, geo = null, modelTier,
@@ -9189,7 +9527,7 @@ export async function runVariants(options = {}) {
 }
 
 export default {
-  makeProvider, runCommand, runVariants, SCHEMAS, PROMPTS, PERSONAS,
+  makeProvider, runCommand, runVariants, libraryDocOf, externalLibraryPlan, SCHEMAS, PROMPTS, PERSONAS,
   classifyUtterance, describeDoc, describeTokens, describeHistory, extractJson, downgradeSchema,
   resolveScope, resolveRef, resolveRefs, refCandidates, colorFromWord, loadEngine, BrainError,
   // круг 3: локальные действия оболочки, групповые правки, адресация по типу узла, проверки

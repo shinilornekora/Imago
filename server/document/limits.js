@@ -53,10 +53,32 @@ export const DB_TIMEOUT_MS = 8000;
 /** Сверка голов в памяти с базой (страховка от пропущенных NOTIFY и отката базы). */
 export const VERIFY_MS = 5000;
 
+/**
+ * Присутствие (SPEC §9.9): выделение — не больше стольких id (длиннее MAX_ID символов
+ * не пропускаются), обрезанное помечается `truncated: true`. Между экземплярами
+ * присутствие идёт через NOTIFY отдельного канала; полезная нагрузка NOTIFY в Postgres —
+ * меньше 8000 байт, своя выжимка держится в PRESENCE_PAYLOAD_BYTES.
+ */
+export const PRESENCE_SELECTION = 200;
+export const PRESENCE_ID_CHARS = 128;
+export const PRESENCE_PAYLOAD_BYTES = 7600;
+/** Присутствие: не чаще стольких сообщений в секунду на сокет. */
+export const PRESENCE_PER_SECOND = 10;
+/** Клиент повторяет своё присутствие раз в столько (сердцебиение), даже если ничего не менялось. */
+export const PRESENCE_HEARTBEAT_MS = 15000;
+/** Без вестей от клиента столько — он считается ушедшим (`left`): три пропущенных сердцебиения. */
+export const PRESENCE_TTL_MS = 45000;
+/** Кеш кадров Hub: на проект — не больше стольких кадров и байт; на весь экземпляр — байт. */
+export const FRAME_CACHE_FRAMES = 256;
+export const FRAME_CACHE_ROOM_BYTES = 4 * 1024 * 1024;
+export const FRAME_CACHE_TOTAL_BYTES = 64 * 1024 * 1024;
+
 /** Числа, которые обязан знать клиент (сверяются тестом с `LIMITS` из src/sync.js). */
 export const CLIENT_LIMITS = Object.freeze({
   txBytes: MAX_BODY_BYTES,
   opsPerTx: MAX_OPS_PER_TX,
   docBytes: MAX_DOC_BYTES,
   docNodes: MAX_DOC_NODES,
+  presenceSelection: PRESENCE_SELECTION,
+  presenceHeartbeatMs: PRESENCE_HEARTBEAT_MS,
 });

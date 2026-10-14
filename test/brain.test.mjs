@@ -24,6 +24,8 @@ import {
   ruPath, ruPathGen, ruToken, ruEnum, factOnly,
   // круг 19: библиотека как словарь агента
   describeLibrary, recognizeComponentIntent,
+  // круг 24: внешняя библиотека (DUIL)
+  libraryDocOf,
   // круг 16, п.1: сравнение форм значения — сверяется с настоящим core.applyOps
   sameAsNow,
 } from '../src/brain.js';
@@ -5848,4 +5850,181 @@ test('круг19 п.4-5: у механической просьбы вариан
   assert.equal(list[0].usage.calls, 0);
   assert.equal(list[0].local, 'detach');
   assert.ok(list[0].ops.length >= 2, 'операций отсоединения нет');
+});
+
+/* ── 24. Круг 24: глобальные id, внешняя библиотека (DUIL), «верни обратно» ──
+ *
+ * SPEC §10.6. id новых узлов brain берёт у движка (core.uid) — переименование перед записью
+ * в Orchestrator (globalizeIds) для свежих id становится пустым. Внешний словарь компонентов
+ * дополняет библиотеку документа (имена документа главнее), а мастер, на который правка
+ * сослалась, переносится в документ теми же операциями.
+ */
+
+const GLOBAL_ID = /^[a-z]+_[0-9a-z]{12,}$/;
+
+test('круг24: id новых узлов — глобальные (core.uid); globalizeIds для них пуст', async () => {
+  const core = await realCore();
+  const { globalizeIds } = await import('../server/orchestrator/pipeline.js');
+  const doc = core.createDoc();
+  const provider = makeFakeProvider({ plan: PLAN_CREATE, tree: TREE_OK });
+  const res = await runCommand({ doc, selection: [], utterance: 'собери экран тарифов', provider, engine: core });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  const creates = res.ops.filter((o) => o.op === 'create');
+  assert.ok(creates.length >= 4);
+  for (const o of creates) assert.match(o.node.id, GLOBAL_ID, `короткий id: ${o.node.id}`);
+  assert.deepEqual(globalizeIds(res.ops), res.ops, 'страховка Orchestrator ничего не переименовала');
+  // и на заглушке движка без uid — та же форма (свой генератор brain)
+  const stub = await runCommand({
+    doc: makeDoc(), selection: [], utterance: 'собери экран тарифов',
+    provider: makeFakeProvider({ plan: PLAN_CREATE, tree: TREE_OK }), engine: makeStubEngine(),
+  });
+  assert.equal(stub.error, undefined, JSON.stringify(stub.error));
+  for (const o of stub.ops.filter((x) => x.op === 'create')) assert.match(o.node.id, GLOBAL_ID);
+  assert.deepEqual(globalizeIds(stub.ops), stub.ops);
+});
+
+test('круг24: id, предложенный моделью, — только псевдоним: узел получает uid, ссылки на него сходятся', async () => {
+  const core = await realCore();
+  const { res, doc } = await run19(core, 'добавь в шапку блок с подписью', {
+    edits: [
+      { op: 'create', parent: 'Шапка', node: { type: 'frame', id: 'box', name: 'Блок акции', layout: { mode: 'column', gap: 8 },
+        children: [{ type: 'frame', id: 'inner_slot', name: 'Слот подписи', layout: { mode: 'row' } }] } },
+      { op: 'create', parent: 'inner_slot', node: { type: 'text', text: 'Скидка 10%' } },
+    ],
+  });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  const creates = res.ops.filter((o) => o.op === 'create');
+  assert.equal(creates.length, 3, JSON.stringify(res.warnings));
+  for (const o of creates) assert.match(o.node.id, GLOBAL_ID);
+  assert.ok(!creates.some((o) => o.node.id === 'box' || o.node.id === 'inner_slot'), 'id модели взят как есть');
+  const slot = creates.find((o) => o.node.name === 'Слот подписи');
+  const text = creates.find((o) => o.node.type === 'text');
+  assert.equal(text.node.parent, slot.node.id, 'ссылка по id модели нашла созданный узел');
+  assert.equal(core.applyOps(doc, res.ops).error, undefined);
+});
+
+/** Документ-библиотека «ДС»: в нём есть свой «Кнопка» (как в демо) и новый «Плашка». */
+async function libraryProject(core) {
+  let lib = core.createDoc();
+  const board = core.artboards(lib)[0];
+  const frame = { type: 'frame', id: core.uid('f'), name: 'Плашка', parent: board.id, children: [],
+    layout: { mode: 'row', gap: 8, padding: { t: 8, r: 12, b: 8, l: 12 }, align: 'center', justify: 'start' },
+    size: { w: { mode: 'hug' }, h: { mode: 'hug' } }, fill: 'accent', radius: 8 };
+  const label = { type: 'text', id: core.uid('t'), name: 'Подпись', parent: frame.id, characters: 'Новинка', style: { token: 'body' }, align: 'left', color: '#FFFFFF' };
+  lib = core.applyOps(lib, [core.ops.create(frame), core.ops.create(label)]).doc;
+  const made = core.applyOps(lib, core.makeComponentOps(lib, frame.id, {
+    name: 'Плашка', props: [{ name: 'текст', kind: 'text', target: label.id, path: 'characters' }],
+  }));
+  assert.equal(made.error, undefined, JSON.stringify(made.error));
+  return made.doc;
+}
+
+test('круг24: внешняя библиотека — словарь в промпте, мастер переносится в документ, имена документа главнее', async () => {
+  const core = await realCore();
+  const ext = await libraryProject(core);
+  const doc = core.createDoc();
+  const seen = {};
+  const patch = { edits: [{ op: 'create', parent: 'Шапка', node: { type: 'instance', of: 'Плашка', props: [{ name: 'текст', value: 'Акция' }] } }] };
+  const provider = {
+    name: 'fake', async ready() { return true; },
+    async complete(messages, schema) {
+      seen[schema.name] = String((messages.find((m) => m.role === 'system') || {}).content || '');
+      return schema.name === 'plan' ? PLAN19 : patch;
+    },
+  };
+  const res = await runCommand({
+    doc, selection: [], utterance: 'добавь в шапку плашку «Акция»', provider, engine: core,
+    activeArtboardId: nameOf(doc, 'Маршрут дня'), library: [{ name: 'ДС', id: 'p_lib', doc: ext }],
+  });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.match(seen.patch, /Плашка\(текст\)/, 'внешнего компонента нет в словаре модели');
+  assert.equal((seen.patch.match(/Кнопка\(/g) || []).length, 1, 'одноимённый компонент попал в словарь дважды');
+  assert.deepEqual(res.libraryAdded, [{ name: 'Плашка', source: 'ДС' }]);
+  const libId = core.libraryNode(doc).id;
+  const [master, ...rest] = res.ops;
+  assert.equal(master.op, 'create');
+  assert.equal(master.node.parent, libId, 'мастер ложится в библиотеку документа');
+  assert.match(master.node.id, GLOBAL_ID);
+  assert.ok(!ext.nodes[master.node.id], 'у переносимого мастера id свежий, а не из чужого проекта');
+  const inst = rest.find((o) => o.op === 'create' && o.node.type === 'instance');
+  assert.equal(inst.node.of, master.node.id);
+  const next = core.applyOps(doc, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.deepEqual(core.validate(next.doc, core.solve(next.doc)).filter((v) => v.severity === 'error'), []);
+  assert.equal(core.instanceSummary(next.doc, inst.node.id), 'Плашка "Акция"');
+  assert.equal(core.components(next.doc).filter((c) => c.name === 'Кнопка').length, 1);
+  assert.equal(res.preview.doc.nodes[inst.node.id].of, master.node.id, 'превью — настоящий документ после правки');
+  // «Кнопка» есть и в документе, и во внешней: берётся мастер документа, ничего не переносится
+  const viaLib = await runCommand({
+    doc, selection: [], utterance: 'добавь в шапку кнопку', engine: core, activeArtboardId: nameOf(doc, 'Маршрут дня'),
+    provider: makeFakeProvider({ plan: PLAN19, patch: [{ edits: [{ op: 'create', parent: 'Шапка', node: { type: 'instance', of: 'Кнопка', props: [{ name: 'текст', value: 'Войти' }] } }] }] }),
+    library: [{ name: 'ДС', doc: ext }],
+  });
+  assert.equal(viaLib.ops.length, 1, 'перенесено лишнее');
+  assert.equal(viaLib.ops[0].node.of, core.components(doc).find((c) => c.name === 'Кнопка').id);
+  assert.equal(viaLib.libraryAdded, undefined);
+});
+
+test('круг24: внешняя библиотека — без своей библиотеки страница заводится; неиспользованное не переносится', async () => {
+  const core = await realCore();
+  const ext = core.applyOps(await libraryProject(core), []).doc;
+  const full = core.createDoc();
+  const bare = flatten19(core, full);   // экземпляры отсоединены, библиотеки нет
+  const board = nameOf(bare, 'Маршрут дня');
+  const res = await runCommand({
+    doc: bare, selection: [], utterance: 'добавь в шапку кнопку «Купить»', engine: core, activeArtboardId: board,
+    provider: makeFakeProvider({ plan: PLAN19, patch: [{ edits: [{ op: 'create', parent: 'Шапка', node: { type: 'instance', of: 'Кнопка', props: [{ name: 'текст', value: 'Купить' }] } }] }] }),
+    library: [{ name: 'ДС', doc: libraryDocOf(ext, core) }],
+  });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.ops[0].node.type, 'page');
+  assert.equal(res.ops[0].node.role, 'library');
+  assert.deepEqual(res.libraryAdded.map((x) => x.name), ['Кнопка']);
+  const next = core.applyOps(bare, res.ops);
+  assert.equal(next.error, undefined, JSON.stringify(next.error));
+  assert.deepEqual(core.components(next.doc).map((c) => c.name), ['Кнопка'], 'перенесён только использованный');
+  assert.deepEqual(core.validate(next.doc, core.solve(next.doc)).filter((v) => v.severity === 'error'), []);
+  // правка, которая библиотеку не трогает, — без единой лишней операции
+  const plain = await runCommand({
+    doc: bare, selection: [], utterance: 'поправь шапку', engine: core, activeArtboardId: board,
+    provider: makeFakeProvider({ plan: PLAN19, patch: [{ edits: [{ op: 'set', target: 'Шапка', path: 'layout.gap', value: '12' }] }] }),
+    library: [{ name: 'ДС', doc: ext }],
+  });
+  assert.equal(plain.error, undefined, JSON.stringify(plain.error));
+  assert.ok(plain.ops.length >= 1 && plain.ops.every((o) => o.op === 'set'), JSON.stringify(plain.ops));
+  assert.equal(plain.libraryAdded, undefined);
+  assert.equal(core.libraryNode(plain.preview.doc), null, 'в превью нет «временной» библиотеки');
+  // выжимка библиотеки для передачи: только корень, страница библиотеки и мастера
+  const slim = libraryDocOf(ext, core);
+  assert.ok(Object.keys(slim.nodes).length < Object.keys(ext.nodes).length);
+  assert.deepEqual(core.components(slim).map((c) => c.name), core.components(ext).map((c) => c.name));
+  assert.equal(libraryDocOf(bare, core), null);
+});
+
+test('круг24: варианты с внешней библиотекой — у каждого варианта свой перенос мастера', async () => {
+  const core = await realCore();
+  const ext = await libraryProject(core);
+  const doc = core.createDoc();
+  const patch = { edits: [{ op: 'create', parent: 'Шапка', node: { type: 'instance', of: 'Плашка', props: [{ name: 'текст', value: 'Хит' }] } }] };
+  const list = await runVariants({
+    doc, selection: [], utterance: 'добавь в шапку плашку', engine: core, n: 2, activeArtboardId: nameOf(doc, 'Маршрут дня'),
+    provider: makeFakeProvider({ plan: PLAN19, patch: [patch, patch, patch, patch] }),
+    library: [{ name: 'ДС', doc: ext }],
+  });
+  assert.equal(list.length, 2);
+  for (const v of list) {
+    assert.equal(v.error, undefined, JSON.stringify(v.error));
+    const next = core.applyOps(doc, v.ops);
+    assert.equal(next.error, undefined, JSON.stringify(next.error));
+    assert.ok(core.components(next.doc).some((c) => c.name === 'Плашка'));
+    assert.deepEqual(v.libraryAdded, [{ name: 'Плашка', source: 'ДС' }]);
+  }
+});
+
+test('круг24: «верни обратно» — повтор, как в оболочке (app.js shellIntent); «верни назад» и «как было» — отмена', () => {
+  assert.equal(recognizeAction('верни обратно'), 'redo');
+  assert.equal(recognizeAction('Верни обратно, пожалуйста'), 'redo');
+  assert.equal(recognizeAction('верни назад'), 'undo');
+  assert.equal(recognizeAction('верни как было'), 'undo');
+  assert.equal(recognizeAction('поменяй обратно цвет кнопки'), null);
 });

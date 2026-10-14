@@ -11,6 +11,7 @@
  *   SNAPSHOT_KEEP    сколько последних снимков хранить (5); снимок seq 0 не удаляется никогда
  *   INTERNAL_TOKEN   токен внутренних маршрутов (`POST /api/internal/traces`); не задан или
  *                    «change-me» — внутренние маршруты отвечают 403
+ *   PRESENCE_TTL_MS  без вестей от клиента столько — он ушёл (45000; клиент шлёт сердцебиение раз в 15 с)
  *   STATIC_DIR       каталог клиента (index.html, app.js, styles.css, src/*.js) — для прогонов без nginx
  *
  * Останов по SIGTERM/SIGINT: сокеты закрываются кодом 1001, новых транзакций
@@ -31,7 +32,7 @@ import { createReader, createSemaphore } from './dslr.js';
 import { createSequencer } from './dslts.js';
 import { createHub } from './hub.js';
 import { createRequestHandler } from './http.js';
-import { SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, PAGE_BYTES, VERIFY_MS } from './limits.js';
+import { SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, PAGE_BYTES, VERIFY_MS, PRESENCE_TTL_MS } from './limits.js';
 
 /**
  * @param {{
@@ -54,6 +55,9 @@ import { SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AF
  *   maxDocNodes?: number,
  *   maxDocBytes?: number,
  *   instanceId?: string,
+ *   presenceTtlMs?: number,
+ *   maxBuffered?: number,
+ *   frameCache?: {frames?: number, roomBytes?: number, totalBytes?: number},
  *   log?: {info:Function, warn:Function}
  * }} [opts] всё необязательно — умолчания из окружения и limits.js
  */
@@ -93,7 +97,15 @@ export async function start(opts = {}) {
     mergeBudgetMs: opts.mergeBudgetMs, maxDocNodes: opts.maxDocNodes, maxDocBytes: opts.maxDocBytes, log
   });
   const server = http.createServer(createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log }));
-  const hub = createHub({ server, dslr, dslts, pingInterval: opts.pingInterval, log });
+  // шина присутствия между экземплярами (SPEC §9.9): эфемерный канал хранилища
+  const bus = typeof storage.publish === 'function' && typeof storage.onNotify === 'function'
+    ? { publish: (msg) => storage.publish(msg), subscribe: (fn) => storage.onNotify(fn) }
+    : null;
+  const hub = createHub({
+    server, dslr, dslts, bus, instanceId, pingInterval: opts.pingInterval,
+    presenceTtlMs: num(opts.presenceTtlMs, Number(env.PRESENCE_TTL_MS || PRESENCE_TTL_MS)),
+    maxBuffered: opts.maxBuffered, frameCache: opts.frameCache, log
+  });
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);

@@ -9,7 +9,8 @@
  * и адаптер в памяти не должен вести себя мягче.
  *
  * Уведомления (`onNotify`) — как LISTEN/NOTIFY у pg: асинхронно, после записи,
- * всем подписчикам (в том числе экземплярам, делящим это хранилище).
+ * всем подписчикам (в том числе экземплярам, делящим это хранилище); `publish` —
+ * эфемерные сообщения присутствия тем же путём.
  * `backup()`/`restore(b)` — копия всего хранилища и возврат к ней: так тесты
  * моделируют откат базы из бэкапа под работающим сервисом.
  */
@@ -74,6 +75,13 @@ export function createMemoryStorage() {
     onNotify(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);
+    },
+
+    /** Эфемерное сообщение всем экземплярам (присутствие, SPEC §9.9) — как NOTIFY отдельного канала. */
+    publish(msg) {
+      if (!listeners.size) return false;
+      notify(msg);
+      return true;
     },
 
     async createProject({ name = '', kind = 'design', doc, engine }) {

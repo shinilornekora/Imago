@@ -134,7 +134,12 @@ test('nginx: ошибки 413/502/503/504 — единый JSON, апстрим 
   for (const [loc, up] of [['/api/', 'document'], ['/ws', 'document'], ['/agent/', 'orchestrator']]) {
     const b = locationBlock(nginxConf, loc);
     // error_page в location заменяет серверный целиком — 413 обязан быть и здесь
-    assert.match(b, /error_page\s+413\s*=\s*@too_large/, `${loc}: 413 отдаст HTML`);
+    const big = /error_page\s+413\s*=\s*(@[\w]+)/.exec(b);
+    assert.ok(big, `${loc}: 413 отдаст HTML`);
+    const bigBody = returnJson(locationBlock(nginxConf, big[1]));
+    assert.equal(bigBody.status, 413, `${big[1]} отдаёт не 413`);
+    assert.equal(bigBody.body.code, 'too_large');
+    assert.equal(bigBody.body.retryable, false);
     for (const code of [502, 503, 504]) {
       const m = new RegExp(`error_page\\s+${code}\\s*=\\s*(@[\\w]+)`).exec(b);
       assert.ok(m, `${loc}: нет error_page ${code}`);
@@ -171,6 +176,46 @@ test('compose: сервисы, healthcheck у document, orchestrator, web; за�
   assert.match(dep('web'), /document:\s*\n\s+condition:\s*service_healthy/);
   assert.match(dep('web'), /orchestrator:\s*\n\s+condition:\s*service_healthy/);
   assert.match(s.web, /\$\{IMAGO_PORT:-8123\}:80/);
+});
+
+test('nginx: тело команды агенту — не больше 1 МБ, как у самого Orchestrator', async () => {
+  const b = locationBlock(nginxConf, '/agent/');
+  assert.equal(directive(b, 'client_max_body_size'), '1m');
+  const { MAX_BODY_BYTES } = await import('../server/orchestrator/limits.js');
+  assert.equal(MAX_BODY_BYTES, 1024 * 1024, 'предел nginx и Orchestrator разошлись');
+  // остальным — прежние 8 МБ: транзакции Document service до 4 МБ должны проходить
+  assert.equal(directive(nginxConf.slice(0, nginxConf.indexOf('location')), 'client_max_body_size'), '8m');
+  const m = /error_page\s+413\s*=\s*(@[\w]+)/.exec(b);
+  assert.match(returnJson(locationBlock(nginxConf, m[1])).body.message, /1 МБ/);
+});
+
+test('compose: document — DB_TIMEOUT_MS и SNAPSHOT_KEEP из окружения с умолчаниями', async () => {
+  const env = sub(services(compose).document, 'environment');
+  const lim = await import('../server/document/limits.js');
+  for (const [name, def] of [['DB_TIMEOUT_MS', lim.DB_TIMEOUT_MS], ['SNAPSHOT_KEEP', lim.SNAPSHOT_KEEP], ['SNAPSHOT_EVERY', lim.SNAPSHOT_EVERY]]) {
+    const m = new RegExp(`${name}:\\s*\\$\\{${name}:-(\\d+)\\}`).exec(env);
+    assert.ok(m, `document: нет ${name} со значением по умолчанию`);
+    assert.equal(Number(m[1]), def, `${name}: умолчание compose расходится с server/document/limits.js`);
+  }
+  assert.match(read('deploy/env.example'), /DB_TIMEOUT_MS/);
+});
+
+test('.dockerignore и запуск процессов: node напрямую, без npm', () => {
+  assert.ok(existsSync(join(root, '.dockerignore')), 'нет .dockerignore — в контекст сборки уходят node_modules и .git');
+  const ignore = new Set(read('.dockerignore').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#')));
+  for (const x of ['node_modules', '.git', 'dist', 'dev.html', '.env', 'test']) assert.ok(ignore.has(x), `.dockerignore: нет ${x}`);
+  // то, что Dockerfile-ы копируют, исключать нельзя
+  for (const x of ['src', 'server', 'tools', 'deploy', 'package.json', 'package-lock.json', 'index.html', 'app.js', 'styles.css']) {
+    assert.ok(!ignore.has(x), `.dockerignore исключает ${x}, а его копирует Dockerfile`);
+  }
+  for (const f of ['deploy/Dockerfile.document', 'deploy/Dockerfile.orchestrator', 'deploy/Dockerfile.web']) {
+    const d = read(f);
+    // npm в роли PID 1 не передаёт SIGTERM процессу: остановка контейнера ждала бы 10 с и
+    // обрывала запись транзакции на полуслове
+    assert.ok(!/^(CMD|ENTRYPOINT)\b.*\bnpm\b/m.test(d), `${f}: процесс запускается через npm`);
+    const cmd = /^CMD\s+(.+)$/m.exec(d);
+    if (cmd && !/nginx/.test(d)) assert.match(cmd[1], /^\["node", "[^"]+\.js"\]$/, `${f}: CMD не в форме ["node", "…"]`);
+  }
 });
 
 test('compose: окружение orchestrator — документ, модель на хосте, общий токен', () => {
@@ -417,6 +462,12 @@ test('nginx -t на настоящем конфиге и живые маршру
   assert.equal(big.status, 413);
   const bigBody = await big.json();
   assert.equal(bigBody.code, 'too_large');
+  // команда агенту больше 1 МБ — 413 у nginx, до Orchestrator не доходит
+  const bigCmd = await fetch(base + '/agent/command', { method: 'POST', body: 'x'.repeat(2 * 1024 * 1024), headers: { 'content-type': 'application/json' } });
+  assert.equal(bigCmd.status, 413);
+  const bigCmdBody = await bigCmd.json();
+  assert.equal(bigCmdBody.code, 'too_large');
+  assert.equal(bigCmdBody.retryable, false);
 
   // апстрим лежит — JSON с upstream и X-Imago-Upstream: down
   await orch.close();

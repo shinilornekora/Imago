@@ -1,6 +1,9 @@
 /**
  * DUIL (SPEC §10.1, стрелки 6/7): срез библиотек — проекты вида `library` (через тот же
- * DSLR-клиент, с тем же кешем по head_seq) → словарь компонентов (`describeLibrary`).
+ * DSLR-клиент, с тем же кешем по head_seq) → внешний словарь компонентов для прогона brain
+ * (`runCommand({library})`, §10.6): выжимки документов-библиотек (`libraryDocOf` — корень,
+ * страница библиотеки, мастера), по порядку списка проектов. brain сам дополняет ими
+ * библиотеку документа (имена документа главнее) и переносит использованные мастера.
  *
  * Шаг не роковой: библиотека недоступна — команда идёт дальше со словарём из самого
  * документа (мастера, материализованные в нём, brain видит и так, §5.3), а в трассе и
@@ -8,7 +11,7 @@
  */
 
 import * as core from '../../../src/core.js';
-import { describeLibrary } from '../../../src/brain.js';
+import { describeLibrary, libraryDocOf } from '../../../src/brain.js';
 import { MAX_LIBRARIES, PROJECT_LIST_TTL_MS } from '../limits.js';
 
 /**
@@ -27,10 +30,11 @@ export function createDuil({ dslr, log = console }) {
 
   /**
    * @param {{exclude?: string, signal?: AbortSignal}} [o]
-   * @returns {Promise<{libraries: {id, name, head_seq, components: number}[], text: string, warnings: string[]}>}
+   * @returns {Promise<{libraries: {id, name, head_seq, components: number}[], docs: {id, name, doc}[], text: string, warnings: string[]}>}
+   *   `docs` — словарь в прогон (`library` у runCommand/runVariants); `text` — он же словами (трасса, отладка)
    */
   async function slice({ exclude, signal } = {}) {
-    const out = { libraries: [], text: '', warnings: [] };
+    const out = { libraries: [], docs: [], text: '', warnings: [] };
     let list;
     try {
       list = await libraries(signal);
@@ -47,6 +51,8 @@ export function createDuil({ dslr, log = console }) {
         const components = text ? Math.max(0, text.split('\n').length - 1) : 0;
         out.libraries.push({ id: p.id, name: p.name || '', head_seq: st.seq, components });
         if (text) texts.push(`[${p.name || p.id}]\n${text}`);
+        const slim = components ? libraryDocOf(st.doc, core) : null;
+        if (slim) out.docs.push({ id: p.id, name: p.name || '', doc: slim });
       } catch (e) {
         out.warnings.push(`Библиотека «${p.name || p.id}» не прочиталась`);
         log.warn(`[orchestrator/duil] библиотека ${p.id}: ${e.message}`);

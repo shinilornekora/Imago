@@ -83,6 +83,7 @@ async function run(id, job) {
       doc: job.doc, selection: job.selection || [], utterance: job.utterance,
       provider: proxyProvider(id), signal: ctl.signal, engine: core, onStage,
       activeArtboardId: job.activeArtboardId || null, history: job.history || null,
+      library: job.library || null,
       selectionBy: job.selectionBy || 'human',
     };
     let result;

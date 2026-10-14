@@ -39,8 +39,9 @@ const INTENT_RU = { create: 'создание', edit: 'правка', theme: 'о
 
 /**
  * Глобальные id для узлов, созданных агентом (§8.3: id генерирует клиент, глобально
- * уникальные). brain выдаёт короткие id, уникальные лишь в документе (`f1`, `t2`, или
- * предложенные моделью); после чужого удаления такой id мог бы вернуться к жизни и
+ * уникальные). С круга 24 brain сам выдаёт `core.uid` (§10.6), и для его операций это
+ * переименование пусто; оно осталось страховкой от коротких id (`f1`, `t2` — уникальных
+ * лишь в документе): после чужого удаления такой id мог бы вернуться к жизни и
  * столкнуться с отменой этого удаления. Переименовываются только узлы, созданные в этой
  * же пачке и не похожие на `core.uid`; ссылки — во всех полях-указателях: `id`, `parent`,
  * `after`, `children`, `of`, `component.props[].target`, а также `set` путей `of` и
@@ -253,6 +254,7 @@ export function createPipeline(deps) {
       step('library');
       const lib = await duil.slice({ exclude: cmd.project, signal });
       trace.libraries = lib.libraries.length;
+      trace.library_components = lib.libraries.reduce((n, l) => n + (l.components || 0), 0);
       guard();
 
       const onLlm = async (messages, schema, opts) => {
@@ -288,6 +290,8 @@ export function createPipeline(deps) {
           : cmd.text,
         activeArtboardId: cmd.board || null,
         history: cmd.history.length ? cmd.history : null,
+        // внешний словарь компонентов (DUIL, §10.6): brain дополняет им библиотеку документа
+        library: lib.docs && lib.docs.length ? lib.docs : null,
         n: verdict.kind === 'variants' ? verdict.n : undefined,
         ...(cmd.test ? { test: cmd.test } : {}),
       };
@@ -368,7 +372,9 @@ export function createPipeline(deps) {
       trace.status = 'shell';
       return;
     }
-    if (!res.ops || !res.ops.length) {
+    // «менять нечего» / «правка ни на что не повлияла» (§10.5): brain возвращает и сами
+    // пустые операции — писать их в общий журнал незачем, это ответ, а не правка
+    if (!res.ops || !res.ops.length || res.nothingChanged || res.nothingToChange) {
       sink.send('result', replyOf(res, 'Агент не нашёл, что изменить'));
       return;
     }
@@ -401,6 +407,7 @@ export function createPipeline(deps) {
       description: v.description || (v.plan && v.plan.summary) || '',
       ops: globalizeIds(v.ops),
       title: (v.plan && v.plan.title) || cmd.text,
+      libraryAdded: Array.isArray(v.libraryAdded) ? v.libraryAdded : [],
       summary: (v.plan && (v.plan.summary || v.plan.title)) || '',
       warnings: (v.warnings || []).map((w) => llm.redact(w)),
     }));
@@ -466,6 +473,8 @@ export function createPipeline(deps) {
       summary: llm.redact((res && res.summary) || plan.summary || plan.title || ''),
       warnings: ((res && res.warnings) || []).map((w) => llm.redact(w)),
       ...(res && res.cannot ? { cannot: res.cannot } : {}),
+      // компоненты внешней библиотеки, перенесённые этой правкой в библиотеку документа (§10.6)
+      ...(res && Array.isArray(res.libraryAdded) && res.libraryAdded.length ? { libraryAdded: res.libraryAdded } : {}),
       ...(select.length ? { select: select.slice(0, 50) } : {}),
     };
   }
@@ -531,7 +540,7 @@ export function createPipeline(deps) {
           const out = await write(task, {
             project: entry.project, base_seq: entry.base_seq, ops: item.ops, client: entry.client, title: item.title,
           });
-          const result = resultOf(out, { summary: item.summary, warnings: item.warnings });
+          const result = resultOf(out, { summary: item.summary, warnings: item.warnings, libraryAdded: item.libraryAdded });
           entry.applied = { key: item.key, label: item.label, result };
           Object.assign(trace, { status: 'ok', tx_id: out.tx_id, seq: out.seq, ops: result.applied, dropped: result.dropped.length });
           resolve(result);

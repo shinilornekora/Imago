@@ -168,7 +168,7 @@ export function createDslv(o = {}) {
   }
 
   /**
-   * @param {object} payload {mode, doc, selection, utterance, activeArtboardId, history, n, test?}
+   * @param {object} payload {mode, doc, selection, utterance, activeArtboardId, history, library, n, test?}
    * @param {{signal?: AbortSignal, onStage?: Function, onLlm: Function}} hooks
    * @returns {Promise<object>} результат brain без превью
    */

@@ -494,7 +494,8 @@ for (const backend of list) {
       const first = await http.post(`/api/projects/${id}/tx`, tx(0, [ops.create(text(board.id, 'до сокета'))]));
       assert.equal(first.body.seq, 1);
 
-      const a = connect(wsUrl(svc, id, { since: 0, client: 'A', author: 'Аня' }));
+      // proto=2 — клиент знает ack (§9.9); прежнему ack заменяет error duplicate (hardening/presence-тесты)
+      const a = connect(wsUrl(svc, id, { since: 0, client: 'A', author: 'Аня', proto: 2 }));
       const b = connect(wsUrl(svc, id, { since: 1, client: 'B', author: 'Боря' }));
       await Promise.all([a.opened, b.opened]);
 

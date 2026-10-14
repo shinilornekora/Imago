@@ -18,7 +18,8 @@ class FakeServer {
     this.doc = doc; this.seq = 0; this.log = []; this.byId = new Map(); this.tomb = new Map();
     this.sockets = new Set(); this.down = false; this.hold = false; this.held = [];
     this.snapshot = { seq: 0, doc, engine: ENGINE_VERSION }; this.floor = 0; this.received = [];
-    this.failNext = null; this.busy = 0; this.httpCalls = [];
+    this.failNext = null; this.busy = 0; this.httpCalls = []; this.presenceIn = []; this.mutePresence = false;
+    this.legacyAck = false;   // как Hub круга 24 с прежним клиентом: вместо ack — error duplicate
   }
   commit(tx) {
     this.received.push(tx.tx_id);
@@ -96,10 +97,21 @@ class FakeServer {
           if (server.hold) { server.held.push(msg.tx); return; }
           // повтор уже записанной, которую этот сокет уже видел (она в снимке) — ack, как Hub круга 23
           const known = server.byId.get(msg.tx.tx_id);
-          if (known && known.seq <= server.floor) { server.received.push(msg.tx.tx_id); this.deliver({ type: 'ack', tx_id: known.tx_id, seq: known.seq, existing: true }); return; }
+          if (known && known.seq <= server.floor) {
+            server.received.push(msg.tx.tx_id);
+            this.deliver(server.legacyAck
+              ? { type: 'error', error: true, code: 'duplicate', retryable: false, existing: true, tx_id: known.tx_id, seq: known.seq, message: 'уже записана' }
+              : { type: 'ack', tx_id: known.tx_id, seq: known.seq, existing: true });
+            return;
+          }
           setTimeout(() => server.commit(msg.tx), 0);
         } else if (msg.type === 'presence') {
-          server.broadcast({ type: 'presence', client: this.client, author: msg.author, selection: msg.selection, board: msg.board, at: Date.now() }, this);
+          server.presenceIn.push(msg);
+          if (server.mutePresence) return;
+          const out = { type: 'presence', client: this.client, author: msg.author, selection: msg.selection, board: msg.board, at: Date.now() };
+          if (msg.busy !== undefined) out.busy = msg.busy;
+          if (msg.queued !== undefined) out.queued = msg.queued;
+          server.broadcast(out, this);
         }
       }
       close() {
@@ -615,4 +627,77 @@ test('sync: 503 с Retry-After при открытии — ждёт срок и 
   assert.equal(gets.length, 3);
   for (let i = 1; i < gets.length; i++) assert.ok(gets[i].at - gets[i - 1].at >= 75, 'пауза не меньше Retry-After');
   await a.sync.close();
+});
+
+/* ------------------------------ круг 24: присутствие ------------------------------ */
+
+test('sync: адрес сокета несёт proto=2 (клиент знает ack); error duplicate — как ack, без ошибки человеку', async () => {
+  const server = new FakeServer(seedDoc());
+  server.legacyAck = true;
+  const urls = [];
+  const Base = server.socketClass();
+  const a = client(server, 'A', { opts: { WebSocketImpl: class extends Base { constructor(u) { super(u); urls.push(u); } } } });
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  assert.match(urls[0], /[?&]proto=2(&|$)/);
+  server.hold = true;
+  a.sync.commit([ops.set('r1', 'name', 'Дубль')]);
+  server.down = true;
+  server.dropAll();
+  await until(() => !a.sync.status.online);
+  server.release();
+  server.forget();
+  server.down = false;
+  a.sync.reconnect();
+  await until(() => a.log.gone.length === 1, 'gone');
+  await until(() => a.sync.status.pending === 0, 'duplicate снял её с очереди');
+  assert.ok(a.log.changes.some((c) => c.reason === 'ack'));
+  assert.deepEqual(a.log.errors, [], 'человеку ошибку не показываем');
+  assert.equal(server.log.length, 1);
+  await a.sync.close();
+});
+
+test('sync: сердцебиение присутствия — повтор без изменений раз в presenceHeartbeatMs; busy/queued доходят до других', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A', { opts: { presenceHeartbeatMs: 40 } });
+  const b = client(server, 'B', { opts: { presenceHeartbeatMs: 0 } });
+  await a.sync.open(); await b.sync.open();
+  await until(() => a.sync.status.online && b.sync.status.online);
+  a.sync.presence({ selection: ['r1'], board: 'ab', busy: true, queued: 2 });
+  const lastB = () => b.log.presence[b.log.presence.length - 1] || [];
+  await until(() => lastB().some((p) => p.client === 'A' && p.busy === true), 'busy у B');
+  const seen = lastB().find((p) => p.client === 'A');
+  assert.equal(seen.queued, 2);
+  assert.deepEqual(seen.selection, ['r1']);
+  // мусор вместо флага не уходит
+  a.sync.presence({ selection: ['r1'], busy: 'да', queued: {} });
+  await until(() => lastB().some((p) => p.client === 'A' && p.busy === undefined), 'busy снят');
+  assert.equal(lastB().find((p) => p.client === 'A').queued, undefined);
+  const fromA = () => server.presenceIn.filter((m) => m.selection && m.selection[0] === 'r1').length;
+  const before = fromA();
+  await tick(200);
+  assert.ok(fromA() - before >= 3, 'сердцебиение без изменений: ' + (fromA() - before));
+  // B без сердцебиения: после первого объявления — тишина
+  const fromBBefore = server.presenceIn.length - fromA();
+  await tick(120);
+  assert.equal(server.presenceIn.length - fromA(), fromBBefore, 'B (heartbeat 0) молчит');
+  await a.sync.close();
+  const n = server.presenceIn.length;
+  await tick(120);
+  assert.equal(server.presenceIn.length, n, 'после close сердцебиение остановлено');
+  await b.sync.close();
+});
+
+test('sync: чужое присутствие без вестей дольше TTL убирается само (сервер не сказал left)', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A', { opts: { presenceHeartbeatMs: 30, presenceTtl: 150 } });
+  const b = client(server, 'B', { opts: { presenceHeartbeatMs: 0 } });
+  await a.sync.open(); await b.sync.open();
+  await until(() => a.sync.status.online && b.sync.status.online);
+  b.sync.presence({ selection: ['r1'] });
+  await until(() => a.sync.others.some((p) => p.client === 'B'), 'B у A');
+  server.mutePresence = true;   // дальше B «молчит»: ни присутствия, ни left
+  await until(() => !a.sync.others.some((p) => p.client === 'B'), 'B протух у A');
+  assert.equal(a.log.presence[a.log.presence.length - 1].some((p) => p.client === 'B'), false, 'onPresence сказал об уходе');
+  await a.sync.close(); await b.sync.close();
 });

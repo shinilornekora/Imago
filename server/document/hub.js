@@ -22,22 +22,45 @@
  *
  * `author` на сокете: браузер не ставит заголовков при upgrade, поэтому имя —
  * из query `author`, из поля `author` в presence или из последней tx сокета.
+ *
+ * Присутствие (SPEC §9.9) — между экземплярами через эфемерную шину хранилища
+ * (pg: NOTIFY отдельного канала `<channel>_presence`, память — общий слушатель):
+ *   {k:'presence', p, i, c, a, s, b?, t?, busy?, queued?, at} · {k:'left', p, i, c} · {k:'bye', i}
+ * где `i` — id экземпляра (своё эхо отбрасывается). Выделение режется до 200 id и
+ * так, чтобы полезная нагрузка уложилась в предел NOTIFY (< 8000 байт); обрезанное —
+ * `truncated: true` (одинаково своим сокетам и чужим экземплярам). `left`: при
+ * закрытии сокета (если у того же clientId нет другого присутствия — вкладки одного
+ * браузера делят clientId), по TTL (нет вестей PRESENCE_TTL_MS — клиент шлёт
+ * сердцебиение раз в 15 с), при остановке экземпляра (`bye`) и при его падении
+ * (у чужих экземпляров истекает TTL записей упавшего).
+ *
+ * Прежний клиент (без `tip`, `epoch` и `proto` в адресе — круг 22) не знает `ack`:
+ * ему повтор уже полученной вместо `ack` — `error {code:'duplicate', retryable:false}`,
+ * по которому он снимает транзакцию с очереди (иначе очередь вставала навсегда).
+ *
+ * Медленный читатель: больше MAX_BUFFERED байт неотправленного — сокет закрывается
+ * (4503), клиент переподключится с since и догонит из базы, а память экземпляра не
+ * копит кадры для вкладки, которая не читает.
  */
 
 import { WebSocketServer } from 'ws';
 import { ENGINE_VERSION } from '../../src/core.js';
 import { DocError, badRequest, internalBody } from './errors.js';
 import { projectSummary } from './storage/committed.js';
-import { MAX_BODY_BYTES, WS_ENVELOPE_BYTES } from './limits.js';
+import {
+  MAX_BODY_BYTES, WS_ENVELOPE_BYTES, PRESENCE_PER_SECOND as PRESENCE_RATE, PRESENCE_SELECTION, PRESENCE_ID_CHARS,
+  PRESENCE_PAYLOAD_BYTES, PRESENCE_TTL_MS, FRAME_CACHE_FRAMES, FRAME_CACHE_ROOM_BYTES, FRAME_CACHE_TOTAL_BYTES
+} from './limits.js';
 
 /** Предел сообщения — тело транзакции (4 МБ) плюс конверт; больше — ws закрывает сокет кодом 1009. */
 export const MAX_MESSAGE = MAX_BODY_BYTES + WS_ENVELOPE_BYTES;
 /** Присутствие: не чаще стольких сообщений в секунду на сокет. */
-export const PRESENCE_PER_SECOND = 10;
-/** Предел выделения в presence — чтобы одно сообщение не раздувало рассылку. */
-const MAX_SELECTION = 1000;
-/** Кадров на проект в кеше (сериализованная tx — один JSON.stringify на всех подписчиков). */
-const FRAME_CACHE = 256;
+export const PRESENCE_PER_SECOND = PRESENCE_RATE;
+/** Неотправленного в сокет больше этого — читатель не успевает: закрыть, пусть догоняет из базы. */
+export const MAX_BUFFERED = 32 * 1024 * 1024;
+const MAX_AUTHOR = 200;
+const isFlag = (v) => typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v));
+const utf8 = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
 /** Коды закрытия: 4400 форма запроса, 4404 нет проекта, 4410 эпоха сменилась, 4503 хранилище/занято. */
 export const CLOSE = { bad: 4400, notFound: 4404, epoch: 4410, unavailable: 4503 };
 
@@ -46,33 +69,92 @@ export const CLOSE = { bad: 4400, notFound: 4404, epoch: 4410, unavailable: 4503
  *   server: import('node:http').Server,
  *   dslr: object,
  *   dslts: object,
+ *   bus?: {publish: (msg: object) => boolean, subscribe: (fn: Function) => Function} | null,
+ *   instanceId?: string,
  *   pingInterval?: number,
+ *   presenceTtlMs?: number,
+ *   maxBuffered?: number,
+ *   frameCache?: {frames?: number, roomBytes?: number, totalBytes?: number},
  *   log?: {warn:Function, info:Function}
  * }} opts
  */
-export function createHub({ server, dslr, dslts, pingInterval = 30000, log = console }) {
+export function createHub({
+  server, dslr, dslts, bus = null, instanceId = 'i', pingInterval = 30000,
+  presenceTtlMs = PRESENCE_TTL_MS, maxBuffered = MAX_BUFFERED, frameCache = {}, log = console
+}) {
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE });
-  /** @type {Map<string, {sockets: Set<import('ws').WebSocket>, frames: Map<string, string>}>} */
+  const cacheFrames = frameCache.frames > 0 ? frameCache.frames : FRAME_CACHE_FRAMES;
+  const cacheRoomBytes = frameCache.roomBytes > 0 ? frameCache.roomBytes : FRAME_CACHE_ROOM_BYTES;
+  const cacheTotalBytes = frameCache.totalBytes > 0 ? frameCache.totalBytes : FRAME_CACHE_TOTAL_BYTES;
+  /**
+   * @type {Map<string, {
+   *   sockets: Set<import('ws').WebSocket>,
+   *   frames: Map<string, {text: string, size: number}>, frameBytes: number,
+   *   remote: Map<string, {i: string, c: string, until: number}>
+   * }>}
+   */
   const rooms = new Map();
+  let cachedBytes = 0;
   let clientCounter = 0;
   let tokenCounter = 0;
+  let closing = false;
 
   const send = (ws, msg) => {
-    if (ws.readyState === ws.OPEN) ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    if (ws.readyState !== ws.OPEN) return;
+    ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    // читатель не успевает: неотправленное копится в памяти экземпляра — закрыть, догонит из базы
+    if (ws.bufferedAmount > maxBuffered && !ws.slowClosed) {
+      ws.slowClosed = true;
+      log.warn(`[document/hub] ${ws.projectId}: клиент ${ws.clientId} не успевает читать (${ws.bufferedAmount} байт в очереди) — закрываю`);
+      ws.close(CLOSE.unavailable, 'slow');
+      // мягкое закрытие ждёт, пока уйдёт очередь; если клиент так и не прочтёт — оборвать
+      const t = setTimeout(() => ws.terminate(), 5000);
+      if (t.unref) t.unref();
+      ws.once('close', () => clearTimeout(t));
+    }
   };
 
-  /** Кадр `{type:'tx', tx}` из кеша комнаты: ключ — seq и chain. */
+  /* ------------------------------ кеш кадров ------------------------------ */
+
+  function evictOldest(room) {
+    const first = room.frames.keys().next();
+    if (first.done) return false;
+    const entry = room.frames.get(first.value);
+    room.frames.delete(first.value);
+    room.frameBytes -= entry.size;
+    cachedBytes -= entry.size;
+    return true;
+  }
+
+  function clearFrames(room) {
+    cachedBytes -= room.frameBytes;
+    room.frameBytes = 0;
+    room.frames.clear();
+  }
+
+  /**
+   * Кадр `{type:'tx', tx}` из кеша комнаты: ключ — seq и chain. Кеш ограничен
+   * числом кадров и байтами — на комнату и на экземпляр; кадр больше четверти
+   * предела комнаты не кешируется вовсе (одна большая вставка вытеснила бы всё).
+   */
   function frameOf(projectId, committed) {
     const room = rooms.get(projectId);
     const key = `${committed.seq}:${committed.chain || ''}`;
     if (room) {
       const hit = room.frames.get(key);
-      if (hit) return hit;
+      if (hit) return hit.text;
     }
     const text = JSON.stringify({ type: 'tx', tx: committed });
     if (room) {
-      room.frames.set(key, text);
-      while (room.frames.size > FRAME_CACHE) room.frames.delete(room.frames.keys().next().value);
+      const size = Buffer.byteLength(text, 'utf8');
+      if (size <= cacheRoomBytes / 4) {
+        room.frames.set(key, { text, size });
+        room.frameBytes += size;
+        cachedBytes += size;
+        while (room.frames.size > cacheFrames || room.frameBytes > cacheRoomBytes) evictOldest(room);
+        // экземпляр целиком: место освобождает тот, кто его занимает сейчас
+        while (cachedBytes > cacheTotalBytes && evictOldest(room)) { /* вытесняем своё */ }
+      }
     }
     return text;
   }
@@ -84,6 +166,7 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
 
   /** Отправить tx сокету, если он её ещё не получал; во время догона — в буфер; дыра — дочитать. */
   function deliverTx(ws, committed) {
+    if (ws.readyState !== ws.OPEN) return;
     if (ws.catchingUp) {
       ws.buffer.push(committed);
       return;
@@ -101,7 +184,8 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
   function relay(projectId, from, msg) {
     const room = rooms.get(projectId);
     if (!room) return;
-    for (const ws of room.sockets) if (ws !== from && ws.ready) send(ws, msg);
+    const text = JSON.stringify(msg);
+    for (const ws of room.sockets) if (ws !== from && ws.ready) send(ws, text);
   }
 
   function onEvent(ev) {
@@ -112,7 +196,7 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
       return;
     }
     if (ev.kind === 'epoch') {
-      room.frames.clear();
+      clearFrames(room);
       for (const ws of [...room.sockets]) {
         if (ev.token !== undefined && ws.token === ev.token) continue;
         if (ws.deciding) {
@@ -135,7 +219,7 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
   function join(projectId, ws) {
     let room = rooms.get(projectId);
     if (!room) {
-      room = { sockets: new Set(), frames: new Map() };
+      room = { sockets: new Set(), frames: new Map(), frameBytes: 0, remote: new Map() };
       rooms.set(projectId, room);
     }
     room.sockets.add(ws);
@@ -145,8 +229,147 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
     const room = rooms.get(projectId);
     if (!room) return;
     room.sockets.delete(ws);
-    if (!room.sockets.size) rooms.delete(projectId);
+    if (!room.sockets.size) {
+      clearFrames(room);
+      rooms.delete(projectId);
+    }
   }
+
+  /* ------------------------------ присутствие ------------------------------ */
+
+  /** Есть ли у clientId присутствие, кроме этого сокета / этой записи чужого экземпляра. */
+  function presentElsewhere(room, clientId, exceptWs, exceptKey) {
+    if (!room) return false;
+    for (const s of room.sockets) if (s !== exceptWs && s.clientId === clientId && s.announced) return true;
+    for (const [k, e] of room.remote) if (k !== exceptKey && e.c === clientId) return true;
+    return false;
+  }
+
+  /** Сообщение сокету из выжимки шины — одна форма для своих и чужих. */
+  function presenceMessage(b) {
+    const msg = { type: 'presence', client: b.c, author: b.a, selection: b.s, at: b.at };
+    if (typeof b.b === 'string') msg.board = b.b;
+    if (b.t) msg.truncated = true;
+    if (isFlag(b.busy)) msg.busy = b.busy;
+    if (isFlag(b.queued)) msg.queued = b.queued;
+    return msg;
+  }
+
+  /**
+   * Выжимка присутствия для шины и сокетов: выделение — не больше PRESENCE_SELECTION
+   * id не длиннее PRESENCE_ID_CHARS и столько, чтобы JSON уложился в
+   * PRESENCE_PAYLOAD_BYTES (полезная нагрузка NOTIFY < 8000 байт).
+   */
+  function presenceBody(ws, raw, now) {
+    const b = { k: 'presence', p: ws.projectId, i: instanceId, c: ws.clientId, a: ws.author ? String(ws.author).slice(0, MAX_AUTHOR) : undefined, s: [], at: new Date(now).toISOString() };
+    if (typeof raw.board === 'string' && raw.board.length <= PRESENCE_ID_CHARS) b.b = raw.board;
+    if (isFlag(raw.busy)) b.busy = raw.busy;
+    if (isFlag(raw.queued)) b.queued = raw.queued;
+    const src = Array.isArray(raw.selection) ? raw.selection : [];
+    let budget = PRESENCE_PAYLOAD_BYTES - utf8({ ...b, t: 1 });
+    let truncated = false;
+    for (const id of src) {
+      if (typeof id !== 'string') continue;
+      if (id.length > PRESENCE_ID_CHARS) { truncated = true; continue; }
+      if (b.s.length >= PRESENCE_SELECTION) { truncated = true; break; }
+      const cost = utf8(id) + (b.s.length ? 1 : 0);
+      if (cost > budget) { truncated = true; break; }
+      budget -= cost;
+      b.s.push(id);
+    }
+    if (truncated) b.t = 1;
+    return b;
+  }
+
+  const publish = (msg) => {
+    if (!bus) return;
+    try {
+      bus.publish(msg);
+    } catch (e) {
+      log.warn('[document/hub] шина присутствия:', e && e.message);
+    }
+  };
+
+  /** Сокет больше не присутствует (закрыт или замолчал): сказать своим и чужим экземплярам. */
+  function withdraw(ws, { closed = false } = {}) {
+    const room = rooms.get(ws.projectId);
+    const had = ws.announced;
+    ws.announced = false;
+    // закрытие сообщается своим всегда (как прежде); молчание — только если о нём знали
+    if ((closed || had) && !presentElsewhere(room, ws.clientId, ws)) relay(ws.projectId, ws, { type: 'left', client: ws.clientId });
+    if (ws.published) {
+      ws.published = false;
+      publish({ k: 'left', p: ws.projectId, i: instanceId, c: ws.clientId });
+    }
+  }
+
+  function onPresence(ws, projectId, raw) {
+    const now = Date.now();
+    // окно в секунду: лишнее отбрасываем молча — это эфемерный поток, не журнал
+    if (now - ws.presenceWindow >= 1000) {
+      ws.presenceWindow = now;
+      ws.presenceCount = 0;
+    }
+    if (++ws.presenceCount > PRESENCE_PER_SECOND) return;
+    if (typeof raw.author === 'string' && raw.author) ws.author = raw.author.slice(0, MAX_AUTHOR);
+    const body = presenceBody(ws, raw, now);
+    ws.announced = true;
+    ws.presenceAt = now;
+    relay(projectId, ws, presenceMessage(body));
+    if (bus) {
+      ws.published = true;
+      publish(body);
+    }
+  }
+
+  /** Сообщение шины от другого экземпляра. */
+  function onBus(m) {
+    if (!m || typeof m !== 'object' || m.i === instanceId || closing) return;
+    if (m.k === 'bye') {
+      for (const [projectId, room] of rooms) {
+        for (const [key, e] of [...room.remote]) {
+          if (e.i !== m.i) continue;
+          room.remote.delete(key);
+          if (!presentElsewhere(room, e.c)) relay(projectId, null, { type: 'left', client: e.c });
+        }
+      }
+      return;
+    }
+    if (typeof m.p !== 'string' || typeof m.c !== 'string' || typeof m.i !== 'string') return;
+    const room = rooms.get(m.p);
+    if (!room) return;   // проект здесь никто не открыл — и помнить незачем
+    const key = m.i + '\u0000' + m.c;
+    if (m.k === 'presence') {
+      if (!Array.isArray(m.s)) return;
+      room.remote.set(key, { i: m.i, c: m.c, until: Date.now() + presenceTtlMs });
+      relay(m.p, null, presenceMessage(m));
+    } else if (m.k === 'left') {
+      if (!room.remote.delete(key)) return;   // не видели — и уходить некому
+      if (!presentElsewhere(room, m.c)) relay(m.p, null, { type: 'left', client: m.c });
+    }
+  }
+  const unbus = bus ? bus.subscribe((m) => {
+    if (m && (m.k === 'presence' || m.k === 'left' || m.k === 'bye')) onBus(m);
+  }) : () => {};
+
+  /** TTL присутствия: свои замолчавшие и чужие без сердцебиения — ушли. */
+  function sweepPresence() {
+    const now = Date.now();
+    for (const [projectId, room] of rooms) {
+      for (const ws of room.sockets) {
+        if (ws.announced && now - ws.presenceAt > presenceTtlMs) withdraw(ws);
+      }
+      for (const [key, e] of [...room.remote]) {
+        if (e.until > now) continue;
+        room.remote.delete(key);
+        if (!presentElsewhere(room, e.c)) relay(projectId, null, { type: 'left', client: e.c });
+      }
+    }
+  }
+  const sweeper = presenceTtlMs > 0 ? setInterval(sweepPresence, Math.max(50, Math.min(5000, Math.floor(presenceTtlMs / 3)))) : null;
+  if (sweeper && sweeper.unref) sweeper.unref();
+
+  /* ------------------------------ ошибки и догон ------------------------------ */
 
   function errorMessage(e, txId) {
     let body;
@@ -170,14 +393,22 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
 
   /**
    * Дочитать из базы всё после ws.lastSeq (страницами), затем буфер живого потока.
-   * Дыра в журнале посреди догона — gone со снимком и дальше от него.
+   * Дыра в журнале посреди догона — gone со снимком и дальше от него; дыра и за
+   * снимком (тот же снимок второй раз) — журнал повреждён: сказать и закрыть, а не
+   * читать снимок по кругу.
    */
   async function pump(ws) {
     const projectId = ws.projectId;
+    let goneAt = -1;
     for (let guard = 0; guard < 100000; guard++) {
       if (ws.readyState !== ws.OPEN) return;
       const view = await dslr.since(projectId, ws.lastSeq);
+      if (ws.readyState !== ws.OPEN) return;
       if (view.gone) {
+        if (view.snapshot.seq === goneAt) {
+          throw new DocError(503, 'unavailable', 'журнал проекта не дочитывается за снимком — повторите позже', { retryable: true });
+        }
+        goneAt = view.snapshot.seq;
         sendGone(ws, view);
         continue;
       }
@@ -201,36 +432,34 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
   async function onTx(ws, projectId, raw) {
     const txId = raw && typeof raw.tx_id === 'string' ? raw.tx_id : undefined;
     try {
-      if (raw && typeof raw === 'object' && typeof raw.author === 'string' && raw.author) ws.author = raw.author;
+      if (raw && typeof raw === 'object' && typeof raw.author === 'string' && raw.author) ws.author = raw.author.slice(0, MAX_AUTHOR);
       const { committed, existing } = await dslts.commit(projectId, raw, { author: ws.author });
       // новая транзакция уже разослана подпиской (автору тоже); сохранённая — повтор
       // после разрыва: досылаем автору, если этот сокет её ещё не видел, иначе — ack
       // (кадры до lastSeq уже ушли этим сокетом раньше ack — порядок клиенту виден)
       if (existing) {
-        if (committed.seq <= ws.lastSeq) send(ws, { type: 'ack', tx_id: committed.tx_id, seq: committed.seq, chain: committed.chain || '', existing: true });
-        else deliverTx(ws, committed);
+        if (committed.seq <= ws.lastSeq) {
+          if (ws.knowsAck) {
+            send(ws, { type: 'ack', tx_id: committed.tx_id, seq: committed.seq, chain: committed.chain || '', existing: true });
+          } else {
+            // клиент круга 22 ack не знает, а кадр с seq ≤ подтверждённого пропустит — без
+            // этого он ждал бы подтверждения вечно и держал за ней всю очередь
+            send(ws, {
+              type: 'error', error: true, code: 'duplicate', retryable: false, existing: true,
+              tx_id: committed.tx_id, seq: committed.seq,
+              message: 'правка уже записана — она в снимке, который пришёл раньше'
+            });
+          }
+        } else {
+          deliverTx(ws, committed);
+        }
       }
     } catch (e) {
       send(ws, errorMessage(e, txId));
     }
   }
 
-  function onPresence(ws, projectId, raw) {
-    const now = Date.now();
-    // окно в секунду: лишнее отбрасываем молча — это эфемерный поток, не журнал
-    if (now - ws.presenceWindow >= 1000) {
-      ws.presenceWindow = now;
-      ws.presenceCount = 0;
-    }
-    if (++ws.presenceCount > PRESENCE_PER_SECOND) return;
-    if (typeof raw.author === 'string' && raw.author) ws.author = raw.author;
-    const selection = Array.isArray(raw.selection)
-      ? raw.selection.filter((s) => typeof s === 'string').slice(0, MAX_SELECTION)
-      : [];
-    const msg = { type: 'presence', client: ws.clientId, author: ws.author, selection, at: new Date(now).toISOString() };
-    if (typeof raw.board === 'string') msg.board = raw.board;
-    relay(projectId, ws, msg);
-  }
+  /* ------------------------------ подключение ------------------------------ */
 
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
@@ -239,11 +468,13 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
     const since = sinceRaw === null || sinceRaw === '' ? undefined : Number(sinceRaw);
     const tip = url.searchParams.get('tip') || undefined;
     const epoch = url.searchParams.get('epoch') || undefined;
+    const proto = Number(url.searchParams.get('proto') || 0);
     ws.isAlive = true;
     ws.projectId = projectId;
     ws.token = ++tokenCounter;
-    ws.clientId = url.searchParams.get('client') || ('c_' + (++clientCounter).toString(36) + '_' + Date.now().toString(36));
-    ws.author = url.searchParams.get('author') || undefined;
+    ws.clientId = (url.searchParams.get('client') || ('c_' + (++clientCounter).toString(36) + '_' + Date.now().toString(36))).slice(0, PRESENCE_ID_CHARS);
+    ws.author = url.searchParams.get('author') ? url.searchParams.get('author').slice(0, MAX_AUTHOR) : undefined;
+    ws.knowsAck = !!(tip || epoch || proto >= 2);
     ws.lastSeq = -1;
     ws.catchingUp = true;
     ws.deciding = true;
@@ -251,17 +482,25 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
     ws.buffer = [];
     ws.presenceWindow = 0;
     ws.presenceCount = 0;
+    ws.presenceAt = 0;
+    ws.announced = false;
+    ws.published = false;
     ws.on('pong', () => { ws.isAlive = true; });
 
     const refuse = (msg, reason) => {
       send(ws, errorMessage(badRequest(msg)));
       ws.close(CLOSE.bad, reason);
     };
+    if (closing) {
+      ws.close(1001, 'server shutting down');
+      return;
+    }
     if (!projectId) return refuse('нужен параметр project', 'project');
     if (since !== undefined && (!Number.isInteger(since) || since < -1)) return refuse('since: целое ≥ 0 (или -1 — «ничего не знаю»)', 'since');
     if ((tip && tip.length > 128) || (epoch && epoch.length > 64)) return refuse('tip/epoch: слишком длинные', 'tip');
 
     let joined = false;
+    let gone = false;
     ws.on('message', (data) => {
       let msg;
       try {
@@ -287,15 +526,21 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
       }
     });
     ws.on('close', () => {
+      gone = true;
+      ws.buffer = [];
       if (!joined) return;
+      joined = false;
       leave(projectId, ws);
-      relay(projectId, ws, { type: 'left', client: ws.clientId });
+      if (!closing) withdraw(ws, { closed: true });
     });
     ws.on('error', (e) => log.warn('[document/hub] сокет:', e && e.message));
 
     (async () => {
       // проверяем проект до подписки: в комнате не должно быть сокетов чужих id
       const project = await dslr.project(projectId);
+      // сокет закрылся, пока проверяли: в комнату его не пускать — иначе он остался бы
+      // в ней навсегда (close уже прошёл), держал голову от выгрузки и кеш кадров
+      if (gone || ws.readyState !== ws.OPEN) return;
       join(projectId, ws);
       joined = true;
       // голова загружена и сверена с базой: откат, о котором экземпляр не знал, ловится здесь
@@ -304,6 +549,7 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
       if (since !== undefined) decision = await dslr.classify(projectId, { since, tip, epoch }, head);
       if (decision === 'evidence') head = await dslts.clientEvidence(projectId, { token: ws.token });
       ws.deciding = false;
+      if (gone) return;
       if (ws.epochMoved) {
         // эпоха сменилась, пока решали: начинать заново
         closeEpoch(ws, head.epoch);
@@ -330,9 +576,8 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
       }
       await pump(ws);
     })().catch((e) => {
+      // комнату покинет обработчик close (он же скажет left, если присутствие было)
       fail(ws, e);
-      if (joined) leave(projectId, ws);
-      joined = false;
     });
   });
 
@@ -357,18 +602,42 @@ export function createHub({ server, dslr, dslts, pingInterval = 30000, log = con
       const room = rooms.get(projectId);
       return room ? room.sockets.size : 0;
     },
+    /** Число открытых комнат (тестам: утечки). */
+    roomCount() {
+      return rooms.size;
+    },
     /** Кадров в кеше проекта (тестам). */
     cachedFrames(projectId) {
       const room = rooms.get(projectId);
       return room ? [...room.frames.keys()] : [];
     },
-    /** Закрыть все сокеты кодом 1001 («уходим») и снять таймеры. */
+    /** Байты кеша кадров: всего и по комнате (тестам). */
+    cacheBytes(projectId) {
+      if (projectId === undefined) return cachedBytes;
+      const room = rooms.get(projectId);
+      return room ? room.frameBytes : 0;
+    },
+    /** Клиенты чужих экземпляров, о которых помнит комната (тестам). */
+    remotePresence(projectId) {
+      const room = rooms.get(projectId);
+      return room ? [...room.remote.values()].map((e) => ({ instance: e.i, client: e.c })) : [];
+    },
+    /** Прогнать TTL присутствия сейчас (тестам). */
+    sweepPresence,
+    /** Закрыть все сокеты кодом 1001 («уходим») и снять таймеры; чужим экземплярам — bye. */
     async close() {
+      if (closing) return;
+      closing = true;
       unsubscribe();
+      unbus();
       dslts.setWatcher(null);
       if (pinger) clearInterval(pinger);
+      if (sweeper) clearInterval(sweeper);
+      // остальные экземпляры: все клиенты этого — ушли (не ждать TTL)
+      publish({ k: 'bye', i: instanceId });
       for (const ws of wss.clients) ws.close(1001, 'server shutting down');
       await new Promise((resolve) => wss.close(() => resolve()));
+      for (const room of rooms.values()) clearFrames(room);
       rooms.clear();
     }
   };

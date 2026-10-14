@@ -166,6 +166,31 @@ test('варианты и команда оболочки — итоговые �
   assert.deepEqual(s.shell, { action: 'undo', args: { times: 2 } });
 });
 
+test('память разговора уходит в /agent/command: до пяти пар, строки до 500 символов', async (t) => {
+  const srv = await fakeServer({
+    'POST /agent/command': async (req, body, res) => {
+      streamHead(res);
+      res.write(sse('result', { tx_id: null, seq: null, applied: 0, summary: 'ok' }));
+      res.write(sse('done', {}));
+      res.end();
+    },
+  });
+  t.after(() => srv.close());
+  const history = Array.from({ length: 7 }, (_, i) => ({ utterance: `реплика ${i}`, summary: `итог ${i}` }));
+  history.push({ utterance: 'ж'.repeat(800), summary: 'и'.repeat(800) });
+  history.push({ summary: 'без реплики' });
+  await runServerCommand({ baseUrl: srv.baseUrl, project: 'p', text: 'а теперь синее', history, command_id: 'cmd_h' });
+  const sent = srv.log[0].body;
+  assert.equal(sent.command_id, 'cmd_h');
+  assert.equal(sent.history.length, 5);
+  assert.equal(sent.history[0].utterance, 'реплика 3');
+  assert.ok(sent.history.every((h) => h.utterance.length <= 500 && h.summary.length <= 500));
+  assert.equal(sent.history[4].utterance.length, 500);
+  // без памяти поле не шлётся вовсе
+  await runServerCommand({ baseUrl: srv.baseUrl, project: 'p', text: 'сделай', history: [] });
+  assert.ok(!('history' in srv.log[1].body));
+});
+
 test('разрыв потока — не провал: исход detached, без исключения', async (t) => {
   const srv = await fakeServer({
     'POST /agent/command': async (req, body, res) => {

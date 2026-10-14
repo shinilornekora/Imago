@@ -13,11 +13,11 @@ server/orchestrator/
   http.js         маршруты §10.2, SSE §10.3, лимит тела 1 МБ, единое тело ошибки
   pipeline.js     шаги jev → read → library → llm/validate → write → result; очередь на проект; стоп; варианты + apply
   jev/            «оболочка или модель»: recognizeAction/recognizeVariants из brain + узкий перенос shellIntent из app.js
-  dslr/           чтение стейта: кеш по (project, head_seq), дотягивание хвоста строгим applyOps
-  duil/           срез библиотек: проекты kind=library → describeLibrary
+  dslr/           чтение стейта: кеш {seq, doc, chain, epoch}, хвост ops?since=&tip=&epoch= по `more`, сброс при откате базы
+  duil/           срез библиотек: проекты kind=library → внешний словарь в прогон brain (library)
   dslv/           пул worker_threads: прогон brain (план → патч → операции → раскладка → validate → починка)
   llm/            провайдер модели: OpenAI-совместимый или Anthropic; URL-сборка, redact ключей
-  dslts/          запись транзакции; повтор с тем же tx_id при сетевой ошибке
+  dslts/          запись транзакции: пределы до сети (413), повтор с тем же tx_id, 503 + Retry-After, 426
   docclient.js    fetch до Document service с дедлайном; сеть/5xx → document_down
   traces.js       трассы §10.4 → POST /api/internal/traces (X-Internal-Token)
   errors.js       OrchError {status, code, message, retryable, detail?}
@@ -85,10 +85,19 @@ curl -N -X POST localhost:8090/agent/command -H 'content-type: application/json'
   накладывает их своим движком); набор живёт в памяти 15 минут по `command_id`;
   `POST /agent/apply {command_id, variant}` пишет выбранный через ту же очередь проекта.
   Повтор того же выбора — та же запись; другой вариант после выбора — `400`.
+* **Чтение (SPEC §10.6).** Кеш стейта хранит chain своей головы и эпоху; хвост —
+  `ops?since=&tip=&epoch=` страницами до `more:false`. 410, другая эпоха, чужой chain у
+  пришедшей записи, голова позади кеша — кеш проекта выбрасывается, стейт читается целиком:
+  после отката базы агент строит патч по новому журналу, а не по закешированному.
 * **Запись.** `tx_id = core.uid('tx')`, `base_seq` = голова прочитанного стейта,
   `author:'Агент'`, `author_kind:'agent'`, `client` — вкладка, приславшая команду (её
-  `sync.js` пометит транзакцию как «свою»), `title` — заголовок плана, `engine`. Сеть или 5xx
-  → повтор с тем же `tx_id` (до 3 раз).
+  `sync.js` пометит транзакцию как «свою»), `title` — заголовок плана, `engine`. Больше 5000
+  операций или 4 МБ — `too_large` до сети, без частичной записи. Сеть или 5xx → повтор с тем
+  же `tx_id` (до 3 раз; у 503 — по `Retry-After`, не дольше 5 с за раз); 413 — `too_large`,
+  426 — `engine`, без повтора. «Менять нечего» (`nothingChanged`) не пишется.
+* **Библиотеки.** DUIL отдаёт в прогон brain выжимки проектов `kind:'library'`
+  (`runCommand({library})`): имена документа главнее, использованный мастер переносится в
+  библиотеку документа той же транзакцией (`result.libraryAdded`).
 * **Трассы.** После каждой команды: шаги и длительности, число вызовов и токены модели,
   `tx_id/seq`, код ошибки — без промптов, ответов модели и ключей. Нет эндпойнта (`404`) или
   сети — одна строка в лог, команда не замечает. Последние 100 — в памяти (`svc.traces.recent()`).
