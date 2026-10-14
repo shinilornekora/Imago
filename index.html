@@ -15,6 +15,9 @@
            Без сервера оба скрыты: артефакт и локальная статика работают по-прежнему. -->
       <button class="btn ghost icon small" id="btn-projects" hidden title="Проекты" aria-label="Проекты"><span class="i" data-icon="folder"></span></button>
       <span class="sync-status" id="sync-status" hidden role="status" aria-live="polite"></span>
+      <!-- Круг 23 (SPEC §10): где выполняются команды агента — «агент: сервер», «агент: в
+           браузере» или «агент недоступен». Только в серверном режиме, как и синхронизация. -->
+      <span class="sync-status agent-status" id="agent-status" hidden role="status" aria-live="polite"></span>
     </div>
 
     <div class="topbar-center" id="artboard-tabs"></div>

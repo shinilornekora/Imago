@@ -1,9 +1,17 @@
-# Imago Studio — совместная работа (SPEC §8.1): PostgreSQL + Document service + NGINX.
-#   docker compose up --build -d      → http://localhost:8123/
-#   docker compose down               (данные остаются в томе imago-db)
-#   docker compose down -v            (стереть базу)
-# Агент в этом круге работает в браузере и ходит в LM Studio на http://localhost:1234/v1
-# с машины пользователя — контейнерам LM Studio не нужен.
+# Imago Studio — совместная работа и агент на сервере (SPEC §8.1, §10):
+# PostgreSQL + Document service + Orchestrator + NGINX.
+#   docker compose up --build -d --wait   → http://localhost:8123/
+#   docker compose down                   (данные остаются в томе imago-db)
+#   docker compose down -v                (стереть базу)
+# Переменные — в .env рядом с этим файлом (образец: deploy/env.example).
+# Модель агента — LM Studio на машине пользователя: из контейнера она видна как
+# host.docker.internal (на Linux его даёт extra_hosts: host-gateway).
+
+x-node-health: &node-health
+  interval: 5s
+  timeout: 3s
+  retries: 20
+  start_period: 10s
 
 services:
   db:
@@ -29,8 +37,38 @@ services:
       DATABASE_URL: postgres://imago:imago@db:5432/imago
       PORT: "8080"
       SNAPSHOT_EVERY: "50"
+      # общий с orchestrator секрет для /api/internal/traces; заглушку change-me сервис
+      # не принимает — тогда трассы просто не пишутся (см. deploy/env.example)
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-change-me}
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
     depends_on:
       db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.orchestrator
+    environment:
+      PORT: "8090"
+      DOCUMENT_URL: http://document:8080
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-change-me}
+      LLM_KIND: ${LLM_KIND:-openai}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_MODEL: ${LLM_MODEL:-local-model}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      <<: *node-health
+      # /agent/health отвечает 200 и тогда, когда модель недоступна (llm: 'down') —
+      # здоровье процесса не зависит от того, запущена ли LM Studio
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/agent/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+    depends_on:
+      document:
         condition: service_healthy
     restart: unless-stopped
 
@@ -40,8 +78,16 @@ services:
       dockerfile: deploy/Dockerfile.web
     ports:
       - "${IMAGO_PORT:-8123}:80"
+    healthcheck:
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
     depends_on:
-      - document
+      document:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

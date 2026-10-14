@@ -4,7 +4,9 @@ erDiagram
     PROJECTS ||--o{ LIBRARY_VERSIONS : "проект вида library: помеченные снимки"
     PROJECTS ||--o{ PROJECT_IMPORTS : "продукт импортирует библиотеку"
     LIBRARY_VERSIONS ||--o{ PROJECT_IMPORTS : "прибит к версии"
-    PROJECTS ||--o{ AGENT_RUNS : "трассы команд"
+    PROJECTS ||--o{ PROJECT_EPOCHS : "эпохи журнала (откаты базы)"
+    PROJECTS ||--o{ TRACES : "трассы команд агента"
+    TRACES ||--o| AGENT_RUNS : "фаза 2: трасса по колонкам"
     WORKSPACES ||--o{ PROJECTS : "владеет (фаза 2)"
     WORKSPACES ||--o{ MEMBERSHIPS : "кто в пространстве (фаза 2)"
     USERS ||--o{ MEMBERSHIPS : ""
@@ -15,6 +17,9 @@ erDiagram
         text name
         text kind "design · library"
         bigint head_seq "номер последней транзакции — точка сериализации"
+        text head_chain "chain записи head_seq; '' у пустого журнала"
+        text epoch "эпоха журнала: случайная метка, меняется при откате базы"
+        text epoch_cause "init · instance · client"
         int engine "версия формата движка"
         uuid workspace_id FK "фаза 2"
         timestamptz created_at
@@ -34,6 +39,7 @@ erDiagram
         text client "clientId вкладки"
         text title "как показать в истории"
         int engine
+        text chain "sha256(prev_chain + tx_id + seq) — якорь цепочки"
         timestamptz created_at
     }
     SNAPSHOTS {
@@ -41,7 +47,26 @@ erDiagram
         bigint seq PK "документ после этой транзакции"
         jsonb doc "root · nodes · tokens · meta — целиком"
         int engine
+        text chain "chain записи seq; снимок без совпадения с журналом не отдаётся"
         timestamptz created_at
+    }
+    PROJECT_EPOCHS {
+        uuid project_id PK, FK
+        text epoch PK
+        bigint seq "голова, на которой эпоха началась"
+        text cause "init · instance · client"
+        timestamptz created_at
+    }
+    TRACES {
+        bigint id PK
+        uuid project_id FK
+        text command_id
+        jsonb body "шаги, длительности, вызовы модели; ≤ 64 КБ; без ключей и промптов"
+        timestamptz created_at
+    }
+    SCHEMA_MIGRATIONS {
+        text name PK "NNN_имя.sql|mjs"
+        timestamptz applied_at
     }
     LIBRARY_VERSIONS {
         uuid project_id PK, FK
@@ -57,6 +82,8 @@ erDiagram
         timestamptz imported_at
     }
     AGENT_RUNS {
+        text note "фаза 2: разбор трасс по колонкам; сейчас — TRACES.body"
+
         uuid id PK
         uuid project_id FK
         text tx_id "какая транзакция вышла"

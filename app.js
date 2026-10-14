@@ -25,6 +25,13 @@ import { makeProvider, runCommand, runVariants } from './src/brain.js';
 /* Круг 22 (SPEC §9.5): клиент-реплика. Документ в серверном режиме живёт в ней, а не в
    localStorage/db; оболочка получает view и шлёт транзакции. */
 import { createSync, idbStorage, memoryStorage } from './src/sync.js';
+/* Круг 23 (SPEC §10): агент на сервере. Команда уходит в Orchestrator, стадии приходят
+   потоком SSE, транзакция агента — по сокету Hub, как любая чужая. Без сервера — brain здесь. */
+import * as AGENT from './src/agent.js';
+import {
+  AGENT_MODE_WORDS, decideAgentMode, agentModeTitle, serverStageRec, queuedLabel, retryLabel,
+  shellIntentFromServer, agentErrorWords, isModelError, normalizeResult, variantsFromServer,
+} from './src/shell.js';
 
 /* --------------------------------- состояние --------------------------------- */
 
@@ -138,7 +145,7 @@ function stageErrorNote(e) {
 async function boot() {
   // есть ли сервер, выясняем параллельно с первой отрисовкой: ответ нужен только
   // к моменту восстановления документа (initCapabilities), а ждать его до первого кадра незачем
-  serverProbe = probeServer();
+  serverProbe = serverAllowed() ? probeServer() : Promise.resolve(null);
   cacheDom();
   applyTheme(settings.theme);
   /* Порядок важен: applyRail решает, открыт рельс или нет, и только потом имеет смысл
@@ -362,6 +369,8 @@ function cacheDom() {
     'peekbar', 'peekbar-text', 'agent-dot',
     // круг 22: серверный режим — проекты, состояние синхронизации, чужие выделения
     'btn-projects', 'sync-status', 'presence',
+    // круг 23: где работает агент — на сервере или в браузере
+    'agent-status',
   ]) dom[id] = el(id);
   dom.dockmsg.setAttribute('role', 'status');
   dom.dockmsg.setAttribute('aria-live', 'polite');
@@ -485,7 +494,19 @@ function rememberServerMode(project) {
 
 /** Ждать ли серверный режим ещё до ответа /api/health: ссылка с проектом или отметка. */
 function serverAnticipated() {
+  if (!serverAllowed()) return false;
   return !!(projectIdFromUrl() || serverMark());
+}
+
+/**
+ * Круг 23. Соло-сборка (dist/local, dev.html) знает о себе, что сервера за ней нет:
+ * IMAGO_DEFAULTS.server === false. Тогда /api/health не спрашиваем вовсе — статический
+ * сервер ответил бы 404, и это была бы ошибка в консоли на каждом открытии; и отметка
+ * прошлого серверного проекта на том же адресе соло-режим не перехватывает.
+ */
+function serverAllowed() {
+  const d = typeof globalThis !== 'undefined' ? globalThis.IMAGO_DEFAULTS : null;
+  return !(d && typeof d === 'object' && d.server === false);
 }
 
 /** Последний по updated_at — тот, что откроется без ?project= в ссылке. */
@@ -621,6 +642,10 @@ function openProject(project) {
     extra: journalExtra,
   });
   server.sync = sync;
+  serverAgent.awaiting.clear();
+  serverAgent.arrived.clear();
+  serverAgent.detached = null;
+  probeAgent({ force: true });
   sync.open().catch((e) => {
     showMsg('error', 'Проект не открылся', { note: humanError(e) });
   });
@@ -695,12 +720,15 @@ function onSyncChange(view, info = {}) {
       return;
     }
     case 'remote': {
+      const prevDoc = state.doc;
       state.doc = view;
       state.geo = solve(view);
       pruneSelection();
       const diff = info.tx && Array.isArray(info.tx.ops) ? diffOf(info.tx.ops, prevGeo) : null;
       renderAll(diff ? { diff, prevGeo } : {});
       refreshSheet();
+      // круг 23: транзакция агента с сервера — уже применена репликой; здесь только итог
+      if (info.tx && info.tx.author_kind === 'agent') onAgentTx(info.tx, prevDoc, diff, !!info.mine);
       return;
     }
     default: {
@@ -732,6 +760,9 @@ function onSyncStatus(s) {
     });
   }
   if (s.online) refreshProjectMeta();
+  // круг 23: сеть вернулась — спросить и Orchestrator; режим агента зависит от связи
+  if (s.online && (!serverAgent.health || !serverAgent.health.ok)) probeAgent();
+  else agentModeChanged();
   // локальная копия могла отстать: миграцию шлём, когда реплика догнала сервер
   if (s.online && !s.syncing && !s.error) maybeMigrate();
 }
@@ -999,6 +1030,7 @@ function renderSyncStatus() {
   const full = names.length ? `${text}. В сети: ${names.join(', ')}` : text;
   host.title = full;
   host.setAttribute('aria-label', `Состояние синхронизации: ${full}`);
+  renderAgentStatus();
 }
 
 /** Цвет участника — из его id: один и тот же у всех, кто его видит. */
@@ -1050,6 +1082,389 @@ function renderPresence() {
 function sharePresence() {
   if (!server || !server.sync) return;
   server.sync.presence({ selection: state.selection, board: activeArtboardId() });
+}
+
+/* ------------------------------ агент на сервере ------------------------------ */
+/*
+ * Круг 23 (SPEC §10). Когда проект открыт через Document service и Orchestrator отвечает
+ * на `/agent/health`, команда агента уходит на сервер: стадии приходят потоком в ту же
+ * ленту, команды оболочки исполняются здесь же, варианты — в той же панели, а транзакция
+ * агента приходит по сокету Hub как любая чужая — второй раз её не применяем. Без сервера
+ * (артефакт, локальная сборка) и когда Orchestrator молчит — прежний путь: brain здесь.
+ */
+const agentClient = AGENT.createAgentClient({ author: () => settings.author || '' });
+const AGENT_PROBE_MS = 30000;
+const AGENT_PROBE_MIN_MS = 10000;   // чаще не спрашиваем: статус реплики меняется на каждой правке
+const serverAgent = {
+  health: null,        // последний ответ /agent/health (или {ok:false})
+  probing: null,
+  timer: null,
+  mode: 'browser',     // server | browser | off — что показано в строке состояния
+  awaiting: new Map(), // tx_id → {label, human, select}: итог пришёл, транзакция ещё нет
+  arrived: new Map(),  // tx_id → {tx, prevDoc, diff}: транзакция пришла раньше итога
+  detached: null,      // {utterance, at}: поток оборвался, итог придёт по синхронизации
+  probedAt: 0,
+  absent: false,       // /agent/ на этом сервере нет вовсе (Document service со STATIC_DIR)
+};
+const AGENT_ARRIVED_MAX = 6;
+
+/** Работает ли сейчас агент на сервере. */
+function agentOnServer() {
+  return agentMode() === 'server';
+}
+
+function agentMode() {
+  return decideAgentMode({
+    inProject: !!(server && server.project && server.sync && server.sync.view),
+    online: !!(server && server.status && server.status.online),
+    health: serverAgent.health,
+    hasProvider: !!state.provider,
+  });
+}
+
+/** Можно ли отправить команду агенту — здесь или на сервере. */
+function agentReady() {
+  return !!state.provider || agentOnServer();
+}
+
+/**
+ * Спросить Orchestrator, жив ли он. Только в серверном режиме: артефакт сюда не ходит.
+ * Без force — не чаще раза в 10 с. Ответ 404 значит, что агента за этим сервером нет
+ * совсем (Document service сам раздаёт клиент, без NGINX): больше не спрашиваем.
+ */
+function probeAgent({ force = false } = {}) {
+  if (!server || serverAgent.absent) return Promise.resolve(null);
+  if (serverAgent.probing) return serverAgent.probing;
+  if (!force && Date.now() - serverAgent.probedAt < AGENT_PROBE_MIN_MS) return Promise.resolve(serverAgent.health);
+  serverAgent.probedAt = Date.now();
+  serverAgent.probing = agentClient.health().then((h) => {
+    serverAgent.health = h;
+    if (h && !h.ok && h.status === 404) {
+      serverAgent.absent = true;
+      if (serverAgent.timer) { clearInterval(serverAgent.timer); serverAgent.timer = null; }
+    }
+    return h;
+  }).catch(() => {
+    serverAgent.health = { ok: false, reason: 'network' };
+    return serverAgent.health;
+  }).finally(() => {
+    serverAgent.probing = null;
+    agentModeChanged();
+  });
+  if (!serverAgent.timer && !serverAgent.absent) {
+    serverAgent.timer = setInterval(() => { if (server && !state.busy) probeAgent(); }, AGENT_PROBE_MS);
+  }
+  return serverAgent.probing;
+}
+
+/** Orchestrator не принял команду из-за сбоя связи: до следующей проверки он «недоступен». */
+function markAgentDown() {
+  serverAgent.health = { ok: false, reason: 'network' };
+  agentModeChanged();
+}
+
+/** Режим агента мог смениться: строка состояния, знак агента и кнопки — заново. */
+function agentModeChanged() {
+  const mode = agentMode();
+  const was = serverAgent.mode;
+  serverAgent.mode = mode;
+  renderAgentStatus();
+  if (dom['btn-run']) setRunnable(!!state.provider);
+  if (was !== mode && was === 'server' && mode !== 'server' && server) {
+    toast(mode === 'browser'
+      ? 'Сервер агента недоступен — команды выполняются в браузере.'
+      : 'Сервер агента недоступен.', 'plain', 6000);
+  }
+}
+
+/** «агент: сервер» / «агент: в браузере» / «агент недоступен» — рядом с синхронизацией. */
+function renderAgentStatus() {
+  const host = dom['agent-status'];
+  if (!host) return;
+  if (!server) { host.hidden = true; return; }
+  const mode = agentMode();
+  const words = AGENT_MODE_WORDS[mode];
+  const title = agentModeTitle(mode, serverAgent.health, AGENT_KIND_WORDS[state.providerKind] || '');
+  host.hidden = false;
+  host.dataset.state = mode;
+  host.textContent = '';
+  const dot = document.createElement('span');
+  dot.className = 'sync-dot';
+  dot.dataset.state = mode === 'server' ? 'on' : mode === 'browser' ? 'off' : 'error';
+  const label = document.createElement('span');
+  label.className = 'sync-text';
+  label.textContent = words;
+  host.append(dot, label);
+  host.title = title;
+  host.setAttribute('aria-label', `${words}. ${title}`);
+}
+
+/** Свои правки — сначала на сервер: агент читает стейт у DSLR и должен видеть их. */
+async function settleOwnEdits(ms, signal) {
+  const sync = server && server.sync;
+  if (!sync) return;
+  const until = Date.now() + ms;
+  while (sync.pending.length && sync.status && sync.status.online && Date.now() < until) {
+    if (signal && signal.aborted) return;
+    await new Promise((r) => setTimeout(r, 60));
+  }
+}
+
+/**
+ * Команда на сервере. true — команда разобрана (успех, отказ, вопрос — всё сказано);
+ * false — сервер её не принял из-за связи, и её надо выполнить в браузере.
+ * Остановка пробрасывается исключением — её разбирает общий catch runUtterance.
+ */
+async function runOnServer(utterance, { variants, ctrl, runId }) {
+  const sync = server.sync;
+  await settleOwnEdits(1500, ctrl.signal);
+  if (ctrl.signal.aborted) throw new AGENT.AgentError({ code: 'cancelled' });
+  let out;
+  try {
+    out = await agentClient.run({
+      project: server.project.id,
+      text: utterance,
+      selection: state.selection.slice(0, 200),
+      board: activeArtboardId() || undefined,
+      base_seq: sync.confirmed ? sync.confirmed.seq : undefined,
+      client: sync.clientId,
+      author: settings.author || undefined,
+      mode: variants ? 'variants' : 'run',
+      n: variants ? 3 : undefined,
+      signal: ctrl.signal,
+      onEvent: (ev) => onServerAgentEvent(ev, runId, variants),
+    });
+  } catch (e) {
+    if (isCancelled(e)) throw e;
+    if (!e.accepted && AGENT.isUpstreamDown(e)) {
+      markAgentDown();
+      if (state.provider) {
+        toast('Сервер агента недоступен — выполняю команду в браузере.', 'plain', 6000);
+        return false;
+      }
+    }
+    hideStage();
+    restoreCommand(utterance);
+    showServerAgentError(e, utterance, { variants });
+    return true;
+  }
+  hideStage();
+  // прогон заменили или остановили, пока шёл ответ: показывать его итог уже некому
+  if (state.runSeq !== runId) return true;
+
+  if (out.error) {
+    if (isCancelled(out.error)) { restoreCommand(utterance); cancelledMsg(utterance); return true; }
+    restoreCommand(utterance);
+    showServerAgentError(out.error, utterance, { variants });
+    return true;
+  }
+  if (out.shell) { applyServerShell(out.shell, utterance); return true; }
+  if (out.variants) {
+    const list = variantsFromServer(out.variants, { doc: state.doc, core: CORE, commandId: out.command_id });
+    if (!list.length) {
+      restoreCommand(utterance);
+      showMsg('warn', 'Варианты ничего не меняют', {
+        note: 'Попробуйте сказать конкретнее — что именно поменять.',
+        actions: [retryAction(utterance)],
+      });
+      return true;
+    }
+    if (ctrl.signal.aborted) return true;
+    // слияние на сервере не отказывает — отметка «документ изменился» вариантам не нужна
+    showVariants(list, utterance, null);
+    return true;
+  }
+  if (out.result) { presentServerResult(out.result, utterance); return true; }
+  if (out.status === 'detached') {
+    serverAgent.detached = { utterance, at: Date.now() };
+    addChat('you', utterance);
+    showMsg('plain', 'Связь с агентом прервалась — ответ придёт по синхронизации', {
+      note: 'Команда выполняется на сервере: правка появится на холсте сама.', ms: 9000,
+    });
+    return true;
+  }
+  // поток кончился штатно, а итога нет: агенту нечего было менять
+  restoreCommand(utterance);
+  showMsg('warn', 'Агент не нашёл, что изменить', {
+    note: 'Выделите узел или скажите, что именно поправить.',
+    actions: [retryAction(utterance)],
+  });
+  return true;
+}
+
+/** События потока §10.3 — в ту же ленту стадий, что у brain. */
+function onServerAgentEvent(ev, runId, variants) {
+  if (!ev || runId !== state.runSeq) return;
+  if (ev.type === 'queued') {
+    onAgentStage({ stage: 'srv:queued', label: queuedLabel(ev.data && ev.data.position) }, 0, runId);
+  } else if (ev.type === 'stage') {
+    onAgentStage(serverStageRec(ev.data), variants ? 3 : 0, runId);
+  } else if (ev.type === 'retry') {
+    onAgentStage({ stage: 'srv:retry', label: retryLabel(ev.data && ev.data.wait_ms) }, 0, runId);
+  }
+}
+
+/** Отказ сервера агента — тем же доком, что отказ модели в браузере. */
+function showServerAgentError(e, utterance, { variants = false } = {}) {
+  const words = agentErrorWords(e);
+  const actions = [];
+  if (e.retryable !== false) {
+    actions.push({ label: 'Повторить', primary: true, onClick: () => runUtterance(utterance, { variants }) });
+  }
+  // модель серверу не отвечает, а у браузера есть своя — выполнить можно здесь
+  if (state.provider && (isModelError(e) || e.code === 'document_down' || AGENT.isUpstreamDown(e))) {
+    actions.push({ label: 'Выполнить в браузере', onClick: () => runUtterance(utterance, { variants, local: true }) });
+  }
+  showMsg('error', words.title, {
+    note: words.note,
+    details: techDetails(null, e),
+    actions,
+  });
+}
+
+/**
+ * Команда оболочки, которую узнал JEV: исполняем здесь тем же кодом, что исполняет
+ * словарь оболочки. Модель не звалась, документ не менялся.
+ */
+function applyServerShell(shell, utterance) {
+  const intent = shellIntentFromServer(shell);
+  if (intent && intent.kind === 'stop') {
+    showMsg('plain', 'Агент сейчас ничего не делает.', { ms: 5000 });
+    return;
+  }
+  if (intent && intent.kind === 'variants') {
+    const src = intent.of || lastHumanUtterance(utterance);
+    if (src) {
+      addChat('you', utterance);
+      chainAfterRun(src, { variants: true, note: `Считаю варианты к «${clip(src, 60)}»` });
+    } else askVariants({ variantsSubject: intent.subject || '' }, utterance);
+    return;
+  }
+  if (intent && applyShellIntent(intent, utterance)) return;
+  // сервер знает слово, которого не знает этот клиент: пробуем свой словарь
+  const local = shellIntent(utterance);
+  if (local && applyShellIntent(local, utterance)) return;
+  showMsg('plain', 'Эту команду оболочки клиент пока не умеет', {
+    note: `Сервер узнал «${clip(String(shell && shell.action || ''), 30)}». Обновите страницу — версия клиента могла устареть.`,
+    ms: 8000,
+  });
+}
+
+/**
+ * Итог команды на сервере (§10.3 `result`): транзакция уже записана и придёт по сокету.
+ * Здесь — только слова, выделение и шаг в истории, когда транзакция до нас доберётся.
+ */
+function presentServerResult(raw, utterance, { variant = null } = {}) {
+  const r = normalizeResult(raw);
+  const res = raw && typeof raw === 'object' ? raw : {};
+  if (!r.txId || (!r.applied && !r.droppedCount)) {
+    // записывать было нечего: переспрос, ответ или «так нельзя» — те же карточки, что у brain
+    if (res.clarify) { showClarify(res, utterance); return; }
+    if (res.cannot) { showCannot(res, utterance); return; }
+    if (res.answer) { showAnswer({ answer: String(res.answer), followups: res.followups }, utterance); return; }
+    addChat('you', utterance);
+    if (r.summary) {
+      addChat('agent', r.summary);
+      rememberPair(utterance, r.summary);
+      showMsg('answer', r.summary, { note: warnLine(r.warnings), details: techDetails(r.warnings) });
+    } else {
+      restoreCommand(utterance, { focus: true });
+      addChat('agent', 'Ничего не изменилось', [], warnLine(r.warnings));
+      showMsg('warn', 'Ничего не изменилось', {
+        note: warnLine(r.warnings) || 'Скажите точнее, что и где поправить.',
+        details: techDetails(r.warnings),
+      });
+    }
+    return;
+  }
+  const headline = variant ? `Принят вариант «${variant.label || 'без названия'}»` : (r.summary || 'Готово');
+  const aside = variant ? r.summary : '';
+  const partly = typeof res.cannot === 'string' ? res.cannot.trim() : '';
+  const followups = Array.isArray(res.followups) ? res.followups.slice(0, 3).map(String) : [];
+  const label = variant ? `${utterance} · ${variant.label || 'вариант'}` : utterance;
+  rememberPair(utterance, r.summary || headline);
+  if (!variant) addChat('you', utterance);
+  addChat('agent', headline, followups, aside);
+  state.awaitingClarify = null;
+  // часть просьбы невыполнима — говорим вместе с тем, что сделано (как у brain, п.19)
+  if (partly) addChat('agent', partly);
+  const issue = issueLine(r.warnings);
+  const dropped = r.dropped.length ? droppedLine(r.dropped) : '';
+  if (issue) addChat('agent', issue);
+  showMsg(issue ? 'warn' : 'result', headline, {
+    issue,
+    note: [partly, aside, dropped, warnLine(r.warnings, { skipLayout: true })].filter(Boolean).join(' · '),
+    details: techDetails(r.warnings),
+    chips: followups.map((f) => ({ text: f, onClick: () => { dom.command.value = f; dom.command.focus(); } })),
+    actions: [{ label: 'Отменить', onClick: () => undoTx(r.txId) }],
+    undoTx: r.txId,
+  });
+  const wait = { label, human: r.summary || headline, select: r.select };
+  const got = serverAgent.arrived.get(r.txId);
+  if (got) {
+    serverAgent.arrived.delete(r.txId);
+    settleAgentTx(got.tx, got.prevDoc, got.diff, wait);
+  } else {
+    serverAgent.awaiting.set(r.txId, wait);
+  }
+}
+
+/**
+ * Транзакция агента пришла по сокету (она уже на холсте — её применила реплика). Своя
+ * команда — шаг в истории с инверсией от вида до неё (отмена — новой транзакцией, §8.3)
+ * и выделение того, что агент сделал. Чужой агент — только рамки, как чужая правка.
+ */
+function onAgentTx(tx, prevDoc, diff, mine) {
+  if (!tx || !tx.tx_id) return;
+  const wait = serverAgent.awaiting.get(tx.tx_id);
+  if (wait) {
+    serverAgent.awaiting.delete(tx.tx_id);
+    settleAgentTx(tx, prevDoc, diff, wait);
+    return;
+  }
+  if (mine && serverAgent.detached) {
+    // поток оборвался, итог пришёл синхронизацией: о нём и говорим
+    const d = serverAgent.detached;
+    serverAgent.detached = null;
+    const human = tx.title || 'Готово';
+    addChat('agent', human);
+    rememberPair(d.utterance, human);
+    showMsg('result', human, {
+      note: 'Агент закончил на сервере — правка пришла синхронизацией.',
+      actions: [{ label: 'Отменить', onClick: () => undoTx(tx.tx_id) }],
+      undoTx: tx.tx_id,
+    });
+    settleAgentTx(tx, prevDoc, diff, { label: d.utterance, human, select: [] });
+    return;
+  }
+  serverAgent.arrived.set(tx.tx_id, { tx, prevDoc, diff });
+  while (serverAgent.arrived.size > AGENT_ARRIVED_MAX) {
+    serverAgent.arrived.delete(serverAgent.arrived.keys().next().value);
+  }
+}
+
+function settleAgentTx(tx, prevDoc, diff, wait) {
+  const ops = Array.isArray(tx.ops) ? tx.ops : [];
+  if (ops.length && prevDoc && !state.history.some((t) => t.id === tx.tx_id)) {
+    let inverse = [];
+    try { inverse = invertOps(prevDoc, ops); } catch { inverse = []; }
+    if (inverse.length) {
+      state.history.length = state.cursor;
+      state.history.push({
+        id: tx.tx_id, kind: 'ops', ops, inverse,
+        label: wait.label || tx.title || 'Агент', who: 'agent', at: Date.now(), undone: false,
+        human: wait.human || tx.title || describeOps(ops, prevDoc),
+        pending: false, seq: tx.seq,
+      });
+      state.cursor = state.history.length;
+      scheduleSave();
+      refreshSheet();
+    }
+  }
+  const ids = (wait.select || []).filter((id) => state.doc.nodes[id]);
+  if (ids.length) setSelection(ids.slice(0, 40), { quiet: true, agent: true });
+  else if (diff) selectTouched(diff);
+  if (diff) revealChange(diff);
 }
 
 /** «Когда менялся» — словами, а не ISO-строкой. */
@@ -1243,8 +1658,10 @@ const AGENT_KIND_WORDS = { claude: 'Claude', lmstudio: 'LM Studio' };
 function updateAgentDot() {
   const dot = dom['agent-dot'];
   if (!dot) return;
-  const kind = AGENT_KIND_WORDS[state.providerKind] || 'модель';
-  const st = !state.provider ? 'off' : (state.busy ? 'busy' : 'ready');
+  const onServer = agentOnServer();
+  const model = onServer && serverAgent.health && serverAgent.health.model ? `, ${serverAgent.health.model}` : '';
+  const kind = onServer ? `сервер${model}` : (AGENT_KIND_WORDS[state.providerKind] || 'модель');
+  const st = !agentReady() ? 'off' : (state.busy ? 'busy' : 'ready');
   const words = {
     off: 'Агент не подключён — откройте настройки',
     ready: `Агент подключён: ${kind}`,
@@ -1256,6 +1673,8 @@ function updateAgentDot() {
 }
 
 function setRunnable(ok) {
+  // круг 23: агент на сервере — команды принимаются и без своей модели у браузера
+  ok = ok || agentOnServer();
   dom['btn-run'].disabled = !ok && !state.busy;
   paintRunButton();
   dom['btn-variants'].disabled = !ok || state.busy;
@@ -5385,7 +5804,7 @@ function applyHistoryAction(action, utterance) {
   return ok;
 }
 
-async function runUtterance(text, { variants = false, toModel = false } = {}) {
+async function runUtterance(text, { variants = false, toModel = false, local = false } = {}) {
   const utterance = String(text || '').trim();
   if (!utterance) {
     /* Сюда приходит только пустая СТРОКА: нераспознанную речь голосовой путь до сюда
@@ -5416,7 +5835,9 @@ async function runUtterance(text, { variants = false, toModel = false } = {}) {
     }
   }
 
-  if (!state.provider) {
+  // круг 23: на сервере агент свой — модель браузера ему не нужна; local — «выполнить в браузере»
+  const onServer = !local && agentOnServer();
+  if (!state.provider && !onServer) {
     // раньше оболочка просто открывала настройки, и команда пропадала без слов (п.11)
     showMsg('warn', 'Агент не подключён — команда не отправлена', {
       note: 'Текст остался в строке. Выберите модель в настройках: Claude на этой странице '
@@ -5453,6 +5874,11 @@ async function runUtterance(text, { variants = false, toModel = false } = {}) {
   const baseStamp = docStamp(state.doc);
 
   try {
+    /* Круг 23 (SPEC §10). Команда — на сервер; false значит «сервер её не принял», и
+       тогда тот же прогон продолжает brain здесь, как раньше. */
+    if (onServer && await runOnServer(utterance, { variants, ctrl, runId })) return;
+    if (state.runSeq !== runId || ctrl.signal.aborted) return;
+
     if (variants) {
       const list = await runVariants({
         doc: state.doc, selection: state.selection, utterance,
@@ -5948,6 +6374,12 @@ function takeVariantAndRefine({ index, rest }) {
   const ok = pick.take();
   if (!ok) return true;   // вариант устарел — об этом уже сказано
   if (dom.command.value.trim() === rest) dom.command.value = '';
+  // вариант сервера записывается не сразу: дорабатываем, когда он лёг
+  if (rest && ok && typeof ok.then === 'function') {
+    toast(`Взял «${pick.label}» — дорабатываю: ${clip(rest, 50)}`, 'plain', 5000);
+    ok.then((done) => { if (done) setTimeout(() => runUtterance(rest), 90); });
+    return true;
+  }
   if (rest) {
     toast(`Взял «${pick.label}» — дорабатываю: ${clip(rest, 50)}`, 'plain', 5000);
     setTimeout(() => runUtterance(rest), 90);
@@ -6203,7 +6635,7 @@ function paintRunButton() {
   run.title = stopping
     ? 'Остановить агента'
     : (state.busy ? 'Агент занят — спрошу, заменить команду или поставить в очередь' : 'Выполнить команду');
-  run.disabled = state.busy ? false : !state.provider;
+  run.disabled = state.busy ? false : !agentReady();
   /* Двух «Стоп» на экране быть не должно: кнопка в блоке хода работы нужна ровно
      тогда, когда главная занята отправкой набранного (п.6). Круг 18, п.2: блок
      переехал наверх справа, но правило то же — и в голосовой сессии, где командной
@@ -6219,7 +6651,7 @@ function setBusy(on) {
   updateAgentDot();
   if (!on) runHoldFired = false;
   paintRunButton();
-  dom['btn-variants'].disabled = on || !state.provider;
+  dom['btn-variants'].disabled = on || !agentReady();
   renderHints();
 }
 
@@ -6255,7 +6687,7 @@ function humanError(e) {
   // собственное сообщение ошибки точнее любого общего: оно и есть первая строка
   const own = String(e.message || '').trim();
   let hint = '';
-  if (!state.provider) {
+  if (!agentReady()) {
     hint = 'Агент не подключён: откройте настройки и укажите модель.';
   } else if (state.providerKind === 'lmstudio' && (kind === 'network' || code === 'upstream_error')) {
     hint = `Проверьте, что LM Studio запущена на ${settings.lmstudio.baseUrl}.`;
@@ -6798,6 +7230,8 @@ function focusVariant(i) {
 
 function acceptVariant(v, utterance) {
   if (!state.variants) return false;   // вариант уже приняли — второй раз не применяем
+  // круг 23: вариант посчитал сервер — выбор уходит в /agent/apply, транзакция придёт по сокету
+  if (v && v.server) return acceptServerVariant(v, utterance);
   if (state.variantsBase != null && docChangedUnder(state.variantsBase)) {
     hideVariants();
     staleMsg(utterance);
@@ -6819,6 +7253,32 @@ function acceptVariant(v, utterance) {
   selectTouched(r.diff);
   revealChange(r.diff);
   return true;
+}
+
+/**
+ * Вариант сервера: Orchestrator записывает его транзакцией и отвечает итогом (§10.2).
+ * Локально ничего не применяем — транзакция приходит по сокету, как любая другая.
+ * Возвращает обещание: «возьми второй, но заголовок крупнее» дорабатывает после записи.
+ */
+function acceptServerVariant(v, utterance) {
+  hideVariants();
+  if (dom.command.value.trim() === String(utterance || '').trim()) dom.command.value = '';
+  addChat('you', utterance);
+  showStage({ stage: 'srv:write', label: 'Записываю вариант' });
+  return agentClient.apply(v.server.command_id, v.server.key).then((result) => {
+    hideStage();
+    presentServerResult(result, utterance, { variant: v });
+    return true;
+  }).catch((e) => {
+    hideStage();
+    const words = agentErrorWords(e);
+    showMsg('error', `Вариант не записан: ${words.title}`, {
+      note: words.note || 'Посчитайте варианты заново.',
+      details: techDetails(null, e),
+      actions: [{ label: 'Посчитать заново', primary: true, onClick: () => runUtterance(utterance, { variants: true }) }],
+    });
+    return false;
+  });
 }
 
 /** Один знак после запятой: viewBox не место для «119.99999999». */
@@ -6991,6 +7451,11 @@ function unpeekVariant() {
 const NUM_LABELS = { gap: 'зазор', t: 'отступ', radius: 'скругление', fontSize: 'кегль', value: 'размер' };
 
 function describeVariant(v) {
+  // вариант сервера без операций: подпись — его собственное описание (§10.3)
+  if (v && v.server && !(v.ops && v.ops.length)) {
+    const n = Number(v.opsCount) || 0;
+    return v.description || (n ? `${n} ${plural(n, 'правка', 'правки', 'правок')}` : 'без изменений');
+  }
   const list = v.ops || [];
   const created = list.filter((o) => o.op === 'create').length;
   const removed = list.filter((o) => o.op === 'remove').length;
@@ -7085,6 +7550,8 @@ function variantSignature(v) {
     } catch { /* опустимся до операций */ }
   }
   if (parts.length) return parts.join('||');
+  // вариант сервера без превью и операций: различаем по ключу, иначе все слились бы в один
+  if (v.server && !(v.ops && v.ops.length)) return 'k:' + String(v.server.key);
   try { return 'o:' + JSON.stringify(v.ops); } catch { return 'r:' + Math.random(); }
 }
 

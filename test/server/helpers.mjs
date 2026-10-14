@@ -46,7 +46,7 @@ export async function backends() {
 
 /** Чистая база перед прогоном: таблицы этого круга, каскадом. */
 async function resetPg(storage) {
-  await storage.pool.query('TRUNCATE projects, operations, snapshots, library_versions, project_imports CASCADE');
+  await storage.pool.query('TRUNCATE projects, operations, snapshots, library_versions, project_imports, project_epochs, traces CASCADE');
 }
 
 /**
@@ -162,3 +162,77 @@ export function wsUrl(svc, projectId, params = {}) {
   const q = new URLSearchParams({ project: projectId, ...params });
   return `ws://127.0.0.1:${svc.port}/ws?${q}`;
 }
+
+/* --------------------- откат базы под работающим сервисом --------------------- */
+
+const PG_TABLES = [
+  ['projects', 'id'],
+  ['operations', 'project_id'],
+  ['snapshots', 'project_id'],
+  ['project_epochs', 'project_id'],
+  ['traces', 'project_id']
+];
+
+/**
+ * «Бэкап» одного проекта: память — копия всего хранилища, pg — строки проекта во
+ * всех таблицах. Вернуть его — restoreBackup (restore из бэкапа: уведомлений нет).
+ */
+export async function takeBackup(storage, projectId) {
+  if (storage.kind === 'memory') return storage.backup();
+  const out = {};
+  for (const [table, key] of PG_TABLES) {
+    out[table] = (await storage.pool.query(`SELECT * FROM ${table} WHERE ${key} = $1`, [projectId])).rows;
+  }
+  return out;
+}
+
+export async function restoreBackup(storage, projectId, backup) {
+  if (storage.kind === 'memory') {
+    storage.restore(backup);
+    return;
+  }
+  const client = await storage.pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM projects WHERE id = $1', [projectId]);
+    for (const [table] of PG_TABLES) {
+      for (const row of backup[table]) {
+        const cols = Object.keys(row);
+        const vals = cols.map((c) => {
+          const v = row[c];
+          return v !== null && typeof v === 'object' && !(v instanceof Date) ? JSON.stringify(v) : v;
+        });
+        await client.query(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((_, i) => '$' + (i + 1)).join(', ')})`, vals);
+      }
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** Второй экземпляр сервиса над той же базой: память — то же хранилище, pg — свой пул и свой LISTEN. */
+export async function startTwin(backend, first, opts = {}) {
+  const storage = backend === 'pg'
+    ? createPgStorage({ connectionString: DB_URL, log: quiet })
+    : first.storage;
+  const svc = await start({ port: 0, storage, snapshotEvery: 50, pingInterval: 0, log: quiet, ...opts });
+  const close = () => svc.close({ closeStorage: backend === 'pg' });
+  return { ...svc, close };
+}
+
+/** Ждать, пока условие не станет истинным. */
+export async function waitFor(fn, what = 'условие', ms = 5000) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() > until) throw new Error('не дождались: ' + what);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+export { quiet };

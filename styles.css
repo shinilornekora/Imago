@@ -249,6 +249,10 @@ button, input, textarea { font: inherit; color: inherit; }
 .sync-dot[data-state="off"] { background: var(--warn); }
 .sync-dot[data-state="error"] { background: var(--danger); }
 .sync-status[data-state="error"] { color: var(--danger); }
+/* Круг 23 (SPEC §10). Где работает агент — тем же языком, что синхронизация, через тонкий
+   разделитель: «агент: сервер» — сплошная точка цвета агента, «в браузере» — приглушённая,
+   «недоступен» — красная. Текст не краснеет: агент без сервера — не авария, документ живёт. */
+.agent-status { padding-left: 10px; border-left: 1px solid var(--line); }
 
 /* Чужие выделения: рамка цвета участника и его имя над ней. Слой над сценой, клики
    пропускает — это подпись, а не орган управления. */

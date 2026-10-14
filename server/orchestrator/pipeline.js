@@ -1,0 +1,590 @@
+/**
+ * Конвейер одной команды (SPEC §8.2 шаги 3–13, §10): JEV → DSLR → DUIL → (LLM ↔ DSLV) → DSLTS.
+ *
+ * Очередь на проект: команды агента одного проекта выполняются по одной (модель
+ * рассуждает над стейтом, который вторая команда уже меняет, §8.3); ждущих не больше
+ * `maxQueue`, дальше — 429 busy. Ручные правки идут мимо очереди (прямо в Document service).
+ *
+ * События — в `sink` (SSE §10.3). Разрыв потока команды не отменяет: sink просто
+ * перестаёт писать, команда доводится до записи, клиент получит транзакцию по сокету Hub.
+ * «Стоп» — AbortSignal команды: снимает её из очереди, прерывает вызов модели и счёт в
+ * воркере; если запись уже ушла в Document service, она доводится (повтор по tx_id).
+ */
+
+import * as core from '../../src/core.js';
+import { OrchError, toOrchError, notFound, badRequest, llmUnconfigured, cancelled as cancelledErr } from './errors.js';
+import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS } from './limits.js';
+
+const { ENGINE_VERSION, uid } = core;
+
+/** Стадии brain → ключи §10.3. Не названные — не показываются (их смысл несёт result). */
+const BRAIN_STAGE = {
+  plan: 'llm', generate: 'llm', retry: 'llm', variant: 'llm',
+  materialize: 'validate', validate: 'validate', repair: 'repair',
+};
+
+const LABELS = {
+  jev: 'Разбираю запрос',
+  read: 'Читаю документ',
+  library: 'Смотрю библиотеки',
+  llm: 'Думаю',
+  validate: 'Проверяю',
+  repair: 'Чиню',
+  write: 'Записываю правку',
+};
+
+const AGENT_AUTHOR = 'Агент';
+
+const INTENT_RU = { create: 'создание', edit: 'правка', theme: 'оформление', ask: 'вопрос', clarify: 'уточнение' };
+
+/**
+ * Глобальные id для узлов, созданных агентом (§8.3: id генерирует клиент, глобально
+ * уникальные). brain выдаёт короткие id, уникальные лишь в документе (`f1`, `t2`, или
+ * предложенные моделью); после чужого удаления такой id мог бы вернуться к жизни и
+ * столкнуться с отменой этого удаления. Переименовываются только узлы, созданные в этой
+ * же пачке и не похожие на `core.uid`; ссылки — во всех полях-указателях: `id`, `parent`,
+ * `after`, `children`, `of`, `component.props[].target`, а также `set` путей `of` и
+ * `component…`. Пачка, где ссылки не найдены, переписывается так же — лишнего не трогаем.
+ */
+export function globalizeIds(ops) {
+  const list = Array.isArray(ops) ? ops : [];
+  const map = new Map();
+  for (const op of list) {
+    const id = op && op.op === 'create' && op.node && op.node.id;
+    if (typeof id === 'string' && !id.includes('_') && !map.has(id)) {
+      map.set(id, uid(op.node.type === 'frame' ? 'f' : op.node.type === 'text' ? 't' : op.node.type === 'instance' ? 'i' : 'n'));
+    }
+  }
+  if (!map.size) return list;
+  const re = (v) => (typeof v === 'string' && map.has(v) ? map.get(v) : v);
+  const comp = (c) => {
+    if (!c || typeof c !== 'object' || !Array.isArray(c.props)) return c;
+    return { ...c, props: c.props.map((p) => (p && typeof p === 'object' && 'target' in p ? { ...p, target: re(p.target) } : p)) };
+  };
+  const node = (n) => {
+    if (!n || typeof n !== 'object') return n;
+    const out = { ...n, id: re(n.id), parent: re(n.parent) };
+    if (Array.isArray(n.children)) out.children = n.children.map(re);
+    if ('of' in n) out.of = re(n.of);
+    if (n.component) out.component = comp(n.component);
+    return out;
+  };
+  return list.map((op) => {
+    if (!op || typeof op !== 'object') return op;
+    const out = { ...op };
+    if ('id' in op) out.id = re(op.id);
+    if ('parent' in op) out.parent = re(op.parent);
+    if ('after' in op) out.after = re(op.after);
+    if (op.node) out.node = node(op.node);
+    if (op.op === 'set' && op.path === 'of') out.value = re(op.value);
+    if (op.op === 'set' && op.path === 'component') out.value = comp(op.value);
+    return out;
+  });
+}
+
+/**
+ * @param {{
+ *   dslr: object, dslts: object, duil: object, dslv: object, llm: object, traces: object,
+ *   docHealth: () => Promise<'up'|'down'>, jev: {classify: Function},
+ *   maxQueue?: number, variantsTtlMs?: number, log?: object
+ * }} deps
+ */
+export function createPipeline(deps) {
+  const { dslr, dslts, duil, dslv, llm, traces, docHealth, jev } = deps;
+  const log = deps.log || console;
+  const maxQueue = deps.maxQueue == null ? MAX_QUEUE_PER_PROJECT : deps.maxQueue;
+  const variantsTtl = deps.variantsTtlMs || VARIANTS_TTL_MS;
+
+  const queues = new Map();     // project → {running: Task|null, waiting: Task[]}
+  const active = new Map();     // command_id → Task (ждёт или выполняется)
+  const variantSets = new Map(); // command_id → {project, base_seq, items, author, client, text, expires, applied?, applying?}
+  let closing = false;
+
+  /* ── очередь проекта ─────────────────────────────────────────────────── */
+
+  /**
+   * Поставить задачу в очередь проекта. Синхронно: либо принято, либо OrchError (429).
+   * @returns {{position: number, finished: Promise<void>}}
+   */
+  function admit(task) {
+    if (closing) throw new OrchError(503, 'shutting_down', 'Агент останавливается — повторите через несколько секунд', { retryAfter: 5 });
+    let q = queues.get(task.project);
+    if (!q) { q = { running: null, waiting: [] }; queues.set(task.project, q); }
+    if (q.running && q.waiting.length >= maxQueue) {
+      throw new OrchError(429, 'busy', `Агент занят командами этого проекта (в очереди ${q.waiting.length}) — повторите, когда он освободится`, { retryAfter: 5 });
+    }
+    let done;
+    task.finished = new Promise((r) => { done = r; });
+    task.markDone = done;
+    if (!q.running) {
+      q.running = task;
+      queueMicrotask(() => runTask(q, task));
+      return { position: 0, finished: task.finished };
+    }
+    q.waiting.push(task);
+    return { position: q.waiting.length, finished: task.finished };
+  }
+
+  async function runTask(q, task) {
+    try {
+      await task.run();
+    } catch (e) {
+      log.warn(`[orchestrator] задача ${task.id} упала: ${e && e.stack ? e.stack : e}`);
+    } finally {
+      task.markDone();
+      next(q, task);
+    }
+  }
+
+  function next(q, finished) {
+    if (q.running === finished) q.running = null;
+    while (!q.running && q.waiting.length) {
+      const t = q.waiting.shift();
+      if (t.dropped) continue;
+      q.running = t;
+      queueMicrotask(() => runTask(q, t));
+    }
+    q.waiting.forEach((t, i) => { if (t.onPosition) t.onPosition(i + 1); });
+    if (!q.running && !q.waiting.length) queues.delete(finished.project);
+  }
+
+  /** Снять ждущую задачу (она не начнётся). */
+  function unqueue(task) {
+    const q = queues.get(task.project);
+    if (!q) return false;
+    const i = q.waiting.indexOf(task);
+    if (i < 0) return false;
+    q.waiting.splice(i, 1);
+    task.dropped = true;
+    q.waiting.forEach((t, j) => { if (t.onPosition) t.onPosition(j + 1); });
+    task.markDone();
+    if (!q.running && !q.waiting.length) queues.delete(task.project);
+    return true;
+  }
+
+  /* ── проверка перед стартом ──────────────────────────────────────────── */
+
+  /** Document service и (если нужна) модель живы — иначе 503 до открытия потока. */
+  async function preflight({ needsModel }) {
+    const [doc, model] = await Promise.all([
+      docHealth(),
+      needsModel ? llm.health() : Promise.resolve(null),
+    ]);
+    if (doc !== 'up') throw Object.assign(new OrchError(503, 'document_down', 'Сервис документов недоступен — команда не выполнена. Правки не потеряны; попробуйте через несколько секунд.', { retryAfter: 5 }));
+    if (model && model.llm === 'unconfigured') throw llmUnconfigured();
+    if (model && model.llm === 'down') {
+      throw new OrchError(503, 'llm_down', 'Модель не отвечает — команда не выполнена. Проверьте, что сервер модели запущен, и повторите.', { retryAfter: 10 });
+    }
+  }
+
+  /* ── команда ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Принять команду: JEV, проверка, очередь. Ошибки до открытия потока — исключением
+   * (HTTP-ответ с кодом); дальше всё идёт событиями в sink.
+   * @param {object} cmd проверенное тело команды
+   * @param {() => {send: Function, end: Function}} openSink открыть поток (вызывается один раз, когда команда принята)
+   * @returns {Promise<{finished: Promise<void>}>}
+   */
+  async function command(cmd, openSink) {
+    if (active.has(cmd.command_id)) throw badRequest('Команда с таким command_id уже выполняется');
+    const t0 = Date.now();
+    const verdict = jev.classify(cmd.text, { hasSelection: cmd.selection.length > 0, mode: cmd.mode, n: cmd.n });
+
+    if (verdict.kind === 'shell') {
+      const sink = openSink();
+      sink.send('stage', { key: 'jev', label: LABELS.jev, at: Date.now() });
+      sink.send('shell', { action: verdict.action, args: verdict.args || {} });
+      sink.send('done', {});
+      sink.end();
+      traces.record({
+        command_id: cmd.command_id, project: cmd.project, mode: cmd.mode, kind: 'shell', status: 'shell',
+        started_at: new Date(t0).toISOString(), ms: Date.now() - t0, steps: [{ key: 'jev', ms: Date.now() - t0 }],
+        engine: ENGINE_VERSION,
+      });
+      return { finished: Promise.resolve() };
+    }
+
+    const needsModel = verdict.kind === 'variants' || verdict.needsModel;
+    await preflight({ needsModel });
+    if (active.has(cmd.command_id)) throw badRequest('Команда с таким command_id уже выполняется');
+
+    const ctrl = new AbortController();
+    const task = {
+      id: cmd.command_id, project: cmd.project, ctrl, cmd, verdict, sink: null, t0,
+      run: () => execute(task),
+    };
+    const { position, finished } = admit(task);
+    active.set(cmd.command_id, task);
+    task.sink = openSink();
+    task.onPosition = (p) => task.sink.send('queued', { position: p });
+    if (position > 0) task.sink.send('queued', { position });
+    finished.then(() => { if (active.get(cmd.command_id) === task) active.delete(cmd.command_id); });
+    return { finished };
+  }
+
+  async function execute(task) {
+    const { cmd, verdict, ctrl, sink } = task;
+    const signal = ctrl.signal;
+    const steps = [];
+    let curStep = null;
+    const usage = { calls: 0, ms: 0, promptTokens: 0, completionTokens: 0 };
+    const trace = {
+      command_id: cmd.command_id, project: cmd.project, mode: verdict.kind === 'variants' ? 'variants' : 'run',
+      kind: verdict.kind, started_at: new Date(task.t0).toISOString(), engine: ENGINE_VERSION,
+      llm_kind: llm.kind, model: llm.model || undefined,
+    };
+    const step = (key, label, detail) => {
+      if (!curStep || curStep.key !== key) {
+        if (curStep) steps.push({ key: curStep.key, ms: Date.now() - curStep.at });
+        curStep = { key, at: Date.now() };
+      }
+      sink.send('stage', { key, label: label || LABELS[key], at: Date.now(), ...(detail ? { detail: llm.redact(detail) } : {}) });
+    };
+    const guard = () => { if (signal.aborted) throw cancelledErr(); };
+
+    try {
+      guard();
+      step('jev', LABELS.jev, verdict.kind === 'variants' ? 'варианты' : INTENT_RU[verdict.intent] || '');
+      guard();
+      step('read');
+      const st = await dslr.read(cmd.project, { signal });
+      guard();
+      step('library');
+      const lib = await duil.slice({ exclude: cmd.project, signal });
+      trace.libraries = lib.libraries.length;
+      guard();
+
+      const onLlm = async (messages, schema, opts) => {
+        if (!llm.provider) throw Object.assign(new Error(llmUnconfigured().message), { kind: 'network', code: 'llm_unconfigured' });
+        const t = Date.now();
+        try {
+          return await llm.provider.complete(messages, schema, {
+            ...opts,
+            signal,
+            onUsage: (u) => {
+              usage.calls += 1;
+              usage.promptTokens += u.promptTokens || 0;
+              usage.completionTokens += u.completionTokens || 0;
+              if (opts.onUsage) opts.onUsage(u);
+            },
+          });
+        } catch (e) {
+          if (e && e.kind === 'network' && !signal.aborted) llm.markDown();
+          // наружу из главного потока — только очищенный текст
+          throw Object.assign(new Error(llm.redact(e && e.message ? e.message : 'Сбой модели')), { kind: (e && e.kind) || 'model', code: e && e.code });
+        } finally {
+          usage.ms += Date.now() - t;
+        }
+      };
+
+      const payload = {
+        mode: verdict.kind === 'variants' ? 'variants' : 'run',
+        doc: st.doc,
+        selection: cmd.selection,
+        // «покажи варианты» без команды — к предыдущей команде из истории диалога
+        utterance: verdict.kind === 'variants' && !verdict.of && cmd.mode !== 'variants' && cmd.history.length
+          ? cmd.history[cmd.history.length - 1].utterance
+          : cmd.text,
+        activeArtboardId: cmd.board || null,
+        history: cmd.history.length ? cmd.history : null,
+        n: verdict.kind === 'variants' ? verdict.n : undefined,
+        ...(cmd.test ? { test: cmd.test } : {}),
+      };
+      step('llm');
+      const res = await dslv.run(payload, {
+        signal,
+        onLlm,
+        onStage: (rec) => {
+          const key = BRAIN_STAGE[rec.stage];
+          if (key) step(key, rec.label, rec.detail);
+        },
+      });
+      guard();
+      trace.model_calls = usage.calls;
+
+      if (payload.mode === 'variants') {
+        await finishVariants(task, st, res.variants || [], trace, step);
+      } else {
+        await finishRun(task, st, res, trace, step);
+      }
+    } catch (e) {
+      let err = toOrchError(e);
+      // сеть, оборванная «стопом», — это остановка, а не авария сервиса
+      if (signal.aborted && (err.code === 'internal' || (e && e.network))) err = cancelledErr();
+      if (!(e instanceof OrchError)) log.warn(`[orchestrator] команда ${cmd.command_id}: ${llm.redact(e && e.stack ? e.stack : e)}`);
+      sink.send('error', { code: err.code, message: llm.redact(err.message), retryable: err.retryable });
+      trace.status = err.code === 'cancelled' ? 'cancelled' : 'error';
+      trace.code = err.code;
+    } finally {
+      if (curStep) steps.push({ key: curStep.key, ms: Date.now() - curStep.at });
+      sink.send('done', {});
+      sink.end();
+      trace.steps = steps;
+      trace.ms = Date.now() - task.t0;
+      trace.model_calls = usage.calls;
+      trace.model_ms = usage.ms;
+      trace.prompt_tokens = usage.promptTokens;
+      trace.completion_tokens = usage.completionTokens;
+      trace.model = llm.model || undefined;
+      if (!trace.status) trace.status = 'ok';
+      traces.record(trace);
+    }
+  }
+
+  /** Ошибка brain → OrchError (§10.2). */
+  function brainError(error) {
+    const msg = llm.redact(error && error.message ? error.message : 'Сбой модели');
+    if (!error) return new OrchError(502, 'llm_failed', msg);
+    if (error.kind === 'cancelled') return cancelledErr();
+    if (error.code === 'llm_unconfigured') return llmUnconfigured();
+    if (error.kind === 'network') {
+      return new OrchError(503, 'llm_down', `Модель не ответила — команда не выполнена. ${msg}`.trim(), { retryAfter: 10 });
+    }
+    return new OrchError(502, 'llm_failed', msg, { retryable: error.retryable !== false });
+  }
+
+  /** То, что агент сказал, не трогая документ: переспрос, ответ, отказ, «нечего менять». */
+  function replyOf(res, fallback) {
+    const plan = res.plan || {};
+    return {
+      tx_id: null, seq: null, applied: 0, dropped: [],
+      summary: llm.redact(res.clarify || res.answer || res.cannot || plan.summary || plan.title || fallback || ''),
+      warnings: (res.warnings || []).map((w) => llm.redact(w)),
+      ...(res.clarify ? { clarify: res.clarify, clarifyOptions: res.clarifyOptions || [] } : {}),
+      ...(res.answer ? { answer: res.answer } : {}),
+      ...(res.followups ? { followups: res.followups } : {}),
+      ...(res.cannot ? { cannot: res.cannot } : {}),
+      ...(res.nothingChanged ? { nothingChanged: true } : {}),
+      ...(res.nothingToChange ? { nothingToChange: true } : {}),
+    };
+  }
+
+  async function finishRun(task, st, res, trace, step) {
+    const { sink, cmd } = task;
+    if (res.error) throw brainError(res.error);
+    if (res.action) {
+      sink.send('shell', { action: res.action, args: res.variantsOf ? { of: res.variantsOf } : {} });
+      trace.status = 'shell';
+      return;
+    }
+    if (!res.ops || !res.ops.length) {
+      sink.send('result', replyOf(res, 'Агент не нашёл, что изменить'));
+      return;
+    }
+    const out = await write(task, {
+      project: cmd.project, base_seq: st.seq, ops: globalizeIds(res.ops), client: cmd.client,
+      title: (res.plan && res.plan.title) || cmd.text,
+    }, step);
+    const result = resultOf(out, res);
+    Object.assign(trace, { tx_id: out.tx_id, seq: out.seq, ops: result.applied, dropped: result.dropped.length });
+    sink.send('result', result);
+  }
+
+  async function finishVariants(task, st, list, trace, step) {
+    const { sink, cmd } = task;
+    const all = list.filter(Boolean);
+    const act = all.find((v) => v.action === 'undo' || v.action === 'redo');
+    if (act) { sink.send('shell', { action: act.action, args: {} }); trace.status = 'shell'; return; }
+    const talk = all.find((v) => v.clarify || ((v.answer || v.cannot) && (!v.ops || !v.ops.length)));
+    if (talk) { sink.send('result', replyOf(talk)); return; }
+    const ok = all.filter((v) => v.ops && v.ops.length && !v.error);
+    if (!ok.length) {
+      const bad = all.find((v) => v.error);
+      if (bad) throw brainError(bad.error);
+      sink.send('result', replyOf({ warnings: (all[0] && all[0].warnings) || [] }, 'Варианты ничего не меняют'));
+      return;
+    }
+    const items = ok.map((v, i) => ({
+      key: String(v.key || `v${i + 1}`),
+      label: v.label || `Вариант ${i + 1}`,
+      description: v.description || (v.plan && v.plan.summary) || '',
+      ops: globalizeIds(v.ops),
+      title: (v.plan && v.plan.title) || cmd.text,
+      summary: (v.plan && (v.plan.summary || v.plan.title)) || '',
+      warnings: (v.warnings || []).map((w) => llm.redact(w)),
+    }));
+    remember(cmd.command_id, {
+      project: cmd.project, base_seq: st.seq, client: cmd.client, text: cmd.text, items,
+      expires: Date.now() + variantsTtl,
+    });
+    trace.variants = items.length;
+    sink.send('variants', {
+      base_seq: st.seq,
+      items: items.map((v) => ({
+        key: v.key, label: v.label, description: v.description, ops_count: v.ops.length,
+        // превью — сами операции: клиент накладывает их своим движком на свой стейт (§8.3)
+        preview: { ops: v.ops, summary: v.summary, warnings: v.warnings },
+      })),
+    });
+  }
+
+  function remember(id, entry) {
+    const now = Date.now();
+    for (const [k, v] of variantSets) if (v.expires < now) variantSets.delete(k);
+    variantSets.delete(id);
+    variantSets.set(id, entry);
+    while (variantSets.size > MAX_VARIANT_SETS) variantSets.delete(variantSets.keys().next().value);
+  }
+
+  /** Запись транзакции агента (шаг 12/13). */
+  async function write(task, { project, base_seq, ops, client, title }, step) {
+    if (task.ctrl && task.ctrl.signal.aborted) throw cancelledErr();
+    if (step) step('write');
+    const tx = {
+      tx_id: uid('tx'),
+      base_seq,
+      ops,
+      author: AGENT_AUTHOR,
+      author_kind: 'agent',
+      ...(client ? { client } : {}),
+      title: String(title || '').slice(0, 200),
+      engine: ENGINE_VERSION,
+    };
+    // с этого места «стоп» запись не отменяет: она уже ушла, повтор идёт по тому же tx_id
+    return dslts.commit(project, tx);
+  }
+
+  /** Committed → событие result. */
+  function resultOf(committed, res) {
+    const plan = (res && res.plan) || {};
+    const created = new Set();
+    const select = [];
+    for (const op of committed.ops || []) {
+      if (op.op === 'create' && op.node && op.node.id) {
+        created.add(op.node.id);
+        if (!created.has(op.node.parent)) select.push(op.node.id);
+      } else if ((op.op === 'set' || op.op === 'move') && op.id && !created.has(op.id) && !select.includes(op.id)) {
+        select.push(op.id);
+      }
+    }
+    return {
+      tx_id: committed.tx_id,
+      seq: committed.seq,
+      applied: (committed.ops || []).length,
+      dropped: committed.dropped || [],
+      summary: llm.redact((res && res.summary) || plan.summary || plan.title || ''),
+      warnings: ((res && res.warnings) || []).map((w) => llm.redact(w)),
+      ...(res && res.cannot ? { cannot: res.cannot } : {}),
+      ...(select.length ? { select: select.slice(0, 50) } : {}),
+    };
+  }
+
+  /* ── стоп и выбор варианта ──────────────────────────────────────────── */
+
+  function stop(commandId) {
+    const task = active.get(commandId);
+    if (!task || task.ctrl.signal.aborted) return false;
+    task.ctrl.abort();
+    if (unqueue(task)) {
+      // не начиналась: событие и done пишем сами
+      task.sink.send('error', { code: 'cancelled', message: 'Команда остановлена', retryable: false });
+      task.sink.send('done', {});
+      task.sink.end();
+      active.delete(commandId);
+      traces.record({
+        command_id: task.cmd.command_id, project: task.project, mode: task.cmd.mode, kind: task.verdict.kind,
+        status: 'cancelled', code: 'cancelled', started_at: new Date(task.t0).toISOString(), ms: Date.now() - task.t0,
+        steps: [], engine: ENGINE_VERSION,
+      });
+    }
+    return true;
+  }
+
+  /**
+   * Записать выбранный вариант. Повтор того же выбора возвращает ту же запись.
+   * @param {string} commandId
+   * @param {string|number} variant ключ варианта или номер (с 0)
+   */
+  async function apply(commandId, variant) {
+    const entry = variantSets.get(commandId);
+    if (!entry || entry.expires < Date.now()) {
+      variantSets.delete(commandId);
+      throw notFound('Варианты этой команды не найдены или устарели — попросите их заново');
+    }
+    const item = typeof variant === 'number'
+      ? entry.items[variant]
+      : entry.items.find((v) => v.key === variant) || (/^\d+$/.test(String(variant)) ? entry.items[Number(variant)] : undefined);
+    if (!item) throw badRequest(`Нет такого варианта: ${String(variant).slice(0, 40)}. Есть: ${entry.items.map((v) => v.key).join(', ')}`);
+    if (entry.applied) {
+      if (entry.applied.key === item.key) return entry.applied.result;
+      throw badRequest(`Уже выбран вариант «${entry.applied.label}» — второй поверх него не записываю`);
+    }
+    if (entry.applying) {
+      if (entry.applying.key === item.key) return entry.applying.promise;
+      throw badRequest('Другой вариант этой команды уже записывается');
+    }
+    const t0 = Date.now();
+    let resolve;
+    let reject;
+    const promise = new Promise((a, b) => { resolve = a; reject = b; });
+    promise.catch(() => {});
+    entry.applying = { key: item.key, promise };
+    const task = {
+      id: `${commandId}#apply`, project: entry.project, ctrl: null, t0,
+      run: async () => {
+        const trace = {
+          command_id: commandId, project: entry.project, mode: 'apply', kind: 'apply',
+          started_at: new Date(t0).toISOString(), engine: ENGINE_VERSION,
+        };
+        try {
+          const out = await write(task, {
+            project: entry.project, base_seq: entry.base_seq, ops: item.ops, client: entry.client, title: item.title,
+          });
+          const result = resultOf(out, { summary: item.summary, warnings: item.warnings });
+          entry.applied = { key: item.key, label: item.label, result };
+          Object.assign(trace, { status: 'ok', tx_id: out.tx_id, seq: out.seq, ops: result.applied, dropped: result.dropped.length });
+          resolve(result);
+        } catch (e) {
+          const err = toOrchError(e);
+          Object.assign(trace, { status: 'error', code: err.code });
+          reject(err);
+        } finally {
+          entry.applying = null;
+          trace.ms = Date.now() - t0;
+          trace.steps = [{ key: 'write', ms: trace.ms }];
+          traces.record(trace);
+        }
+      },
+    };
+    try {
+      admit(task);
+    } catch (e) {
+      entry.applying = null;
+      throw e;
+    }
+    return promise;
+  }
+
+  /* ── здоровье и останов ─────────────────────────────────────────────── */
+
+  async function health() {
+    const [document, model] = await Promise.all([docHealth(), llm.health()]);
+    return {
+      // ok — сам агент отвечает; что с документами и моделью — в полях document и llm
+      ok: true,
+      engine: ENGINE_VERSION,
+      llm: model.llm,
+      document,
+      ...(model.model ? { model: model.model } : {}),
+    };
+  }
+
+  /** Перестать принимать, дождаться выполняемых (до grace), остальное прервать. */
+  async function close(graceMs = 10000) {
+    closing = true;
+    const all = () => [...active.values()].map((t) => t.finished).filter(Boolean);
+    const settled = Promise.allSettled(all());
+    const timer = new Promise((r) => setTimeout(r, graceMs).unref());
+    await Promise.race([settled, timer]);
+    for (const t of active.values()) if (t.ctrl) t.ctrl.abort();
+    await Promise.race([Promise.allSettled(all()), new Promise((r) => setTimeout(r, 3000).unref())]);
+  }
+
+  return {
+    command, stop, apply, health, close,
+    get busy() { return active.size; },
+    /** Для тестов и отладки. */
+    queueOf: (project) => { const q = queues.get(project); return q ? { running: q.running && q.running.id, waiting: q.waiting.map((t) => t.id) } : null; },
+  };
+}

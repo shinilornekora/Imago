@@ -1,0 +1,3 @@
+# Скрипты Windows — всегда CRLF, при любом core.autocrlf (иначе cmd.exe путает метки и блоки)
+*.cmd text eol=crlf
+*.bat text eol=crlf

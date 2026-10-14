@@ -23,17 +23,31 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem Переменные — в .env рядом с docker-compose.yml; первый запуск берёт образец
+if not exist ".env" (
+  copy /y "deploy\env.example" ".env" >nul
+  echo Создан .env из deploy\env.example — модель агента и порт меняются там.
+)
+for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
+  if /i "%%A"=="IMAGO_PORT" if not defined IMAGO_PORT set "IMAGO_PORT=%%B"
+)
 if "%IMAGO_PORT%"=="" set "IMAGO_PORT=8123"
-echo Imago Studio: собираю и поднимаю Postgres + Document service + NGINX...
-docker compose up --build -d
+
+echo Imago Studio: собираю и поднимаю Postgres + Document service + Orchestrator + NGINX...
+echo ^(первый раз — несколько минут; дальше быстрее. Миграции базы идут сами.^)
+docker compose up --build -d --wait
 if errorlevel 1 (
   echo.
-  echo Не поднялось — см. вывод выше. Логи: docker compose logs
+  echo Не поднялось — см. вывод выше. Состояние: docker compose ps   Логи: docker compose logs
   echo.
   pause
   exit /b 1
 )
+
 echo.
 echo Готово: http://localhost:%IMAGO_PORT%/
+echo Агент на сервере ^(llm: up — модель отвечает, down — запустите LM Studio^):
+curl -s "http://localhost:%IMAGO_PORT%/agent/health"
+echo.
 echo Остановить: STOP.cmd ^(данные остаются^). Логи: docker compose logs -f
 start "" "http://localhost:%IMAGO_PORT%/"

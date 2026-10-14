@@ -1,0 +1,52 @@
+/**
+ * Пределы Orchestrator. Всё, что можно настроить, читается из окружения в index.js;
+ * здесь — умолчания и потолки формы запроса.
+ */
+
+/** Тело запроса больше — 413 too_large (SPEC §10.2). */
+export const MAX_BODY_BYTES = 1024 * 1024;
+
+/** Ждущих команд на проект (кроме выполняемой). Больше — 429 busy. */
+export const MAX_QUEUE_PER_PROJECT = 4;
+
+/** Сколько живут посчитанные варианты в ожидании /agent/apply. */
+export const VARIANTS_TTL_MS = 15 * 60 * 1000;
+/** Сколько наборов вариантов держим в памяти всего (старые вытесняются). */
+export const MAX_VARIANT_SETS = 200;
+
+/** Форма команды. */
+export const MAX_TEXT = 5000;
+export const MAX_ID = 128;
+export const MAX_SELECTION = 2000;
+export const MAX_HISTORY = 5;
+export const MAX_HISTORY_CHARS = 500;
+export const MAX_AUTHOR = 200;
+export const MAX_VARIANTS = 6;
+
+/** Сеть до Document service. */
+export const DOC_TIMEOUT_MS = 10000;
+export const DOC_HEALTH_TIMEOUT_MS = 1500;
+export const WRITE_ATTEMPTS = 3;
+/** Сеть до модели: проверка здоровья. */
+export const LLM_HEALTH_TIMEOUT_MS = 3000;
+export const LLM_HEALTH_CACHE_MS = 10000;
+
+/** DSLV: пул воркеров. */
+export const WORKER_MAX_OLD_MB = 512;
+/** Счётное время одного прогона (ожидание модели не считается). */
+export const WORKER_TIMEOUT_MS = 60000;
+
+/** Кеш стейтов DSLR: проектов в памяти. */
+export const DSLR_CACHE_PROJECTS = 64;
+/** DUIL: библиотек на команду и время жизни списка проектов. */
+export const MAX_LIBRARIES = 8;
+export const PROJECT_LIST_TTL_MS = 5000;
+
+/** Трассы в памяти (последние N) — для отладки и тестов. */
+export const TRACE_RING = 100;
+
+/** Остановка: сколько ждём выполняемые команды, прежде чем прервать. */
+export const SHUTDOWN_GRACE_MS = 10000;
+
+/** Пульс SSE, чтобы прокси не рвал простаивающий поток. */
+export const SSE_PING_MS = 15000;

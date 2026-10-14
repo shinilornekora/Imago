@@ -196,15 +196,22 @@ for (const backend of list) {
       const one = await http.get(`/api/projects/${id}/ops?since=1`);
       assert.deepEqual(one.body.txs.map((t) => t.seq), [2]);
       const none = await http.get(`/api/projects/${id}/ops?since=2`);
-      assert.deepEqual(none.body, { head_seq: 2, txs: [] });
+      assert.equal(none.body.head_seq, 2);
+      assert.deepEqual(none.body.txs, []);
+      assert.equal(none.body.more, false);
+      assert.equal(none.body.tip, b.body.chain, 'tip — chain головы');
+      assert.equal(typeof none.body.epoch, 'string');
       const limited = await http.get(`/api/projects/${id}/ops?since=0&limit=1`);
       assert.deepEqual(limited.body.txs.map((t) => t.seq), [1]);
       assert.equal(limited.body.head_seq, 2);
+      assert.equal(limited.body.more, true, 'за страницей есть ещё');
 
       // клиент впереди сервера (проект пересоздан) или ничего не знает → снимок
       for (const since of [-1, 99]) {
         const gone = await http.get(`/api/projects/${id}/ops?since=${since}`);
         assert.equal(gone.status, 410);
+        assert.equal(gone.body.error, true);
+        assert.equal(gone.body.code, 'gone');
         assert.equal(gone.body.head_seq, 2);
         assert.equal(gone.body.snapshot.seq, 0);
         assert.ok(gone.body.snapshot.doc.nodes);
@@ -213,12 +220,15 @@ for (const backend of list) {
       assert.equal((await http.get(`/api/projects/${id}/ops?since=0&limit=0`)).status, 400);
     });
 
-    it('неверный engine → 426 {engine}; мусор → 400; base_seq впереди головы → 400', async () => {
+    it('неверный engine → 426 {engine}; мусор → 400; base_seq впереди головы → зажим', async () => {
       const { id, board } = await fresh();
       const old = await http.post(`/api/projects/${id}/tx`, tx(0, [ops.create(text(board.id, 'x'))], { engine: E + 1 }));
       assert.equal(old.status, 426);
       assert.equal(old.body.engine, E);
-      assert.equal(old.body.error, 'engine');
+      assert.equal(old.body.error, true);
+      assert.equal(old.body.code, 'engine');
+      assert.equal(old.body.retryable, false);
+      assert.deepEqual(old.body.detail, { engine: E });
       const noEngine = await http.post(`/api/projects/${id}/tx`, { tx_id: 'tx_x', base_seq: 0, ops: [] });
       assert.equal(noEngine.status, 426);
 
@@ -227,12 +237,19 @@ for (const backend of list) {
         { tx_id: 'a', base_seq: 0, ops: [], engine: E, author_kind: 'robot' }]) {
         const r = await http.post(`/api/projects/${id}/tx`, body);
         assert.equal(r.status, 400, 'мусор: ' + JSON.stringify(body));
-        assert.equal(r.body.error, 'bad-request');
+        assert.equal(r.body.error, true);
+        assert.equal(r.body.code, 'bad_request');
+        assert.equal(r.body.retryable, false);
+        assert.equal(typeof r.body.message, 'string');
       }
       assert.equal((await http.raw('POST', `/api/projects/${id}/tx`, '{oops', { 'content-type': 'application/json' })).status, 400);
-      assert.equal((await http.post(`/api/projects/${id}/tx`, tx(5, []))).status, 400);
       // после всех отказов голова не сдвинулась
       assert.equal((await http.get('/api/projects/' + id)).body.head_seq, 0);
+      // база клиента впереди головы (откат базы) — не отказ: base_seq зажимается до головы
+      const ahead = await http.post(`/api/projects/${id}/tx`, tx(5, []));
+      assert.equal(ahead.status, 201);
+      assert.equal(ahead.body.seq, 1);
+      assert.equal(ahead.body.base_seq, 0);
     });
 
     it('тело больше 4 МБ → 413', async () => {
@@ -506,8 +523,10 @@ for (const backend of list) {
       assert.equal(gotA.tx.author, 'Аня', 'автор — из query сокета');
       assert.deepEqual(gotA.tx, gotB.tx);
 
-      // повтор своей tx после «разрыва» — ответ есть, но не второй раз тем же сокетом
+      // повтор своей tx после «разрыва» — ответ есть, но не второй раз тем же кадром: ack
       a.send({ type: 'tx', tx: t });
+      const ack = await a.next();
+      assert.deepEqual(ack, { type: 'ack', tx_id: t.tx_id, seq: 2, chain: gotA.tx.chain, existing: true });
       assert.ok(await a.silence(100), 'сокет, уже получивший seq 2, второй раз её не получает');
       assert.ok(await b.silence(50));
 
@@ -635,26 +654,30 @@ for (const backend of list) {
       const err = await a.next();
       assert.equal(err.type, 'error');
       assert.equal(err.code, 'engine');
+      assert.equal(err.error, true);
+      assert.equal(err.retryable, false);
       assert.equal(err.tx_id, stale.tx_id);
       assert.equal(err.engine, E);
       a.send({ type: 'tx', tx: { foo: 1 } });
-      assert.equal((await a.next()).code, 'bad-request');
+      assert.equal((await a.next()).code, 'bad_request');
       a.ws.send('не json');
-      assert.equal((await a.next()).code, 'bad-request');
+      assert.equal((await a.next()).code, 'bad_request');
       a.send({ type: 'what' });
-      assert.equal((await a.next()).code, 'bad-request');
+      const what = await a.next();
+      assert.deepEqual(Object.keys(what).sort(), ['code', 'error', 'message', 'retryable', 'type']);
+      assert.equal(what.code, 'bad_request');
       await a.close();
 
       const ghost = connect(wsUrl(svc, '00000000-0000-4000-8000-000000000000', { since: 0 }));
       await ghost.opened;
       const e = await ghost.next();
       assert.equal(e.type, 'error');
-      assert.equal(e.code, 'not-found');
+      assert.equal(e.code, 'not_found');
       assert.equal((await ghost.closed).code, 4404);
 
       const noProject = connect(`ws://127.0.0.1:${svc.port}/ws`);
       await noProject.opened;
-      assert.equal((await noProject.next()).code, 'bad-request');
+      assert.equal((await noProject.next()).code, 'bad_request');
       assert.equal((await noProject.closed).code, 4400);
     });
 

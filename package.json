@@ -5,7 +5,8 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
     "test:server": "node --test \"test/server/*.test.mjs\"",
-    "server": "node server/document/index.js"
+    "server": "node server/document/index.js",
+    "orchestrator": "node server/orchestrator/index.js"
   },
   "dependencies": {
     "pg": "^8.23.0",

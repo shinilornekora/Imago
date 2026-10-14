@@ -1,0 +1,433 @@
+/**
+ * Развёртывание (SPEC §8.1, §10): статическая проверка конфигов compose, nginx и
+ * Dockerfile-ов простыми регулярками, а если в окружении есть nginx — `nginx -t` на
+ * настоящем конфиге с подменой адресов апстримов и живая проверка маршрутов: SSE без
+ * буферизации, /api/internal закрыт, JSON-ошибки за упавший апстрим.
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { spawn, spawnSync } from 'node:child_process';
+import http from 'node:http';
+import net from 'node:net';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const read = (p) => readFileSync(join(root, p), 'utf8');
+
+const nginxConf = read('deploy/nginx.conf');
+const compose = read('docker-compose.yml');
+
+/* ---------------------------------- разбор ---------------------------------- */
+
+/** Блок `location <spec> { … }`: скобки внутри строк в кавычках (JSON в return) не считаются. */
+function locationBlock(conf, spec) {
+  const esc = spec.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const m = new RegExp(`location\\s+${esc}\\s*\\{`).exec(conf);
+  if (!m) return null;
+  let depth = 1;
+  let quote = '';
+  for (let i = m.index + m[0].length; i < conf.length; i++) {
+    const ch = conf[i];
+    if (quote) { if (ch === quote && conf[i - 1] !== '\\') quote = ''; continue; }
+    if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === '#') { const nl = conf.indexOf('\n', i); i = nl < 0 ? conf.length : nl; }
+    else if (ch === '{') depth += 1;
+    else if (ch === '}' && --depth === 0) return conf.slice(m.index + m[0].length, i);
+  }
+  return null;
+}
+
+/** Значение `set $name …;` в конфиге nginx. */
+function setVar(conf, name) {
+  const m = new RegExp(`set\\s+\\$${name}\\s+([^;]+);`).exec(conf);
+  return m ? m[1].trim() : null;
+}
+
+/** Секунды из `proxy_read_timeout 900s;` и подобных. */
+function seconds(v) {
+  const m = /^(\d+)(ms|s|m|h)?$/.exec(String(v || '').trim());
+  if (!m) return NaN;
+  const n = Number(m[1]);
+  return { ms: n / 1000, s: n, m: n * 60, h: n * 3600 }[m[2] || 's'];
+}
+
+function directive(block, name) {
+  const m = new RegExp(`(?:^|\\n)\\s*${name}\\s+([^;]+);`).exec(block || '');
+  return m ? m[1].trim() : null;
+}
+
+/** JSON из `return <code> '<json>';`. */
+function returnJson(block) {
+  const m = /return\s+(\d{3})\s+'([^']*)';/.exec(block || '');
+  if (!m) return null;
+  return { status: Number(m[1]), body: JSON.parse(m[2].replace(/\\n/g, '\n')) };
+}
+
+/** Сервисы compose: имя → текст блока (два пробела отступа — уровень сервиса). */
+function services(yaml) {
+  const at = yaml.indexOf('\nservices:');
+  assert.ok(at >= 0, 'в compose нет services:');
+  const rest = yaml.slice(at + '\nservices:'.length);
+  const end = rest.search(/\n\S/);
+  const body = end >= 0 ? rest.slice(0, end) : rest;
+  const out = {};
+  const re = /\n {2}([a-z][\w-]*):\s*\n/g;
+  const marks = [];
+  let m;
+  while ((m = re.exec(body))) marks.push({ name: m[1], at: m.index + m[0].length });
+  marks.forEach((x, i) => { out[x.name] = body.slice(x.at, i + 1 < marks.length ? marks[i + 1].at : body.length); });
+  return out;
+}
+
+/** Подблок `key:` сервиса (по отступу четыре пробела). */
+function sub(block, key) {
+  const m = new RegExp(`\\n? {4}${key}:\\s*\\n((?: {6,}.*\\n?)+)`).exec(block || '');
+  return m ? m[1] : '';
+}
+
+/* ------------------------------- статические ------------------------------- */
+
+test('nginx: /agent/ → orchestrator:8090 без буферизации, с долгим таймаутом', () => {
+  assert.equal(setVar(nginxConf, 'orchestrator_upstream'), 'http://orchestrator:8090');
+  const b = locationBlock(nginxConf, '/agent/');
+  assert.ok(b, 'нет location /agent/');
+  assert.equal(directive(b, 'proxy_pass'), '$orchestrator_upstream');
+  assert.equal(directive(b, 'proxy_buffering'), 'off');
+  assert.ok(seconds(directive(b, 'proxy_read_timeout')) >= 300, 'proxy_read_timeout короче 5 минут');
+  assert.match(b, /add_header\s+X-Accel-Buffering\s+no/);
+  assert.equal(directive(b, 'proxy_http_version'), '1.1');
+});
+
+test('nginx: /api/ и /ws → document:8080, WebSocket с апгрейдом', () => {
+  assert.equal(setVar(nginxConf, 'document_upstream'), 'http://document:8080');
+  const api = locationBlock(nginxConf, '/api/');
+  const ws = locationBlock(nginxConf, '/ws');
+  assert.equal(directive(api, 'proxy_pass'), '$document_upstream');
+  assert.equal(directive(ws, 'proxy_pass'), '$document_upstream');
+  assert.match(ws, /proxy_set_header\s+Upgrade\s+\$http_upgrade/);
+  assert.ok(seconds(directive(ws, 'proxy_read_timeout')) >= 600);
+  // апстримы — переменными: nginx стартует и тогда, когда сервиса ещё нет в DNS
+  assert.match(nginxConf, /resolver\s+127\.0\.0\.11/);
+});
+
+test('nginx: /api/internal/ снаружи закрыт — 403 JSON, раньше общего /api/', () => {
+  const b = locationBlock(nginxConf, '^~ /api/internal/');
+  assert.ok(b, 'нет location ^~ /api/internal/ (без ^~ его перебьёт регулярка или префикс)');
+  const r = returnJson(b);
+  assert.equal(r.status, 403);
+  assert.equal(r.body.error, true);
+  assert.equal(r.body.retryable, false);
+  assert.ok(!/proxy_pass/.test(b));
+  // и токен снаружи не проходит в сервисы
+  assert.match(locationBlock(nginxConf, '/api/'), /proxy_set_header\s+X-Internal-Token\s+""/);
+});
+
+test('nginx: ошибки 413/502/503/504 — единый JSON, апстрим назван и помечен заголовком', () => {
+  assert.ok(!/proxy_intercept_errors\s+on/.test(nginxConf), 'свои ошибки сервисов nginx подменять не должен');
+  assert.match(nginxConf, /error_page\s+413\s*=\s*@too_large/);
+  const tl = returnJson(locationBlock(nginxConf, '@too_large'));
+  assert.equal(tl.status, 413);
+  assert.deepEqual(Object.keys(tl.body).sort(), ['code', 'error', 'message', 'retryable']);
+  for (const [loc, up] of [['/api/', 'document'], ['/ws', 'document'], ['/agent/', 'orchestrator']]) {
+    const b = locationBlock(nginxConf, loc);
+    // error_page в location заменяет серверный целиком — 413 обязан быть и здесь
+    assert.match(b, /error_page\s+413\s*=\s*@too_large/, `${loc}: 413 отдаст HTML`);
+    for (const code of [502, 503, 504]) {
+      const m = new RegExp(`error_page\\s+${code}\\s*=\\s*(@[\\w]+)`).exec(b);
+      assert.ok(m, `${loc}: нет error_page ${code}`);
+      const named = locationBlock(nginxConf, m[1]);
+      const r = returnJson(named);
+      assert.equal(r.status, code, `${m[1]} отдаёт не ${code}`);
+      assert.equal(r.body.error, true);
+      assert.equal(r.body.upstream, up);
+      assert.equal(typeof r.body.code, 'string');
+      assert.equal(typeof r.body.message, 'string');
+      assert.equal(r.body.retryable, true);
+      assert.match(named, /default_type\s+application\/json/);
+      if (code !== 504) {
+        assert.match(named, /add_header\s+X-Imago-Upstream\s+down\s+always/);
+        assert.match(named, /add_header\s+Retry-After\s+\d+\s+always/);
+      }
+    }
+  }
+});
+
+test('compose: сервисы, healthcheck у document, orchestrator, web; зависимости по здоровью', () => {
+  const s = services(compose);
+  for (const name of ['db', 'document', 'orchestrator', 'web']) assert.ok(s[name], `нет сервиса ${name}`);
+  for (const name of ['document', 'orchestrator', 'web']) {
+    const hc = sub(s[name], 'healthcheck');
+    assert.match(hc, /test:\s*\[/, `${name}: нет healthcheck.test`);
+    assert.match(hc, /"(node|wget)"/, `${name}: проверка не node/wget`);
+  }
+  assert.match(sub(s.document, 'healthcheck'), /127\.0\.0\.1:8080\/api\/health/);
+  assert.match(sub(s.orchestrator, 'healthcheck'), /127\.0\.0\.1:8090\/agent\/health/);
+  const dep = (name) => sub(s[name], 'depends_on');
+  assert.match(dep('document'), /db:\s*\n\s+condition:\s*service_healthy/);
+  assert.match(dep('orchestrator'), /document:\s*\n\s+condition:\s*service_healthy/);
+  assert.match(dep('web'), /document:\s*\n\s+condition:\s*service_healthy/);
+  assert.match(dep('web'), /orchestrator:\s*\n\s+condition:\s*service_healthy/);
+  assert.match(s.web, /\$\{IMAGO_PORT:-8123\}:80/);
+});
+
+test('compose: окружение orchestrator — документ, модель на хосте, общий токен', () => {
+  const s = services(compose);
+  const env = sub(s.orchestrator, 'environment');
+  assert.match(env, /DOCUMENT_URL:\s*http:\/\/document:8080/);
+  assert.match(env, /PORT:\s*"8090"/);
+  assert.match(env, /LLM_BASE_URL:\s*\$\{LLM_BASE_URL:-http:\/\/host\.docker\.internal:1234\/v1\}/);
+  assert.match(env, /LLM_MODEL:\s*\$\{LLM_MODEL:-[^}]+\}/);
+  assert.match(env, /LLM_API_KEY:\s*\$\{LLM_API_KEY:-\}/);
+  assert.match(sub(s.orchestrator, 'extra_hosts'), /host\.docker\.internal:host-gateway/);
+  // один и тот же токен у обоих; умолчание — заглушка, которую document не принимает
+  const tok = /INTERNAL_TOKEN:\s*(\$\{INTERNAL_TOKEN:-([^}]*)\})/;
+  const a = tok.exec(env);
+  const b = tok.exec(sub(s.document, 'environment'));
+  assert.ok(a && b, 'INTERNAL_TOKEN должен быть у document и orchestrator');
+  assert.equal(a[1], b[1]);
+  assert.equal(a[2], 'change-me');
+  // к базе orchestrator не прикасается (§8.1)
+  assert.ok(!/DATABASE_URL/.test(s.orchestrator));
+});
+
+test('Dockerfile.orchestrator: node:22-alpine, src и server/orchestrator, npm ci --omit=dev', () => {
+  const d = read('deploy/Dockerfile.orchestrator');
+  assert.match(d, /^FROM node:22-alpine/m);
+  assert.match(d, /RUN npm ci --omit=dev/);
+  assert.match(d, /^COPY src \.\/src$/m);
+  assert.match(d, /^COPY server\/orchestrator \.\/server\/orchestrator$/m);
+  assert.ok(!/^COPY server\/document/m.test(d));
+  const cmd = /CMD \["node", "([^"]+)"\]/.exec(d);
+  assert.ok(cmd);
+  assert.ok(existsSync(join(root, cmd[1])), `${cmd[1]} нет в репозитории`);
+  assert.match(d, /^EXPOSE 8090$/m);
+  // всё, что orchestrator импортирует вне своего каталога, — только из src/ (оно в образе)
+  const dir = join(root, 'server/orchestrator');
+  if (existsSync(dir)) {
+    const files = spawnSync('find', [dir, '-name', '*.js'], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean);
+    for (const f of files) {
+      for (const m of readFileSync(f, 'utf8').matchAll(/from\s+'(\.[^']+)'/g)) {
+        const target = join(dirname(f), m[1]);
+        const ok = target.startsWith(join(root, 'src')) || target.startsWith(dir);
+        assert.ok(ok, `${f.slice(root.length + 1)} импортирует ${m[1]} — этого нет в образе`);
+      }
+    }
+  }
+});
+
+test('Dockerfile.web и сборка: все модули клиента попадают в dist', () => {
+  const web = read('deploy/Dockerfile.web');
+  assert.match(web, /COPY src \.\/src/);
+  assert.match(web, /RUN node tools\/build\.mjs/);
+  assert.match(web, /COPY deploy\/nginx\.conf \/etc\/nginx\/conf\.d\/default\.conf/);
+  assert.match(web, /COPY --from=build \/app\/dist\/web \/usr\/share\/nginx\/html/);
+  const build = read('tools/build.mjs');
+  const listed = /const SRC_MODULES = \[([^\]]+)\]/.exec(build);
+  assert.ok(listed, 'в build.mjs не найден список модулей src');
+  // dist/web — с сервером за страницей, dist/local и dev.html — соло без сервера
+  assert.match(build, /join\(web, 'index\.html'\), fullDoc\(\{ top: defaultsFor\(true\) \}\)/);
+  assert.match(build, /join\(dist, 'index\.html'\), fullDoc\(\{ top: defaultsFor\(false\) \}\)/);
+  const copied = new Set([...listed[1].matchAll(/'([^']+)'/g)].map((m) => m[1]));
+  // всё, что app.js тянет из src/ (и что тянут они), должно быть скопировано
+  const seen = new Set();
+  const walk = (file) => {
+    for (const m of read(file).matchAll(/(?:import|export)[^'"]*from\s+'(\.\/src\/[^']+|\.\/[^']+)'/g)) {
+      const rel = file === 'app.js' ? m[1].replace(/^\.\//, '') : join(dirname(file), m[1]).replace(/^\.\//, '');
+      if (!rel.startsWith('src/') || seen.has(rel)) continue;
+      seen.add(rel);
+      walk(rel);
+    }
+  };
+  walk('app.js');
+  assert.ok(seen.has('src/agent.js') && seen.has('src/shell.js'));
+  for (const f of seen) assert.ok(copied.has(f.slice(4)), `${f} не копируется в dist/local`);
+});
+
+test('START.cmd и STOP.cmd: UTF-8, CRLF в каждой строке, compose с ожиданием здоровья', () => {
+  for (const f of ['START.cmd', 'STOP.cmd']) {
+    const raw = readFileSync(join(root, f));
+    const text = raw.toString('utf8');
+    assert.ok(!text.includes('�'), `${f}: не UTF-8`);
+    const lines = text.split('\n');
+    lines.pop();   // после последнего \n
+    for (const [i, l] of lines.entries()) assert.ok(l.endsWith('\r'), `${f}:${i + 1} без CRLF`);
+    assert.match(text, /chcp 65001/);
+  }
+  const start = read('START.cmd');
+  assert.match(start, /docker compose up --build -d --wait/);
+  assert.match(start, /\/agent\/health/);
+});
+
+/* ------------------------------ живой nginx ------------------------------ */
+
+const NGINX = (() => {
+  const r = spawnSync('sh', ['-c', 'command -v nginx'], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : '';
+})();
+
+/** Свободный порт из выданного диапазона (8730–8739). */
+async function freePort() {
+  for (let p = 8730; p <= 8739; p++) {
+    const ok = await new Promise((resolve) => {
+      const s = net.createServer();
+      s.once('error', () => resolve(false));
+      s.listen(p, '127.0.0.1', () => s.close(() => resolve(true)));
+    });
+    if (ok) return p;
+  }
+  throw new Error('нет свободного порта 8730–8739');
+}
+
+function listen(handler) {
+  const sockets = new Set();
+  const srv = http.createServer(handler);
+  srv.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+  return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve({
+    port: srv.address().port,
+    close: () => new Promise((r) => { for (const s of sockets) s.destroy(); srv.close(() => r()); }),
+  })));
+}
+
+/** Конфиг для прогона: адреса апстримов и порт подменены, временные пути — свои. */
+function testConfig(dir, port, docPort, orchPort) {
+  const site = nginxConf
+    .replace(/listen\s+80;/, `listen 127.0.0.1:${port};`)
+    .replace(/root\s+\/usr\/share\/nginx\/html;/, `root ${join(dir, 'html')};`)
+    .replace('http://document:8080', `http://127.0.0.1:${docPort}`)
+    .replace('http://orchestrator:8090', `http://127.0.0.1:${orchPort}`);
+  assert.notEqual(site, nginxConf);
+  writeFileSync(join(dir, 'site.conf'), site);
+  const main = `
+daemon off;
+master_process off;
+worker_processes 1;
+pid ${join(dir, 'nginx.pid')};
+error_log ${join(dir, 'error.log')} warn;
+events { worker_connections 64; }
+http {
+  default_type application/octet-stream;
+  types { text/html html; text/javascript js; text/css css; }
+  access_log off;
+  client_body_temp_path ${join(dir, 'tmp/body')};
+  proxy_temp_path ${join(dir, 'tmp/proxy')};
+  fastcgi_temp_path ${join(dir, 'tmp/fastcgi')};
+  uwsgi_temp_path ${join(dir, 'tmp/uwsgi')};
+  scgi_temp_path ${join(dir, 'tmp/scgi')};
+  include ${join(dir, 'site.conf')};
+}
+`;
+  writeFileSync(join(dir, 'nginx.conf'), main);
+  return join(dir, 'nginx.conf');
+}
+
+test('nginx -t на настоящем конфиге и живые маршруты', { skip: NGINX ? false : 'nginx в окружении нет' }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'imago-nginx-'));
+  mkdirSync(join(dir, 'html'));
+  mkdirSync(join(dir, 'tmp'));
+  writeFileSync(join(dir, 'html', 'index.html'), '<!doctype html><title>Imago</title>');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const seenDoc = [];
+  const doc = await listen((req, res) => {
+    seenDoc.push({ url: req.url, token: req.headers['x-internal-token'] });
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, engine: 1 }));
+    });
+  });
+  const orch = await listen((req, res) => {
+    req.resume();
+    req.on('end', async () => {
+      if (req.url === '/agent/health') {
+        res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '7' });
+        res.end(JSON.stringify({ error: true, code: 'llm_down', message: 'модель недоступна', retryable: true }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' });
+      res.write('event: stage\ndata: {"key":"jev"}\n\n');
+      await new Promise((r) => setTimeout(r, 700));
+      res.write('event: result\ndata: {"tx_id":"t"}\n\nevent: done\ndata: {}\n\n');
+      res.end();
+    });
+  });
+  t.after(() => doc.close());
+  let orchUp = true;
+  t.after(() => (orchUp ? orch.close() : null));
+
+  const port = await freePort();
+  const conf = testConfig(dir, port, doc.port, orch.port);
+  const check = spawnSync(NGINX, ['-t', '-p', dir, '-c', conf, '-e', join(dir, 'error.log')], { encoding: 'utf8' });
+  assert.equal(check.status, 0, `nginx -t: ${check.stderr}`);
+
+  const proc = spawn(NGINX, ['-p', dir, '-c', conf, '-e', join(dir, 'error.log')], { stdio: 'ignore' });
+  t.after(() => { try { proc.kill('SIGTERM'); } catch { /* уже нет */ } });
+  const base = `http://127.0.0.1:${port}`;
+  for (let i = 0; i < 50; i++) {
+    try { await fetch(base + '/'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+
+  // статика
+  const home = await fetch(base + '/');
+  assert.equal(home.status, 200);
+  assert.match(await home.text(), /Imago/);
+
+  // /api/internal закрыт, до сервиса не доходит
+  const internal = await fetch(base + '/api/internal/traces', { method: 'POST', body: '{}', headers: { 'x-internal-token': 'x' } });
+  assert.equal(internal.status, 403);
+  assert.equal((await internal.json()).error, true);
+  assert.ok(!seenDoc.some((r) => r.url.startsWith('/api/internal')));
+
+  // /api/ доходит, служебный токен снаружи срезан
+  const api = await fetch(base + '/api/health', { headers: { 'x-internal-token': 'secret' } });
+  assert.equal(api.status, 200);
+  assert.equal(seenDoc.at(-1).token, undefined);
+
+  // своя ошибка Orchestrator проходит как есть — с его кодом и Retry-After
+  const own = await fetch(base + '/agent/health');
+  assert.equal(own.status, 503);
+  assert.equal(own.headers.get('retry-after'), '7');
+  assert.equal(own.headers.get('x-imago-upstream'), null);
+  assert.equal((await own.json()).code, 'llm_down');
+
+  // SSE: первое событие приходит до конца потока — буферизации нет
+  const t0 = Date.now();
+  const sse = await fetch(base + '/agent/command', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+  assert.equal(sse.status, 200);
+  assert.equal(sse.headers.get('x-accel-buffering'), 'no');
+  const reader = sse.body.getReader();
+  const first = await reader.read();
+  const tFirst = Date.now() - t0;
+  assert.match(new TextDecoder().decode(first.value), /event: stage/);
+  let rest = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    rest += new TextDecoder().decode(value);
+  }
+  const tEnd = Date.now() - t0;
+  assert.match(rest, /event: done/);
+  assert.ok(tEnd - tFirst >= 350, `стадия пришла вместе с концом потока (${tFirst} мс из ${tEnd})`);
+
+  // большое тело — 413 тем же JSON
+  const big = await fetch(base + '/api/projects', { method: 'POST', body: 'x'.repeat(9 * 1024 * 1024), headers: { 'content-type': 'application/json' } });
+  assert.equal(big.status, 413);
+  const bigBody = await big.json();
+  assert.equal(bigBody.code, 'too_large');
+
+  // апстрим лежит — JSON с upstream и X-Imago-Upstream: down
+  await orch.close();
+  orchUp = false;
+  const down = await fetch(base + '/agent/command', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+  assert.equal(down.status, 502);
+  assert.equal(down.headers.get('x-imago-upstream'), 'down');
+  assert.ok(down.headers.get('retry-after'));
+  const body = await down.json();
+  assert.deepEqual(
+    { error: body.error, upstream: body.upstream, retryable: body.retryable, code: body.code },
+    { error: true, upstream: 'orchestrator', retryable: true, code: 'upstream_down' },
+  );
+});

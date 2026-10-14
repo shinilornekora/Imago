@@ -19,20 +19,35 @@ ${top}${body}</body>
 `;
 }
 
-/* 1) dev.html — прогон в браузере с заглушкой платформы */
-writeFileSync(join(root, 'dev.html'), fullDoc({ top: '<script src="tools/stub.js"></script>\n' }), 'utf8');
+/* 1) dev.html — прогон в браузере с заглушкой платформы. Сервера за ним нет (server: false):
+   оболочка не спрашивает /api/health, и в консоли нет 404 от статического сервера. */
+writeFileSync(join(root, 'dev.html'), fullDoc({
+  top: '<script>window.IMAGO_DEFAULTS = { server: false };</script>\n<script src="tools/stub.js"></script>\n',
+}), 'utf8');
 
 /* 2) dist/local — локальная сборка: голос + LM Studio */
 const dist = join(root, 'dist', 'local');
 mkdirSync(join(dist, 'src'), { recursive: true });
 
-const defaults = `<script>
-  window.IMAGO_DEFAULTS = { lmstudio: { enabled: true, baseUrl: 'http://localhost:1234/v1', model: 'local-model' } };
+/* server: false — соло-сборка без сервера: оболочка не ищет Document service и Orchestrator
+   (статический http.server на /api/health отвечает 404 — это была бы ошибка в консоли) */
+const defaultsFor = (serverMode) => `<script>
+  window.IMAGO_DEFAULTS = { server: ${serverMode}, lmstudio: { enabled: true, baseUrl: 'http://localhost:1234/v1', model: 'local-model' } };
 </script>
 `;
-writeFileSync(join(dist, 'index.html'), fullDoc({ top: defaults }), 'utf8');
+/** Модули клиента: всё, что app.js импортирует из src/ (test/deploy.test.mjs сверяет список). */
+const SRC_MODULES = ['core.js', 'brain.js', 'sync.js', 'agent.js', 'shell.js'];
+writeFileSync(join(dist, 'index.html'), fullDoc({ top: defaultsFor(false) }), 'utf8');
 for (const f of ['styles.css', 'app.js']) copyFileSync(join(root, f), join(dist, f));
-for (const f of ['core.js', 'brain.js', 'sync.js']) copyFileSync(join(root, 'src', f), join(dist, 'src', f));
+for (const f of SRC_MODULES) copyFileSync(join(root, 'src', f), join(dist, 'src', f));
+
+/* 2a) dist/web — то же для NGINX (deploy/Dockerfile.web): за страницей Document service и
+   Orchestrator, server: true. START.cmd и server.mjs здесь не нужны. */
+const web = join(root, 'dist', 'web');
+mkdirSync(join(web, 'src'), { recursive: true });
+writeFileSync(join(web, 'index.html'), fullDoc({ top: defaultsFor(true) }), 'utf8');
+for (const f of ['styles.css', 'app.js']) copyFileSync(join(root, f), join(web, f));
+for (const f of SRC_MODULES) copyFileSync(join(root, 'src', f), join(web, 'src', f));
 
 writeFileSync(join(dist, 'START.cmd'), [
   '@echo off',
@@ -166,4 +181,4 @@ Ctrl+D — дублировать                 Space+мышь — панор�
 Колесо — зум, Ctrl+колесо — зум к курсору
 `, 'utf8');
 
-console.log('built: dev.html, dist/local (index.html, START.cmd, server.mjs, ЧИТАТЬ.txt)');
+console.log('built: dev.html, dist/local (index.html, START.cmd, server.mjs, ЧИТАТЬ.txt), dist/web (для NGINX)');

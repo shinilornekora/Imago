@@ -25,7 +25,7 @@ for (const backend of list) {
         ? createPgStorage({ connectionString: DB_URL, log: { info() {}, warn() {} } })
         : createMemoryStorage();
       await storage.init();
-      if (backend.name === 'pg') await storage.pool.query('TRUNCATE projects, operations, snapshots, library_versions, project_imports CASCADE');
+      if (backend.name === 'pg') await storage.pool.query('TRUNCATE projects, operations, snapshots, library_versions, project_imports, project_epochs, traces CASCADE');
     });
     after(async () => {
       await storage.close();
@@ -97,8 +97,10 @@ for (const backend of list) {
       assert.deepEqual((await storage.txsAfter(p.id, 0, 2)).map((t) => t.seq), [1, 2]);
       assert.deepEqual((await storage.txsAfter(p.id, 5)), []);
       const doc = createDoc('empty');
-      await storage.writeSnapshot(p.id, 3, doc, E);
-      await storage.writeSnapshot(p.id, 3, createDoc('empty'), E);   // повтор — DO NOTHING
+      const chain3 = await storage.chainAt(p.id, 3);
+      assert.equal(await storage.writeSnapshot(p.id, 3, doc, E, 'чужая цепочка'), false, 'снимок не по журналу не пишется');
+      assert.equal(await storage.writeSnapshot(p.id, 3, doc, E, chain3), true);
+      assert.equal(await storage.writeSnapshot(p.id, 3, createDoc('empty'), E, chain3), false);   // повтор — DO NOTHING
       const snap = await storage.latestSnapshot(p.id);
       assert.equal(snap.seq, 3);
       assert.equal(snap.doc.root, doc.root);

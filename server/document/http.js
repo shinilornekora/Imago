@@ -1,7 +1,9 @@
 /**
- * HTTP-маршруты Document service (SPEC §9.2). Только `node:http`: JSON, коды
- * ответов как в таблице §9.2. CORS не нужен — nginx держит `/api` и `/ws` на
- * том же origin, что и статику; на OPTIONS отвечаем 204, чтобы preflight из
+ * HTTP-маршруты Document service (SPEC §9.2, §9.8). Только `node:http`: JSON,
+ * коды ответов как в таблице §9.2; тело любой ошибки —
+ * `{error: true, code, message, retryable, detail?}` (+ `Retry-After`, когда
+ * повтор имеет смысл позже). CORS не нужен — nginx держит `/api` и `/ws` на том
+ * же origin, что и статику; на OPTIONS отвечаем 204, чтобы preflight из
  * dev-сборки на другом порту не падал на 404.
  *
  * `STATIC_DIR` — раздача клиента (index.html, app.js, styles.css, src/*.js)
@@ -10,16 +12,21 @@
 
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
+import { timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { createDoc, ENGINE_VERSION } from '../../src/core.js';
-import { DocError, viaStorage } from './errors.js';
-import { MAX_LIMIT } from './dslr.js';
-import { projectSummary } from './storage/committed.js';
+import { DocError, badRequest, notFound, tooLarge, internalBody, viaStorage } from './errors.js';
+import { jsonBytes } from './storage/committed.js';
+import {
+  MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX
+} from './limits.js';
 
-/** Предел тела запроса (SPEC: транзакция ≤ 4 МБ; документ проекта — тоже). */
-export const MAX_BODY = 4 * 1024 * 1024;
+/** Предел тела запроса (совместимость: прежде экспортировался отсюда). */
+export const MAX_BODY = MAX_BODY_BYTES;
 const PROJECT_KINDS = new Set(['design', 'library']);
 const MAX_PROJECT_NAME = 200;
+/** Значение-заглушка из примеров конфигурации: внутренним токеном не считается никогда. */
+const PLACEHOLDER_TOKEN = 'change-me';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -45,45 +52,55 @@ const MIME = {
   '.wasm': 'application/wasm'
 };
 
-function sendJSON(res, status, body) {
+function sendJSON(res, status, body, headers = {}) {
   const text = JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(text),
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store',
+    ...headers
   });
   res.end(text);
 }
 
+function sendError(res, e) {
+  const headers = e.retryAfter !== undefined ? { 'Retry-After': String(e.retryAfter) } : {};
+  sendJSON(res, e.status, e.body(), headers);
+}
+
 /**
- * Тело запроса как JSON: пусто → null; больше MAX_BODY → 413; не JSON → 400.
+ * Тело запроса как JSON: пусто → null; больше предела → 413; не JSON → 400.
  * Слишком большое тело не дочитываем и не рвём соединение сразу: чтение
  * останавливается, ответ 413 уходит, и только потом обработчик закрывает
  * соединение (см. createRequestHandler) — иначе клиент вместо 413 видел бы
  * обрыв и не понял бы, что транзакцию надо разбить, а не повторить.
  */
-function readJSON(req) {
+function readJSON(req, max = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
-    const tooLarge = () => {
+    const tooLargeBody = () => {
       req.pause();
-      reject(new DocError(413, 'too-large', `тело больше ${MAX_BODY} байт`));
+      reject(tooLarge(`тело больше ${max} байт`, { detail: { limit: 'body_bytes', max } }));
     };
     const declared = Number(req.headers['content-length']);
-    if (Number.isFinite(declared) && declared > MAX_BODY) {
-      tooLarge();
+    if (Number.isFinite(declared) && declared > max) {
+      tooLargeBody();
       return;
     }
+    let done = false;
     req.on('data', (chunk) => {
+      if (done) return;
       size += chunk.length;
-      if (size > MAX_BODY) {
-        tooLarge();
+      if (size > max) {
+        done = true;
+        tooLargeBody();
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (done) return;
       if (!size) {
         resolve(null);
         return;
@@ -91,10 +108,10 @@ function readJSON(req) {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       } catch (_) {
-        reject(new DocError(400, 'bad-request', 'тело не JSON'));
+        reject(badRequest('тело не JSON'));
       }
     });
-    req.on('error', (e) => reject(new DocError(400, 'bad-request', 'обрыв тела запроса: ' + e.message)));
+    req.on('error', (e) => reject(badRequest('обрыв тела запроса: ' + e.message)));
   });
 }
 
@@ -110,32 +127,48 @@ function authorOf(req) {
   }
 }
 
+/** Целое из query или undefined; не целое → 400. */
+function intParam(url, name, { min = -Infinity, max = Infinity } = {}) {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) throw badRequest(`${name}: целое${Number.isFinite(min) ? ` от ${min}` : ''}${Number.isFinite(max) ? ` до ${max}` : ''}`);
+  return n;
+}
+
+const flag = (url, name) => {
+  const v = url.searchParams.get(name);
+  return v !== null && v !== '0' && v !== 'false';
+};
+
+/** Сравнение токенов за постоянное время. */
+function sameToken(a, b) {
+  const x = Buffer.from(String(a), 'utf8');
+  const y = Buffer.from(String(b), 'utf8');
+  if (x.length !== y.length) return false;
+  return timingSafeEqual(x, y);
+}
+
 async function serveStatic(req, res, root, pathname) {
+  const missing = () => sendError(res, new DocError(404, 'not_found', 'нет такого файла', { retryable: false }));
   let rel;
   try {
     rel = decodeURIComponent(pathname);
   } catch (_) {
-    sendJSON(res, 400, { error: 'bad-request', message: 'негодный путь' });
+    sendError(res, badRequest('негодный путь'));
     return;
   }
   if (rel === '/' || rel === '') rel = '/index.html';
   const file = path.resolve(root, '.' + rel);
   // путь вне каталога (../) не раздаём — как и всё, что не файл
-  if (file !== root && !file.startsWith(root + path.sep)) {
-    sendJSON(res, 404, { error: 'not-found', message: 'нет такого файла' });
-    return;
-  }
+  if (file !== root && !file.startsWith(root + path.sep)) return missing();
   let info;
   try {
     info = await stat(file);
   } catch (_) {
-    sendJSON(res, 404, { error: 'not-found', message: 'нет такого файла' });
-    return;
+    return missing();
   }
-  if (!info.isFile()) {
-    sendJSON(res, 404, { error: 'not-found', message: 'нет такого файла' });
-    return;
-  }
+  if (!info.isFile()) return missing();
   const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
   res.writeHead(200, {
     'Content-Type': type,
@@ -151,11 +184,23 @@ async function serveStatic(req, res, root, pathname) {
 }
 
 /**
- * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, log?: object}} deps
+ * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, internalToken?: string, log?: object}} deps
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void}
  */
-export function createRequestHandler({ dslr, dslts, storage, staticDir, log = console }) {
+export function createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log = console }) {
   const root = staticDir ? path.resolve(staticDir) : null;
+  const token = typeof internalToken === 'string' && internalToken && internalToken !== PLACEHOLDER_TOKEN ? internalToken : null;
+  if (internalToken === PLACEHOLDER_TOKEN) log.warn('[document/http] INTERNAL_TOKEN = «change-me» — это заглушка; внутренние маршруты закрыты, пока не задан настоящий токен');
+  const methodNotAllowed = () => new DocError(405, 'method_not_allowed', 'метод не поддерживается', { retryable: false });
+
+  /** 410: снимок и голова — с верхнего уровня тела, как раньше. */
+  function sendGone(res, view, epoch) {
+    const e = new DocError(410, 'gone', 'с этого места журнал не догнать — нужен снимок', {
+      retryable: false,
+      compat: { snapshot: view.snapshot, head_seq: view.head_seq, epoch, tip: view.snapshot.chain || '' }
+    });
+    sendError(res, e);
+  }
 
   async function route(req, res, url) {
     const { method } = req;
@@ -172,30 +217,52 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, log = co
         await serveStatic(req, res, root, url.pathname);
         return;
       }
-      throw new DocError(404, 'not-found', 'нет такого маршрута');
+      throw notFound('нет такого маршрута');
     }
 
     // GET /api/health
-    if (parts.length === 2 && parts[1] === 'health' && method === 'GET') {
+    if (parts.length === 2 && parts[1] === 'health') {
+      if (method !== 'GET') throw methodNotAllowed();
       sendJSON(res, 200, { ok: true, engine: ENGINE_VERSION });
       return;
     }
 
-    if (parts[1] !== 'projects') throw new DocError(404, 'not-found', 'нет такого маршрута');
+    // POST /api/internal/traces — только для Orchestrator (nginx снаружи отдаёт 403)
+    if (parts[1] === 'internal') {
+      if (!token || !sameToken(req.headers['x-internal-token'] || '', token)) {
+        throw new DocError(403, 'forbidden', 'внутренний маршрут: нужен X-Internal-Token', { retryable: false });
+      }
+      if (parts.length === 3 && parts[2] === 'traces') {
+        if (method !== 'POST') throw methodNotAllowed();
+        const body = await readJSON(req, MAX_TRACE_BYTES);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw badRequest('трасса: JSON-объект');
+        const projectId = body.project_id || body.project;
+        const commandId = body.command_id;
+        if (typeof projectId !== 'string' || !projectId) throw badRequest('project: id проекта');
+        if (typeof commandId !== 'string' || !commandId || commandId.length > 128) throw badRequest('command_id: строка до 128 символов');
+        const saved = await viaStorage(storage.addTrace({ projectId, commandId, body }));
+        if (!saved) throw notFound();
+        sendJSON(res, 201, { id: saved.id, created_at: saved.created_at });
+        return;
+      }
+      throw notFound('нет такого маршрута');
+    }
+
+    if (parts[1] !== 'projects') throw notFound('нет такого маршрута');
 
     // GET|POST /api/projects
     if (parts.length === 2) {
       if (method === 'GET') {
         const list = await viaStorage(storage.listProjects());
-        sendJSON(res, 200, { projects: list.map(projectSummary) });
+        sendJSON(res, 200, { projects: list.map((p) => ({ id: p.id, name: p.name, kind: p.kind, head_seq: p.head_seq, updated_at: p.updated_at })) });
         return;
       }
       if (method === 'POST') {
         const body = (await readJSON(req)) || {};
-        if (typeof body !== 'object' || Array.isArray(body)) throw new DocError(400, 'bad-request', 'тело должно быть объектом');
+        if (typeof body !== 'object' || Array.isArray(body)) throw badRequest('тело должно быть объектом');
         const name = body.name === undefined || body.name === null ? '' : String(body.name).slice(0, MAX_PROJECT_NAME);
         const kind = body.kind === undefined || body.kind === null ? 'design' : body.kind;
-        if (!PROJECT_KINDS.has(kind)) throw new DocError(400, 'bad-request', 'kind: design | library');
+        if (!PROJECT_KINDS.has(kind)) throw badRequest('kind: design | library');
         let doc;
         if (body.doc === undefined || body.doc === null) {
           doc = createDoc();
@@ -203,81 +270,124 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, log = co
           const d = body.doc;
           // минимальная проверка формы; остальное приводит createDoc(seed) — тот же путь, что импорт JSON на клиенте
           if (!d || typeof d !== 'object' || Array.isArray(d) || !d.nodes || typeof d.nodes !== 'object' || typeof d.root !== 'string' || !d.nodes[d.root]) {
-            throw new DocError(400, 'bad-request', 'doc: объект с nodes и root, корень должен быть среди узлов');
+            throw badRequest('doc: объект с nodes и root, корень должен быть среди узлов');
           }
+          if (Object.keys(d.nodes).length > MAX_DOC_NODES) throw tooLarge(`doc: не больше ${MAX_DOC_NODES} узлов`, { detail: { limit: 'doc_nodes', max: MAX_DOC_NODES } });
           doc = createDoc(d);
         }
         if (name) doc.meta = { ...(doc.meta || {}), name };
+        if (jsonBytes(doc) > MAX_DOC_BYTES) throw tooLarge('doc: больше предела документа', { detail: { limit: 'doc_bytes', max: MAX_DOC_BYTES } });
         const project = await viaStorage(storage.createProject({ name, kind, doc, engine: ENGINE_VERSION }));
-        sendJSON(res, 201, { id: project.id, name: project.name, kind: project.kind, head_seq: 0, engine: project.engine, created_at: project.created_at, updated_at: project.updated_at });
+        sendJSON(res, 201, { id: project.id, name: project.name, kind: project.kind, head_seq: 0, engine: project.engine, epoch: project.epoch, tip: '', created_at: project.created_at, updated_at: project.updated_at });
         return;
       }
-      throw new DocError(405, 'method-not-allowed', 'метод не поддерживается');
+      throw methodNotAllowed();
     }
 
     const id = parts[2];
 
-    // GET|PATCH /api/projects/:id
+    // GET|PATCH /api/projects/:id   (?head=1 — только голова; ?lean=1[&since=] — без документа снимка)
     if (parts.length === 3) {
       if (method === 'GET') {
-        const { project, snapshot, tail } = await dslr.open(id);
-        sendJSON(res, 200, { ...project, snapshot, tail });
+        if (flag(url, 'head')) {
+          sendJSON(res, 200, await dslr.head(id));
+          return;
+        }
+        const lean = flag(url, 'lean');
+        const since = lean ? intParam(url, 'since', { min: 0 }) : undefined;
+        if (lean && since !== undefined) {
+          const p = await dslr.project(id);
+          if (since > p.head_seq) {
+            sendGone(res, await dslr.gone(id, p), p.epoch);
+            return;
+          }
+        }
+        const { project, snapshot, tail, more } = await dslr.open(id, { lean, since });
+        sendJSON(res, 200, { ...project, snapshot, tail, more });
         return;
       }
       if (method === 'PATCH') {
         const body = await readJSON(req);
-        if (!body || typeof body !== 'object' || typeof body.name !== 'string' || !body.name.trim()) throw new DocError(400, 'bad-request', 'name: непустая строка');
+        if (!body || typeof body !== 'object' || typeof body.name !== 'string' || !body.name.trim()) throw badRequest('name: непустая строка');
         const project = await viaStorage(storage.renameProject(id, body.name.trim().slice(0, MAX_PROJECT_NAME)));
-        if (!project) throw new DocError(404, 'not-found', 'проект не найден');
+        if (!project) throw notFound();
         sendJSON(res, 200, { id: project.id, name: project.name, kind: project.kind, head_seq: project.head_seq });
         return;
       }
-      throw new DocError(405, 'method-not-allowed', 'метод не поддерживается');
+      throw methodNotAllowed();
     }
 
     if (parts.length === 4) {
-      // GET /api/projects/:id/ops?since=&limit=
-      if (parts[3] === 'ops' && method === 'GET') {
-        const sinceRaw = url.searchParams.get('since');
-        const since = sinceRaw === null || sinceRaw === '' ? -1 : Number(sinceRaw);
-        if (!Number.isInteger(since) || since < -1) throw new DocError(400, 'bad-request', 'since: целое ≥ 0');
-        const limitRaw = url.searchParams.get('limit');
-        const limit = limitRaw === null || limitRaw === '' ? undefined : Number(limitRaw);
-        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT)) throw new DocError(400, 'bad-request', `limit: целое от 1 до ${MAX_LIMIT}`);
+      // GET /api/projects/:id/ops?since=&limit=[&tip=&epoch=]
+      if (parts[3] === 'ops') {
+        if (method !== 'GET') throw methodNotAllowed();
+        const sinceQ = intParam(url, 'since', { min: -1 });
+        const since = sinceQ === undefined ? -1 : sinceQ;
+        const limit = intParam(url, 'limit', { min: 1, max: MAX_LIMIT });
+        const tip = url.searchParams.get('tip') || undefined;
+        const epoch = url.searchParams.get('epoch') || undefined;
+        if ((tip && tip.length > 128) || (epoch && epoch.length > 64)) throw badRequest('tip/epoch: слишком длинные');
+        if (tip || epoch) {
+          const p = await dslr.project(id);
+          let head = { head_seq: p.head_seq, epoch: p.epoch };
+          const decision = await dslr.classify(id, { since, tip, epoch }, head);
+          if (decision !== 'tail') {
+            if (decision === 'evidence') head = await dslts.clientEvidence(id);
+            sendGone(res, await dslr.gone(id), head.epoch);
+            return;
+          }
+        }
         const view = await dslr.since(id, since, limit);
         if (view.gone) {
-          sendJSON(res, 410, { snapshot: view.snapshot, head_seq: view.head_seq });
+          sendGone(res, view, view.project.epoch);
           return;
         }
-        sendJSON(res, 200, { head_seq: view.head_seq, txs: view.txs });
+        sendJSON(res, 200, { head_seq: view.head_seq, epoch: view.project.epoch, tip: view.project.head_chain || '', txs: view.txs, more: view.more });
         return;
       }
       // POST /api/projects/:id/tx
-      if (parts[3] === 'tx' && method === 'POST') {
+      if (parts[3] === 'tx') {
+        if (method !== 'POST') throw methodNotAllowed();
         const body = await readJSON(req);
         const { committed, existing } = await dslts.commit(id, body, { author: authorOf(req) });
         sendJSON(res, existing ? 200 : 201, committed);
         return;
       }
+      // GET /api/projects/:id/traces?limit= — последние трассы, только чтение
+      if (parts[3] === 'traces') {
+        if (method !== 'GET') throw methodNotAllowed();
+        const limit = intParam(url, 'limit', { min: 1, max: TRACES_MAX }) || TRACES_DEFAULT;
+        await dslr.project(id);
+        const traces = await viaStorage(storage.listTraces(id, limit));
+        sendJSON(res, 200, { traces });
+        return;
+      }
     }
-    throw new DocError(404, 'not-found', 'нет такого маршрута');
+    throw notFound('нет такого маршрута');
   }
 
   return (req, res) => {
-    const url = new URL(req.url || '/', 'http://localhost');
+    let url;
+    try {
+      url = new URL(req.url || '/', 'http://localhost');
+    } catch (_) {
+      sendError(res, badRequest('негодный адрес'));
+      return;
+    }
     route(req, res, url).catch((e) => {
       if (res.headersSent) {
         res.destroy();
         return;
       }
       if (e instanceof DocError) {
-        sendJSON(res, e.status, e.body());
+        sendError(res, e);
       } else {
         log.warn('[document/http] сбой:', e && e.stack ? e.stack : e);
-        sendJSON(res, 500, { error: 'internal', message: 'внутренняя ошибка' });
+        sendJSON(res, 500, internalBody());
       }
       // тело не дочитано (413): соединение дальше не годится — закрываем, когда ответ ушёл
       if (!req.complete) res.once('finish', () => req.destroy());
     });
   };
 }
+

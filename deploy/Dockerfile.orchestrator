@@ -1,0 +1,14 @@
+# Orchestrator (SPEC §8.1, §10): второй процесс — агент. Ведёт команду по шагам 3–13:
+# JEV, DSLR/DSLTS-клиенты, DUIL, DSLV (воркеры), LLM. К базе не прикасается.
+# Движок и конвейер — те же src/core.js и src/brain.js, что у клиента, поэтому src/ целиком;
+# из server/ — только orchestrator: Document service ему не нужен.
+FROM node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY src ./src
+COPY server/orchestrator ./server/orchestrator
+EXPOSE 8090
+USER node
+CMD ["node", "server/orchestrator/index.js"]
