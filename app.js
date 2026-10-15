@@ -32,6 +32,8 @@ import {
   AGENT_MODE_WORDS, decideAgentMode, agentModeTitle, serverStageRec, queuedLabel, retryLabel,
   shellIntentFromServer, agentErrorWords, isModelError, normalizeResult, variantsFromServer,
   tooLargeWords, stoppedWriteWords, historyForServer,
+  // круг 25: режим агента по /agent/health, отказ сервера агента, dropped словами, строки по кодовым точкам
+  agentHealthNotice, AGENT_DOWN_WORDS, detachedLostWords, droppedWords, presenceAgentWords, cutText, cleanText,
 } from './src/shell.js';
 import * as SHELL from './src/shell.js';
 
@@ -52,6 +54,7 @@ const state = {
   chat: [],             // лента реплик агента: {role, text, at, followups}
   pairs: [],            // последние пары «команда — итог» для контекста агента
   busy: false,
+  agentPresence: null,  // круг 25: {busy}|{queued} — что агент делает для этого человека (присутствие)
   railFocus: null,      // строка рельса, попадающая в табуляцию
   issues: new Map(),    // замечания раскладки из validate: id узла → список (п.5)
   stageGoal: '',
@@ -373,6 +376,8 @@ function cacheDom() {
     'btn-projects', 'sync-status', 'presence',
     // круг 23: где работает агент — на сервере или в браузере
     'agent-status',
+    // круг 25: соавторы в шапке — аватарки и «+N» вместо списка имён
+    'people',
   ]) dom[id] = el(id);
   dom.dockmsg.setAttribute('role', 'status');
   dom.dockmsg.setAttribute('aria-live', 'polite');
@@ -450,7 +455,9 @@ async function apiJson(path, init = {}) {
   if (!res.ok) {
     // тело ошибки (SPEC §9.8): {error: true, code, message, retryable} — error уже не строка
     const said = body && (body.message || (typeof body.error === 'string' ? body.error : ''));
-    const e = new Error(said || `сервер ответил ${res.status}`);
+    // круг 25, п.7: «сервер ответил 503» человеку ничего не говорит — код уходит в поле status
+    const e = new Error(said || (res.status === 404 ? 'не найдено на сервере'
+      : res.status >= 500 ? 'сервер сейчас не отвечает как надо' : 'сервер отказал в запросе'));
     e.status = res.status;
     if (body && typeof body.code === 'string') e.code = body.code;
     if (body && typeof body.retryable === 'boolean') e.retryable = body.retryable;
@@ -532,6 +539,15 @@ async function createProject(name) {
  * записью id в ссылку, чтобы перезагрузка вернула туда же.
  */
 async function initServer(health) {
+  /* Круг 25, п.1. Своя модель браузера в серверном режиме — только та, что человек включил
+     сам (настройки → «Агент»). Прежняя серверная сборка включала LM Studio по умолчанию, и
+     при упавшем Orchestrator команда уходила на localhost:1234 — «Failed to fetch» у
+     человека, у которого никакой LM Studio нет. Отметка `chosen` ставится только руками. */
+  if (state.providerKind === 'lmstudio' && !(settings.lmstudio && settings.lmstudio.chosen === true)) {
+    state.provider = null;
+    state.providerKind = null;
+    setRunnable(false);
+  }
   server = {
     engine: health ? health.engine : null, project: null, sync: null, others: [], migrated: false, list: [],
     status: { online: false, pending: 0, syncing: true, error: null },
@@ -620,6 +636,9 @@ function openProject(project) {
   state.chat = [];
   state.pairs = [];
   state.saveBlocked = null;
+  sessionJournal.length = 0;
+  journalHuman.clear();
+  removedInfo.clear();
   hideVariants();
   hideMsg();
   // до открытия холст пуст: документ придёт из журнала или от сервера, демо здесь не место
@@ -644,6 +663,8 @@ function openProject(project) {
     onDropped: onSyncDropped,
     onPresence: onSyncPresence,
     onGone: () => toast('Сервер прислал свежий снимок — свои правки переиграны поверх него.', 'plain', 6000),
+    // круг 25, п.4: журнал реплики изменился — открытая «История» перерисуется
+    onJournal: () => { if (state.sheetOpen === 'history' && state.sheetTab !== 'chat') refreshSheet(); },
     onError: onSyncError,
     extra: journalExtra,
   });
@@ -652,7 +673,9 @@ function openProject(project) {
   serverAgent.arrived.clear();
   serverAgent.stopped.clear();
   serverAgent.current = null;
-  serverAgent.detached = null;
+  endDetached();
+  serverAgent.lost.clear();
+  serverAgent.lastFailed = null;
   probeAgent({ force: true });
   sync.open().catch((e) => {
     showMsg('error', 'Проект не открылся', { note: humanError(e) });
@@ -729,6 +752,8 @@ function onSyncChange(view, info = {}) {
     }
     case 'remote': {
       const prevDoc = state.doc;
+      noteRemoved(info.tx, prevDoc);
+      noteJournal(info.tx);
       state.doc = view;
       state.geo = solve(view);
       pruneSelection();
@@ -810,6 +835,32 @@ function onSyncError(e) {
     });
     return;
   }
+  /* Круг 25: реплика раз за разом не может записать правку и сняла её «не сохранено» —
+     правка не пропадает молча: говорим какая и даём вернуть её в очередь. Код сервера
+     человеку не нужен (п.7). */
+  if (e.code === 'not_saved') {
+    if (e.tx) forgetRejectedTx(e.tx.tx_id);
+    const entryTitle = e.tx && (e.tx.title || '');
+    const what = entryTitle ? `«${clip(cleanText(entryTitle), 60)}»` : '';
+    const sync = server.sync;
+    const canRetry = !!(e.tx && sync && typeof sync.retryUnsaved === 'function');
+    showMsg('error', `Правка ${what ? `${what} ` : ''}не сохранена`, {
+      note: 'Сервер раз за разом не может её записать — она снята с очереди, остальные правки сохраняются.',
+      role: 'not-saved',
+      actions: canRetry ? [{ label: 'Попробовать ещё раз', primary: true, onClick: () => { hideMsg(); sync.retryUnsaved(e.tx.tx_id); } }] : [],
+    });
+    return;
+  }
+  // после восстановления базы не всё своё удалось переиграть — словами реплики, без кодов
+  if (e.code === 'replay_expired' || e.code === 'replay_incomplete') {
+    const [head, ...rest] = String(e.message || '').split(': ');
+    const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
+    showMsg('warn', cap(cleanText(head)) || 'Часть правок из прошлой версии не восстановлена', {
+      note: rest.length ? `${cap(cleanText(rest.join(': ')))}.` : '',
+      role: 'replay',
+    });
+    return;
+  }
   if (e.code === 'diverged') {
     toast('Транзакция сервера не применилась к реплике — обновите страницу, если холст разошёлся.', 'error', 9000);
     return;
@@ -846,13 +897,108 @@ function forgetRejectedTx(txId) {
   refreshSheet();
 }
 
+/* ------------------- круг 25, п.5: кто удалил и как звался удалённый ------------------- */
+/* Чужая транзакция удалила слои: запоминаем, как они звались и кто удалил, — когда своя
+   правка этих слоёв не применится, человек узнает «Аня удалила этот слой», а не «узел уже
+   удалён». Реплика умеет то же (`whoRemoved`) — её ответ главнее; здесь — имя слоя, которого
+   в документе уже нет, и запасной путь, пока реплика этого не умеет. */
+const REMOVED_KEEP = 400;
+const removedInfo = new Map();   // id → {name, by: {author, author_kind, seq, title}}
+
+function noteRemoved(tx, prevDoc) {
+  if (!tx || !Array.isArray(tx.ops) || !prevDoc || !prevDoc.nodes) return;
+  const by = { author: tx.author || '', author_kind: tx.author_kind || 'human', seq: tx.seq, title: tx.title || '' };
+  for (const op of tx.ops) {
+    if (!op || op.op !== 'remove' || !prevDoc.nodes[op.id]) continue;
+    let ids = [op.id];
+    try { ids = subtreeIds(prevDoc, op.id); } catch { ids = [op.id]; }
+    for (const id of ids.slice(0, 200)) {
+      const n = prevDoc.nodes[id];
+      if (!n) continue;
+      removedInfo.delete(id);
+      removedInfo.set(id, { name: n.name || placeholderName(prevDoc, n) || '', by });
+    }
+  }
+  while (removedInfo.size > REMOVED_KEEP) removedInfo.delete(removedInfo.keys().next().value);
+}
+
+/* ----------------- круг 25, п.4: чужие правки в «Истории» ----------------- */
+/* Источник — журнал реплики (`sync.journal()`: подтверждённые транзакции, новые первыми).
+   Пока реплика его не даёт — свой журнал этого сеанса из пришедших чужих транзакций. Описание
+   словами (как у своих) считается здесь, по документу до транзакции, и живёт по tx_id. */
+const JOURNAL_KEEP = 200;
+const sessionJournal = [];            // новые первыми
+const journalHuman = new Map();       // tx_id → описание словами
+
+function noteJournal(tx) {
+  if (!tx || !tx.tx_id || !state.doc) return;
+  if (!journalHuman.has(tx.tx_id) && Array.isArray(tx.ops) && tx.ops.length) {
+    try { journalHuman.set(tx.tx_id, describeOps(tx.ops, state.doc)); } catch { /* опишем заголовком */ }
+    while (journalHuman.size > JOURNAL_KEEP) journalHuman.delete(journalHuman.keys().next().value);
+  }
+  if (sessionJournal.some((t) => t.tx_id === tx.tx_id)) return;
+  sessionJournal.unshift({
+    seq: tx.seq, tx_id: tx.tx_id, author: tx.author || '', author_kind: tx.author_kind || 'human',
+    title: tx.title || '', created_at: tx.created_at || new Date().toISOString(), client: tx.client || '',
+    command_id: tx.command_id || null, ops_count: Array.isArray(tx.ops) ? tx.ops.length : 0,
+    dropped_count: Array.isArray(tx.dropped) ? tx.dropped.length : 0,
+    mine: !!(server && server.sync && tx.client && tx.client === server.sync.clientId),
+  });
+  if (sessionJournal.length > JOURNAL_KEEP) sessionJournal.length = JOURNAL_KEEP;
+}
+
+/** Подтверждённые транзакции проекта, новые первыми: журнал реплики или свой журнал сеанса. */
+function journalList() {
+  const sync = server && server.sync;
+  if (sync && typeof sync.journal === 'function') {
+    try {
+      const got = sync.journal(JOURNAL_KEEP);
+      if (Array.isArray(got)) return got;
+    } catch { /* реплика не смогла — свой журнал */ }
+  }
+  return sessionJournal;
+}
+
+/** Имя слоя — из документа или из памяти об удалённых. */
+function layerNameOf(id) {
+  if (!id) return '';
+  const n = state.doc && state.doc.nodes ? state.doc.nodes[id] : null;
+  if (n) return n.name || placeholderName(state.doc, n) || '';
+  const r = removedInfo.get(id);
+  return r ? r.name : '';
+}
+
+/** Кто помешал отброшенной операции: `by` от сервера, `whoRemoved` реплики, своя память. */
+function dropperOf(d) {
+  if (!d) return null;
+  if (d.by && typeof d.by === 'object') return d.by;
+  const op = d.op || {};
+  const id = d.reason === 'orphan' ? (op.node && op.node.parent) || op.parent : op.id;
+  if (!id) return null;
+  const sync = server && server.sync;
+  if (sync && typeof sync.whoRemoved === 'function') {
+    try { const w = sync.whoRemoved(id); if (w) return w; } catch { /* реплика не знает — своя память */ }
+  }
+  const r = removedInfo.get(id);
+  return r ? r.by : null;
+}
+
+/** dropped словами (shell.droppedWords) с именами слоёв и тем, кто помешал. */
+function droppedMsgOf(dropped, { applied = 0, agent = false } = {}) {
+  return droppedWords({ dropped, applied, agent, nameOf: layerNameOf, whoOf: dropperOf });
+}
+
 /**
- * Сервер отбросил часть своей транзакции (§9.5): одна строка в доке. Если то же самое
- * предсказал локальный rebase при commit — человеку уже сказано, второй раз не говорим.
+ * Сервер отбросил часть своей транзакции (§9.5). Если то же самое предсказал локальный
+ * rebase при commit — человеку уже сказано, второй раз не говорим. Круг 25, п.5: конкретно —
+ * что не применилось, почему и кто помешал; «остальное применено» — только если было что;
+ * карточка не исчезает сама — её закрывает человек.
  */
 function onSyncDropped(committed) {
   if (!server || !committed || !Array.isArray(committed.dropped) || !committed.dropped.length) return;
   if (committed.author_kind === 'system') return;
+  // правка агента: о ней скажет итог команды (presentServerResult), здесь второй раз не нужно
+  if (committed.author_kind === 'agent') return;
   const entry = state.history.find((t) => t.id === committed.tx_id);
   const predicted = entry && Array.isArray(entry.predicted) ? entry.predicted : [];
   /* Сверяем номера только у записей с index: выжимка журнала (SPEC §9.8) кончается
@@ -862,10 +1008,9 @@ function onSyncDropped(committed) {
   const more = committed.dropped.reduce((n, d) => n + (d && !Number.isInteger(d.index) && Number.isFinite(d.more) ? d.more : 0), 0);
   const same = predicted.length === got.length + more && got.every((x, i) => predicted[i] === x);
   if (predicted.length && same) return;
-  showMsg('warn', droppedLine(committed.dropped), {
-    note: 'Кто-то изменил документ раньше — остальное применено.',
-    ms: 9000,
-  });
+  const w = droppedMsgOf(committed.dropped, { applied: Array.isArray(committed.ops) ? committed.ops.length : 0 });
+  addChat('agent', w.title, [], w.note);
+  showMsg('warn', w.title, { note: w.note, role: 'dropped' });
 }
 
 /**
@@ -970,7 +1115,7 @@ function askAuthorIfNeeded() {
   form.append(input, go);
   form.addEventListener('submit', (e) => {
     e.preventDefault();
-    const name = input.value.replace(/\s+/g, ' ').trim().slice(0, 40);
+    const name = cutText(cleanText(input.value), 40);
     if (!name) { input.focus(); return; }
     setAuthor(name);
     hideMsg();
@@ -981,7 +1126,7 @@ function askAuthorIfNeeded() {
 }
 
 function setAuthor(name) {
-  settings.author = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  settings.author = cutText(cleanText(name), 40);
   saveSettings();
   if (server && server.sync) server.sync.setAuthor(settings.author);
 }
@@ -994,7 +1139,7 @@ function docTitle() {
 
 async function renameProject(name) {
   if (!server || !server.project) return;
-  const next = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Без названия';
+  const next = cutText(cleanText(name), 120) || 'Без названия';
   if (next === server.project.name) return;
   const was = server.project.name;
   server.project.name = next;
@@ -1033,23 +1178,79 @@ function renderSyncStatus() {
       kind = noNet ? 'off' : 'error';
     } else kind = s.syncing ? 'busy' : 'on';
   }
-  const names = (server.others || []).map((p) => p.author || 'без имени');
-  const shown = names.slice(0, 3);
-  const more = names.length - shown.length;
-  const who = names.length ? ` · ${shown.join(', ')}${more > 0 ? ` и ещё ${more}` : ''}` : '';
+  /* Круг 25, п.6. Имена соавторов больше не дописываются в строку статуса: на 1024 px с
+     одним соавтором она съедала ряд досок до 28 px. Соавторы — аватарками справа (renderPeople). */
+  const names = (server.others || []).map((p) => cleanText(p.author) || 'Без имени');
   host.textContent = '';
   const dot = document.createElement('span');
   dot.className = 'sync-dot';
   dot.dataset.state = kind;
   const label = document.createElement('span');
   label.className = 'sync-text';
-  label.textContent = text + who;
+  label.textContent = text;
   host.append(dot, label);
   host.dataset.state = kind;
   const full = names.length ? `${text}. В сети: ${names.join(', ')}` : text;
   host.title = full;
   host.setAttribute('aria-label', `Состояние синхронизации: ${full}`);
   renderAgentStatus();
+  renderPeople();
+}
+
+/** Сколько аватарок соавторов помещается; остальные — «+N». */
+const PEOPLE_SHOWN = 3;
+
+/** Инициалы для аватарки: «Анастасия Ковалёва» → «АК», «Аня» → «А». */
+function initialsOf(name) {
+  const parts = cleanText(name).split(' ').filter(Boolean);
+  if (!parts.length) return '?';
+  const first = (w) => Array.from(w)[0] || '';
+  return (first(parts[0]) + (parts[1] ? first(parts[1]) : '')).toUpperCase();
+}
+
+/**
+ * Соавторы в шапке (круг 25, п.6 и п.8): кружки с инициалами цвета участника (тем же, что
+ * рамка его выделения), сверх трёх — «+N». У того, над чьей командой работает агент или
+ * чья команда ждёт очереди, кружок пульсирует, а подсказка говорит «Аня ждёт агента…».
+ */
+function renderPeople() {
+  const host = dom.people;
+  if (!host) return;
+  const list = server ? (server.others || []) : [];
+  host.textContent = '';
+  if (!list.length) { host.hidden = true; return; }
+  host.hidden = false;
+  const lines = [];
+  list.forEach((p, i) => {
+    const name = cleanText(p.author) || 'Без имени';
+    const doing = presenceAgentWords(p);
+    lines.push(doing || name);
+    if (i >= PEOPLE_SHOWN) return;
+    const a = document.createElement('span');
+    a.className = 'person';
+    a.style.setProperty('--who', presenceColor(p.client));
+    a.textContent = initialsOf(name);
+    a.title = doing || name;
+    if (doing) a.dataset.agent = 'on';
+    host.appendChild(a);
+  });
+  if (list.length > PEOPLE_SHOWN) {
+    const more = document.createElement('span');
+    more.className = 'person more';
+    more.textContent = `+${list.length - PEOPLE_SHOWN}`;
+    more.title = lines.slice(PEOPLE_SHOWN).join('\n');
+    host.appendChild(more);
+  }
+  const busy = list.map(presenceAgentWords).filter(Boolean);
+  if (busy.length) {
+    // словами — рядом с кружками (на узкой шапке остаётся только пульс и подсказка)
+    const note = document.createElement('span');
+    note.className = 'people-note';
+    note.textContent = busy.length === 1 ? busy[0] : `${busy[0]} и ещё ${busy.length - 1}`;
+    host.appendChild(note);
+  }
+  host.title = `В сети: ${lines.join(', ')}`;
+  host.setAttribute('aria-label', `В сети ${list.length} ${plural(list.length, 'соавтор', 'соавтора', 'соавторов')}: ${list.map((p) => cleanText(p.author) || 'Без имени').join(', ')}${busy.length ? `. ${busy.join('. ')}` : ''}`);
 }
 
 /** Цвет участника — из его id: один и тот же у всех, кто его видит. */
@@ -1089,7 +1290,8 @@ function renderPresence() {
     el.style.setProperty('--who', presenceColor(p.client));
     const tag = document.createElement('span');
     tag.className = 'presence-name';
-    tag.textContent = p.author || 'без имени';
+    // круг 25, п.8: «Аня ждёт агента…» прямо у её выделения
+    tag.textContent = presenceAgentWords(p) || cleanText(p.author) || 'Без имени';
     el.appendChild(tag);
     host.appendChild(el);
     drawn += 1;
@@ -1100,7 +1302,20 @@ function renderPresence() {
 /** Своё выделение и доска — другим участникам; реплика сама режет частоту до 10/с. */
 function sharePresence() {
   if (!server || !server.sync) return;
-  server.sync.presence({ selection: state.selection, board: activeArtboardId() });
+  /* Круг 25, п.8 (SPEC §9.9): агент работает над командой этого человека — busy, команда
+     ждёт очереди проекта — queued (номер в очереди). Другие видят «Аня ждёт агента…». */
+  const a = state.agentPresence || null;
+  const p = { selection: state.selection, board: activeArtboardId() };
+  p.busy = !!(a && a.busy);
+  p.queued = a && a.queued ? a.queued : false;
+  server.sync.presence(p);
+}
+
+/** Агент взялся за свою команду / встал в очередь / закончил — присутствие вслед. */
+function setAgentPresence(next) {
+  const was = JSON.stringify(state.agentPresence || null);
+  state.agentPresence = next || null;
+  if (JSON.stringify(state.agentPresence) !== was) sharePresence();
 }
 
 /* ------------------------------ агент на сервере ------------------------------ */
@@ -1124,8 +1339,13 @@ const serverAgent = {
   detached: null,      // {utterance, at}: поток оборвался, итог придёт по синхронизации
   current: null,       // {commandId, utterance, at}: команда, которая идёт на сервере сейчас
   stopped: new Map(),  // command_id → {utterance, at, txId}: «стоп» нажат — запись могла успеть
+  lost: new Map(),     // command_id → {utterance, lostAt}: сказано «не выполнена» (круг 25, п.3)
   probedAt: 0,
   absent: false,       // /agent/ на этом сервере нет вовсе (Document service со STATIC_DIR)
+  healthFailedAt: 0,   // когда /agent/health в последний раз не ответил (круг 25: «перезапустился»)
+  lastFailed: null,    // {utterance, variants}: команда, которой помешал сбой агента или модели
+  watch: null,         // таймер: пока висит карточка «модель/агент не отвечает», спрашиваем health
+  queuedAhead: [],     // имена из присутствия, чьи команды впереди в очереди проекта
 };
 const AGENT_ARRIVED_MAX = 6;
 /* Сколько ждём транзакцию остановленной команды: Orchestrator доводит уже начатую запись
@@ -1139,9 +1359,12 @@ function agentOnServer() {
 }
 
 function agentMode() {
+  /* Круг 25 (п.2, ревью Д5). Режим решает /agent/health: сокет Document service тут ни при
+     чём — пока Hub переподключается или реплика открывает другой проект, Orchestrator жив и
+     читает документ сам. Проект «открыт», как только выбран: переходное «открываю проект…»
+     режим не меняет и ложного «сервер агента недоступен» не даёт. */
   return decideAgentMode({
-    inProject: !!(server && server.project && server.sync && server.sync.view),
-    online: !!(server && server.status && server.status.online),
+    inProject: !!(server && server.project),
     health: serverAgent.health,
     hasProvider: !!state.provider,
   });
@@ -1150,6 +1373,15 @@ function agentMode() {
 /** Можно ли отправить команду агенту — здесь или на сервере. */
 function agentReady() {
   return !!state.provider || agentOnServer();
+}
+
+/**
+ * Принимает ли строка команду. В серверном режиме — всегда: даже когда агент недоступен,
+ * команда не пропадает молча, а получает ответ «сервер агента не отвечает» с «Повторить»
+ * (круг 25, п.1), и перед этим Orchestrator спрашивается ещё раз.
+ */
+function commandReady() {
+  return agentReady() || !!server;
 }
 
 /**
@@ -1162,19 +1394,23 @@ function probeAgent({ force = false } = {}) {
   if (serverAgent.probing) return serverAgent.probing;
   if (!force && Date.now() - serverAgent.probedAt < AGENT_PROBE_MIN_MS) return Promise.resolve(serverAgent.health);
   serverAgent.probedAt = Date.now();
+  const prev = serverAgent.health;
   serverAgent.probing = agentClient.health().then((h) => {
     serverAgent.health = h;
     if (h && !h.ok && h.status === 404) {
       serverAgent.absent = true;
       if (serverAgent.timer) { clearInterval(serverAgent.timer); serverAgent.timer = null; }
     }
+    if (h && !h.ok) serverAgent.healthFailedAt = Date.now();
     return h;
   }).catch(() => {
     serverAgent.health = { ok: false, reason: 'network' };
+    serverAgent.healthFailedAt = Date.now();
     return serverAgent.health;
   }).finally(() => {
     serverAgent.probing = null;
     agentModeChanged();
+    onAgentHealthChanged(prev, serverAgent.health);
   });
   if (!serverAgent.timer && !serverAgent.absent) {
     serverAgent.timer = setInterval(() => { if (server && !state.busy) probeAgent(); }, AGENT_PROBE_MS);
@@ -1182,24 +1418,48 @@ function probeAgent({ force = false } = {}) {
   return serverAgent.probing;
 }
 
-/** Orchestrator не принял команду из-за сбоя связи: до следующей проверки он «недоступен». */
+/**
+ * Orchestrator не принял команду из-за сбоя связи: до следующей проверки он «недоступен».
+ * Тоста нет — о сбое уже говорит карточка команды; следующая проверка health скажет, когда
+ * он вернётся.
+ */
 function markAgentDown() {
   serverAgent.health = { ok: false, reason: 'network' };
+  serverAgent.healthFailedAt = Date.now();
   agentModeChanged();
 }
 
-/** Режим агента мог смениться: строка состояния, знак агента и кнопки — заново. */
+/** Режим агента мог смениться: строка состояния, знак агента и кнопки — заново. Без слов. */
 function agentModeChanged() {
-  const mode = agentMode();
-  const was = serverAgent.mode;
-  serverAgent.mode = mode;
+  serverAgent.mode = agentMode();
   renderAgentStatus();
   if (dom['btn-run']) setRunnable(!!state.provider);
-  if (was !== mode && was === 'server' && mode !== 'server' && server) {
-    toast(mode === 'browser'
-      ? 'Сервер агента недоступен — команды выполняются в браузере.'
-      : 'Сервер агента недоступен.', 'plain', 6000);
+}
+
+/**
+ * Ответ /agent/health изменился (круг 25, п.2 и п.7). Говорим об этом только здесь — по
+ * ответу health, с именем того сервиса, что лежит, — а не по переходам реплики (смена
+ * проекта, переподключение Hub). Красная карточка «модель не отвечает» уходит сама, когда
+ * модель вернулась: висящая ошибка о том, чего уже нет, — неправда.
+ */
+function onAgentHealthChanged(prev, next) {
+  if (!server) return;
+  const words = agentHealthNotice(prev, next, { hasProvider: !!state.provider });
+  const role = dom.dockmsg && !dom.dockmsg.hidden ? dom.dockmsg.dataset.role : '';
+  const back = next && next.ok === true && next.document === 'up' && next.llm === 'up';
+  if (back && (role === 'model-down' || role === 'agent-down')) {
+    const again = serverAgent.lastFailed;
+    showMsg('plain', role === 'model-down' ? 'Модель на сервере снова отвечает' : 'Сервер агента снова на связи', {
+      note: again ? `Команда «${clip(again.utterance, 60)}» не выполнялась — её можно повторить.` : '',
+      actions: again ? [{ label: 'Повторить', primary: true, onClick: () => runUtterance(again.utterance, { variants: again.variants }) }] : [],
+      ms: again ? 0 : 6000,
+    });
+    serverAgent.lastFailed = null;
+    return;
   }
+  if (!words) return;
+  // о возвращении тостом не говорим, если и о пропаже не говорили бы: смена проекта, первый ответ
+  toast(words.text, words.kind, 6000);
 }
 
 /** «агент: сервер» / «агент: в браузере» / «агент недоступен» — рядом с синхронизацией. */
@@ -1314,11 +1574,8 @@ async function runOnServer(utterance, { variants, ctrl, runId }) {
   }
   if (out.result) { presentServerResult(out.result, utterance); return true; }
   if (out.status === 'detached') {
-    serverAgent.detached = { utterance, at: Date.now() };
     addChat('you', utterance);
-    showMsg('plain', 'Связь с агентом прервалась — ответ придёт по синхронизации', {
-      note: 'Команда выполняется на сервере: правка появится на холсте сама.', ms: 9000,
-    });
+    awaitDetached(commandId, utterance, { variants, startedAt });
     return true;
   }
   // поток кончился штатно, а итога нет: агенту нечего было менять
@@ -1330,34 +1587,164 @@ async function runOnServer(utterance, { variants, ctrl, runId }) {
   return true;
 }
 
+/* Круг 25, п.3. Поток команды оборвался. Раньше оболочка обещала «ответ придёт по
+   синхронизации» и замолкала навсегда — а если Orchestrator упал, команды больше нет
+   нигде. Теперь проверяем: спрашиваем /agent/health и ждём транзакцию команды (по
+   command_id, без него — свою транзакцию агента) не дольше DETACHED_WAIT_MS. Пришла —
+   обычный итог. Orchestrator не отвечает или ответил уже другой процесс (был недоступен,
+   стал доступен) — команды нет: говорим это, возвращаем текст в строку и даём «Повторить». */
+const DETACHED_WAIT_MS = 25000;
+const DETACHED_PROBE_MS = 2500;
+/* Orchestrator не отвечает: начатую запись мог довести Document service — ждём ещё чуть-чуть. */
+const DETACHED_DOWN_GRACE_MS = 5000;
+/* Команды, которые объявлены невыполненными: если транзакция всё-таки придёт — скажем. */
+const DETACHED_LOST_MS = 3 * 60 * 1000;
+
+function awaitDetached(commandId, utterance, { variants = false, startedAt = Date.now() } = {}) {
+  endDetached();
+  const d = {
+    commandId, utterance, variants, startedAt, at: Date.now(), timer: null,
+    downSince: 0, wasDown: false,
+  };
+  serverAgent.detached = d;
+  showMsg('plain', 'Связь с агентом прервалась — проверяю, выполнена ли команда', {
+    note: `«${clip(utterance, 60)}»: если сервер агента её доделал, правка придёт сама.`,
+    role: 'detached',
+  });
+  const step = async () => {
+    if (serverAgent.detached !== d) return;
+    const h = await probeAgent({ force: true });
+    if (serverAgent.detached !== d) return;
+    const now = Date.now();
+    const ok = !!(h && h.ok);
+    /* Сокет документа тоже лёг — значит, пропала связь (сеть, вход), а не Orchestrator: он,
+       может быть, доделывает команду, и транзакция придёт с догоном. Ждём полный срок. */
+    const netDown = !(server && server.status && server.status.online);
+    if (netDown) d.netDown = true;
+    if (!ok) {
+      d.wasDown = true;
+      if (!d.downSince) d.downSince = now;
+    }
+    if (!d.netDown) {
+      // был недоступен и снова отвечает — это уже другой процесс: о команде он не знает
+      if (ok && d.wasDown) { lostDetached(d, 'restarted'); return; }
+      if (!ok && now - d.downSince >= DETACHED_DOWN_GRACE_MS) { lostDetached(d, 'down'); return; }
+    }
+    if (now - d.at >= DETACHED_WAIT_MS) { lostDetached(d, !ok ? 'down' : 'silent'); return; }
+    d.timer = setTimeout(step, DETACHED_PROBE_MS);
+  };
+  d.timer = setTimeout(step, 400);
+}
+
+function endDetached() {
+  const d = serverAgent.detached;
+  if (d && d.timer) clearTimeout(d.timer);
+  serverAgent.detached = null;
+  return d;
+}
+
+/** Транзакция команды так и не пришла: команды нет — сказать, вернуть текст, дать повторить. */
+function lostDetached(d, why) {
+  endDetached();
+  serverAgent.lost.set(d.commandId, { ...d, lostAt: Date.now() });
+  for (const [id, x] of serverAgent.lost) if (Date.now() - x.lostAt > DETACHED_LOST_MS) serverAgent.lost.delete(id);
+  const words = detachedLostWords(d.utterance, why === 'silent' ? 'silent' : why);
+  restoreCommand(d.utterance);
+  addChat('agent', words.title);
+  serverAgent.lastFailed = { utterance: d.utterance, variants: d.variants };
+  showMsg('error', words.title, {
+    note: words.note,
+    role: why === 'down' ? 'agent-down' : 'detached-lost',
+    actions: [{ label: 'Повторить', primary: true, onClick: () => retryAfterProbe(d.utterance, { variants: d.variants }) }],
+  });
+  if (why === 'down') watchAgentHealth();
+}
+
 /** События потока §10.3 — в ту же ленту стадий, что у brain. */
 function onServerAgentEvent(ev, runId, variants) {
   if (!ev || runId !== state.runSeq) return;
   if (ev.type === 'queued') {
-    onAgentStage({ stage: 'srv:queued', label: queuedLabel(ev.data && ev.data.position) }, 0, runId);
+    const pos = ev.data && Number.isFinite(ev.data.position) ? ev.data.position : 0;
+    setAgentPresence({ queued: pos > 0 ? pos : true });
+    // чья команда впереди — по присутствию: у тех, над чьими командами агент сейчас работает
+    const ahead = (server ? server.others : []).filter((p) => p && (p.busy === true || (typeof p.busy === 'number' && p.busy > 0)));
+    onAgentStage({ stage: 'srv:queued', label: queuedLabel(pos, ahead.map((p) => p.author || 'Без имени')) }, 0, runId);
   } else if (ev.type === 'stage') {
+    setAgentPresence({ busy: true });
     onAgentStage(serverStageRec(ev.data), variants ? 3 : 0, runId);
   } else if (ev.type === 'retry') {
     onAgentStage({ stage: 'srv:retry', label: retryLabel(ev.data && ev.data.wait_ms) }, 0, runId);
   }
 }
 
+/**
+ * Сервер агента не отвечает, а своей модели у браузера нет (круг 25, п.1): команда не
+ * выполнена и не потеряна — текст остаётся в строке, «Повторить» спрашивает Orchestrator
+ * заново. «Выполнить в браузере» здесь нет: выполнять нечем.
+ */
+function agentDownMsg(utterance, { variants = false } = {}) {
+  restoreCommand(utterance);
+  serverAgent.lastFailed = { utterance, variants };
+  showMsg('error', AGENT_DOWN_WORDS.title, {
+    note: AGENT_DOWN_WORDS.note,
+    role: 'agent-down',
+    actions: [{ label: 'Повторить', primary: true, onClick: () => retryAfterProbe(utterance, { variants }) }],
+  });
+  watchAgentHealth();
+}
+
+/** «Повторить» после сбоя агента: строка уже держит текст — её и отправляем. */
+function retryAfterProbe(utterance, { variants = false } = {}) {
+  if (dom.command.value.trim() === String(utterance || '').trim()) dom.command.value = '';
+  runUtterance(utterance, { variants });
+}
+
+/**
+ * Пока на экране «модель/агент не отвечает», спрашиваем /agent/health чаще обычного — раз
+ * в 10 с: карточка должна уйти, как только связь вернулась (п.7), а не через полминуты.
+ */
+function watchAgentHealth() {
+  if (serverAgent.watch) return;
+  serverAgent.watch = setInterval(() => {
+    const role = dom.dockmsg && !dom.dockmsg.hidden ? dom.dockmsg.dataset.role : '';
+    if (!server || (role !== 'model-down' && role !== 'agent-down')) {
+      clearInterval(serverAgent.watch);
+      serverAgent.watch = null;
+      return;
+    }
+    probeAgent({ force: true });
+  }, AGENT_PROBE_MIN_MS);
+}
+
 /** Отказ сервера агента — тем же доком, что отказ модели в браузере. */
 function showServerAgentError(e, utterance, { variants = false } = {}) {
   const words = agentErrorWords(e);
   const actions = [];
+  const modelDown = isModelError(e) && e.code === 'llm_down';
+  const agentDown = AGENT.isUpstreamDown(e) || e.code === 'network';
   if (e.retryable !== false) {
-    actions.push({ label: 'Повторить', primary: true, onClick: () => runUtterance(utterance, { variants }) });
+    /* Предохранитель модели (Retry-After): повтор раньше срока заведомо получит тот же
+       отказ — кнопка выключена и считает секунды до срока (п.7). */
+    actions.push({
+      label: 'Повторить', primary: true, waitMs: words.waitMs,
+      onClick: () => retryAfterProbe(utterance, { variants }),
+      // срок вышел — спросим, вернулась ли модель: карточка уйдёт сама, если да
+      onReady: () => { if (server) probeAgent({ force: true }); },
+    });
   }
-  // модель серверу не отвечает, а у браузера есть своя — выполнить можно здесь
-  if (state.provider && (isModelError(e) || e.code === 'document_down' || AGENT.isUpstreamDown(e))) {
+  // модель серверу не отвечает, а у браузера есть своя (её включил человек) — выполнить можно здесь
+  if (state.provider && (isModelError(e) || e.code === 'document_down' || agentDown)) {
     actions.push({ label: 'Выполнить в браузере', onClick: () => runUtterance(utterance, { variants, local: true }) });
   }
+  const role = modelDown ? 'model-down' : agentDown ? 'agent-down' : '';
+  if (role) serverAgent.lastFailed = { utterance, variants };
   showMsg('error', words.title, {
     note: words.note,
     details: techDetails(null, e),
     actions,
+    role,
   });
+  if (role) watchAgentHealth();
 }
 
 /**
@@ -1415,6 +1802,17 @@ function presentServerResult(raw, utterance, { variant = null } = {}) {
     }
     return;
   }
+  /* Круг 25, п.5: агент записал транзакцию, но ни одна операция не легла — это не «Готово»:
+     говорим, что не применилось и кто помешал, отменять нечего. */
+  if (!r.applied && r.droppedCount) {
+    const w = droppedMsgOf(r.dropped, { applied: 0, agent: true });
+    if (!variant) addChat('you', utterance);
+    addChat('agent', w.title, [], w.note);
+    rememberPair(utterance, w.title);
+    restoreCommand(utterance);
+    showMsg('warn', w.title, { note: w.note, role: 'dropped', actions: [retryAction(utterance)] });
+    return;
+  }
   const headline = variant ? `Принят вариант «${variant.label || 'без названия'}»` : (r.summary || 'Готово');
   const aside = variant ? r.summary : '';
   const partly = typeof res.cannot === 'string' ? res.cannot.trim() : '';
@@ -1427,7 +1825,8 @@ function presentServerResult(raw, utterance, { variant = null } = {}) {
   // часть просьбы невыполнима — говорим вместе с тем, что сделано (как у brain, п.19)
   if (partly) addChat('agent', partly);
   const issue = issueLine(r.warnings);
-  const dropped = r.dropped.length ? droppedLine(r.dropped) : '';
+  // круг 25, п.5: что из правки агента не легло и кто помешал — конкретно
+  const dropped = r.dropped.length ? droppedMsgOf(r.dropped, { applied: r.applied, agent: true }).title : '';
   if (issue) addChat('agent', issue);
   showMsg(issue ? 'warn' : 'result', headline, {
     issue,
@@ -1462,10 +1861,26 @@ function onAgentTx(tx, prevDoc, diff, mine) {
   }
   const stopped = stoppedCommandFor(tx, mine);
   if (stopped) { settleStoppedTx(stopped, tx, prevDoc, diff); return; }
-  if (mine && serverAgent.detached) {
+  // команда, о которой уже сказано «не выполнена», всё-таки записана: говорим правду
+  const late = tx.command_id ? serverAgent.lost.get(tx.command_id) : null;
+  if (late) {
+    serverAgent.lost.delete(tx.command_id);
+    const human = tx.title || 'Готово';
+    if (dom.command && dom.command.value.trim() === String(late.utterance || '').trim()) dom.command.value = '';
+    addChat('agent', `Агент всё-таки выполнил «${clip(late.utterance, 60)}»: ${human}`);
+    rememberPair(late.utterance, human);
+    showMsg('result', `Агент всё-таки выполнил команду: ${human}`, {
+      note: `«${clip(late.utterance, 60)}» — повторять не нужно.`,
+      actions: [{ label: 'Отменить', onClick: () => undoTx(tx.tx_id) }],
+      undoTx: tx.tx_id,
+    });
+    settleAgentTx(tx, prevDoc, diff, { label: late.utterance, human, select: [] });
+    return;
+  }
+  const det = serverAgent.detached;
+  if (det && (tx.command_id ? tx.command_id === det.commandId : mine)) {
     // поток оборвался, итог пришёл синхронизацией: о нём и говорим
-    const d = serverAgent.detached;
-    serverAgent.detached = null;
+    const d = endDetached();
     const human = tx.title || 'Готово';
     addChat('agent', human);
     rememberPair(d.utterance, human);
@@ -1679,7 +2094,7 @@ function fillProjects(body, list, { loading } = {}) {
       const finish = async (save) => {
         if (done) return;
         done = true;
-        const name = input.value.replace(/\s+/g, ' ').trim().slice(0, 120);
+        const name = cutText(cleanText(input.value), 120);
         if (save && name && name !== p.name) {
           try {
             const got = await apiJson(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'PATCH', body: { name } });
@@ -1771,7 +2186,8 @@ function updateAgentDot() {
   const kind = onServer ? `сервер${model}` : (AGENT_KIND_WORDS[state.providerKind] || 'модель');
   const st = !agentReady() ? 'off' : (state.busy ? 'busy' : 'ready');
   const words = {
-    off: 'Агент не подключён — откройте настройки',
+    // круг 25: в серверном режиме агент — сервер; «откройте настройки» там не помогут
+    off: server ? 'Сервер агента не отвечает — правки руками сохраняются' : 'Агент не подключён — откройте настройки',
     ready: `Агент подключён: ${kind}`,
     busy: `Агент работает: ${kind}`,
   }[st];
@@ -1782,7 +2198,7 @@ function updateAgentDot() {
 
 function setRunnable(ok) {
   // круг 23: агент на сервере — команды принимаются и без своей модели у браузера
-  ok = ok || agentOnServer();
+  ok = ok || commandReady();
   dom['btn-run'].disabled = !ok && !state.busy;
   paintRunButton();
   dom['btn-variants'].disabled = !ok || state.busy;
@@ -1908,7 +2324,10 @@ function serverCommit(opsList, label, who = 'human', extra = {}) {
        сказал onSyncError — его строку не перебиваем общей «N правок не применились». */
     const refused = r.dropped.length > 0 && r.dropped.every((d) => d && (d.limit === 'tx_bytes' || d.limit === 'ops_per_tx'));
     // отмене и повтору о причине скажет serverStep — своими словами
-    if (!refused && !extra.noRender && kind !== 'system' && !extra.undoOf && !extra.redoOf) showMsg('warn', line, { ms: 9000 });
+    if (!refused && !extra.noRender && kind !== 'system' && !extra.undoOf && !extra.redoOf) {
+      const w = droppedMsgOf(r.dropped, { applied: 0 });
+      showMsg('warn', w.title, { note: w.note, role: 'dropped' });
+    }
     return { ok: false, error: { code: refused ? 'too_large' : 'not_found', message: line }, dropped: r.dropped };
   }
   const inverse = invertOps(prevDoc, r.applied);
@@ -1936,7 +2355,10 @@ function serverCommit(opsList, label, who = 'human', extra = {}) {
     renderAll({ diff, prevGeo });
     if (who === 'human' && !service) announceIssues(freshIssues(hadIssues, state.issues));
     if (who === 'human' && !extra.quiet && !service) announceHuman(tx, diff);
-    if (r.dropped.length && kind !== 'system') showMsg('warn', droppedLine(r.dropped), { ms: 9000 });
+    if (r.dropped.length && kind !== 'system') {
+      const w = droppedMsgOf(r.dropped, { applied: r.applied.length });
+      showMsg('warn', w.title, { note: w.note, role: 'dropped' });
+    }
   }
   scheduleSave();
   refreshSheet();
@@ -5755,8 +6177,9 @@ function enqueueRun(run, { silent = false } = {}) {
 
 function clip(s, n) {
   const t = String(s || '').trim();
-  if (t.length <= n) return t;
-  const cut = `${t.slice(0, n - 1)}…`;
+  // круг 25: по кодовым точкам — эмодзи в имени не режется пополам
+  if (Array.from(t).length <= n) return t;
+  const cut = cutText(t, n, { ellipsis: true });
   // обрезка могла съесть закрывающую кавычку — дальше по строке всё съезжало в лапки
   const open = (cut.match(/«/g) || []).length;
   const close = (cut.match(/»/g) || []).length;
@@ -5947,7 +6370,17 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
   }
 
   // круг 23: на сервере агент свой — модель браузера ему не нужна; local — «выполнить в браузере»
-  const onServer = !local && agentOnServer();
+  let onServer = !local && agentOnServer();
+  /* Круг 25, п.1. Агент «недоступен» по прошлой проверке — спросим Orchestrator ещё раз
+     прямо сейчас: он мог вернуться, а ждать следующей проверки (30 с) человеку незачем. */
+  if (server && !local && !onServer && !state.provider && !serverAgent.absent) {
+    await probeAgent({ force: true });
+    onServer = agentOnServer();
+  }
+  if (server && !state.provider && !onServer) {
+    agentDownMsg(utterance, { variants });
+    return;
+  }
   if (!state.provider && !onServer) {
     // раньше оболочка просто открывала настройки, и команда пропадала без слов (п.11)
     showMsg('warn', 'Агент не подключён — команда не отправлена', {
@@ -6746,7 +7179,7 @@ function paintRunButton() {
   run.title = stopping
     ? 'Остановить агента'
     : (state.busy ? 'Агент занят — спрошу, заменить команду или поставить в очередь' : 'Выполнить команду');
-  run.disabled = state.busy ? false : !agentReady();
+  run.disabled = state.busy ? false : !commandReady();
   /* Двух «Стоп» на экране быть не должно: кнопка в блоке хода работы нужна ровно
      тогда, когда главная занята отправкой набранного (п.6). Круг 18, п.2: блок
      переехал наверх справа, но правило то же — и в голосовой сессии, где командной
@@ -6758,11 +7191,13 @@ function paintRunButton() {
 
 function setBusy(on) {
   state.busy = on;
+  // круг 25, п.8: занятость агента — и в присутствии (в браузере и на сервере одинаково)
+  setAgentPresence(on ? { busy: true } : null);
   dom.app.dataset.busy = on ? 'on' : 'off';
   updateAgentDot();
   if (!on) runHoldFired = false;
   paintRunButton();
-  dom['btn-variants'].disabled = on || !agentReady();
+  dom['btn-variants'].disabled = on || !commandReady();
   renderHints();
 }
 
@@ -6788,6 +7223,9 @@ const ERROR_WAYOUT = {
   sampling_disabled: 'Можно работать через локальную модель: настройки → LM Studio.',
 };
 
+/* Служебное в тексте ошибки: такую строку человеку не показываем (круг 25, п.7). */
+const NOISE_RE = /failed to fetch|networkerror|load failed|https?:\/\/|\b[1-5]\d\d\b|\bjson\b|econn|etimedout|enotfound|\b(?:tx|cmd|c|f|t|lib)_[a-z0-9]{6,}\b/i;
+
 function humanError(e) {
   if (!e) return 'Что-то пошло не так';
   if (typeof e === 'string') return e;
@@ -6795,10 +7233,19 @@ function humanError(e) {
   const kind = typeof e.kind === 'string' ? e.kind : '';
   if (kind === 'cancelled' || code === 'cancelled' || e.name === 'AbortError') return 'Команда остановлена';
 
-  // собственное сообщение ошибки точнее любого общего: оно и есть первая строка
-  const own = String(e.message || '').trim();
+  // собственное сообщение ошибки точнее любого общего: оно и есть первая строка —
+  // если в нём нет служебного: «Failed to fetch», адреса, коды HTTP человеку не говорят
+  // ничего (круг 25, п.7); такое уходит в «Подробности», а здесь — свои слова
+  const raw = String(e.message || '').trim();
+  const noisy = NOISE_RE.test(raw);
+  const own = noisy
+    ? (/fetch|network|load failed|econn|enotfound|etimedout/i.test(raw) || e instanceof TypeError
+      ? (server ? 'Нет связи с сервером' : 'Нет связи с моделью')
+      : Number.isFinite(e.status) && e.status >= 500 ? 'Сервер сейчас не отвечает как надо' : '')
+    : raw;
   let hint = '';
-  if (!agentReady()) {
+  // круг 25: в серверном режиме ошибки чаще про сервер, а не про модель — этот совет там не к месту
+  if (!agentReady() && !server) {
     hint = 'Агент не подключён: откройте настройки и укажите модель.';
   } else if (state.providerKind === 'lmstudio' && (kind === 'network' || code === 'upstream_error')) {
     hint = `Проверьте, что LM Studio запущена на ${settings.lmstudio.baseUrl}.`;
@@ -6950,6 +7397,13 @@ let msgUndoTx = null;
    отклик отмены/возврата. */
 let msgTransient = false;
 let msgTimer = null;
+/* Круг 25, п.7: кнопки с обратным отсчётом (предохранитель модели) — их таймеры живут,
+   пока живёт сообщение. */
+let msgActTimers = [];
+function clearMsgActTimers() {
+  for (const t of msgActTimers) clearInterval(t);
+  msgActTimers = [];
+}
 
 /**
  * Сообщение агента — там же, где человек печатал: под командной строкой, её шириной.
@@ -6972,6 +7426,7 @@ function sameGist(a, b) {
 function showMsg(kind, text, opts = {}) {
   if (!dom.dockmsg) { toast(text, kind === 'error' ? 'error' : 'plain'); return; }
   clearTimeout(msgTimer);
+  clearMsgActTimers();
   /* Приветствие уступает место обычному сообщению. Его высоту камера, в отличие от
      прочих сообщений, СЧИТАЕТ (круг 13: оно часть первого экрана, и его закрытие —
      повод вписать заново). Но исчезает оно и вот так — попутно, от постороннего
@@ -7074,6 +7529,28 @@ function showMsg(kind, text, opts = {}) {
     b.textContent = a.label;
     b.addEventListener('click', a.onClick);
     acts.appendChild(b);
+    /* Повтор раньше срока заведомо получит тот же отказ: кнопка выключена и считает
+       секунды до срока, потом включается сама (п.7). */
+    if (Number.isFinite(a.waitMs) && a.waitMs > 0) {
+      const until = Date.now() + a.waitMs;
+      const tick = () => {
+        const left = Math.ceil((until - Date.now()) / 1000);
+        if (left <= 0) {
+          b.disabled = false;
+          b.textContent = a.label;
+          b.removeAttribute('aria-disabled');
+          return true;
+        }
+        b.disabled = true;
+        b.setAttribute('aria-disabled', 'true');
+        b.textContent = `${a.label} через ${left} с`;
+        return false;
+      };
+      if (!tick()) {
+        const t = setInterval(() => { if (tick()) { clearInterval(t); if (typeof a.onReady === 'function') a.onReady(); } }, 250);
+        msgActTimers.push(t);
+      }
+    }
   }
 
   syncMsgMore();
@@ -7120,6 +7597,7 @@ function syncMsgMore() {
 
 function hideMsg() {
   clearTimeout(msgTimer);
+  clearMsgActTimers();
   msgUndoTx = null;
   msgTransient = false;
   if (dom.dockmsg) {
@@ -8416,11 +8894,11 @@ function bindUi() {
   // имя документа — строка, а не разметка: вставляем ровно текст (п.15)
   const plainInsert = (e, text) => {
     e.preventDefault();
-    const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const t = cutText(cleanText(text), 120);
     if (!t) return;
     let done = false;
     try { done = document.execCommand('insertText', false, t); } catch { done = false; }
-    if (!done) dom.docname.textContent = `${dom.docname.textContent}${t}`.slice(0, 120);
+    if (!done) dom.docname.textContent = cutText(`${dom.docname.textContent}${t}`, 120);
     if (!done) resetDocNameScroll();
   };
   dom.docname.addEventListener('paste', (e) => plainInsert(e, e.clipboardData && e.clipboardData.getData('text/plain')));
@@ -8698,15 +9176,83 @@ function openHistory(tab) {
   });
 }
 
+/**
+ * Чужие правки для «Истории» (круг 25, п.4): кто, что, когда. Свои (`mine`) здесь не нужны —
+ * они в стеке отмены со своими кнопками; служебные (миграция формата) человеку не говорят ничего.
+ */
+function othersEdits() {
+  if (!server) return [];
+  const own = new Set(state.history.map((t) => t.id));
+  for (const t of state.history) if (t.lastTx) own.add(t.lastTx);
+  return journalList().filter((t) => t && t.tx_id && !t.mine && !own.has(t.tx_id)
+    && t.author_kind !== 'system' && !(t.client && server.sync && t.client === server.sync.clientId));
+}
+
+/** Строка чужой правки: время, что (заголовок или описание), кто. Отменять чужое нельзя. */
+function otherEditItem(t) {
+  const item = document.createElement('div');
+  item.className = 'hitem';
+  const agent = t.author_kind === 'agent';
+  item.dataset.who = agent ? 'agent' : 'other';
+  const head = document.createElement('div');
+  head.className = 'hhead';
+  const when = document.createElement('span');
+  when.className = 'when';
+  const at = Date.parse(t.created_at || '');
+  when.textContent = Number.isFinite(at) ? new Date(at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+  if (Number.isFinite(at)) when.title = whenWords(t.created_at);
+  const what = document.createElement('span');
+  what.className = 'what';
+  const described = journalHuman.get(t.tx_id) || '';
+  const title = cleanText(t.title);
+  const text = human(described || title || (t.ops_count
+    ? `${t.ops_count} ${plural(t.ops_count, 'изменение', 'изменения', 'изменений')}`
+    : 'Правка без изменений'));
+  what.textContent = text;
+  what.title = title && title !== text ? `${text} · ${title}` : text;
+  const who = document.createElement('span');
+  who.className = 'who';
+  // правка агента по чужой команде: чья команда — по вкладке (client) из присутствия
+  const by = agent && t.client ? (server.others || []).find((p) => p && p.client === t.client) : null;
+  const byName = by ? cutText(cleanText(by.author), 16, { ellipsis: true }) : '';
+  who.textContent = agent ? (byName ? `Агент · ${byName}` : 'Агент') : (cutText(cleanText(t.author), 24, { ellipsis: true }) || 'Без имени');
+  who.title = agent
+    ? (byName ? `Правка агента по команде: ${cleanText(by.author)}` : 'Правка агента по команде участника')
+    : `Правку сделал(а) ${cleanText(t.author) || 'участник без имени'}`;
+  head.append(when, what, who);
+  item.appendChild(head);
+  const dropped = Number(t.dropped_count) || 0;
+  if (dropped) {
+    const foot = document.createElement('div');
+    foot.className = 'hfoot';
+    const tag = document.createElement('span');
+    tag.className = 'tagpill';
+    tag.textContent = `${dropped} ${plural(dropped, 'правка не применилась', 'правки не применились', 'правок не применились')}`;
+    foot.appendChild(tag);
+    item.appendChild(foot);
+  }
+  return item;
+}
+
 function fillEdits(body) {
-  if (!state.history.length) {
+  const others = othersEdits();
+  if (!state.history.length && !others.length) {
     const p = document.createElement('div');
     p.className = 'empty-note';
     p.textContent = 'Пока ничего не менялось.';
     body.appendChild(p);
     return;
   }
+  /* Свои и чужие — одной лентой по времени, новые сверху. Свои — со своими кнопками
+     (вернуться, вернуть), чужие — только кто, что и когда. */
+  const timeOf = (t) => { const v = Date.parse(t.created_at || ''); return Number.isFinite(v) ? v : 0; };
+  let k = 0;
+  const pending = others.slice().sort((a, b) => timeOf(b) - timeOf(a));
+  const flushOthersAfter = (at) => {
+    while (k < pending.length && timeOf(pending[k]) >= at) body.appendChild(otherEditItem(pending[k++]));
+  };
   [...state.history].reverse().forEach((tx, idx) => {
+    flushOthersAfter(Number(tx.at) || 0);
     const i = state.history.length - 1 - idx;
     const undone = i >= state.cursor;
     const current = i + 1 === state.cursor;
@@ -8772,6 +9318,7 @@ function fillEdits(body) {
     item.append(head, foot);
     body.appendChild(item);
   });
+  flushOthersAfter(-Infinity);
 }
 
 function fillChat(body) {
@@ -9282,8 +9829,13 @@ function fillSettings(body) {
   status.textContent = state.providerKind === 'claude'
     ? 'Агент работает через Claude на этой странице.'
     : state.providerKind === 'lmstudio'
-      ? `Агент работает через LM Studio: ${settings.lmstudio.baseUrl}`
-      : 'Агент не подключён.';
+      ? (server
+        ? `Команды агента выполняет сервер; если он не отвечает — LM Studio этого компьютера: ${settings.lmstudio.baseUrl}`
+        : `Агент работает через LM Studio: ${settings.lmstudio.baseUrl}`)
+      // круг 25: в серверном режиме своя модель не нужна — агент живёт на сервере
+      : server
+        ? 'Команды агента выполняет сервер. Своя модель здесь нужна, только чтобы работать, когда сервер агента не отвечает.'
+        : 'Агент не подключён.';
   body.appendChild(status);
 
   const connect = document.createElement('button');
@@ -9305,7 +9857,10 @@ function fillSettings(body) {
       state.provider = probe;
       state.providerKind = 'lmstudio';
       settings.lmstudio.enabled = true;
+      // круг 25: модель браузера включил человек сам — в серверном режиме только такая и работает
+      settings.lmstudio.chosen = true;
       saveSettings();
+      agentModeChanged();
       setRunnable(true);
       toast('LM Studio отвечает — агент работает через неё.', 'plain', 5000);
     } else {
@@ -9333,6 +9888,22 @@ function fillSettings(body) {
       openSettings();
     });
     lmRows.push(back);
+  }
+  // круг 25: в серверном режиме модель браузера — запасной путь; выключить её можно здесь же
+  if (server && state.providerKind === 'lmstudio') {
+    const off = document.createElement('button');
+    off.className = 'btn subtle wide';
+    off.textContent = 'Не использовать LM Studio';
+    off.addEventListener('click', () => {
+      state.provider = null;
+      state.providerKind = null;
+      settings.lmstudio.enabled = false;
+      settings.lmstudio.chosen = false;
+      saveSettings();
+      agentModeChanged();
+      openSettings();
+    });
+    lmRows.push(off);
   }
   body.appendChild(group('Локальная модель (LM Studio)', lmRows));
 
@@ -9367,6 +9938,14 @@ function fillSettings(body) {
     : '«Одна команда»: микрофон выключается сам — после отправки и после десяти секунд тишины. '
       + '«Слушать постоянно»: слышит всё, что говорят рядом, пока его не выключить.';
   body.appendChild(group('Голос', [always, voiceNote]));
+  /* Круг 25, п.6: на телефоне кнопка темы уступает место имени проекта в шапке — выбор
+     темы есть и здесь (и голосом: «тёмная тема интерфейса»). */
+  body.appendChild(group('Оформление', [row('Тема', segField(
+    ['auto', 'light', 'dark'],
+    THEME_WORDS[settings.theme] ? settings.theme : 'auto',
+    (v) => { setTheme(v); openSettings(); },
+    ['Как в системе', 'Светлая', 'Тёмная'],
+  ))]));
 }
 
 /**
@@ -10096,7 +10675,7 @@ function sanitizePairs(list) {
   return list
     .filter((p) => p && typeof p.utterance === 'string' && p.utterance.trim())
     .slice(-5)
-    .map((p) => ({ utterance: String(p.utterance).slice(0, 500), summary: String(p.summary || '').slice(0, 500) }));
+    .map((p) => ({ utterance: cutText(p.utterance, 500), summary: cutText(p.summary || '', 500) }));
 }
 
 /* -------------------------------- настройки ---------------------------------- */

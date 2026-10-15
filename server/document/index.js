@@ -14,11 +14,22 @@
  *   PRESENCE_TTL_MS  без вестей от клиента столько — он ушёл (45000; клиент шлёт сердцебиение раз в 15 с)
  *   STATIC_DIR       каталог клиента (index.html, app.js, styles.css, src/*.js) — для прогонов без nginx
  *
- * Останов по SIGTERM/SIGINT: сокеты закрываются кодом 1001, новых транзакций
- * нет, снимки в полёте дописываются, пул базы закрывается.
+ * Порт открывается СРАЗУ, до миграций базы (SPEC §9.11): пока они идут,
+ * `GET /api/health` и все прочие маршруты отвечают 503 `migrating` (`detail:
+ * {phase, migration, progress}`, `Retry-After`), сокеты — тем же 503 на upgrade.
+ * Так проверка здоровья (compose, балансировщик) видит живой процесс, а не отказ
+ * соединения, и знает, что он делает. Миграции упали — понятная ошибка и выход с
+ * кодом 1; повторный старт продолжит с упавшей миграции.
+ *
+ * Останов по SIGTERM/SIGINT (обработчики ставятся до миграций): сокеты закрываются
+ * кодом 1001, новых транзакций нет, снимки в полёте дописываются, пул базы
+ * закрывается; во время миграций — обрывается соединение миграций (база откатывает
+ * текущую пачку, сделанное раньше сохранено).
  *
  * Экспорт `start(opts)` — тот же сервис программно (тесты поднимают его на
- * PORT=0 с любым адаптером; два `start` над одним хранилищем — два экземпляра).
+ * PORT=0 с любым адаптером; два `start` над одним хранилищем — два экземпляра);
+ * промис — когда сервис готов. `launch(opts)` — то же, но промис — когда открыт
+ * порт: `{port, url, ready, close, state}`, `ready` — промис готового сервиса.
  */
 
 import http from 'node:http';
@@ -32,6 +43,7 @@ import { createReader, createSemaphore } from './dslr.js';
 import { createSequencer } from './dslts.js';
 import { createHub } from './hub.js';
 import { createRequestHandler } from './http.js';
+import { migrating, setStorageLog } from './errors.js';
 import { SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, PAGE_BYTES, VERIFY_MS, PRESENCE_TTL_MS } from './limits.js';
 
 /**
@@ -62,6 +74,24 @@ import { SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AF
  * }} [opts] всё необязательно — умолчания из окружения и limits.js
  */
 export async function start(opts = {}) {
+  const l = await launch(opts);
+  try {
+    return await l.ready;
+  } catch (e) {
+    await l.close().catch(() => {});
+    throw e;
+  }
+}
+
+/** Повторить через столько секунд, пока идут миграции. */
+const MIGRATING_RETRY_S = 5;
+
+/**
+ * Открыть порт сразу, хранилище (миграции) — следом. Опции — как у start().
+ * @returns {Promise<{server: http.Server, port: number, url: string, storage: object, instanceId: string,
+ *   ready: Promise<object>, close: Function, readonly state: 'starting'|'ready'|'failed'|'closed'}>}
+ */
+export async function launch(opts = {}) {
   const env = process.env;
   const log = opts.log || console;
   const num = (v, d) => (v !== undefined ? v : d);
@@ -83,29 +113,34 @@ export async function start(opts = {}) {
       storage = createMemoryStorage();
     }
   }
-  await storage.init();
+  setStorageLog(log);
+  let state = 'starting';
 
-  const heavy = createSemaphore({
-    max: num(opts.heavyConcurrency, HEAVY_CONCURRENCY),
-    queue: num(opts.heavyQueue, HEAVY_QUEUE),
-    retryAfter: num(opts.retryAfter, RETRY_AFTER_S)
-  });
-  const dslr = createReader({ storage, heavy, pageBytes: num(opts.pageBytes, PAGE_BYTES) });
-  const dslts = createSequencer({
-    storage, instanceId, snapshotEvery, snapshotKeep, idleMs: opts.idleMs,
-    verifyMs: num(opts.verifyMs, VERIFY_MS),
-    mergeBudgetMs: opts.mergeBudgetMs, maxDocNodes: opts.maxDocNodes, maxDocBytes: opts.maxDocBytes, log
-  });
-  const server = http.createServer(createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log }));
-  // шина присутствия между экземплярами (SPEC §9.9): эфемерный канал хранилища
-  const bus = typeof storage.publish === 'function' && typeof storage.onNotify === 'function'
-    ? { publish: (msg) => storage.publish(msg), subscribe: (fn) => storage.onNotify(fn) }
-    : null;
-  const hub = createHub({
-    server, dslr, dslts, bus, instanceId, pingInterval: opts.pingInterval,
-    presenceTtlMs: num(opts.presenceTtlMs, Number(env.PRESENCE_TTL_MS || PRESENCE_TTL_MS)),
-    maxBuffered: opts.maxBuffered, frameCache: opts.frameCache, log
-  });
+  // До готовности — 503 migrating на всё (и на /api/health), после — маршруты http.js.
+  const detail = () => {
+    const m = storage.migrationState;
+    return m ? { phase: m.phase, migration: m.migration, progress: m.progress } : { phase: 'init', migration: null, progress: null };
+  };
+  let handler = null;
+  const notReady = (req, res) => {
+    const err = migrating(detail(), MIGRATING_RETRY_S);
+    const body = JSON.stringify(err.body());
+    res.writeHead(503, {
+      'content-type': 'application/json; charset=utf-8',
+      'retry-after': String(MIGRATING_RETRY_S),
+      'cache-control': 'no-store',
+      'content-length': Buffer.byteLength(body)
+    });
+    res.end(req.method === 'HEAD' ? undefined : body);
+  };
+  const server = http.createServer((req, res) => (handler ? handler(req, res) : notReady(req, res)));
+  // сокет до готовности: тот же 503 ответом на upgrade (Hub ещё не создан)
+  const earlyUpgrade = (req, socket) => {
+    const body = JSON.stringify(migrating(detail(), MIGRATING_RETRY_S).body());
+    socket.on('error', () => {});
+    socket.end(`HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json; charset=utf-8\r\nRetry-After: ${MIGRATING_RETRY_S}\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+  };
+  server.on('upgrade', earlyUpgrade);
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -115,39 +150,99 @@ export async function start(opts = {}) {
     });
   });
   const actualPort = server.address().port;
-  log.info(`[document] слушаю http://${host}:${actualPort} · движок ${ENGINE_VERSION} · хранилище ${storage.kind} · экземпляр ${instanceId}${staticDir ? ` · статика ${path.resolve(staticDir)}` : ''}`);
+  const url = `http://127.0.0.1:${actualPort}`;
+  // «слушаю …» — только когда сервис готов (по этой строке его ждут скрипты и тесты)
+  log.info(`[document] порт http://${host}:${actualPort} открыт · хранилище ${storage.kind} готовится (миграции; до готовности — 503 migrating) · экземпляр ${instanceId}`);
 
+  let svc = null;
+  let parts = null;
   let closing = null;
+
+  const ready = (async () => {
+    const t0 = Date.now();
+    await storage.init();
+    if (closing) throw new Error('остановлен до готовности');
+    const heavy = createSemaphore({
+      max: num(opts.heavyConcurrency, HEAVY_CONCURRENCY),
+      queue: num(opts.heavyQueue, HEAVY_QUEUE),
+      retryAfter: num(opts.retryAfter, RETRY_AFTER_S)
+    });
+    const dslr = createReader({ storage, heavy, pageBytes: num(opts.pageBytes, PAGE_BYTES) });
+    const dslts = createSequencer({
+      storage, instanceId, snapshotEvery, snapshotKeep, idleMs: opts.idleMs,
+      verifyMs: num(opts.verifyMs, VERIFY_MS),
+      mergeBudgetMs: opts.mergeBudgetMs, maxDocNodes: opts.maxDocNodes, maxDocBytes: opts.maxDocBytes, log
+    });
+    // шина присутствия между экземплярами (SPEC §9.9): эфемерный канал хранилища
+    const bus = typeof storage.publish === 'function' && typeof storage.onNotify === 'function'
+      ? { publish: (msg) => storage.publish(msg), subscribe: (fn) => storage.onNotify(fn) }
+      : null;
+    server.off('upgrade', earlyUpgrade);
+    const hub = createHub({
+      server, dslr, dslts, bus, instanceId, pingInterval: opts.pingInterval,
+      presenceTtlMs: num(opts.presenceTtlMs, Number(env.PRESENCE_TTL_MS || PRESENCE_TTL_MS)),
+      maxBuffered: opts.maxBuffered, frameCache: opts.frameCache, log
+    });
+    parts = { dslr, dslts, hub };
+    handler = createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log });
+    state = 'ready';
+    log.info(`[document] слушаю http://${host}:${actualPort} · готов за ${Date.now() - t0} мс · движок ${ENGINE_VERSION} · хранилище ${storage.kind} · экземпляр ${instanceId}${staticDir ? ` · статика ${path.resolve(staticDir)}` : ''}`);
+    svc = { server, port: actualPort, url, storage, dslr, dslts, hub, instanceId, close };
+    return svc;
+  })();
+  ready.catch(() => { if (state === 'starting') state = 'failed'; });
+
   /** Остановить сервис; хранилище закрывается, только если `closeStorage` (по умолчанию — да). */
-  const close = ({ closeStorage = true } = {}) => {
+  function close({ closeStorage = true } = {}) {
     if (closing) return closing;
     closing = (async () => {
-      await hub.close();
+      if (parts) await parts.hub.close();
+      else server.off('upgrade', earlyUpgrade);
+      // во время миграций хранилище закрывается первым: оно обрывает соединение миграций
+      if (!parts && closeStorage) await storage.close().catch(() => {});
+      await Promise.race([ready.catch(() => {}), new Promise((r) => setTimeout(r, 5000).unref())]);
       await new Promise((resolve) => server.close(() => resolve()));
-      await dslts.close();
-      if (closeStorage) await storage.close();
+      if (parts) {
+        await parts.dslts.close();
+        if (closeStorage) await storage.close();
+      }
+      state = 'closed';
     })();
     return closing;
-  };
+  }
 
-  return { server, port: actualPort, url: `http://127.0.0.1:${actualPort}`, storage, dslr, dslts, hub, instanceId, close };
+  return {
+    server, port: actualPort, url, storage, instanceId, ready, close,
+    get state() { return state; }
+  };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  start().then((svc) => {
+  launch().then((l) => {
+    let stopping = false;
     const stop = (signal) => {
-      console.info(`[document] ${signal} — останавливаюсь`);
-      // на второй сигнал — сразу; на зависшее закрытие — через 10 с
+      if (stopping) process.exit(1);   // второй сигнал — сразу
+      stopping = true;
+      console.info(`[document] ${signal} — останавливаюсь${l.state === 'starting' ? ' (посреди миграций: сделанное сохранено)' : ''}`);
+      // на зависшее закрытие — через 10 с
       const hard = setTimeout(() => process.exit(1), 10000);
       hard.unref();
-      svc.close().then(() => process.exit(0), (e) => {
+      l.close().then(() => process.exit(0), (e) => {
         console.error('[document] не удалось остановиться чисто:', e);
         process.exit(1);
       });
     };
-    process.once('SIGTERM', () => stop('SIGTERM'));
-    process.once('SIGINT', () => stop('SIGINT'));
+    // обработчики — до миграций: SIGTERM посреди долгой миграции не убивает процесс жёстко
+    process.on('SIGTERM', () => stop('SIGTERM'));
+    process.on('SIGINT', () => stop('SIGINT'));
+    l.ready.catch((e) => {
+      if (stopping) return;
+      console.error('[document] не запустился:', e && e.message ? e.message : e);
+      const hard = setTimeout(() => process.exit(1), 5000);
+      hard.unref();
+      l.close().finally(() => process.exit(1));
+    });
   }).catch((e) => {
     console.error('[document] не запустился:', e && e.stack ? e.stack : e);
     process.exit(1);

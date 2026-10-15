@@ -253,6 +253,39 @@ button, input, textarea { font: inherit; color: inherit; }
    разделитель: «агент: сервер» — сплошная точка цвета агента, «в браузере» — приглушённая,
    «недоступен» — красная. Текст не краснеет: агент без сервера — не авария, документ живёт. */
 .agent-status { padding-left: 10px; border-left: 1px solid var(--line); }
+/* Круг 25, п.6. Статусы уступают место раньше досок: текст обрезается многоточием, точка
+   остаётся всегда. Полные слова — в title. */
+.proj-wrap { display: contents; }
+.brand .sync-status { flex: 0 1 auto; }
+.brand .sync-status .sync-text { min-width: 0; }
+
+/* Круг 25, п.6 и п.8. Соавторы — кружки с инициалами цвета их рамки выделения, внахлёст,
+   сверх трёх — «+N». Имена жили в строке статуса и на 1024 px с одним соавтором сжимали
+   ряд досок до 28 px. Пульс у кружка — агент работает над командой этого человека. */
+.people { display: inline-flex; align-items: center; flex: none; margin-right: 6px; min-width: 0; }
+.person {
+  width: 24px; height: 24px; border-radius: 999px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 600; letter-spacing: .02em; line-height: 1;
+  /* цвет участника притемнён: белые инициалы на жёлто-зелёном не читались */
+  color: #fff; background: color-mix(in srgb, var(--who, var(--accent)) 72%, #000);
+  box-shadow: 0 0 0 2px var(--panel);
+  margin-left: -6px; cursor: default; user-select: none;
+}
+.person:first-child { margin-left: 0; }
+.person.more {
+  background: var(--panel-2); color: var(--muted);
+  box-shadow: 0 0 0 2px var(--panel), inset 0 0 0 1px var(--line-strong);
+}
+.person[data-agent="on"] { animation: person-pulse 1.4s ease-in-out infinite; }
+@keyframes person-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--panel), 0 0 0 2px color-mix(in srgb, var(--agent) 0%, transparent); }
+  50% { box-shadow: 0 0 0 2px var(--panel), 0 0 0 5px color-mix(in srgb, var(--agent) 45%, transparent); }
+}
+.people-note {
+  margin-left: 8px; font-size: var(--t-xs); color: var(--muted); white-space: nowrap;
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* Чужие выделения: рамка цвета участника и его имя над ней. Слой над сценой, клики
    пропускает — это подпись, а не орган управления. */
@@ -289,7 +322,8 @@ button, input, textarea { font: inherit; color: inherit; }
 .hfoot .tagpill.wait { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 
 .topbar-center {
-  flex: 1; display: flex; gap: 4px; justify-content: flex-start; min-width: 0;
+  /* круг 25, п.6: ряд досок не сжимается до одной кнопки «+» — минимум под вкладку и «+» */
+  flex: 1; display: flex; gap: 4px; justify-content: flex-start; min-width: 132px;
   overflow-x: auto; overflow-y: hidden; scrollbar-width: none; padding: 0 2px;
 }
 .topbar-center::-webkit-scrollbar { display: none; }
@@ -1392,6 +1426,18 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   .app[data-work="on"] .toasts { top: 196px; }
 }
 
+/* Круг 25, п.6. До 1280 px подписи «История», «Экспорт», «Шкалы» уступают место
+   состояниям и ряду досок: значки остаются, слова — в title. Раньше уступали состояния
+   («в сет…», «а…») и доски (28 px — одна кнопка «+»). */
+@media (max-width: 1280px) {
+  .topbar { gap: 10px; }
+  .topbar-right .btn-label { display: none; }
+  .topbar-right .btn.with-icon { width: 32px; padding: 6px 0; justify-content: center; }
+  .topbar-right { gap: 2px; }
+  .people-note { display: none; }
+  .docname { max-width: 180px; }
+}
+
 /* узкий экран: рельс и инспектор — накладки поверх холста, холст занимает всю ширину */
 @media (max-width: 900px) {
   /* Колонок нет вовсе — обнуляем сами переменные, а не шаблон: по ним же считают своё
@@ -1463,6 +1509,30 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 @media (max-width: 560px) {
   .wordmark { display: none; }
   .docname { max-width: 120px; }
+  /* Круг 25, п.6. На 390 px точки состояний наезжали на выбор доски, а имя проекта
+     сжималось до буквы. Теперь точки — значком на углу кнопки «Проекты» (слова — в title),
+     соавторы — в подсказке состояния и у их выделений на холсте, тема — в настройках. */
+  .topbar { gap: 6px; padding: 0 6px; }
+  .brand { gap: 4px; }
+  .brand-sep { display: none; }
+  .docname { flex: 0 1 auto; min-width: 40px; }
+  .proj-wrap { display: inline-flex; position: relative; flex: none; }
+  .proj-wrap .sync-status {
+    position: absolute; top: 1px; right: -1px; padding: 0; border: 0; gap: 0;
+    pointer-events: auto;
+  }
+  .proj-wrap .agent-status { top: auto; bottom: 1px; }
+  .proj-wrap .sync-dot { width: 7px; height: 7px; box-shadow: 0 0 0 1.5px var(--panel); }
+  .topbar-center { min-width: 124px; flex: 1 1 0; }
+  .tab.pick { min-width: 0; }
+  #people { display: none !important; }
+  #btn-theme { display: none; }
+}
+@media (max-width: 420px) {
+  /* число досок — в списке по нажатию; имени активной доски место нужнее */
+  .tab.pick .pick-count { display: none; }
+  .tab.pick { gap: 4px; padding: 4px 6px 4px 9px; }
+  .docname { max-width: 84px; }
   /* Круг 20, п.4. Пятая кнопка в шапке телефона сжимала имя документа до одной буквы
      (41 → 12 px). На телефоне редактор шкал открывается ссылкой из инспектора
      («Шкала отступов…»), а кнопка шапки уступает место имени. */

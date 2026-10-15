@@ -22,9 +22,9 @@ export const MAX_LIMIT = LIMIT_MAX;
 
 /**
  * Семафор тяжёлых чтений: `max` одновременно, `queue` ждут, остальным — 503 busy.
- * @param {{max?: number, queue?: number, retryAfter?: number}} [o]
+ * @param {{max?: number, queue?: number, retryAfter?: number, message?: string}} [o]
  */
-export function createSemaphore({ max = HEAVY_CONCURRENCY, queue = HEAVY_QUEUE, retryAfter = RETRY_AFTER_S } = {}) {
+export function createSemaphore({ max = HEAVY_CONCURRENCY, queue = HEAVY_QUEUE, retryAfter = RETRY_AFTER_S, message = 'сервер занят чтением больших проектов — повторите чуть позже' } = {}) {
   let active = 0;
   const waiting = [];
   const release = () => {
@@ -41,7 +41,7 @@ export function createSemaphore({ max = HEAVY_CONCURRENCY, queue = HEAVY_QUEUE, 
     async run(fn) {
       if (active >= max) {
         if (waiting.length >= queue) {
-          throw new DocError(503, 'busy', 'сервер занят чтением больших проектов — повторите чуть позже', { retryable: true, retryAfter });
+          throw new DocError(503, 'busy', message, { retryable: true, retryAfter });
         }
         await new Promise((resolve) => waiting.push(resolve));
       } else {
@@ -80,7 +80,12 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
     });
   }
 
-  const snapOut = (s) => ({ seq: s.seq, doc: s.doc, engine: s.engine, chain: s.chain || '' });
+  // надгробия снимка (§9.10) — клиенту для прогноза слияния; пустые не отдаём
+  const snapOut = (s) => {
+    const out = { seq: s.seq, doc: s.doc, engine: s.engine, chain: s.chain || '' };
+    if (s.tombstones && typeof s.tombstones === 'object' && Object.keys(s.tombstones).length) out.tombstones = s.tombstones;
+    return out;
+  };
 
   return {
     heavy,

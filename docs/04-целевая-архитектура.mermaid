@@ -11,6 +11,7 @@ flowchart LR
     DSLV["DSLV<br/>DSL Validator — движок, копия, суд"]
     DSLTS["DSLTS<br/>DSL Transaction — секвенсор: сливает, нумерует, пишет"]
     HUB["Hub<br/>рассылка по WS · присутствие"]
+    TR["Трассы агента<br/>/api/internal/traces — только изнутри сети"]
     DB[("PostgreSQL<br/>журнал операций · снимки · проекты и библиотеки")]
 
     CLIENT -->|"0 · открыть проект"| DSLR
@@ -19,10 +20,12 @@ flowchart LR
     NGINX -->|"2"| CLIENT
     CLIENT -->|"3 · команда агенту"| ORCH
     ORCH -->|"4"| JEV
-    JEV -->|"5 · да / нет"| ORCH
+    JEV -->|"5 · да → событие shell, клиент исполняет команду оболочки сам / нет"| ORCH
     ORCH -->|"4a"| DSLR
     DSLR -->|"5a · стейт + номер"| ORCH
     ORCH -->|"6"| DUIL
+    DUIL -->|"6a · проекты-библиотеки — через клиент DSLR, по HTTP"| DSLR
+    DSLR -->|"7a · их стейт"| DUIL
     DUIL -->|"7 · словарь компонентов"| ORCH
     ORCH -->|"8 · промпт"| LLM
     LLM -->|"9 · патч"| ORCH
@@ -35,8 +38,9 @@ flowchart LR
     DSLTS -->|"12b · каждая транзакция"| HUB
     HUB -->|"всем подписчикам проекта, автору тоже"| CLIENT
     DB -->|"снимок + хвост"| DSLR
-    DB -->|"срез библиотек"| DUIL
-    ORCH -->|"7b · стадии по ходу работы"| CLIENT
+    ORCH -->|"7b · стадии по ходу работы; команды оболочки — событием shell"| CLIENT
+    ORCH -->|"T · трасса команды (POST, X-Internal-Token)"| TR
+    TR -->|"таблица traces"| DB
 
     classDef human fill:#1b6ef3,stroke:#1b6ef3,color:#fff
     classDef infra fill:#7c6cf5,stroke:#7c6cf5,color:#fff
@@ -50,9 +54,10 @@ flowchart LR
     class NGINX infra
     class ORCH orch
     class DUIL,DSLV svc
-    class DSLR,DSLTS,HUB docsvc
+    class DSLR,DSLTS,HUB,TR docsvc
     class LLM model
     class JEV jev
     class DB store
 
-    %% Два процесса: Document service = DSLR + DSLTS + Hub (светлые), Orchestrator = JEV + DUIL + DSLV + LLM-клиент.
+    %% Два процесса: Document service = DSLR + DSLTS + Hub + приём трасс (светлые), Orchestrator = JEV + DUIL + DSLV + LLM-клиент.
+    %% К базе ходит только Document service: DUIL читает библиотеки через DSLR по HTTP (круг 25 — схема приведена к коду).

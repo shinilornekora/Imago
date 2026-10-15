@@ -194,7 +194,10 @@ export function commandStream(base, body) {
 }
 
 export async function createProject(document, body = { name: 'Проба' }) {
-  const r = await call(`http://127.0.0.1:${document.port}`, 'POST', '/api/projects', body);
+  // круг 25: без `doc` сервис заводит пустой документ, демо — только по `demo: true`;
+  // тесты агента строятся на демо-документе (доски «Маршрут дня», «Шапка»…)
+  const payload = body && body.doc === undefined && body.demo === undefined ? { ...body, demo: true } : body;
+  const r = await call(`http://127.0.0.1:${document.port}`, 'POST', '/api/projects', payload);
   if (r.status !== 201) throw new Error('проект не создан: ' + r.text);
   return r.body;
 }

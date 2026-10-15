@@ -31,10 +31,20 @@ mkdirSync(join(dist, 'src'), { recursive: true });
 
 /* server: false — соло-сборка без сервера: оболочка не ищет Document service и Orchestrator
    (статический http.server на /api/health отвечает 404 — это была бы ошибка в консоли) */
-const defaultsFor = (serverMode) => `<script>
-  window.IMAGO_DEFAULTS = { server: ${serverMode}, lmstudio: { enabled: true, baseUrl: 'http://localhost:1234/v1', model: 'local-model' } };
+/* Круг 25, п.1. Своя модель у браузера по умолчанию — только в соло-сборке: за ней нет
+   сервера, и LM Studio на этой же машине — единственный агент. В серверной (dist/web) агент —
+   Orchestrator; LM Studio на localhost:1234 у человека за другим компьютером нет, и при
+   упавшем Orchestrator команда уходила туда и падала «Failed to fetch» под статусом
+   «агент: в браузере». Там модель браузера включает только сам человек (настройки → «Агент»). */
+const defaultsFor = (serverMode) => (serverMode
+  ? `<script>
+  window.IMAGO_DEFAULTS = { server: true, lmstudio: { enabled: false, baseUrl: 'http://localhost:1234/v1', model: 'local-model' } };
 </script>
-`;
+`
+  : `<script>
+  window.IMAGO_DEFAULTS = { server: false, lmstudio: { enabled: true, baseUrl: 'http://localhost:1234/v1', model: 'local-model' } };
+</script>
+`);
 /** Модули клиента: всё, что app.js импортирует из src/ (test/deploy.test.mjs сверяет список). */
 const SRC_MODULES = ['core.js', 'brain.js', 'sync.js', 'agent.js', 'shell.js'];
 writeFileSync(join(dist, 'index.html'), fullDoc({ top: defaultsFor(false) }), 'utf8');

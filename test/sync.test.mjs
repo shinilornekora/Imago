@@ -4,6 +4,7 @@ import * as core from '../src/core.js';
 import { createSync, memoryStorage, droppedLine, statusLine, LIMITS } from '../src/sync.js';
 
 const { createDoc, applyOps, ops, hashDoc, rebase, collectTombstones, ENGINE_VERSION } = core;
+import { cleanText } from '../src/sync.js';
 
 /* ------------------------------ фальшивый сервер ------------------------------ */
 
@@ -20,6 +21,7 @@ class FakeServer {
     this.snapshot = { seq: 0, doc, engine: ENGINE_VERSION }; this.floor = 0; this.received = [];
     this.failNext = null; this.busy = 0; this.httpCalls = []; this.presenceIn = []; this.mutePresence = false;
     this.legacyAck = false;   // как Hub круга 24 с прежним клиентом: вместо ack — error duplicate
+    this.failWhere = null;    // (tx) => тело ошибки | null — на каждую попытку
   }
   commit(tx) {
     this.received.push(tx.tx_id);
@@ -92,6 +94,13 @@ class FakeServer {
           if (server.failNext) {
             const f = server.failNext; server.failNext = null; server.received.push(msg.tx.tx_id);
             this.deliver({ type: 'error', error: true, tx_id: msg.tx.tx_id, ...f });
+            return;
+          }
+          // «отравленная» транзакция: каждый раз одна и та же повторяемая ошибка
+          const poison = server.failWhere && server.failWhere(msg.tx);
+          if (poison) {
+            server.received.push(msg.tx.tx_id);
+            this.deliver({ type: 'error', error: true, tx_id: msg.tx.tx_id, ...poison });
             return;
           }
           if (server.hold) { server.held.push(msg.tx); return; }
@@ -700,4 +709,155 @@ test('sync: чужое присутствие без вестей дольше T
   await until(() => !a.sync.others.some((p) => p.client === 'B'), 'B протух у A');
   assert.equal(a.log.presence[a.log.presence.length - 1].some((p) => p.client === 'B'), false, 'onPresence сказал об уходе');
   await a.sync.close(); await b.sync.close();
+});
+
+/* ------------------------------ круг 25 (SPEC §9.10) ------------------------------ */
+
+test('sync: одна и та же повторяемая ошибка 8 раз подряд при живом сервере — правка снята в «не сохранено», очередь идёт дальше', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  server.failWhere = (tx) => (tx.ops[0].value === 'Отравленная' ? { code: 'unavailable', message: 'хранилище недоступно', retryable: true } : null);
+  const bad = a.sync.commit([ops.set('r1', 'name', 'Отравленная')], { title: 'Переименовать' });
+  const good = a.sync.commit([ops.set('ab', 'name', 'Доска дошла')]);
+  await until(() => a.sync.status.pending === 0, 'очередь прошла');
+  assert.equal(server.received.filter((id) => id === bad.tx.tx_id).length, 9, 'восемь попыток, проверка «сервер жив», последняя');
+  assert.equal(server.doc.nodes.ab.name, 'Доска дошла', 'следующая правка записана');
+  assert.equal(server.doc.nodes.r1.name, 'Плашка');
+  assert.equal(a.sync.view.nodes.r1.name, 'Плашка', 'вид — без снятой правки');
+  const err = a.log.errors.find((e) => e.code === 'not_saved');
+  assert.ok(err, JSON.stringify(a.log.errors));
+  assert.equal(err.tx.tx_id, bad.tx.tx_id);
+  assert.equal(err.cause, 'unavailable');
+  assert.match(err.message, /не сохранена.*«Переименовать»|«Переименовать».*не сохранена/);
+  assert.deepEqual(a.sync.unsaved.map((u) => [u.tx_id, u.cause]), [[bad.tx.tx_id, 'unavailable']]);
+  // человек просит повторить — сервер уже в порядке
+  server.failWhere = null;
+  assert.equal(a.sync.retryUnsaved(bad.tx.tx_id), true);
+  await until(() => a.sync.status.pending === 0 && server.doc.nodes.r1.name === 'Отравленная', 'повтор записан');
+  assert.equal(a.sync.unsaved.length, 0);
+  assert.ok(good.tx);
+  await a.sync.close();
+});
+
+test('sync: повторяемые ошибки при лежащем сервере (чтение тоже 503) — правка не снимается, дойдёт, когда поднимется', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  server.failWhere = () => ({ code: 'unavailable', message: 'хранилище недоступно', retryable: true });
+  server.busy = 1e9;   // и HTTP-проверка «жив ли» отвечает 503
+  const r = a.sync.commit([ops.set('r1', 'name', 'Дождётся')]);
+  await until(() => server.received.filter((id) => id === r.tx.tx_id).length >= 9, 'повторяет и после восьмой');
+  assert.equal(a.sync.pending.length, 1, 'правка в очереди');
+  assert.equal(a.log.errors.filter((e) => e.code === 'not_saved').length, 0);
+  server.failWhere = null;
+  server.busy = 0;
+  a.sync.reconnect();
+  for (let i = 0; i < 400 && a.sync.status.pending; i++) await tick(10);
+  assert.equal(a.sync.status.pending, 0);
+  assert.equal(server.doc.nodes.r1.name, 'Дождётся');
+  await a.sync.close();
+});
+
+test('sync: busy не считается отравой — сколько бы раз ни было', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  let n = 0;
+  server.failWhere = () => (n++ < 12 ? { code: 'busy', message: 'занято', retryable: true, retry_after: 0.001 } : null);
+  a.sync.commit([ops.set('r1', 'name', 'После занятости')]);
+  for (let i = 0; i < 400 && a.sync.status.pending; i++) await tick(10);
+  assert.equal(a.sync.status.pending, 0);
+  assert.equal(server.doc.nodes.r1.name, 'После занятости');
+  assert.equal(a.log.errors.length, 0);
+  await a.sync.close();
+});
+
+test('sync: журнал в памяти, whoRemoved и onDropped с by/label — кто помешал своей правке', async () => {
+  const server = new FakeServer(seedDoc());
+  const journals = [];
+  const a = client(server, 'A', { opts: { onJournal: (list) => journals.push(list) } });
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  server.hold = true;
+  a.sync.commit([ops.set('r1', 'name', 'Поздно'), ops.set('ab', 'name', 'Доска A')], { title: 'Переименовать плашку', command_id: 'cmd_7' });
+  await tick();
+  server.commit({ tx_id: 'tx_boris', base_seq: 0, ops: [ops.remove('r1')], engine: ENGINE_VERSION, client: 'Z', author: 'Борис', author_kind: 'human', title: 'Удалить плашку', created_at: new Date().toISOString() });
+  server.release();
+  await until(() => a.log.dropped.length === 1, 'dropped пришёл');
+  const ev = a.log.dropped[0];
+  assert.equal(ev.label, 'Переименовать плашку');
+  assert.equal(ev.dropped[0].reason, 'removed');
+  assert.deepEqual(ev.dropped[0].by, { author: 'Борис', author_kind: 'human', seq: 1, title: 'Удалить плашку' });
+  assert.equal(ev.dropped[0].label, 'Переименовать плашку');
+  assert.deepEqual(ev.by, ev.dropped[0].by);
+  assert.deepEqual(a.sync.whoRemoved('r1'), { author: 'Борис', author_kind: 'human', seq: 1, title: 'Удалить плашку' });
+  assert.equal(a.sync.whoRemoved('ab'), null);
+  const j = a.sync.journal();
+  assert.deepEqual(j.map((x) => [x.seq, x.tx_id === 'tx_boris', x.mine, x.ops_count, x.dropped_count]), [[2, false, true, 1, 1], [1, true, false, 1, 0]]);
+  assert.equal(j[0].command_id, 'cmd_7', 'command_id своей правки — в журнале');
+  for (const k of ['seq', 'tx_id', 'author', 'author_kind', 'title', 'created_at', 'client', 'command_id', 'ops_count', 'dropped_count', 'mine']) assert.ok(k in j[0], k);
+  assert.equal(a.sync.journal(1).length, 1);
+  await tick();
+  assert.ok(journals.length >= 1 && journals[journals.length - 1].length === 2, 'onJournal — при изменении');
+  await a.sync.close();
+});
+
+test('sync: журнал ограничен 500 записями; снимок другой эпохи его очищает', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  for (let i = 0; i < 520; i++) server.commit({ tx_id: 'tx_z' + i, base_seq: i, ops: [ops.set('ab', 'name', 'n' + i)], engine: ENGINE_VERSION, client: 'Z' });
+  await until(() => a.sync.confirmed.seq === 520, 'догнал');
+  assert.equal(a.sync.journal(1000).length, 500);
+  assert.equal(a.sync.journal(1000)[0].seq, 520);
+  await a.sync.close();
+});
+
+test('sync: транзакция агента по команде этой вкладки (client = свой, author_kind agent) — в mine', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  server.commit({ tx_id: 'tx_agent', base_seq: 0, ops: [ops.set('r1', 'name', 'От агента')], engine: ENGINE_VERSION, client: 'A', author: 'Агент', author_kind: 'agent', created_at: new Date().toISOString() });
+  server.commit({ tx_id: 'tx_other_agent', base_seq: 1, ops: [ops.set('ab', 'name', 'Чужой агент')], engine: ENGINE_VERSION, client: 'Z', author_kind: 'agent' });
+  await until(() => a.sync.confirmed.seq === 2);
+  assert.deepEqual(a.sync.mine.map((m) => [m.tx_id, m.author_kind]), [['tx_agent', 'agent']]);
+  await a.sync.close();
+});
+
+test('sync: строки правки — без U+0000 и одиночных половин, как их запишет сервер', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  const r = a.sync.commit([ops.set('r1', 'name', 'а\u0000б\ud800')], { title: 'т\u0000' });
+  assert.equal(r.tx.ops[0].value, 'аб\ufffd');
+  assert.equal(r.tx.title, 'т');
+  assert.equal(a.sync.view.nodes.r1.name, 'аб\ufffd');
+  assert.equal(cleanText('ок 😀'), 'ок 😀');
+  await until(() => a.sync.status.pending === 0);
+  await a.sync.close();
+});
+
+test('sync: надгробия снимка (gone) — прогноз слияния знает удалённые до снимка узлы', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  await a.sync.open();
+  await until(() => a.sync.status.online);
+  a.sync.offline();
+  server.commit({ tx_id: 'tx_rm', base_seq: 0, ops: [ops.remove('r1')], engine: ENGINE_VERSION, client: 'Z' });
+  server.forget();
+  server.snapshot = { ...server.snapshot, tombstones: { r1: 'ab' } };
+  a.sync.reconnect();
+  await until(() => a.log.gone.length === 1 && a.sync.status.online, 'снимок пришёл');
+  // create ребёнка удалённого узла: с надгробием — переприкрепление к ab (как на сервере), без — orphan
+  const r = a.sync.commit([ops.create({ type: 'rect', id: 'kid', name: 'Ребёнок', parent: 'r1', radius: 0, fill: '#000000', size: { w: { mode: 'fixed', value: 5 }, h: { mode: 'fixed', value: 5 } } })]);
+  assert.deepEqual(r.dropped, []);
+  assert.equal(r.applied[0].node.parent, 'ab');
+  await a.sync.close();
 });

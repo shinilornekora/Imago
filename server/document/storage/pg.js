@@ -6,11 +6,14 @@
  *   createProject({name, kind, doc, engine}) → Project   (снимок при seq 0 — сразу, эпоха — новая)
  *   listProjects() → Project[] · getProject(id) → Project|null · renameProject(id, name)
  *     Project = {id, name, kind, head_seq, head_chain, epoch, epoch_cause, engine, created_at, updated_at}
- *   latestSnapshot(projectId) → {seq, doc, engine, chain, created_at}|null   (только снимок, чей chain совпадает с журналом)
+ *   latestSnapshot(projectId) → {seq, doc, engine, chain, tombstones, created_at}|null   (только снимок, чей chain совпадает с журналом)
  *   txsAfter(projectId, seq, limit, {maxBytes}?) → Committed[]   (первая — всегда, дальше — пока влезает в maxBytes)
  *   chainAt(projectId, seq) → string|null   (seq 0 → '')
  *   commitTx(projectId, tx, {expectSeq, expectChain, origin}) → {status:'committed'|'existing'|'stale'|'missing', …}
- *   writeSnapshot(projectId, seq, doc, engine, chain) → boolean · pruneSnapshots(projectId, keep)
+ *   writeSnapshot(projectId, seq, doc, engine, chain, tombstones?) → boolean · pruneSnapshots(projectId, keep)
+ *   saveSnapshot(projectId, {seq, doc, engine, chain, tombstones}) → boolean   (то же, объектом)
+ *     снимок несёт `tombstones` — объект id → родитель (у снимков до круга 25 — `{}`)
+ *   Committed несёт `command_id`, если транзакция его прислала (SPEC §9.11)
  *   findTx(projectId, txId) → Committed|null
  *   knownEpoch(projectId, epoch) → boolean · bumpEpoch(projectId, fromEpoch, cause, origin) → {status:'bumped'|'moved', epoch, cause}
  *   addTrace({projectId, commandId, body}) → {id, created_at}|null · listTraces(projectId, limit) → Trace[]
@@ -33,9 +36,20 @@
  * больше — не отправляется (Hub режет выделение заранее).
  *
  * Дедлайны: обычные запросы — statement_timeout и query_timeout = DB_TIMEOUT_MS;
- * миграции — отдельным соединением без дедлайна (`SET LOCAL statement_timeout = 0`),
+ * соединение, на котором истёк query_timeout или которое оборвалось, в пул не
+ * возвращается (release(err)) — ROLLBACK на нём встал бы в очередь за зависшим запросом.
+ * Полуоткрытое соединение (сеть пропала, ответ не дошёл): база сама обрывает сеанс,
+ * простаивающий в транзакции дольше `idle_in_transaction_session_timeout` (15 с), —
+ * замок строки проекта не висит вечно; TCP keepalive у пула, слушателя и миграций;
+ * слушатель ещё и пингуется (SELECT 1 раз в 10 с) — молча умерший LISTEN переподключается.
+ *
+ * Миграции — отдельным соединением без дедлайна (`SET LOCAL statement_timeout = 0`),
  * под advisory-lock, каждая в своей транзакции; `.mjs`-миграции сами режут работу
- * на пачки-транзакции.
+ * на пачки-транзакции и сообщают прогресс (`migrationState` — для 503 migrating).
+ * DDL ждёт замок не дольше `lock_timeout` (1 с) и повторяется: ALTER, вставший в
+ * очередь за долгой транзакцией, иначе держал бы за собой все запросы к таблице.
+ * Схема годится для смешанных версий (SPEC §9.11): старый экземпляр, пишущий без
+ * chain, работает и во время, и после миграций.
  *
  * Все запросы параметризованы; JSON в jsonb-колонки уходит строкой через
  * JSON.stringify — node-pg превращает массив-параметр в литерал массива
@@ -46,7 +60,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import pg from 'pg';
-import { toCommitted, txColumns, newEpoch } from './committed.js';
+import { toCommitted, txColumns, newEpoch, tombstonesObject } from './committed.js';
 import { DB_TIMEOUT_MS, PAGE_BYTES } from '../limits.js';
 
 export const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
@@ -73,7 +87,36 @@ const types = {
   }
 };
 
-const OP_COLUMNS = 'project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, engine, chain, created_at';
+const OP_COLUMNS = 'project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, command_id, engine, chain, created_at';
+
+/** Сеанс, простаивающий в транзакции дольше этого, база обрывает сама (замок строки проекта отпускается). */
+export const IDLE_IN_TX_MS = 15000;
+/** Первая проба TCP keepalive простаивающего соединения. */
+const KEEPALIVE_MS = 10000;
+/** Пинг слушателя LISTEN: раз в столько, ответ — не дольше LISTEN_PING_TIMEOUT_MS. */
+const LISTEN_PING_MS = 10000;
+const LISTEN_PING_TIMEOUT_MS = 5000;
+/** DDL миграции ждёт замок не дольше стольких мс и повторяется (до MIGRATION_LOCK_TRIES раз). */
+const MIGRATION_LOCK_TIMEOUT_MS = 1000;
+const MIGRATION_LOCK_TRIES = 60;
+
+/**
+ * Ошибка, после которой соединение больше не годится: истёк query_timeout (запрос
+ * ещё идёт на сервере, следующий встанет за ним), соединение оборвано.
+ */
+function fatalForConnection(e) {
+  const msg = e && e.message ? e.message : '';
+  return msg === 'Query read timeout' || /Connection terminated|connection is closed|Client was closed|ECONNRESET|EPIPE|ETIMEDOUT|not queryable/i.test(msg)
+    || (e && (e.code === '57P01' || e.code === '57P02' || e.code === '57P03' || e.code === '08006' || e.code === '08003' || e.code === '25P03'));
+}
+
+/** Оборвать соединение сразу, не дожидаясь ответа сервера (полуоткрытое не ответит). */
+function destroyClient(client) {
+  try {
+    if (client.connection && client.connection.stream) client.connection.stream.destroy();
+  } catch (_) { /* уже закрыто */ }
+  client.end().catch(() => {});
+}
 
 const isoOf = (v) => (v instanceof Date ? v.toISOString() : v);
 
@@ -101,6 +144,9 @@ function projectOf(row) {
  *   listen?: boolean,              // слушать уведомления (по умолчанию — да, если есть connectionString)
  *   applicationName?: string,      // application_name сеансов (слушатель — с суффиксом «:listen»); видно в pg_stat_activity
  *   listenRetryMs?: number,        // первая пауза переподключения слушателя (200 мс; дальше — вдвое, до 10 с)
+ *   listenPingMs?: number,         // пинг слушателя (10 с; 0 — без пинга)
+ *   idleInTxMs?: number,           // idle_in_transaction_session_timeout (15 с)
+ *   migrationLockTimeoutMs?: number, // lock_timeout DDL миграций (1 с; дальше — повтор)
  *   log?: {warn:Function, info:Function}
  * }} opts
  */
@@ -112,9 +158,16 @@ export function createPgStorage(opts = {}) {
   if (!CHANNEL_RE.test(channel)) throw new Error('channel: имя канала NOTIFY — [a-z_][a-z0-9_]*');
   const presenceChannel = channel + '_presence';
   const listenRetryMs = opts.listenRetryMs > 0 ? opts.listenRetryMs : 200;
+  const idleInTxMs = opts.idleInTxMs !== undefined ? opts.idleInTxMs : IDLE_IN_TX_MS;
+  const listenPingMs = opts.listenPingMs !== undefined ? opts.listenPingMs : LISTEN_PING_MS;
+  const migrationLockTimeoutMs = opts.migrationLockTimeoutMs > 0 ? opts.migrationLockTimeoutMs : MIGRATION_LOCK_TIMEOUT_MS;
   const base = {
     connectionString: opts.connectionString,
     types,
+    // полуоткрытое соединение: база обрывает сеанс, застрявший в транзакции, сама
+    ...(idleInTxMs > 0 ? { idle_in_transaction_session_timeout: idleInTxMs } : {}),
+    keepAlive: true,
+    keepAliveInitialDelayMillis: KEEPALIVE_MS,
     ...(opts.options ? { options: opts.options } : {}),
     ...(opts.applicationName ? { application_name: String(opts.applicationName).slice(0, 56) } : {}),
     // сервер без базы должен отвечать 503, а не висеть: ждём подключения не дольше 5 с
@@ -189,6 +242,10 @@ export function createPgStorage(opts = {}) {
       retry();
     });
     client.on('end', () => { if (!closing) retry(); });
+    // молча умершее соединение (полуоткрытое: ни error, ни end) — пинг; нет ответа — обрыв
+    let pingTimer = null;
+    const stopPing = () => { if (pingTimer) clearInterval(pingTimer); pingTimer = null; };
+    client.once('end', stopPing);
     try {
       await client.connect();
       await client.query(`LISTEN ${channel}`);
@@ -204,6 +261,28 @@ export function createPgStorage(opts = {}) {
       return;
     }
     if (retried) return;   // соединение умерло, пока мы подписывались: переподключение уже назначено
+    if (listenPingMs > 0) {
+      let pinging = false;
+      pingTimer = setInterval(() => {
+        if (pinging || listener !== client) return;
+        pinging = true;
+        let timer;
+        Promise.race([
+          client.query('SELECT 1'),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('пинг слушателя без ответа')), LISTEN_PING_TIMEOUT_MS); })
+        ]).catch((e) => {
+          if (closing || listener !== client) return;
+          log.warn('[document/pg] слушатель NOTIFY не отвечает, переподключаюсь:', e && e.message);
+          stopPing();
+          destroyClient(client);
+          retry();
+        }).finally(() => {
+          clearTimeout(timer);
+          pinging = false;
+        });
+      }, listenPingMs);
+      if (pingTimer.unref) pingTimer.unref();
+    }
     listener = client;
     listenerPid = client.processID || null;
     listenAttempt = 0;
@@ -230,22 +309,37 @@ export function createPgStorage(opts = {}) {
 
   /* -------------------------------- миграции -------------------------------- */
 
+  /** Что сейчас делают миграции (503 migrating): null — не идут. */
+  let migrationState = null;
+  /** Соединение миграций в работе: close() обрывает его (SIGTERM во время миграций). */
+  let migrationClient = null;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const isLockTimeout = (e) => !!(e && (e.code === '55P03' || e.code === '40P01'));
+
   /**
-   * Миграции (SPEC §9.8): файлы каталога `NNN_имя.sql|mjs` по порядку, учёт в
+   * Миграции (SPEC §9.8, §9.11): файлы каталога `NNN_имя.sql|mjs` по порядку, учёт в
    * schema_migrations. Отдельное соединение без дедлайна обычных запросов;
    * сессионный advisory-lock на всё время (включая создание таблицы учёта — два
    * экземпляра на пустой базе иначе столкнутся уже на CREATE TABLE). Каждая
-   * `.sql` — своя транзакция с `SET LOCAL statement_timeout = 0`; `.mjs` получает
-   * соединение и сама режет тяжёлую работу на пачки-транзакции.
+   * `.sql` — своя транзакция с `SET LOCAL statement_timeout = 0` и коротким
+   * `lock_timeout`: не дождалась замка — откат и повтор через паузу (DDL не стоит в
+   * очереди за долгой транзакцией, держа за собой всех). `.mjs` получает соединение и
+   * сама режет тяжёлую работу на пачки-транзакции; `ctx.progress({done, total})` —
+   * прогресс для 503 migrating. Упавшая миграция откатывается и не записывается в
+   * учёт: следующий старт начнёт с неё (её работа идемпотентна).
    */
   async function migrate() {
-    const client = new pg.Client(base);
+    migrationState = { phase: 'connect', migration: null, progress: null };
+    const client = new pg.Client({ ...base, ...(idleInTxMs > 0 ? { idle_in_transaction_session_timeout: Math.max(idleInTxMs, 60000) } : {}) });
     // разрыв посреди миграции — отказ запроса (и старта), а не необработанный error процесса
     client.on('error', (e) => log.warn('[document/pg] соединение миграций оборвалось:', e && e.message));
-    await client.connect();
+    migrationClient = client;
     let locked = false;
     try {
+      if (closing) throw new Error('хранилище закрывается');
+      await client.connect();
       await client.query('SET statement_timeout = 0');
+      migrationState = { phase: 'lock', migration: null, progress: null };
       await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK]);
       locked = true;
       await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
@@ -253,27 +347,49 @@ export function createPgStorage(opts = {}) {
       const files = (await readdir(migrationsDir)).filter((f) => MIGRATION_RE.test(f)).sort();
       for (const file of files) {
         if (applied.has(file)) continue;
+        if (closing) throw new Error('хранилище закрывается');
         const full = path.join(migrationsDir, file);
         const started = Date.now();
+        migrationState = { phase: 'migrate', migration: file, progress: null, started_at: new Date(started).toISOString() };
         if (file.endsWith('.sql')) {
           const sql = await readFile(full, 'utf8');
-          await client.query('BEGIN');
-          try {
-            await client.query('SET LOCAL statement_timeout = 0');
-            await client.query('SET LOCAL lock_timeout = 0');
-            await client.query(sql);
-            await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [file]);
-            await client.query('COMMIT');
-          } catch (e) {
-            await client.query('ROLLBACK').catch(() => {});
-            e.message = `миграция ${file}: ${e.message}`;
-            throw e;
+          for (let attempt = 1; ; attempt++) {
+            await client.query('BEGIN');
+            try {
+              await client.query('SET LOCAL statement_timeout = 0');
+              await client.query(`SET LOCAL lock_timeout = ${Math.floor(migrationLockTimeoutMs)}`);
+              await client.query(sql);
+              await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [file]);
+              await client.query('COMMIT');
+              break;
+            } catch (e) {
+              await client.query('ROLLBACK').catch(() => {});
+              if (isLockTimeout(e) && attempt < MIGRATION_LOCK_TRIES && !closing) {
+                if (attempt === 1 || attempt % 10 === 0) log.warn(`[document/pg] миграция ${file}: замок таблицы занят, повтор ${attempt}`);
+                await sleep(Math.min(2000, 100 * attempt));
+                continue;
+              }
+              e.message = `миграция ${file}: ${e.message}`;
+              throw e;
+            }
           }
         } else {
           const mod = await import(pathToFileURL(full).href);
           if (typeof mod.up !== 'function') throw new Error(`миграция ${file}: нет export up()`);
+          const ctx = {
+            client,
+            log,
+            lockTimeoutMs: migrationLockTimeoutMs,
+            lockTries: MIGRATION_LOCK_TRIES,
+            isLockTimeout,
+            /** Прогресс для 503 migrating: {done, total} или что-то своё. */
+            progress(p) {
+              if (migrationState && migrationState.migration === file) migrationState.progress = p;
+            },
+            get closing() { return closing; }
+          };
           try {
-            await mod.up({ client, log });
+            await mod.up(ctx);
           } catch (e) {
             e.message = `миграция ${file}: ${e.message}`;
             throw e;
@@ -282,7 +398,14 @@ export function createPgStorage(opts = {}) {
         }
         log.info(`[document/pg] миграция ${file} применена за ${Date.now() - started} мс`);
       }
+    } catch (e) {
+      const file = migrationState && migrationState.migration;
+      if (!/^миграция /.test(e.message || '')) e.message = `миграции${file ? ' (' + file + ')' : ''}: ${e.message}`;
+      if (file) e.message += ` — сделанное сохранено, повторный старт продолжит с ${file}`;
+      throw e;
     } finally {
+      migrationState = null;
+      if (migrationClient === client) migrationClient = null;
       if (locked) await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK]).catch(() => {});
       await client.end().catch(() => {});
     }
@@ -294,6 +417,10 @@ export function createPgStorage(opts = {}) {
    * разрыв между запросами транзакции (pg_terminate_backend, перезапуск базы, сеть)
    * иначе убивал бы экземпляр. Здесь ошибка запоминается, соединение возвращается в
    * пул сломанным (пул его выбросит), а запрос получит отказ → 503, клиент повторит.
+   * `client.fail(e)` — запрос упал так, что соединение больше не годится (истёк
+   * query_timeout: запрос всё ещё идёт на сервере, ROLLBACK встал бы за ним; обрыв):
+   * сокет закрывается сразу, база откатывает транзакцию сама (или по
+   * idle_in_transaction_session_timeout, если сеть полуоткрыта).
    */
   async function checkout() {
     const client = await pool.connect();
@@ -310,6 +437,12 @@ export function createPgStorage(opts = {}) {
       client.removeListener('error', onError);
       release(err || broken || undefined);
     })(client.release);
+    client.fail = (e) => {
+      if (!fatalForConnection(e)) return false;
+      broken = broken || e;
+      destroyClient(client);
+      return true;
+    };
     return client;
   }
 
@@ -326,7 +459,7 @@ export function createPgStorage(opts = {}) {
       await client.query('COMMIT');
       return out;
     } catch (e) {
-      await client.query('ROLLBACK').catch(() => {});
+      if (!client.fail(e)) await client.query('ROLLBACK').catch(() => {});
       throw e;
     } finally {
       client.release();
@@ -351,7 +484,7 @@ export function createPgStorage(opts = {}) {
     return res.rows.map(toCommitted);
   }
 
-  return {
+  const self = {
     kind: 'pg',
     /** Пул наружу — тестам, чтобы чистить таблицы; сервису он не нужен. */
     pool,
@@ -359,6 +492,8 @@ export function createPgStorage(opts = {}) {
     presenceChannel,
     migrate,
     publish,
+    /** Что делают миграции сейчас (`{phase, migration, progress}`) или null — для 503 migrating. */
+    get migrationState() { return migrationState ? { ...migrationState } : null; },
     /** Слушатель уведомлений подключён (тестам и /health-отладке). */
     get listening() { return !!listener; },
     /** pid серверного процесса слушателя (тестам: pg_terminate_backend). */
@@ -380,6 +515,9 @@ export function createPgStorage(opts = {}) {
       // последние эфемерные (bye остановки) — до закрытия слушателя, но не дольше секунды
       if (publishing.size) await Promise.race([Promise.allSettled([...publishing]), new Promise((r) => setTimeout(r, 1000).unref())]);
       closing = true;
+      // SIGTERM во время миграций: соединение миграций рвётся, база откатывает текущую
+      // пачку; сделанное раньше сохранено, следующий старт продолжит
+      if (migrationClient) destroyClient(migrationClient);
       if (listenTimer) clearTimeout(listenTimer);
       listenTimer = null;
       if (listener) {
@@ -409,7 +547,7 @@ export function createPgStorage(opts = {}) {
           'INSERT INTO snapshots (project_id, seq, doc, engine, chain) VALUES ($1, 0, $2::jsonb, $3, \'\')',
           [project.id, JSON.stringify(doc), engine]
         );
-        await client.query('INSERT INTO project_epochs (project_id, epoch, seq, cause) VALUES ($1, $2, 0, \'init\')', [project.id, epoch]);
+        await client.query('INSERT INTO project_epochs (project_id, epoch, seq, cause) VALUES ($1, $2, 0, \'init\') ON CONFLICT DO NOTHING', [project.id, epoch]);
         return project;
       });
     },
@@ -443,7 +581,7 @@ export function createPgStorage(opts = {}) {
     async latestSnapshot(projectId) {
       if (!okId(projectId)) return null;
       const res = await pool.query(
-        `SELECT s.seq, s.doc, s.engine, s.chain, s.created_at FROM snapshots s
+        `SELECT s.seq, s.doc, s.engine, s.chain, s.tombstones, s.created_at FROM snapshots s
           WHERE s.project_id = $1
             AND (s.seq = 0 OR EXISTS (SELECT 1 FROM operations o WHERE o.project_id = s.project_id AND o.seq = s.seq AND o.chain = s.chain))
           ORDER BY s.seq DESC LIMIT 1`,
@@ -451,7 +589,11 @@ export function createPgStorage(opts = {}) {
       );
       const row = res.rows[0];
       if (!row) return null;
-      return { seq: Number(row.seq), doc: row.doc, engine: row.engine, chain: row.chain || '', created_at: isoOf(row.created_at) };
+      return {
+        seq: Number(row.seq), doc: row.doc, engine: row.engine, chain: row.chain || '',
+        tombstones: row.tombstones && typeof row.tombstones === 'object' && !Array.isArray(row.tombstones) ? row.tombstones : {},
+        created_at: isoOf(row.created_at)
+      };
     },
 
     /** Номера снимков проекта (тестам и отладке). */
@@ -512,12 +654,12 @@ export function createPgStorage(opts = {}) {
         const chain = up.rows[0].head_chain;
         const epoch = up.rows[0].epoch;
         const ins = await client.query(
-          `INSERT INTO operations (project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, engine, chain)
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15)
+          `INSERT INTO operations (project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, engine, chain, command_id)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16)
            ON CONFLICT (project_id, tx_id) DO NOTHING
            RETURNING ${OP_COLUMNS}`,
           [projectId, seq, c.tx_id, c.base_seq, JSON.stringify(c.ops), JSON.stringify(c.dropped), JSON.stringify(c.notes),
-            c.undo_of, c.redo_of, c.author, c.author_kind, c.client, c.title, c.engine, chain]
+            c.undo_of, c.redo_of, c.author, c.author_kind, c.client, c.title, c.engine, chain, c.command_id]
         );
         if (!ins.rowCount) {
           await client.query('ROLLBACK');
@@ -539,7 +681,7 @@ export function createPgStorage(opts = {}) {
         await client.query('COMMIT');
         return { status: 'committed', committed: toCommitted(ins.rows[0]), epoch };
       } catch (e) {
-        await client.query('ROLLBACK').catch(() => {});
+        if (!client.fail(e)) await client.query('ROLLBACK').catch(() => {});
         throw e;
       } finally {
         client.release();
@@ -552,16 +694,22 @@ export function createPgStorage(opts = {}) {
      * открытие проекта. Снимок с тем же seq, но другой цепочкой, заменяется.
      * @returns {Promise<boolean>} записан ли
      */
-    async writeSnapshot(projectId, seq, doc, engine, chain = '') {
+    async writeSnapshot(projectId, seq, doc, engine, chain = '', tombstones = {}) {
       const res = await pool.query(
-        `INSERT INTO snapshots (project_id, seq, doc, engine, chain)
-         SELECT $1, $2, $3::jsonb, $4, $5
+        `INSERT INTO snapshots (project_id, seq, doc, engine, chain, tombstones)
+         SELECT $1, $2, $3::jsonb, $4, $5, $6::jsonb
           WHERE EXISTS (SELECT 1 FROM operations WHERE project_id = $1 AND seq = $2 AND chain = $5)
-         ON CONFLICT (project_id, seq) DO UPDATE SET doc = EXCLUDED.doc, engine = EXCLUDED.engine, chain = EXCLUDED.chain, created_at = now()
+         ON CONFLICT (project_id, seq) DO UPDATE SET doc = EXCLUDED.doc, engine = EXCLUDED.engine, chain = EXCLUDED.chain,
+                tombstones = EXCLUDED.tombstones, created_at = now()
           WHERE snapshots.chain IS DISTINCT FROM EXCLUDED.chain`,
-        [projectId, seq, JSON.stringify(doc), engine, chain]
+        [projectId, seq, JSON.stringify(doc), engine, chain, JSON.stringify(tombstonesObject(tombstones))]
       );
       return res.rowCount > 0;
+    },
+
+    /** Объектная форма writeSnapshot: `{seq, doc, engine, chain, tombstones}`. */
+    async saveSnapshot(projectId, { seq, doc, engine, chain = '', tombstones } = {}) {
+      return self.writeSnapshot(projectId, seq, doc, engine, chain, tombstones);
     },
 
     /** Прореживание: последние `keep` снимков; seq 0 (затравка) не удаляется никогда. */
@@ -586,7 +734,13 @@ export function createPgStorage(opts = {}) {
 
     async knownEpoch(projectId, epoch) {
       if (!okId(projectId) || typeof epoch !== 'string' || !epoch) return false;
-      const res = await pool.query('SELECT 1 FROM project_epochs WHERE project_id = $1 AND epoch = $2', [projectId, epoch]);
+      // нынешняя эпоха проекта известна всегда — даже если проект создал экземпляр до
+      // круга 23, который project_epochs не пишет (смешанные версии, SPEC §9.11)
+      const res = await pool.query(
+        `SELECT 1 FROM project_epochs WHERE project_id = $1 AND epoch = $2
+         UNION ALL SELECT 1 FROM projects WHERE id = $1 AND epoch = $2 LIMIT 1`,
+        [projectId, epoch]
+      );
       return res.rowCount > 0;
     },
 
@@ -644,4 +798,5 @@ export function createPgStorage(opts = {}) {
       return res.rows.map((r) => ({ id: String(r.id), command_id: r.command_id, created_at: isoOf(r.created_at), body: r.body }));
     }
   };
+  return self;
 }

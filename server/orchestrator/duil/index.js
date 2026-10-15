@@ -12,20 +12,67 @@
 
 import * as core from '../../../src/core.js';
 import { describeLibrary, libraryDocOf } from '../../../src/brain.js';
-import { MAX_LIBRARIES, PROJECT_LIST_TTL_MS } from '../limits.js';
+import { MAX_LIBRARIES, PROJECT_LIST_TTL_MS, PROJECT_LIST_STALE_MS } from '../limits.js';
 
 /**
- * @param {{dslr: ReturnType<import('../dslr/index.js').createDslrClient>, log?: object}} o
+ * Круг 25: раньше каждая команда (раз в 5 с) читала ВЕСЬ `GET /api/projects` — на
+ * сервисе с тысячами проектов это мегабайты на команду, — и каждый раз заново считала
+ * словарь и выжимку каждой библиотеки. Теперь:
+ *   • список библиотек живёт `PROJECT_LIST_TTL_MS` (60 с), одно чтение на всех
+ *     (параллельные команды ждут то же); не прочитался — берётся прежний, пока он не
+ *     старше `PROJECT_LIST_STALE_MS`; запрос — с `?kind=library` (сервис, который
+ *     фильтр знает, отдаст только библиотеки; прочий — всё, фильтруем сами);
+ *   • свежесть самих библиотек — по их журналу через DSLR (дочитывание хвоста,
+ *     дёшево), словарь и выжимка пересчитываются только при новом head_seq.
+ * @param {{dslr: ReturnType<import('../dslr/index.js').createDslrClient>, log?: object, listTtlMs?: number}} o
  */
-export function createDuil({ dslr, log = console }) {
-  let listed = null;   // {at, projects}
+export function createDuil({ dslr, log = console, listTtlMs = PROJECT_LIST_TTL_MS }) {
+  let listed = null;      // {at, projects}
+  let listing = null;     // идущее чтение списка (одно на всех)
+  const derived = new Map();   // id → {seq, text, components, slim}
+  const stats = { lists: 0, derived: 0 };
 
   async function libraries(signal) {
-    if (listed && Date.now() - listed.at < PROJECT_LIST_TTL_MS) return listed.projects;
-    const all = await dslr.list({ signal });
-    const projects = all.filter((p) => p && p.kind === 'library');
-    listed = { at: Date.now(), projects };
-    return projects;
+    if (listed && Date.now() - listed.at < listTtlMs) return listed.projects;
+    if (!listing) {
+      listing = (async () => {
+        try {
+          const all = await dslr.list({ query: 'kind=library' });
+          stats.lists++;
+          const projects = all.filter((p) => p && p.kind === 'library');
+          listed = { at: Date.now(), projects };
+          // выжимки библиотек, которых больше нет, — вон
+          const keep = new Set(projects.map((p) => p.id));
+          for (const id of derived.keys()) if (!keep.has(id)) derived.delete(id);
+          return projects;
+        } finally {
+          listing = null;
+        }
+      })();
+    }
+    try {
+      return await abortable(listing, signal);
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+      if (listed && Date.now() - listed.at < PROJECT_LIST_STALE_MS) {
+        log.warn(`[orchestrator/duil] список проектов: ${e.message} — беру прежний`);
+        return listed.projects;
+      }
+      throw e;
+    }
+  }
+
+  /** Словарь и выжимка библиотеки на её голове (пересчёт — только при новом seq). */
+  function derive(id, st) {
+    const hit = derived.get(id);
+    if (hit && hit.seq === st.seq) return hit;
+    const text = describeLibrary(st.doc, core) || '';
+    const components = text ? Math.max(0, text.split('\n').length - 1) : 0;
+    const slim = components ? libraryDocOf(st.doc, core) : null;
+    const entry = { seq: st.seq, text, components, slim };
+    derived.set(id, entry);
+    stats.derived++;
+    return entry;
   }
 
   /**
@@ -47,13 +94,12 @@ export function createDuil({ dslr, log = console }) {
     for (const p of list.filter((x) => x.id !== exclude).slice(0, MAX_LIBRARIES)) {
       try {
         const st = await dslr.read(p.id, { signal });
-        const text = describeLibrary(st.doc, core) || '';
-        const components = text ? Math.max(0, text.split('\n').length - 1) : 0;
-        out.libraries.push({ id: p.id, name: p.name || '', head_seq: st.seq, components });
-        if (text) texts.push(`[${p.name || p.id}]\n${text}`);
-        const slim = components ? libraryDocOf(st.doc, core) : null;
-        if (slim) out.docs.push({ id: p.id, name: p.name || '', doc: slim });
+        const d = derive(p.id, st);
+        out.libraries.push({ id: p.id, name: p.name || '', head_seq: st.seq, components: d.components });
+        if (d.text) texts.push(`[${p.name || p.id}]\n${d.text}`);
+        if (d.slim) out.docs.push({ id: p.id, name: p.name || '', doc: d.slim });
       } catch (e) {
+        if (e && e.code === 'not_found') { listed = null; derived.delete(p.id); }
         out.warnings.push(`Библиотека «${p.name || p.id}» не прочиталась`);
         log.warn(`[orchestrator/duil] библиотека ${p.id}: ${e.message}`);
       }
@@ -62,5 +108,17 @@ export function createDuil({ dslr, log = console }) {
     return out;
   }
 
-  return { slice };
+  return { slice, stats, /** тестам: забыть список */ invalidate: () => { listed = null; } };
+}
+
+/** Ждать общего промиса, но уйти по своему сигналу (чтение списка не прерывается — оно общее). */
+function abortable(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(Object.assign(new Error('остановлено'), { name: 'AbortError' }));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(Object.assign(new Error('остановлено'), { name: 'AbortError' }));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then((v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+      (e) => { signal.removeEventListener('abort', onAbort); reject(e); });
+  });
 }

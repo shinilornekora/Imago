@@ -20,6 +20,26 @@ import { SCHEMAS } from '../../../src/brain.js';
 
 const WORKER_URL = new URL('./worker.js', import.meta.url);
 
+/** Что из окружения процесса видит воркер: язык, часовой пояс, пути — и больше ничего. */
+const WORKER_ENV_KEYS = new Set(['PATH', 'HOME', 'LANG', 'LANGUAGE', 'TZ', 'NODE_ENV', 'TMPDIR', 'TEMP', 'TMP']);
+
+/**
+ * Окружение воркера по белому списку (SPEC §10.1: ключ — только в главном потоке).
+ * Раньше воркер получал `{...process.env}` целиком — с LLM_API_KEY, INTERNAL_TOKEN и
+ * LLM_BASE_URL (в нём бывают userinfo и ?key=). NODE_OPTIONS — пустой: он ломает resourceLimits.
+ * @param {Record<string, string|undefined>} src
+ * @returns {Record<string, string>}
+ */
+export function workerEnv(src) {
+  const out = {};
+  for (const [k, v] of Object.entries(src || {})) {
+    if (typeof v !== 'string') continue;
+    if (WORKER_ENV_KEYS.has(k) || /^LC_[A-Z_]+$/.test(k)) out[k] = v;
+  }
+  out.NODE_OPTIONS = '';
+  return out;
+}
+
 /**
  * @param {{size?: number, maxOldMb?: number, timeoutMs?: number, testHooks?: boolean, log?: object}} [o]
  */
@@ -40,7 +60,9 @@ export function createDslv(o = {}) {
       resourceLimits: { maxOldGenerationSizeMb: maxOldMb, maxYoungGenerationSizeMb: Math.min(64, Math.max(8, Math.round(maxOldMb / 8))) },
       // NODE_OPTIONS родителя (например, --max-old-space-size) воркеру не передаём: он ломает resourceLimits
       execArgv: [],
-      env: { ...process.env, NODE_OPTIONS: '' },
+      // круг 25: окружение — только безопасный минимум: ключ модели, INTERNAL_TOKEN и
+      // адреса с учётными данными воркеру не нужны (модель зовёт главный поток)
+      env: workerEnv(process.env),
     });
     const slot = { worker, job: null, dead: false };
     stats.spawned++;

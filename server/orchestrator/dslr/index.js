@@ -20,9 +20,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { applyOps } from '../../../src/core.js';
+import { applyBatches } from '../../../src/core.js';
 import { notFound, OrchError } from '../errors.js';
-import { DSLR_CACHE_PROJECTS, DOC_PAGE_LIMIT, DSLR_MAX_PAGES, DSLR_FULL_ATTEMPTS, DOC_RETRY_AFTER_MAX_S } from '../limits.js';
+import { DSLR_CACHE_PROJECTS, DSLR_CACHE_BYTES, DOC_PAGE_LIMIT, DSLR_MAX_PAGES, DSLR_FULL_ATTEMPTS, DOC_RETRY_AFTER_MAX_S } from '../limits.js';
 
 /** Якорь записи журнала (SPEC §9.8): sha256(prev_chain + tx_id + seq), hex. */
 export function chainNext(prev, txId, seq) {
@@ -38,19 +38,60 @@ class Reset extends Error {
 }
 
 /**
- * @param {{doc: ReturnType<import('../docclient.js').createDocClient>, log?: object, cacheSize?: number, pageLimit?: number}} o
+ * Оценка размера документа в байтах JSON — без сериализации: строки и числа обходом.
+ * Для кеша достаточно порядка величины (точный JSON 24-мегабайтного документа — сотни мс).
  */
-export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CACHE_PROJECTS, pageLimit = DOC_PAGE_LIMIT }) {
-  /** id → {seq, doc, chain, epoch, project}; порядок вставки = давность использования. */
+export function estimateBytes(value) {
+  let bytes = 0;
+  const stack = [value];
+  let guard = 0;
+  while (stack.length && guard++ < 5e6) {
+    const v = stack.pop();
+    if (typeof v === 'string') bytes += v.length + 2;
+    else if (typeof v === 'number' || typeof v === 'boolean') bytes += 8;
+    else if (v === null || v === undefined) bytes += 4;
+    else if (Array.isArray(v)) { bytes += 2 + v.length; for (const x of v) stack.push(x); }
+    else if (typeof v === 'object') {
+      bytes += 2;
+      for (const k of Object.keys(v)) { bytes += k.length + 4; stack.push(v[k]); }
+    }
+  }
+  return bytes;
+}
+
+/**
+ * @param {{doc: ReturnType<import('../docclient.js').createDocClient>, log?: object, cacheSize?: number, cacheBytes?: number, pageLimit?: number}} o
+ */
+export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CACHE_PROJECTS, cacheBytes = DSLR_CACHE_BYTES, pageLimit = DOC_PAGE_LIMIT }) {
+  /** id → {seq, doc, chain, epoch, project, bytes}; порядок вставки = давность использования. */
   const cache = new Map();
+  let cachedBytes = 0;
   /** id → хвост цепочки чтений этого проекта. */
   const lanes = new Map();
-  const stats = { full: 0, incremental: 0, hits: 0, resets: 0, pages: 0 };
+  const stats = { full: 0, incremental: 0, hits: 0, resets: 0, pages: 0, evicted: 0 };
 
-  const remember = (id, entry) => {
+  const drop = (id) => {
+    const e = cache.get(id);
+    if (!e) return;
     cache.delete(id);
+    cachedBytes -= e.bytes || 0;
+  };
+
+  /**
+   * Круг 25: предел кеша — и число проектов, и байты (оценка JSON документов). Самый
+   * давний вытесняется, пока сумма больше; только что прочитанный остаётся всегда (он
+   * нужен команде сейчас), даже если один больше предела.
+   */
+  const remember = (id, entry) => {
+    drop(id);
     cache.set(id, entry);
-    while (cache.size > cacheSize) cache.delete(cache.keys().next().value);
+    cachedBytes += entry.bytes || 0;
+    while (cache.size > 1 && (cache.size > cacheSize || cachedBytes > cacheBytes)) {
+      const oldest = cache.keys().next().value;
+      if (oldest === id) break;
+      drop(oldest);
+      stats.evicted++;
+    }
   };
 
   const path = (id) => `/api/projects/${encodeURIComponent(id)}`;
@@ -62,7 +103,8 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
    * @param {{seq:number, doc:object, chain:string|null}} st
    */
   function replay(st, txs) {
-    let { seq, doc, chain } = st;
+    let { seq, chain } = st;
+    const batches = [];
     for (const tx of txs) {
       if (!tx || tx.seq !== seq + 1) throw new Reset(`дыра в номерах журнала: ждали ${seq + 1}, пришла ${tx && tx.seq}`);
       if (typeof tx.chain === 'string' && tx.chain) {
@@ -73,12 +115,24 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
       } else {
         chain = null;   // сверять дальше нечем
       }
-      const res = applyOps(doc, Array.isArray(tx.ops) ? tx.ops : []);
-      if (res.error) throw new Reset(`журнал не лёг на кеш (seq ${tx.seq}): ${res.error.message || res.error}`);
-      doc = res.doc;
+      batches.push(Array.isArray(tx.ops) ? tx.ops : []);
       seq = tx.seq;
     }
-    return { seq, doc, chain };
+    // круг 25: вся страница — одним черновиком (applyBatches), а не копией словаря узлов
+    // на каждую транзакцию; каждая транзакция по-прежнему строгая и атомарная
+    const res = applyBatches(st.doc, batches);
+    const bad = res.results.findIndex(Boolean);
+    if (bad >= 0) {
+      const e = res.results[bad].error;
+      throw new Reset(`журнал не лёг на кеш (seq ${txs[bad].seq}): ${e.message || e}`);
+    }
+    // размер — прибавкой операций (remove его не уменьшает); набежало больше половины
+    // от последнего обхода — обходим документ заново, чтобы оценка не уплывала вверх
+    const grown = batches.reduce((n, ops) => n + (ops.length ? estimateBytes(ops) : 0), 0);
+    let bytes = (st.bytes || 0) + grown;
+    let bytesAt = st.bytesAt || st.bytes || 0;
+    if (grown && bytes - bytesAt > bytesAt / 2) bytes = bytesAt = estimateBytes(res.doc);
+    return { seq, doc: res.doc, chain, bytes, bytesAt };
   }
 
   /** Ответ, который не 200 и не 404/410, — сбой чтения. */
@@ -142,6 +196,7 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
     const base = {
       seq: snapshot.seq,
       doc: snapshot.doc,
+      bytes: estimateBytes(snapshot.doc),
       chain: typeof snapshot.chain === 'string' ? snapshot.chain : null,
       epoch: typeof project.epoch === 'string' && project.epoch ? project.epoch : null,
     };
@@ -181,10 +236,10 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
         else stats.incremental++;
         entry = { ...st, project: { ...hit.project, head_seq: st.seq } };
       } catch (e) {
-        if (e && e.code === 'not_found') cache.delete(id);
+        if (e && e.code === 'not_found') drop(id);
         if (!(e instanceof Reset)) throw e;
         // журнал под кешем переписан: кеш проекта — вон, стейт — заново
-        cache.delete(id);
+        drop(id);
         stats.resets++;
         log.warn(`[orchestrator/dslr] ${id}: ${e.message} — кеш выброшен, читаю целиком`);
         entry = await fresh(id, opts);
@@ -203,7 +258,7 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
   function read(id, opts = {}) {
     const prev = lanes.get(id) || Promise.resolve();
     const run = prev.catch(() => {}).then(() => readNow(id, opts)).catch((e) => {
-      if (e && e.code === 'not_found') cache.delete(id);
+      if (e && e.code === 'not_found') drop(id);
       throw e;
     });
     const tail = run.catch(() => {});
@@ -214,14 +269,17 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
 
   /** Список проектов: [{id, name, kind, head_seq, updated_at}]. */
   async function list(opts = {}) {
-    const r = await net.get('/api/projects', opts);
+    const { query, ...rest } = opts;
+    const r = await net.get(query ? `/api/projects?${query}` : '/api/projects', rest);
     if (r.status !== 200 || !r.body || !Array.isArray(r.body.projects)) throw failed('список проектов', r);
     return r.body.projects;
   }
 
   return {
     read, list, stats,
-    forget: (id) => cache.delete(id),
+    forget: (id) => drop(id),
+    /** Сколько байтов (оценка) и проектов в кеше. */
+    usage: () => ({ projects: cache.size, bytes: cachedBytes }),
     /** Для тестов и отладки: что лежит в кеше (без документа). */
     peek: (id) => { const e = cache.get(id); return e ? { seq: e.seq, chain: e.chain, epoch: e.epoch, doc: e.doc } : null; },
   };

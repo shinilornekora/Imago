@@ -12,6 +12,7 @@
 
 import { documentDown } from './errors.js';
 import { DOC_TIMEOUT_MS, DOC_HEALTH_TIMEOUT_MS } from './limits.js';
+import { cutText } from '../../src/core.js';
 
 /** Retry-After: секунды (целое ≥ 0) или HTTP-дата; null — не задан или не разобрался. */
 export function parseRetryAfter(header, body) {
@@ -62,7 +63,7 @@ export function createDocClient(o) {
       let json = null;
       try { json = text ? JSON.parse(text) : null; } catch { json = null; }
       if (res.status >= 500) {
-        const why = json && json.message ? `: ${String(json.message).slice(0, 200)}` : '';
+        const why = json && json.message ? `: ${cutText(json.message, 200)}` : '';
         const after = parseRetryAfter(res.headers.get('retry-after'), json);
         const err = Object.assign(documentDown(), { detail: { status: res.status, cause: `Document service ответил ${res.status}${why}` } });
         err.docStatus = res.status;

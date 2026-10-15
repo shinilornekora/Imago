@@ -61,7 +61,7 @@ for (const backend of list) {
       await i2.close();
       await i1.close();
     });
-    const fresh = async () => (await http.post('/api/projects', { name: 'Присутствие' })).body.id;
+    const fresh = async () => (await http.post('/api/projects', { name: 'Присутствие', demo: true })).body.id;
 
     it('presence с одного экземпляра видна на другом — та же форма, что своим; эха нет; busy/queued как есть', async () => {
       const id = await fresh();
@@ -215,7 +215,7 @@ for (const backend of list) {
       await i2.close();
       await i1.close();
     });
-    const fresh = async () => (await http.post('/api/projects', { name: 'TTL' })).body.id;
+    const fresh = async () => (await http.post('/api/projects', { name: 'TTL', demo: true })).body.id;
 
     it('замолчавший клиент уходит по TTL — у своих и на другом экземпляре; заговорил — вернулся', async () => {
       const id = await fresh();
@@ -324,7 +324,7 @@ describe('присутствие: экземпляр упал (SIGKILL) · pg', 
     try {
       const port = await ready;
       const other = { port, url: `http://127.0.0.1:${port}` };
-      const id = (await api(i1.url).post('/api/projects', { name: 'Падение' })).body.id;
+      const id = (await api(i1.url).post('/api/projects', { name: 'Падение', demo: true })).body.id;
       const B = await open(i1, id, 'B');
       const K = await open(other, id, 'K');
       K.send({ type: 'presence', selection: ['k1'], busy: true });

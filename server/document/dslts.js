@@ -24,6 +24,11 @@
  *                                         голова выбрасывается, Hub закрывает
  *                                         сокеты проекта кодом 4410;
  *   эпоха в базе другая                 → её сменил кто-то ещё: голова выбрасывается.
+ *
+ * Круг 25 (§9.10): строки транзакции чистятся (id с U+0000/половиной — 400), поля операций
+ * проверяются по типу; очередь мьютекса ограничена байтами (проект и экземпляр — 503 busy);
+ * надгробия загружаются из снимка и пишутся в него; байты документа считаются точно;
+ * переигрывание после отката (`replay_of_epoch`) не затирает более новое чужое (`stale`).
  */
 
 import { applyOps, rebase, collectTombstones, ENGINE_VERSION } from '../../src/core.js';
@@ -31,7 +36,10 @@ import { DocError, badRequest, notFound, tooLarge, unavailable, viaStorage } fro
 import { chainNext, compactDropped, jsonBytes } from './storage/committed.js';
 import {
   MAX_OPS_PER_TX, MAX_DOC_BYTES, MAX_DOC_NODES, MERGE_BUDGET_MS,
-  SNAPSHOT_EVERY, SNAPSHOT_KEEP, VERIFY_MS, PAGE_TXS
+  SNAPSHOT_EVERY, SNAPSHOT_KEEP, VERIFY_MS, PAGE_TXS,
+  QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES, BUSY_RETRY_S,
+  REPLAY_MAX_AGE_MS, REPLAY_SCAN_TXS, MAX_VALUE_DEPTH, MAX_OP_ID, MAX_COMMAND_ID,
+  isCleanText, cleanText, cutText, cleanDeep
 } from './limits.js';
 
 /** Предел операций в транзакции (совместимость: прежде экспортировался отсюда). */
@@ -57,22 +65,54 @@ const MAX_NAME = 200;
 const MAX_TITLE = 500;
 
 const isStr = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+/** id-строка: не длиннее max и чистая (U+0000 и одиночные суррогаты в id — это 400, а не правка). */
+const isId = (v, max) => isStr(v, max) && isCleanText(v);
+const isMissing = (v) => v === undefined || v === null;
 
 /**
- * Проверка формы транзакции (SPEC §9.1). Возвращает нормализованную копию с
+ * Поля операции, которые читает слияние и применение: их тип проверяется здесь
+ * (иначе `parent: {"toString": 1}` доходил до String() в движке и давал 500).
+ * Отсутствующее поле — дело rebase (`dropped: invalid`, §9.7); присутствующее не
+ * того типа или с негодными символами — 400.
+ * @returns {string|null} что не так
+ */
+function opShapeError(op) {
+  const idOk = (v) => typeof v === 'string' && v.length <= MAX_OP_ID && isCleanText(v);
+  const optId = (v, name) => (isMissing(v) || idOk(v) ? null : `${name}: строка-id`);
+  let err = optId(op.id, 'id') || optId(op.parent, 'parent');
+  if (err) return err;
+  if (op.after !== undefined && op.after !== null && !idOk(op.after)) return 'after: строка-id или null';
+  if (!isMissing(op.index) && !(typeof op.index === 'number' && Number.isFinite(op.index))) return 'index: число';
+  if (!isMissing(op.path) && !(typeof op.path === 'string' && op.path.length <= 1024 && isCleanText(op.path))) return 'path: строка';
+  if (op.op === 'create' && !isMissing(op.node)) {
+    if (typeof op.node !== 'object' || Array.isArray(op.node)) return 'node: объект';
+    err = optId(op.node.id, 'node.id') || optId(op.node.parent, 'node.parent');
+    if (err) return err;
+  }
+  return null;
+}
+
+/**
+ * Проверка формы транзакции (SPEC §9.1, §9.10). Возвращает нормализованную копию с
  * известными полями; форма негодна → 400, операций больше предела → 413,
- * версия движка не наша → 426. Сами операции глубоко не проверяются: их судит
+ * версия движка не наша → 426. Операции проверяются по форме полей, которые читает
+ * движок (id, parent, after, index, path, node.id, node.parent), по смыслу их судит
  * rebase (`dropped: invalid`), иначе транзакция с одной битой операцией
  * отклонялась бы целиком — против §8.3.
+ *
+ * Строки (§9.10): id (tx_id, undo_of, redo_of, client, id в операциях) с U+0000 или
+ * одиночной суррогатной половиной — 400; значения (author, title, всё внутри
+ * операций, включая ключи) — чистятся: U+0000 убирается, одиночная половина → U+FFFD.
+ * Иначе запись в jsonb падала, ответ был 503 retryable, и очередь клиента стояла вечно.
  * @param {any} raw
  * @param {{author?: string}} [ctx] автор из заголовка X-Author, если в теле нет
  * @returns {object}
  */
 export function validateTx(raw, ctx = {}) {
-  const txId = raw && isStr(raw.tx_id, MAX_ID) ? { tx_id: raw.tx_id } : {};
+  const txId = raw && isStr(raw.tx_id, MAX_ID) ? { tx_id: cleanText(raw.tx_id) } : {};
   const bad = (msg) => badRequest(msg, { compat: txId });
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw bad('транзакция должна быть объектом');
-  if (!isStr(raw.tx_id, MAX_ID)) throw bad('tx_id: непустая строка до 128 символов');
+  if (!isId(raw.tx_id, MAX_ID)) throw bad('tx_id: непустая строка до 128 символов без U+0000 и одиночных суррогатов');
   if (!Number.isInteger(raw.base_seq) || raw.base_seq < 0) throw bad('base_seq: целое ≥ 0');
   if (!Array.isArray(raw.ops)) throw bad('ops: массив операций');
   if (raw.ops.length > MAX_OPS_PER_TX) {
@@ -81,28 +121,45 @@ export function validateTx(raw, ctx = {}) {
   for (let i = 0; i < raw.ops.length; i++) {
     const op = raw.ops[i];
     if (!op || typeof op !== 'object' || Array.isArray(op) || !OP_KINDS.has(op.op)) throw bad(`ops[${i}]: неизвестная операция`);
+    const err = opShapeError(op);
+    if (err) throw bad(`ops[${i}]: ${err}`);
   }
-  for (const k of ['undo_of', 'redo_of']) {
-    if (raw[k] !== undefined && raw[k] !== null && !isStr(raw[k], MAX_ID)) throw bad(`${k}: строка tx_id`);
+  for (const k of ['undo_of', 'redo_of', 'client']) {
+    if (!isMissing(raw[k]) && raw[k] !== '' && !isId(raw[k], MAX_ID)) throw bad(`${k}: строка-id до ${MAX_ID} символов`);
   }
-  for (const [k, max] of [['author', MAX_NAME], ['client', MAX_ID], ['title', MAX_TITLE]]) {
-    if (raw[k] !== undefined && raw[k] !== null && (typeof raw[k] !== 'string' || raw[k].length > max)) throw bad(`${k}: строка до ${max} символов`);
+  for (const [k, max] of [['author', MAX_NAME], ['title', MAX_TITLE]]) {
+    if (!isMissing(raw[k]) && (typeof raw[k] !== 'string' || raw[k].length > max)) throw bad(`${k}: строка до ${max} символов`);
   }
   if (raw.author_kind !== undefined && raw.author_kind !== null && !AUTHOR_KINDS.has(raw.author_kind)) throw bad('author_kind: human · agent · system');
+  if (!isMissing(raw.replay_of_epoch) && !isId(raw.replay_of_epoch, 64)) throw bad('replay_of_epoch: метка эпохи');
+  if (!isMissing(raw.replay_at) && !(typeof raw.replay_at === 'string' && raw.replay_at.length <= 40 && Number.isFinite(Date.parse(raw.replay_at)))) throw bad('replay_at: дата ISO');
   // версия движка — после формы: у мусора нет версии, у старого клиента есть, и ему нужен именно 426
   if (raw.engine !== ENGINE_VERSION) {
     throw new DocError(426, 'engine', `версия движка ${raw.engine === undefined ? 'не указана' : raw.engine}, сервер работает с ${ENGINE_VERSION} — обновите клиент`, {
       retryable: false, detail: { engine: ENGINE_VERSION }, compat: { engine: ENGINE_VERSION, ...txId }
     });
   }
-  const tx = { tx_id: raw.tx_id, base_seq: raw.base_seq, ops: raw.ops, engine: ENGINE_VERSION };
+  let ops;
+  try {
+    ops = cleanDeep(raw.ops);
+  } catch (e) {
+    if (e && e.code === 'depth') throw bad(`ops: вложенность значений глубже ${MAX_VALUE_DEPTH}`);
+    throw e;
+  }
+  const tx = { tx_id: raw.tx_id, base_seq: raw.base_seq, ops, engine: ENGINE_VERSION };
   if (raw.undo_of) tx.undo_of = raw.undo_of;
   if (raw.redo_of) tx.redo_of = raw.redo_of;
-  const author = raw.author || ctx.author;
-  if (author) tx.author = String(author).slice(0, MAX_NAME);
+  const author = cleanText(typeof raw.author === 'string' && raw.author ? raw.author : ctx.author);
+  if (author) tx.author = cutText(String(author), MAX_NAME);
   tx.author_kind = raw.author_kind || 'human';
   if (raw.client) tx.client = raw.client;
-  if (raw.title) tx.title = raw.title;
+  if (raw.title) tx.title = cleanText(raw.title);
+  // связь с командой агента (трасса): метаданные — негодное значение не губит правку, его просто нет
+  if (isId(raw.command_id, MAX_COMMAND_ID)) tx.command_id = raw.command_id;
+  if (raw.replay_of_epoch) {
+    tx.replay_of_epoch = raw.replay_of_epoch;
+    if (raw.replay_at) tx.replay_at = new Date(Date.parse(raw.replay_at)).toISOString();
+  }
   return tx;
 }
 
@@ -125,18 +182,69 @@ function firstFailing(doc, list, apply = applyOps) {
 
 const nodeCount = (doc) => (doc && doc.nodes ? Object.keys(doc.nodes).length : 0);
 
+/** Байты JSON документа без словаря узлов и токенов (метаданные, версия): их замена в delta. */
+const restBytes = (doc) => jsonBytes({ ...doc, nodes: null, tokens: null });
+
 /**
- * Слияние транзакции с головой (SPEC §9.4, п.2; §9.8): rebase → строгий applyOps;
+ * Точная разница байт JSON документа после применения (SPEC §9.10, предел
+ * документа): applyOps копирует словарь узлов поверхностно и заменяет только
+ * изменённые узлы, поэтому сравнение по ссылке находит ровно их. Разница
+ * складывается из узлов (`"id":{…}` и запятые), токенов и прочих полей — сумма
+ * совпадает с `jsonBytes(after) - jsonBytes(before)` байт в байт.
+ * @param {object} before
+ * @param {object} after
+ * @returns {number}
+ */
+export function docBytesDelta(before, after) {
+  if (before === after) return 0;
+  let delta = restBytes(after) - restBytes(before);
+  if (before.tokens !== after.tokens) delta += jsonBytes(after.tokens) - jsonBytes(before.tokens);
+  const a = before.nodes || {};
+  const b = after.nodes || {};
+  if (a !== b) {
+    const entry = (id, node) => jsonBytes(id) + 1 + jsonBytes(node);
+    let na = 0;
+    let nb = 0;
+    for (const id in a) {
+      na += 1;
+      const x = a[id];
+      const y = Object.prototype.hasOwnProperty.call(b, id) ? b[id] : undefined;
+      if (y === undefined) delta -= entry(id, x);
+      else if (y !== x) delta += jsonBytes(y) - jsonBytes(x);
+    }
+    for (const id in b) {
+      nb += 1;
+      if (!Object.prototype.hasOwnProperty.call(a, id)) delta += entry(id, b[id]);
+    }
+    // запятые между записями словаря
+    delta += Math.max(0, nb - 1) - Math.max(0, na - 1);
+  }
+  return delta;
+}
+
+/** Лист документа, который пишет операция: `n:<id>\u0000<path>` (set) или `t:\u0000<path>` (setToken). */
+function leafOf(op) {
+  if (!op || typeof op.path !== 'string') return null;
+  if (op.op === 'set' && typeof op.id === 'string') return { scope: 'n:' + op.id, path: op.path };
+  if (op.op === 'setToken') return { scope: 't:', path: op.path };
+  return null;
+}
+/** Пути пересекаются: один — префикс другого по сегментам (`layout` и `layout.gap`). */
+const pathsMeet = (a, b) => a === b || a.startsWith(b + '.') || b.startsWith(a + '.');
+
+/**
+ * Слияние транзакции с головой (SPEC §9.4, п.2; §9.8; §9.10): rebase → строгий applyOps;
  * не прошло — виноватая операция в `dropped` с `reason:'invalid'`, повтор (в
  * пределах бюджета времени — дальше подозрительный остаток отбрасывается целиком,
- * `limit:'merge_budget'`). Документ после транзакции больше предела (узлы, байты)
- * и больше, чем был, — отбрасываются все операции, кроме `remove`
- * (`limit:'doc_nodes'|'doc_bytes'`). Надгробия считаются по применённой форме ДО
- * применения (collectTombstones смотрит на родителей удаляемых узлов в документе,
- * где они ещё есть).
+ * `limit:'merge_budget'`). Документ после транзакции больше предела (узлы, байты —
+ * байты считаются точно, разницей по изменённым узлам) и больше, чем был, —
+ * отбрасываются все операции, кроме `remove` (`limit:'doc_nodes'|'doc_bytes'`).
+ * `lim.stale` — индексы операций, которые отброшены заранее с `reason:'stale'`
+ * (переигрывание после отката базы, их лист уже переписан позже). Надгробия
+ * считаются по применённой форме ДО применения.
  * @param {{doc:object, tombstones:Map, docBytes?:number}} head
  * @param {object} tx
- * @param {{mergeBudgetMs?:number, maxDocNodes?:number, maxDocBytes?:number, applyOps?:Function}} [lim]
+ * @param {{mergeBudgetMs?:number, maxDocNodes?:number, maxDocBytes?:number, applyOps?:Function, stale?:Set<number>}} [lim]
  *   `applyOps` — подмена строгого применения (тестам: по контракту rebase отдаёт
  *   применимое, и ветку «applyOps не принял» иначе не достать)
  * @returns {{ops:object[], dropped:object[], notes:object[], doc:object, tombstones:[string, string|null][], docBytes:number}}
@@ -148,9 +256,19 @@ export function mergeIntoHead(head, tx, lim = {}) {
   const apply = typeof lim.applyOps === 'function' ? lim.applyOps : applyOps;
   const started = Date.now();
   const src = tx.ops;
-  const rb = rebase(head.doc, src, { tombstones: head.tombstones });
-  const dropped = rb.dropped.slice();
-  let notes = rb.notes.slice();
+  const dropped = [];
+  let notes = [];
+  // заранее отброшенные (stale): в rebase не идут, индексы остальных — через карту
+  const stale = lim.stale && lim.stale.size ? lim.stale : null;
+  const map = [];
+  for (let i = 0; i < src.length; i++) {
+    if (stale && stale.has(i)) dropped.push({ index: i, op: src[i], reason: 'stale' });
+    else map.push(i);
+  }
+  const input = stale ? map.map((i) => src[i]) : src;
+  const rb = rebase(head.doc, input, { tombstones: head.tombstones });
+  for (const d of rb.dropped) dropped.push({ ...d, index: map[d.index] });
+  notes = rb.notes.map((n) => ({ ...n, index: map[n.index] }));
   let kept = rb.ops.slice();
   // исходные индексы оставленных операций: rebase сохраняет порядок, минуя отброшенные
   const droppedIdx = new Set(dropped.map((d) => d.index));
@@ -181,16 +299,11 @@ export function mergeIntoHead(head, tx, lim = {}) {
   };
   let doc = settle();
 
-  // пределы документа: считаем узлы всегда (дёшево), байты — по оценке, точно — у границы
+  // пределы документа: узлы — счётом, байты — точно (разница по изменённым узлам)
   const beforeNodes = nodeCount(head.doc);
   const beforeBytes = Number.isFinite(head.docBytes) ? head.docBytes : jsonBytes(head.doc);
   let afterNodes = nodeCount(doc);
-  let afterBytes = beforeBytes + (kept.length ? jsonBytes(kept) : 0);
-  let exact = false;
-  if (afterBytes > maxBytes) {
-    afterBytes = jsonBytes(doc);
-    exact = true;
-  }
+  let afterBytes = beforeBytes + docBytesDelta(head.doc, doc);
   let limit = null;
   if (afterNodes > maxNodes && afterNodes > beforeNodes) limit = 'doc_nodes';
   else if (afterBytes > maxBytes && afterBytes > beforeBytes) limit = 'doc_bytes';
@@ -209,16 +322,26 @@ export function mergeIntoHead(head, tx, lim = {}) {
     keptIdx = keepRemovesIdx;
     doc = settle();
     afterNodes = nodeCount(doc);
-    afterBytes = jsonBytes(doc);
-    exact = true;
+    afterBytes = beforeBytes + docBytesDelta(head.doc, doc);
   }
   dropped.sort((a, b) => a.index - b.index);
   notes = notes.filter((n) => !droppedIdx.has(n.index));
   return {
     ops: kept, dropped, notes, doc,
     tombstones: collectTombstones(head.doc, kept),
-    docBytes: exact ? afterBytes : Math.max(0, afterBytes)
+    docBytes: afterBytes
   };
+}
+
+/** Надгробия снимка (объект id → родитель; у снимков до круга 25 — нет) → Map. */
+export function tombstonesOf(raw) {
+  const m = new Map();
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [id, parent] of Object.entries(raw)) m.set(id, typeof parent === 'string' ? parent : null);
+  } else if (Array.isArray(raw)) {
+    for (const pair of raw) if (Array.isArray(pair) && typeof pair[0] === 'string') m.set(pair[0], typeof pair[1] === 'string' ? pair[1] : null);
+  }
+  return m;
 }
 
 /**
@@ -237,9 +360,15 @@ export function mergeIntoHead(head, tx, lim = {}) {
  */
 export function createSequencer({
   storage, instanceId = 'i', snapshotEvery = SNAPSHOT_EVERY, snapshotKeep = SNAPSHOT_KEEP,
-  idleMs = IDLE_MS, verifyMs = VERIFY_MS, mergeBudgetMs, maxDocNodes, maxDocBytes, log = console
+  idleMs = IDLE_MS, verifyMs = VERIFY_MS, mergeBudgetMs, maxDocNodes, maxDocBytes, log = console,
+  queueProjectBytes = QUEUE_PROJECT_BYTES, queueProjectTxs = QUEUE_PROJECT_TXS, queueTotalBytes = QUEUE_TOTAL_BYTES,
+  replayScanTxs = REPLAY_SCAN_TXS
 }) {
   const lim = { mergeBudgetMs, maxDocNodes, maxDocBytes };
+  /** Очередь записи (§9.10): projectId → {bytes, txs} транзакций в мьютексе (ждут и пишутся); всего — байт. */
+  const queued = new Map();
+  let queuedBytes = 0;
+  let busyRefusals = 0;
   /** @type {Map<string, object>} projectId → голова */
   const heads = new Map();
   /** @type {Map<string, Promise>} projectId → хвост очереди (мьютекс) */
@@ -295,6 +424,7 @@ export function createSequencer({
     while (head.recent.length > RECENT_LIMIT) {
       const old = head.recent.shift();
       if (head.byTx.get(old.tx_id) === old) head.byTx.delete(old.tx_id);
+      head.replayAt.delete(old.tx_id);
     }
   }
 
@@ -307,8 +437,8 @@ export function createSequencer({
       // молчать нельзя, но и вставать нельзя: голова идёт дальше по номерам
       log.warn(`[document/dslts] ${projectId}: seq ${committed.seq} не применяется: ${res.error.message}`);
     } else {
+      head.docBytes += docBytesDelta(head.doc, res.doc);
       head.doc = res.doc;
-      head.docBytes += jsonBytes(committed.ops);
     }
     head.head_seq = committed.seq;
     if (typeof committed.chain === 'string') head.chain = committed.chain;
@@ -352,7 +482,9 @@ export function createSequencer({
       }
       head = {
         doc: snap.doc, head_seq: snap.seq, chain: snap.chain || '', epoch: project.epoch,
-        tombstones: new Map(), recent: [], byTx: new Map(), lastUsed: 0, timer: null,
+        // надгробия до снимка — из самого снимка (§9.10): без них та же офлайн-транзакция
+        // давала бы в свежей голове `orphan`, а в долгоживущей — `reparented`
+        tombstones: tombstonesOf(snap.tombstones), recent: [], byTx: new Map(), replayAt: new Map(), lastUsed: 0, timer: null,
         docBytes: jsonBytes(snap.doc)
       };
       // страница ограничена и числом, и байтами: конец — только пустая страница
@@ -474,14 +606,148 @@ export function createSequencer({
   const verifier = verifyMs > 0 ? setInterval(verifyAll, verifyMs) : null;
   if (verifier && verifier.unref) verifier.unref();
 
-  function scheduleSnapshot(projectId, seq, doc, chain) {
+  function scheduleSnapshot(projectId, seq, doc, chain, tombstones) {
+    // надгробия — копией сейчас: к моменту записи голова уйдёт дальше
+    const tomb = Object.fromEntries(tombstones);
     // после ответа: setImmediate отпускает текущий тик, запись идёт следующим
     track(new Promise((resolve) => setImmediate(resolve))
       .then(async () => {
-        const written = await storage.writeSnapshot(projectId, seq, doc, ENGINE_VERSION, chain);
+        const written = await storage.writeSnapshot(projectId, seq, doc, ENGINE_VERSION, chain, tomb);
         if (written && snapshotKeep > 0) await storage.pruneSnapshots(projectId, snapshotKeep);
       })
       .catch((e) => log.warn(`[document/dslts] ${projectId}: снимок seq ${seq} не записан: ${e && e.message}`)));
+  }
+
+  /**
+   * Какие `set`/`setToken` переигрываемой транзакции устарели (SPEC §9.10): тот же
+   * лист (или путь, пересекающийся с ним) после исходной записи правки (`replay_at`)
+   * переписала чужая транзакция — среди записанных после `base_seq`. Своё (тот же
+   * `client`) не в счёт: свои переигранные правки идут по порядку. Правка старше
+   * REPLAY_MAX_AGE_MS или окно поиска длиннее replayScanTxs — устарели все её листья.
+   * @returns {Promise<Set<number>>}
+   */
+  async function staleOps(projectId, head, tx) {
+    const leaves = [];
+    tx.ops.forEach((op, i) => {
+      const l = leafOf(op);
+      if (l) leaves.push({ i, ...l });
+    });
+    const out = new Set();
+    if (!leaves.length) return out;
+    const all = () => { for (const x of leaves) out.add(x.i); return out; };
+    const at = tx.replay_at ? Date.parse(tx.replay_at) : NaN;
+    if (Number.isFinite(at) && Date.now() - at > REPLAY_MAX_AGE_MS) return all();
+    const from = Math.min(tx.base_seq, head.head_seq);
+    if (head.head_seq - from > replayScanTxs) return all();
+    const consider = (c) => {
+      if (c.seq <= from || c.tx_id === tx.tx_id) return;
+      if (tx.client && c.client === tx.client) return;
+      if (Number.isFinite(at)) {
+        // переигранная раньше чужая правка считается по своему исходному времени
+        const t = Date.parse(head.replayAt.get(c.tx_id) || c.created_at);
+        if (Number.isFinite(t) && t <= at) return;
+      }
+      for (const op of c.ops || []) {
+        const l = leafOf(op);
+        if (!l) continue;
+        for (const x of leaves) if (!out.has(x.i) && x.scope === l.scope && pathsMeet(x.path, l.path)) out.add(x.i);
+      }
+    };
+    if (head.recent.length && head.recent[0].seq <= from + 1) {
+      for (const c of head.recent) consider(c);
+      return out;
+    }
+    let seq = from;
+    while (seq < head.head_seq) {
+      const page = await viaStorage(storage.txsAfter(projectId, seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES }));
+      const was = seq;
+      for (const c of page) {
+        if (c.seq > head.head_seq) break;
+        consider(c);
+        seq = c.seq;
+      }
+      if (seq === was || out.size === leaves.length) break;
+    }
+    return out;
+  }
+
+  /** Запись транзакции под мьютексом проекта (SPEC §9.4); очередь уже учтена в commit. */
+  async function commitQueued(projectId, raw, ctx) {
+    let tx;
+    try {
+      tx = validateTx(raw, ctx);
+    } catch (e) {
+      // мусор в несуществующий проект — это 404, а не 400: проект проверяем только
+      // на пути отказа, чтобы не платить запросом к базе за каждую годную транзакцию
+      if (!(await viaStorage(storage.getProject(projectId)))) throw notFound();
+      throw e;
+    }
+    return withLock(projectId, async () => {
+      // очередь мьютекса могла дождаться остановки: голову после close() не загружаем
+      if (closed) throw unavailable('сервис останавливается');
+      let head = await ensureHead(projectId);
+      // tx_id известен → сохранённое (идемпотентность, §8.3). Здесь только память:
+      // всё старше RECENT_LIMIT ловит UNIQUE(project_id, tx_id) в commitTx, а лишний
+      // запрос к базе на каждую новую транзакцию — это круг ожидания на горячем пути
+      const known = head.byTx.get(tx.tx_id);
+      if (known) return { committed: known, existing: true };
+      if (tx.base_seq > head.head_seq) {
+        // клиент видел голову дальше нашей: возможно, писал другой экземпляр — сначала сверка
+        const r = await syncHead(projectId);
+        if (r === 'epoch' || r === 'rollback') head = await ensureHead(projectId);
+        if (tx.base_seq > head.head_seq) {
+          // база позади клиента (откат или пересоздание): зажим, а не отказ — слияние не отказывает
+          tx = { ...tx, base_seq: head.head_seq };
+        }
+      }
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        head = await ensureHead(projectId);
+        const again = head.byTx.get(tx.tx_id);
+        if (again) return { committed: again, existing: true };
+        // переигрывание после отката базы (§9.10): лист, который после правки переписал
+        // кто-то другой, остаётся за более новым — `set` отбрасывается с `reason:'stale'`
+        const stale = tx.replay_of_epoch ? await staleOps(projectId, head, tx) : null;
+        const merged = mergeIntoHead(head, tx, stale && stale.size ? { ...lim, stale } : lim);
+        const record = { ...tx, ops: merged.ops, dropped: compactDropped(merged.dropped), notes: merged.notes };
+        const expectSeq = head.head_seq + 1;
+        const expectChain = chainNext(head.chain, tx.tx_id, expectSeq);
+        const res = await viaStorage(storage.commitTx(projectId, record, { expectSeq, expectChain, origin: instanceId }));
+        if (res.status === 'missing') throw notFound();
+        if (res.status === 'existing') {
+          // записал другой экземпляр (или гонка мимо памяти): голова могла отстать
+          if (res.committed.seq > head.head_seq) await syncHead(projectId);
+          return { committed: res.committed, existing: true };
+        }
+        if (res.status === 'stale') {
+          staleRetries += 1;
+          if (res.reason === 'chain' || res.head_seq < head.head_seq) {
+            // номер тот же, а журнал под ним другой, или база позади: откат базы
+            await rollback(projectId, head, { epoch: res.epoch, head_seq: res.head_seq }, res.reason === 'chain' ? 'цепочка на записи другая' : 'номер записи позади головы');
+          } else {
+            // номер ушёл вперёд — писал другой экземпляр: перечитать хвост, слить заново
+            await syncHead(projectId);
+          }
+          if (attempt >= 2) await new Promise((r) => setTimeout(r, Math.random() * RETRY_BACKOFF_MS * attempt));
+          continue;
+        }
+        // надгробия пополняются ДО обновления документа — считались по прежней голове
+        for (const [id, parent] of merged.tombstones) head.tombstones.set(id, parent);
+        head.doc = merged.doc;
+        head.docBytes = merged.docBytes;
+        head.head_seq = res.committed.seq;
+        head.chain = res.committed.chain;
+        if (tx.replay_at) head.replayAt.set(tx.tx_id, tx.replay_at);
+        remember(head, res.committed);
+        // бездействие считается от конца записи, а не от её начала: долгая запись
+        // (медленная база, длинная очередь) не должна выгружать голову сразу после себя
+        touch(projectId, head);
+        emit({ kind: 'tx', projectId, committed: res.committed });
+        if (snapshotEvery > 0 && res.committed.seq % snapshotEvery === 0) scheduleSnapshot(projectId, res.committed.seq, head.doc, head.chain, head.tombstones);
+        return { committed: res.committed, existing: false };
+      }
+      exhausted += 1;
+      throw unavailable('голову проекта двигает другой экземпляр — повторите позже');
+    });
   }
 
   const info = (head) => ({ head_seq: head.head_seq, chain: head.chain, epoch: head.epoch });
@@ -549,78 +815,39 @@ export function createSequencer({
      * @returns {Promise<{committed: object, existing: boolean}>}
      */
     async commit(projectId, raw, ctx = {}) {
-      let tx;
-      try {
-        tx = validateTx(raw, ctx);
-      } catch (e) {
-        // мусор в несуществующий проект — это 404, а не 400: проект проверяем только
-        // на пути отказа, чтобы не платить запросом к базе за каждую годную транзакцию
-        if (!(await viaStorage(storage.getProject(projectId)))) throw notFound();
-        throw e;
-      }
       if (closed) throw unavailable('сервис останавливается');
-      return withLock(projectId, async () => {
-        // очередь мьютекса могла дождаться остановки: голову после close() не загружаем
-        if (closed) throw unavailable('сервис останавливается');
-        let head = await ensureHead(projectId);
-        // tx_id известен → сохранённое (идемпотентность, §8.3). Здесь только память:
-        // всё старше RECENT_LIMIT ловит UNIQUE(project_id, tx_id) в commitTx, а лишний
-        // запрос к базе на каждую новую транзакцию — это круг ожидания на горячем пути
-        const known = head.byTx.get(tx.tx_id);
-        if (known) return { committed: known, existing: true };
-        if (tx.base_seq > head.head_seq) {
-          // клиент видел голову дальше нашей: возможно, писал другой экземпляр — сначала сверка
-          const r = await syncHead(projectId);
-          if (r === 'epoch' || r === 'rollback') head = await ensureHead(projectId);
-          if (tx.base_seq > head.head_seq) {
-            // база позади клиента (откат или пересоздание): зажим, а не отказ — слияние не отказывает
-            tx = { ...tx, base_seq: head.head_seq };
-          }
-        }
-        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-          head = await ensureHead(projectId);
-          const again = head.byTx.get(tx.tx_id);
-          if (again) return { committed: again, existing: true };
-          const merged = mergeIntoHead(head, tx, lim);
-          const record = { ...tx, ops: merged.ops, dropped: compactDropped(merged.dropped), notes: merged.notes };
-          const expectSeq = head.head_seq + 1;
-          const expectChain = chainNext(head.chain, tx.tx_id, expectSeq);
-          const res = await viaStorage(storage.commitTx(projectId, record, { expectSeq, expectChain, origin: instanceId }));
-          if (res.status === 'missing') throw notFound();
-          if (res.status === 'existing') {
-            // записал другой экземпляр (или гонка мимо памяти): голова могла отстать
-            if (res.committed.seq > head.head_seq) await syncHead(projectId);
-            return { committed: res.committed, existing: true };
-          }
-          if (res.status === 'stale') {
-            staleRetries += 1;
-            if (res.reason === 'chain' || res.head_seq < head.head_seq) {
-              // номер тот же, а журнал под ним другой, или база позади: откат базы
-              await rollback(projectId, head, { epoch: res.epoch, head_seq: res.head_seq }, res.reason === 'chain' ? 'цепочка на записи другая' : 'номер записи позади головы');
-            } else {
-              // номер ушёл вперёд — писал другой экземпляр: перечитать хвост, слить заново
-              await syncHead(projectId);
-            }
-            if (attempt >= 2) await new Promise((r) => setTimeout(r, Math.random() * RETRY_BACKOFF_MS * attempt));
-            continue;
-          }
-          // надгробия пополняются ДО обновления документа — считались по прежней голове
-          for (const [id, parent] of merged.tombstones) head.tombstones.set(id, parent);
-          head.doc = merged.doc;
-          head.docBytes = merged.docBytes;
-          head.head_seq = res.committed.seq;
-          head.chain = res.committed.chain;
-          remember(head, res.committed);
-          // бездействие считается от конца записи, а не от её начала: долгая запись
-          // (медленная база, длинная очередь) не должна выгружать голову сразу после себя
-          touch(projectId, head);
-          emit({ kind: 'tx', projectId, committed: res.committed });
-          if (snapshotEvery > 0 && res.committed.seq % snapshotEvery === 0) scheduleSnapshot(projectId, res.committed.seq, head.doc, head.chain);
-          return { committed: res.committed, existing: false };
-        }
-        exhausted += 1;
-        throw unavailable('голову проекта двигает другой экземпляр — повторите позже');
-      });
+      // очередь мьютекса ограничена (§9.10): байтами тел — на проект и на экземпляр, и числом
+      // на проект. Пустая очередь принимает всегда (одна транзакция в 4 МБ проходит)
+      const bytes = Number.isFinite(ctx.bytes) && ctx.bytes > 0 ? ctx.bytes : jsonBytes(raw);
+      const q = queued.get(projectId) || { bytes: 0, txs: 0 };
+      const overProject = q.txs > 0 && (q.bytes + bytes > queueProjectBytes || q.txs + 1 > queueProjectTxs);
+      const overTotal = queuedBytes > 0 && queuedBytes + bytes > queueTotalBytes;
+      if (overProject || overTotal) {
+        busyRefusals += 1;
+        const txId = raw && typeof raw.tx_id === 'string' && raw.tx_id.length <= MAX_ID && isCleanText(raw.tx_id) ? { tx_id: raw.tx_id } : {};
+        throw new DocError(503, 'busy', 'очередь записи переполнена — повторите чуть позже', {
+          retryable: true, retryAfter: BUSY_RETRY_S, compat: txId,
+          detail: { limit: overProject ? 'queue_project' : 'queue_total' }
+        });
+      }
+      q.bytes += bytes;
+      q.txs += 1;
+      queued.set(projectId, q);
+      queuedBytes += bytes;
+      try {
+        return await commitQueued(projectId, raw, ctx);
+      } finally {
+        q.bytes -= bytes;
+        q.txs -= 1;
+        queuedBytes -= bytes;
+        if (q.txs <= 0 && queued.get(projectId) === q) queued.delete(projectId);
+      }
+    },
+
+    /** Очередь записи сейчас: байты и число на проект, байты всего, сколько раз отказано (тестам). */
+    queueStats(projectId) {
+      const q = projectId !== undefined ? queued.get(projectId) : null;
+      return { bytes: q ? q.bytes : 0, txs: q ? q.txs : 0, totalBytes: queuedBytes, refused: busyRefusals };
     },
 
     /**

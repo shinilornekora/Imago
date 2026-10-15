@@ -60,15 +60,32 @@ export const WORKER_TIMEOUT_MS = 60000;
 
 /** Кеш стейтов DSLR: проектов в памяти. */
 export const DSLR_CACHE_PROJECTS = 64;
+/**
+ * Круг 25: и по байтам — оценка JSON документов в кеше. Документ бывает до 24 МиБ JSON
+ * (§9.8), в памяти объектами — в разы больше; 64 таких — гигабайты. Самый давний
+ * вытесняется, пока сумма больше предела (последний прочитанный остаётся всегда).
+ */
+export const DSLR_CACHE_BYTES = 96 * 1024 * 1024;
 /** DUIL: библиотек на команду и время жизни списка проектов. */
 export const MAX_LIBRARIES = 8;
-export const PROJECT_LIST_TTL_MS = 5000;
+/** Круг 25: список библиотек — не чаще раза в 30 с (свежесть самих библиотек — по их журналу). */
+export const PROJECT_LIST_TTL_MS = 30000;
+/** Список не прочитался — прежний годится ещё столько. */
+export const PROJECT_LIST_STALE_MS = 10 * 60 * 1000;
 
 /** Трассы в памяти (последние N) — для отладки и тестов. */
 export const TRACE_RING = 100;
 
-/** Остановка: сколько ждём выполняемые команды, прежде чем прервать. */
-export const SHUTDOWN_GRACE_MS = 10000;
+/**
+ * Остановка (круг 25): Docker шлёт SIGKILL через 10 с после SIGTERM, поэтому весь останов
+ * укладывается в SHUTDOWN_HARD_MS = 8 с: выполняемой команде — дедлайн SHUTDOWN_GRACE_MS
+ * (успела — записана), потом отмена и не больше SHUTDOWN_ABORT_WAIT_MS на то, чтобы она
+ * свернулась; трассам — SHUTDOWN_FLUSH_MS. Не уложились — выход с кодом 1 по таймеру.
+ */
+export const SHUTDOWN_GRACE_MS = 5000;
+export const SHUTDOWN_ABORT_WAIT_MS = 1500;
+export const SHUTDOWN_FLUSH_MS = 1000;
+export const SHUTDOWN_HARD_MS = 8000;
 
 /** Пульс SSE, чтобы прокси не рвал простаивающий поток. */
 export const SSE_PING_MS = 15000;

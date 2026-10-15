@@ -13,16 +13,24 @@
       <!-- Круг 22 (SPEC §9.5). Серверный режим: рядом с именем — шторка «Проекты» и состояние
            синхронизации («в сети · всё сохранено», «не в сети · N правок ждут», кто в сети).
            Без сервера оба скрыты: артефакт и локальная статика работают по-прежнему. -->
+      <!-- Круг 25: «Проекты» и оба состояния — одной группой. На широкой шапке группа не
+           видна (display: contents), на телефоне точки состояний садятся значком на угол
+           кнопки «Проекты» и не наезжают на выбор доски. -->
+      <span class="proj-wrap">
       <button class="btn ghost icon small" id="btn-projects" hidden title="Проекты" aria-label="Проекты"><span class="i" data-icon="folder"></span></button>
       <span class="sync-status" id="sync-status" hidden role="status" aria-live="polite"></span>
       <!-- Круг 23 (SPEC §10): где выполняются команды агента — «агент: сервер», «агент: в
            браузере» или «агент недоступен». Только в серверном режиме, как и синхронизация. -->
       <span class="sync-status agent-status" id="agent-status" hidden role="status" aria-live="polite"></span>
+      </span>
     </div>
 
     <div class="topbar-center" id="artboard-tabs"></div>
 
     <div class="topbar-right">
+      <!-- Круг 25: кто ещё в проекте — кружки с инициалами цвета их выделения, сверх трёх «+N».
+           Пульсирует тот, над чьей командой работает агент («Аня ждёт агента…» в подсказке). -->
+      <span class="people" id="people" hidden role="group" aria-label="Соавторы"></span>
       <button class="btn ghost with-icon" id="btn-history" title="История правок (H)" aria-label="История правок"><span class="i" data-icon="history"></span><span class="btn-label">История</span></button>
       <button class="btn ghost with-icon" id="btn-export" title="Экспорт" aria-label="Экспорт"><span class="i" data-icon="export"></span><span class="btn-label">Экспорт</span></button>
       <!-- Круг 20, п.4. Редактор шкал документа — отдельная шторка. Кнопка стоит среди

@@ -20,6 +20,7 @@
 
 import { OrchError, notFound, documentDown } from '../errors.js';
 import { WRITE_ATTEMPTS, DOC_RETRY_AFTER_MAX_S, WRITE_WAIT_BUDGET_MS, DOC_MAX_OPS_PER_TX, DOC_MAX_BODY_BYTES } from '../limits.js';
+import { cutText } from '../../../src/core.js';
 
 const plural = (n, one, few, many) => {
   const a = Math.abs(n) % 100;
@@ -104,7 +105,7 @@ export function createDsltsClient({
           retryable: false, detail: { engine: r.body && r.body.engine },
         });
       }
-      throw new OrchError(502, 'document_failed', `Сервис документов не принял правку агента (${r.status})${r.body && r.body.message ? ': ' + String(r.body.message).slice(0, 300) : ''}`, { retryable: false });
+      throw new OrchError(502, 'document_failed', `Сервис документов не принял правку агента (${r.status})${r.body && r.body.message ? ': ' + cutText(r.body.message, 300) : ''}`, { retryable: false });
     }
     if (last && last.code === 'document_down') {
       last.message = 'Сервис документов не подтвердил правку агента — он перегружен или недоступен. Повторите команду через несколько секунд.';

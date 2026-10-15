@@ -33,6 +33,14 @@
  * `queued` (агент работает над командой этого человека) — как их дала оболочка;
  * в адресе сокета `proto=2` — клиент знает `ack` (прежнему сервер вместо `ack` шлёт
  * `error {code:'duplicate'}`, его реплика тоже понимает).
+ *
+ * Круг 25 (SPEC §9.10): после отката базы переигрываются все свои из прежней эпохи (окно
+ * 200, и транзакции агента по команде этой вкладки), с `replay_of_epoch`/`replay_at` —
+ * сервер не даст старому значению затереть более новое чужое (`dropped: stale`); старше
+ * суток — не переигрываются, человеку сказано. Транзакция, на которую сервер раз за разом
+ * отвечает одной и той же повторяемой ошибкой, снимается в «не сохранено» (`unsaved`),
+ * очередь идёт дальше. Журнал подтверждённых в памяти — `journal()`, `whoRemoved()`, `by` и
+ * `label` в `onDropped`. Строки правки чистятся (U+0000, одиночные суррогаты), как на сервере.
  */
 
 const WRITE_DELAY = 200;          // пауза между изменением и записью журнала
@@ -41,7 +49,13 @@ const PRESENCE_TTL = 90 * 1000;   // чужое присутствие без в
 const ACK_TIMEOUT = 8 * 1000;     // подтверждение не пришло — дослать (идемпотентно), потом переподключиться
 const OPS_PAGE = 500;             // сколько транзакций просить за один GET …/ops
 const HELLO_TIMEOUT = 8 * 1000;   // сокет открыт, а hello нет — это не сервер (или зомби): закрыть и подключиться заново
-const MINE_KEEP = 50;             // своих подтверждённых транзакций помним столько — переиграть после отката базы
+const MINE_KEEP = 200;            // своих подтверждённых транзакций помним столько — переиграть после отката базы
+const MINE_BYTES = 4 * 1024 * 1024; // …и не больше стольких байт JSON (старые вытесняются первыми)
+const MINE_EVICTED_KEEP = 5000;   // вытесненных из окна (эпоха, seq) помним столько — сказать, что не переиграно
+const JOURNAL_KEEP = 500;         // журнал подтверждённых транзакций в памяти (история, «кто удалил»)
+const JOURNAL_LEAVES = 200;       // листьев/узлов на запись журнала для «кто помешал»
+const RETRY_POISON = 8;           // столько одинаковых повторяемых ошибок подряд на одну транзакцию при живом сервере — снять её
+const UNSAVED_KEEP = 50;          // снятых «не сохранено» помним столько
 const HTTP_RETRIES = 4;           // 503/429 с Retry-After: столько повторов, потом — как сбой
 const RETRY_AFTER_MAX = 30;       // Retry-After больше этого (с) не ждём — это уже не «чуть позже»
 const EPOCH_REOPEN_MS = 250;      // переоткрытие после 4410 — сразу, с разбросом, чтобы вкладки не били в такт
@@ -60,6 +74,7 @@ export const LIMITS = Object.freeze({
   docNodes: 20000,
   presenceSelection: 200,        // id в выделении присутствия — больше сервер обрежет (truncated)
   presenceHeartbeatMs: 15000,    // сердцебиение присутствия: сервер считает ушедшим после 45 с тишины
+  replayMaxAgeMs: 24 * 60 * 60 * 1000,   // свои правки старше суток после отката базы не переигрываются (SPEC §9.10)
 });
 
 /** Причины отброшенных операций — словами человека (SPEC §9.1 DropReason, §9.8 limit). */
@@ -74,7 +89,49 @@ export const DROP_WORDS = Object.freeze({
   merge_budget: 'сервер не успел разобрать правку',
   ops_per_tx: 'слишком много операций в одной правке',
   tx_bytes: 'правка слишком большая',
+  stale: 'правка устарела — её уже переписали после восстановления базы',
 });
+
+/* ------------------------------ строки (SPEC §9.10) ------------------------------ */
+
+const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+const LONE_G = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+/** Строка годна серверу: без U+0000 и одиночных суррогатных половин. */
+function isCleanText(v) {
+  if (typeof v !== 'string') return false;
+  if (v.indexOf('\u0000') >= 0) return false;
+  return typeof v.isWellFormed === 'function' ? v.isWellFormed() : !LONE.test(v);
+}
+/** U+0000 — вон, одиночная половина — U+FFFD (как делает сервер; так прогноз совпадает с ответом). */
+export function cleanText(v) {
+  if (typeof v !== 'string' || isCleanText(v)) return v;
+  const s = v.replace(/\u0000/g, '');
+  return typeof s.toWellFormed === 'function' ? s.toWellFormed() : s.replace(LONE_G, '\ufffd');
+}
+/** Строки и ключи значения целиком; копия — только там, где есть что чистить. */
+function cleanDeep(v, depth = 0) {
+  if (typeof v === 'string') return cleanText(v);
+  if (!v || typeof v !== 'object' || depth > 64) return v;
+  if (Array.isArray(v)) {
+    let out = null;
+    for (let i = 0; i < v.length; i++) {
+      const y = cleanDeep(v[i], depth + 1);
+      if (y !== v[i]) { if (!out) out = v.slice(); out[i] = y; }
+    }
+    return out || v;
+  }
+  let out = null;
+  for (const k of Object.keys(v)) {
+    const y = cleanDeep(v[k], depth + 1);
+    const k2 = cleanText(k);
+    if (y !== v[k] || k2 !== k) {
+      if (!out) out = { ...v };
+      if (k2 !== k) delete out[k];
+      out[k2] = y;
+    }
+  }
+  return out || v;
+}
 
 /** Склонение: 1 правка, 2 правки, 5 правок. */
 export function plural(n, one, few, many) {
@@ -153,9 +210,26 @@ function tombToList(map) {
 }
 function tombFromList(list) {
   const m = new Map();
-  if (Array.isArray(list)) for (const pair of list) if (Array.isArray(pair) && pair[0]) m.set(String(pair[0]), pair[1] == null ? null : String(pair[1]));
+  if (Array.isArray(list)) {
+    for (const pair of list) if (Array.isArray(pair) && pair[0]) m.set(String(pair[0]), pair[1] == null ? null : String(pair[1]));
+  } else if (list && typeof list === 'object') {
+    // снимок сервера (§9.10): объект id → родитель
+    for (const [id, p] of Object.entries(list)) m.set(id, p == null ? null : String(p));
+  }
   return m;
 }
+
+/** Сколько операций отброшено: запись `{more: N}` прибавляет N. */
+function droppedCount(list) {
+  let n = 0;
+  if (Array.isArray(list)) for (const d of list) {
+    if (!d || typeof d !== 'object') continue;
+    n += typeof d.more === 'number' && d.index === undefined && d.reason === undefined ? Math.max(0, d.more) : 1;
+  }
+  return n;
+}
+/** Пути пересекаются по сегментам: `layout` и `layout.gap`. */
+const pathsMeet = (a, b) => a === b || a.startsWith(b + '.') || b.startsWith(a + '.');
 
 /* ------------------------------ хранилища ------------------------------ */
 
@@ -234,10 +308,14 @@ export function memoryStorage() {
  * @param {Function} [o.fetchImpl]
  * @param {Function} [o.onChange]   (view, info) — view изменился не по своему commit: open · confirmed · remote · gone · error · ack
  * @param {Function} [o.onStatus]   ({online, pending, syncing, error, head, label})
- * @param {Function} [o.onDropped]  (committed) — сервер отбросил часть операций своей транзакции
+ * @param {Function} [o.onDropped]  (committed + {label, by}) — сервер отбросил часть операций своей транзакции;
+ *                                  у каждой записи dropped — `by` (кто помешал, если узнаётся) и `label` (подпись правки)
+ * @param {Function} [o.onJournal]  (list) — журнал подтверждённых изменился (как replica.journal())
  * @param {Function} [o.onPresence] (list) — кто в сети с их выделениями
  * @param {Function} [o.onGone]     (snapshot) — база ушла за хвост: пришёл снимок
- * @param {Function} [o.onError]    ({code, message, tx?}) — code: engine · not-found · diverged · too_large · коды сервера
+ * @param {Function} [o.onError]    ({code, message, tx?}) — code: engine · not-found · diverged · too_large ·
+ *                                  not_saved (правку раз за разом не записать — снята с очереди) · replay_expired ·
+ *                                  replay_incomplete (после отката базы не всё своё переиграно) · коды сервера
  * @param {Function} [o.extra]      () => object — что оболочка кладёт в журнал рядом с документом
  * @param {number} [o.reconnectMin] пауза перед первым переподключением, мс (1000)
  * @param {number} [o.reconnectMax] потолок паузы, мс (30000)
@@ -294,7 +372,15 @@ export function createSync(o) {
   let tip = null;              // chain подтверждённой головы (SPEC §9.8); null — сервер его не дал
   let epoch = null;            // эпоха журнала, в которой получено confirmed
   let epochMoved = false;      // hello принёс другую эпоху — снимок, который придёт следом, требует переиграть mine
-  let mine = [];               // свои подтверждённые: [{tx, seq, epoch}] — переигрываются после отката базы
+  let mine = [];               // свои подтверждённые: [{tx, seq, epoch, at, bytes}] — переигрываются после отката базы
+  let mineEvicted = [];        // вытесненные из окна mine: [{epoch, seq}] — сказать, что их уже не переиграть
+  let unsaved = [];            // снятые «не сохранено»: [{tx, cause, message, at}]
+  let poison = null;           // {tx_id, code, n}: одинаковые повторяемые ошибки подряд на одну транзакцию
+  let probing = false;         // идёт проверка «сервер жив?» перед тем, как снять транзакцию
+  let lastRemoved = [];        // надгробия последней применённой транзакции сервера (для журнала)
+  let journalList = [];        // подтверждённые по возрастанию seq: [{pub, created, leaves, removed}]
+  const removedBy = new Map(); // id удалённого узла → запись журнала (самая новая)
+  let journalNotify = false;
   let serverWait = 0;          // сервер попросил подождать (Retry-After), мс — пауза переподключения не меньше
   let resendTimer = null;      // повтор отправки после повторяемой ошибки
 
@@ -378,7 +464,8 @@ export function createSync(o) {
       error = 'diverged';
       call(o.onError, { code: 'diverged', message: 'транзакция сервера не применилась к реплике: ' + (res.error ? res.error.message : ''), tx: c });
     }
-    for (const [id, p] of core.collectTombstones(before, c.ops)) tomb.set(id, p);
+    lastRemoved = [];
+    for (const [id, p] of core.collectTombstones(before, c.ops)) { tomb.set(id, p); lastRemoved.push(id); }
     confirmed = { seq: c.seq, doc: res.error ? before : res.doc };
     tip = typeof c.chain === 'string' && c.chain ? c.chain : null;
     return before;
@@ -396,7 +483,7 @@ export function createSync(o) {
     return {
       seq: confirmed.seq, doc: confirmed.doc, pending,
       tombstones: tombToList(tomb), clientId, updatedAt: Date.now(),
-      tip, epoch, mine,
+      tip, epoch, mine, mineEvicted, unsaved,
       ...(extra !== undefined ? { extra } : {}),
     };
   }
@@ -459,17 +546,22 @@ export function createSync(o) {
     if (r.status === 404) { error = 'not-found'; emitStatus(); call(o.onError, { code: 'not-found', message: 'проект не найден' }); return false; }
     if (!r.ok || !r.body || !r.body.snapshot || !r.body.snapshot.doc) throw new Error(`GET /api/projects: ${r.status}`);
     const moved = !!(epoch && typeof r.body.epoch === 'string' && r.body.epoch !== epoch);
-    adoptSnapshot(r.body.snapshot, r.body.tail, r.body.epoch);
-    if (moved) requeueMine();
+    adoptSnapshot(r.body.snapshot, r.body.tail, r.body.epoch, moved);
+    if (moved) requeueMine(r.body.snapshot.seq);
     return true;
   }
 
-  /** Снимок как confirmed, надгробия с нуля, хвост — по порядку, своя очередь — поверх. */
-  function adoptSnapshot(snapshot, tail, nextEpoch) {
+  /**
+   * Снимок как confirmed, надгробия — из снимка (у прежнего сервера их нет — с нуля),
+   * хвост — по порядку, своя очередь — поверх. Журнал: эпоха сменилась — он про
+   * другую историю, очищается; иначе остаётся то, что не новее снимка.
+   */
+  function adoptSnapshot(snapshot, tail, nextEpoch, moved = false) {
     confirmed = { seq: isNum(snapshot.seq) ? snapshot.seq : 0, doc: snapshot.doc };
     tip = typeof snapshot.chain === 'string' && snapshot.chain ? snapshot.chain : null;
     if (typeof nextEpoch === 'string' && nextEpoch) epoch = nextEpoch;
-    tomb = new Map();
+    tomb = tombFromList(snapshot.tombstones);
+    journalTrim(moved ? -1 : confirmed.seq);
     const list = Array.isArray(tail) ? tail.slice().sort((a, b) => a.seq - b.seq) : [];
     for (const c of list) if (isNum(c.seq) && c.seq > confirmed.seq) takeCommitted(c, { silent: true });
     replayAll();
@@ -514,9 +606,9 @@ export function createSync(o) {
     if (!snapshot || !snapshot.doc) return;
     const moved = epochMoved || !!(epoch && typeof nextEpoch === 'string' && nextEpoch && nextEpoch !== epoch);
     epochMoved = false;
-    adoptSnapshot(snapshot, [], nextEpoch);
+    adoptSnapshot(snapshot, [], nextEpoch, moved);
     // база откатилась: свои транзакции прежней эпохи могли пропасть вместе с ней — переиграть
-    if (moved) requeueMine();
+    if (moved) requeueMine(snapshot.seq);
     call(o.onGone, snapshot);
     call(o.onChange, view, { reason: 'gone', head: headSeq });
     emitStatus();
@@ -545,10 +637,15 @@ export function createSync(o) {
   function takeCommitted(c, opts = {}) {
     const i = pending.findIndex((p) => p.tx_id === c.tx_id);
     const before = applyConfirmed(c);
+    // транзакция агента по команде этой вкладки — тоже своя: после отката базы её переиграет реплика
+    const agentMine = i < 0 && !!c.client && c.client === clientId && c.author_kind === 'agent';
+    journalAdd(c, lastRemoved, i >= 0 || (!!c.client && c.client === clientId));
+    if (agentMine) rememberMine(agentTx(c), c.seq, c.created_at);
     if (i >= 0) {
       const own = pending.splice(i, 1)[0];
       if (inflight === c.tx_id) clearInflight();
-      rememberMine(own, c.seq);
+      if (poison && poison.tx_id === c.tx_id) poison = null;
+      rememberMine(own, c.seq, c.created_at);
       const prevHash = opts.silent ? '' : hashOf(view);
       replayAll();
       scheduleWrite();
@@ -556,7 +653,7 @@ export function createSync(o) {
       if (opts.silent) return;
       let inverse = [];
       try { inverse = core.invertOps(before, c.ops); } catch (e) { report('invert', e); }
-      if (Array.isArray(c.dropped) && c.dropped.length) call(o.onDropped, c);
+      if (Array.isArray(c.dropped) && c.dropped.length) call(o.onDropped, explainDropped(c, own));
       call(o.onChange, view, { reason: 'confirmed', tx: c, inverse, same: prevHash !== '' && prevHash === hashOf(view) });
       sendNext();
       return;
@@ -566,28 +663,159 @@ export function createSync(o) {
     if (!opts.silent) call(o.onChange, view, { reason: 'remote', tx: c, mine: !!c.client && c.client === clientId });
   }
 
-  /** Своя подтверждённая — в mine (последние MINE_KEEP): после отката базы её переиграют. */
-  function rememberMine(tx, seq) {
-    if (!tx || !tx.tx_id) return;
-    mine = mine.filter((m) => m.tx.tx_id !== tx.tx_id);
-    mine.push({ tx, seq, epoch });
-    if (mine.length > MINE_KEEP) mine = mine.slice(-MINE_KEEP);
+  /** Транзакция агента из рассылки — в форме Tx для переигрывания (применённые операции). */
+  function agentTx(c) {
+    const tx = { tx_id: c.tx_id, base_seq: isNum(c.base_seq) ? c.base_seq : 0, ops: Array.isArray(c.ops) ? c.ops : [], engine: core.ENGINE_VERSION, client: clientId, author_kind: 'agent' };
+    for (const k of ['author', 'title', 'command_id', 'undo_of', 'redo_of']) if (typeof c[k] === 'string' && c[k]) tx[k] = c[k];
+    return tx;
   }
 
   /**
-   * Эпоха сменилась и пришёл снимок: свои транзакции, подтверждённые в прежней
-   * эпохе, встают в начало очереди (в порядке seq). Уцелевшие сервер узнает по
-   * tx_id и ответит сохранённым (`ack` или `tx`), потерянные запишет заново.
+   * Своя подтверждённая — в mine: после отката базы её переиграют. Окно — последние
+   * MINE_KEEP и не больше MINE_BYTES; вытесненные запоминаются (эпоха, seq), чтобы
+   * после отката честно сказать, сколько своего уже не переиграть. `at` — когда правка
+   * записана впервые (время сервера; у переигранной — исходное).
    */
-  function requeueMine() {
-    const back = mine.filter((m) => m.epoch !== epoch && !pending.some((p) => p.tx_id === m.tx.tx_id))
-      .sort((a, b) => a.seq - b.seq);
-    if (!back.length) return;
-    mine = mine.filter((m) => !back.includes(m));
-    if (inflight) clearInflight();
-    pending = [...back.map((m) => m.tx), ...pending];
-    replayAll();
+  function rememberMine(tx, seq, at) {
+    if (!tx || !tx.tx_id) return;
+    mine = mine.filter((m) => m.tx.tx_id !== tx.tx_id);
+    const when = (typeof tx.replay_at === 'string' && tx.replay_at) || (typeof at === 'string' && at) || new Date().toISOString();
+    let bytes = 0;
+    try { bytes = JSON.stringify(tx).length; } catch { bytes = 0; }
+    mine.push({ tx, seq, epoch, at: when, bytes });
+    let total = 0;
+    for (const m of mine) total += m.bytes || 0;
+    while (mine.length > 1 && (mine.length > MINE_KEEP || total > MINE_BYTES)) {
+      const old = mine.shift();
+      total -= old.bytes || 0;
+      mineEvicted.push({ epoch: old.epoch, seq: old.seq });
+    }
+    if (mineEvicted.length > MINE_EVICTED_KEEP) mineEvicted = mineEvicted.slice(-MINE_EVICTED_KEEP);
+  }
+
+  /**
+   * Эпоха сменилась и пришёл снимок (SPEC §9.8, §9.10): свои транзакции, подтверждённые
+   * в прежней эпохе, встают в начало очереди — все, в порядке, в котором их
+   * подтверждали. Каждая несёт `replay_of_epoch` и `replay_at`: сервер узнает
+   * уцелевшие по tx_id, потерянные запишет заново, но `set` на лист, который после
+   * неё переписал кто-то другой, отбросит (`stale`) — старое не затирает новое.
+   * Старше суток — не переигрываются (человеку — «N правок из прошлой версии не
+   * восстановлены»); вытесненные из окна после снимка — тоже сказать.
+   */
+  function requeueMine(snapSeq) {
+    const old = mine.filter((m) => m.epoch !== epoch && !pending.some((p) => p.tx_id === m.tx.tx_id));
+    const now = Date.now();
+    const fresh = [];
+    const expired = [];
+    for (const m of old) {
+      const t = Date.parse(m.at);
+      (Number.isFinite(t) && now - t > LIMITS.replayMaxAgeMs ? expired : fresh).push(m);
+    }
+    const lost = mineEvicted.filter((e) => e.epoch !== epoch && (!isNum(snapSeq) || e.seq > snapSeq)).length;
+    mineEvicted = mineEvicted.filter((e) => e.epoch === epoch);
+    if (!old.length && !lost) return;
+    mine = mine.filter((m) => !old.includes(m));
+    const words = (n) => `${n} ${plural(n, 'правка', 'правки', 'правок')} из прошлой версии не ${plural(n, 'восстановлена', 'восстановлены', 'восстановлены')}`;
+    if (expired.length) {
+      call(o.onError, { code: 'replay_expired', count: expired.length, message: `${words(expired.length)}: им больше суток — база с тех пор восстановлена из резервной копии`, txs: expired.map((m) => m.tx) });
+    }
+    if (lost) {
+      call(o.onError, { code: 'replay_incomplete', count: lost, message: `${words(lost)}: реплика помнит только последние ${MINE_KEEP}` });
+    }
+    if (fresh.length) {
+      if (inflight) clearInflight();
+      pending = [...fresh.map((m) => ({ ...m.tx, replay_of_epoch: m.epoch || 'none', replay_at: m.at })), ...pending];
+      replayAll();
+    }
     scheduleWrite();
+  }
+
+  /* ---- журнал в памяти: история и «кто помешал» ---- */
+
+  function journalAdd(c, removedIds, own) {
+    const pub = {
+      seq: c.seq, tx_id: String(c.tx_id || ''), author: typeof c.author === 'string' ? c.author : '',
+      author_kind: c.author_kind || 'human', title: typeof c.title === 'string' ? c.title : '',
+      created_at: typeof c.created_at === 'string' ? c.created_at : '', client: typeof c.client === 'string' ? c.client : '',
+      command_id: typeof c.command_id === 'string' ? c.command_id : '',
+      ops_count: Array.isArray(c.ops) ? c.ops.length : 0, dropped_count: droppedCount(c.dropped), mine: !!own,
+    };
+    const created = [];
+    const leaves = [];
+    for (const op of Array.isArray(c.ops) ? c.ops : []) {
+      if (!op || typeof op !== 'object') continue;
+      if (op.op === 'create' && op.node && typeof op.node.id === 'string') { if (created.length < JOURNAL_LEAVES) created.push(op.node.id); }
+      else if ((op.op === 'set' || op.op === 'setToken') && typeof op.path === 'string' && leaves.length < JOURNAL_LEAVES) {
+        leaves.push({ scope: op.op === 'set' ? 'n:' + op.id : 't:', path: op.path });
+      }
+    }
+    const entry = { pub, created, leaves, removed: Array.isArray(removedIds) ? removedIds : [] };
+    journalList.push(entry);
+    for (const id of entry.removed) removedBy.set(id, entry);
+    while (journalList.length > JOURNAL_KEEP) dropEntry(journalList.shift());
+    noteJournal();
+  }
+  function dropEntry(e) {
+    for (const id of e.removed) if (removedBy.get(id) === e) removedBy.delete(id);
+  }
+  /** Оставить записи не новее seq (-1 — очистить: эпоха сменилась, это другая история). */
+  function journalTrim(seq) {
+    if (!journalList.length) return;
+    const keep = seq < 0 ? [] : journalList.filter((e) => e.pub.seq <= seq);
+    if (keep.length === journalList.length) return;
+    for (const e of journalList) if (!keep.includes(e)) dropEntry(e);
+    journalList = keep;
+    noteJournal();
+  }
+  function noteJournal() {
+    if (journalNotify || typeof o.onJournal !== 'function') return;
+    journalNotify = true;
+    Promise.resolve().then(() => { journalNotify = false; call(o.onJournal, journal()); });
+  }
+  /** Последние подтверждённые транзакции, новые первыми. */
+  function journal(limit = 200) {
+    const n = Math.max(0, Math.min(JOURNAL_KEEP, isNum(limit) ? limit : 200));
+    return journalList.slice(-n).reverse().map((e) => ({ ...e.pub }));
+  }
+  const whoOf = (e) => (e ? { author: e.pub.author, author_kind: e.pub.author_kind, seq: e.pub.seq, title: e.pub.title } : null);
+  /** Кто удалил узел (сам узел или поддерево с ним) — по недавнему журналу; не знаем — null. */
+  function whoRemoved(nodeId) {
+    return whoOf(removedBy.get(String(nodeId)) || null);
+  }
+  function newest(pred, exceptTx) {
+    for (let k = journalList.length - 1; k >= 0; k--) {
+      const e = journalList[k];
+      if (e.pub.tx_id !== exceptTx && pred(e)) return e;
+    }
+    return null;
+  }
+  /** Кто помешал операции из dropped: удалил узел или родителя, создал тот же id, переписал лист. */
+  function whoFor(d, exceptTx) {
+    const op = d && d.op && typeof d.op === 'object' ? d.op : {};
+    const nodeId = op.op === 'create' ? op.node && op.node.id : op.id;
+    switch (d && d.reason) {
+      case 'removed': return whoRemoved(nodeId);
+      case 'orphan': return whoRemoved(op.op === 'create' ? op.node && op.node.parent : op.parent);
+      case 'exists': return whoOf(newest((e) => e.created.includes(nodeId), exceptTx));
+      case 'stale': {
+        if (typeof op.path !== 'string') return null;
+        const scope = op.op === 'setToken' ? 't:' : 'n:' + op.id;
+        return whoOf(newest((e) => !e.pub.mine && e.leaves.some((l) => l.scope === scope && pathsMeet(l.path, op.path)), exceptTx));
+      }
+      default: return null;
+    }
+  }
+  /** Подтверждение с dropped для человека: подпись правки и кто помешал (§9.10). */
+  function explainDropped(c, own) {
+    const label = (typeof c.title === 'string' && c.title) || (own && typeof own.title === 'string' && own.title) || '';
+    let first = null;
+    const dropped = c.dropped.map((d) => {
+      if (!d || typeof d !== 'object' || d.index === undefined) return d;
+      const by = whoFor(d, c.tx_id);
+      if (by && !first) first = by;
+      return { ...d, by, label };
+    });
+    return { ...c, dropped, label, by: first };
   }
 
   /* ---- отправка ---- */
@@ -749,6 +977,7 @@ export function createSync(o) {
     if (i >= 0 && isNum(msg.seq) && msg.seq <= confirmed.seq && !catchingUp) {
       const own = pending.splice(i, 1)[0];
       if (inflight === own.tx_id) clearInflight();
+      if (poison && poison.tx_id === own.tx_id) poison = null;
       rememberMine(own, msg.seq);
       replayAll();
       scheduleWrite();
@@ -756,6 +985,80 @@ export function createSync(o) {
       call(o.onChange, view, { reason: 'ack', tx: own, seq: msg.seq });
       sendNext();
     }
+  }
+
+  /**
+   * Одинаковые повторяемые ошибки подряд на одну транзакцию (§9.10): `busy` не в
+   * счёт — это перегрузка, а не правка. Возвращает, который раз подряд.
+   */
+  function notePoison(tx, code) {
+    if (code === 'busy') return 0;
+    if (poison && poison.tx_id === tx.tx_id && poison.code === code) poison.n += 1;
+    else poison = { tx_id: tx.tx_id, code, n: 1 };
+    return poison.n;
+  }
+
+  /**
+   * RETRY_POISON раз подряд одно и то же — сервер жив (отвечает на чтение головы)?
+   * Да — ещё одна попытка: та же ошибка и после неё — правку не записать никогда,
+   * снять её в «не сохранено», очередь идёт дальше (пока проверяли, сервер мог и
+   * подняться — тогда попытка пройдёт). Нет (хранилище лежит) — ждать и повторять.
+   */
+  function probePoison(tx) {
+    if (probing) return;
+    probing = true;
+    const later = () => {
+      if (poison && poison.tx_id === tx.tx_id) poison.n = RETRY_POISON - 1;
+      scheduleResend(reconnectMax);
+    };
+    http(`/api/projects/${encodeURIComponent(projectId)}?head=1`).then((r) => {
+      probing = false;
+      if (closed) return;
+      if (!pending.some((p) => p.tx_id === tx.tx_id)) { sendNext(); return; }
+      if (r.ok && poison && poison.tx_id === tx.tx_id) {
+        poison.alive = true;
+        scheduleResend(reconnectMin);
+      } else {
+        later();
+      }
+    }, (e) => {
+      probing = false;
+      report('probe', e);
+      if (!closed) later();
+    });
+  }
+
+  /** Снять транзакцию в «не сохранено»: правка не исчезает молча — человеку сказано, она в unsaved. */
+  function giveUp(i, code, msg) {
+    const tx = pending.splice(i, 1)[0];
+    if (inflight === tx.tx_id) clearInflight();
+    poison = null;
+    unsaved.push({ tx, cause: code, message: String((msg && msg.message) || ''), at: new Date().toISOString() });
+    if (unsaved.length > UNSAVED_KEEP) unsaved = unsaved.slice(-UNSAVED_KEEP);
+    replayAll();
+    scheduleWrite();
+    call(o.onChange, view, { reason: 'error', tx });
+    const what = tx.title ? `«${tx.title}»` : '';
+    call(o.onError, {
+      code: 'not_saved', cause: code, tx,
+      message: `правка ${what ? what + ' ' : ''}не сохранена: сервер раз за разом не может её записать (${code}) — она снята с очереди, остальные правки идут дальше`,
+    });
+    emitStatus();
+    sendNext();
+  }
+
+  /** Вернуть «не сохранённую» правку в очередь (человек попросил повторить). */
+  function retryUnsaved(txId) {
+    const k = unsaved.findIndex((u) => u.tx.tx_id === txId);
+    if (k < 0) return false;
+    const { tx } = unsaved.splice(k, 1)[0];
+    pending.push(tx);
+    replayAll();
+    scheduleWrite();
+    call(o.onChange, view, { reason: 'retry', tx });
+    emitStatus();
+    sendNext();
+    return true;
   }
 
   function handleMessage(msg) {
@@ -773,7 +1076,7 @@ export function createSync(o) {
           // цело: эпоха новая сразу, свои подтверждённые числятся за ней
           if (epoch && msg.epoch !== epoch) epochMoved = true;
           if (msg.gone !== true) {
-            if (epochMoved && msg.gone === false) { epochMoved = false; for (const m of mine) m.epoch = msg.epoch; }
+            if (epochMoved && msg.gone === false) { epochMoved = false; for (const m of mine) m.epoch = msg.epoch; for (const e of mineEvicted) e.epoch = msg.epoch; }
             epoch = msg.epoch;
           }
         }
@@ -801,7 +1104,7 @@ export function createSync(o) {
       }
       case 'tx':
         // (прежний сервер без hello.gone) после hello с новой эпохой пошёл хвост, а не снимок
-        if (epochMoved && ready) { epochMoved = false; for (const m of mine) m.epoch = epoch; }
+        if (epochMoved && ready) { epochMoved = false; for (const m of mine) m.epoch = epoch; for (const e of mineEvicted) e.epoch = epoch; }
         handleTx(msg.tx);
         break;
       case 'ack':
@@ -830,7 +1133,12 @@ export function createSync(o) {
           // сервер занят или хранилище недоступно: транзакция остаётся в очереди и уйдёт позже
           serverWait = Math.max(serverWait, wait);
           if (tx && inflight === tx.tx_id) clearInflight();
-          if (tx) scheduleResend(wait || reconnectMin);
+          if (tx) {
+            const n = notePoison(tx, code);
+            if (n >= RETRY_POISON && poison.alive) giveUp(i, code, msg);
+            else if (n >= RETRY_POISON) probePoison(tx);
+            else scheduleResend(wait || Math.min(reconnectMax, reconnectMin * Math.pow(2, Math.max(0, n - 1))));
+          }
           emitStatus();
           break;
         }
@@ -949,7 +1257,8 @@ export function createSync(o) {
    * @returns {{tx: object|null, view: object, applied: object[], dropped: object[]}}
    */
   function commit(opsList, meta = {}) {
-    const list = clone(Array.isArray(opsList) ? opsList : opsList ? [opsList] : []).filter((op) => op && typeof op === 'object');
+    // строки — как их запишет сервер (§9.10): без U+0000 и одиночных суррогатов
+    const list = cleanDeep(clone(Array.isArray(opsList) ? opsList : opsList ? [opsList] : [])).filter((op) => op && typeof op === 'object');
     if (!view) return { tx: null, view, applied: [], dropped: list.map((op, index) => ({ index, op, reason: 'invalid' })) };
     for (const op of list) {
       // id создаваемых узлов чеканит клиент (§8.3): без него сервер и мы выдали бы разные
@@ -986,8 +1295,9 @@ export function createSync(o) {
       client: clientId,
       author_kind: meta.author_kind === 'agent' || meta.author_kind === 'system' ? meta.author_kind : 'human',
     };
-    if (author) tx.author = author;
-    if (meta.title) tx.title = String(meta.title).slice(0, 200);
+    if (author) tx.author = cleanText(author);
+    if (meta.title) tx.title = cleanText(String(meta.title).slice(0, 200));
+    if (typeof meta.command_id === 'string' && meta.command_id && meta.command_id.length <= 128 && isCleanText(meta.command_id)) tx.command_id = meta.command_id;
     if (meta.undo_of) tx.undo_of = String(meta.undo_of);
     if (meta.redo_of) tx.redo_of = String(meta.redo_of);
     let bytes = 0;
@@ -1026,6 +1336,8 @@ export function createSync(o) {
       tip = typeof rec.tip === 'string' && rec.tip ? rec.tip : null;
       epoch = typeof rec.epoch === 'string' && rec.epoch ? rec.epoch : null;
       mine = Array.isArray(rec.mine) ? rec.mine.filter((m) => m && m.tx && m.tx.tx_id && Array.isArray(m.tx.ops) && isNum(m.seq)).slice(-MINE_KEEP) : [];
+      mineEvicted = Array.isArray(rec.mineEvicted) ? rec.mineEvicted.filter((e) => e && isNum(e.seq)).slice(-MINE_EVICTED_KEEP) : [];
+      unsaved = Array.isArray(rec.unsaved) ? rec.unsaved.filter((u) => u && u.tx && u.tx.tx_id && Array.isArray(u.tx.ops)).slice(-UNSAVED_KEEP) : [];
       replayAll();
       call(o.onChange, view, { reason: 'open', from: 'local', extra: extraLoaded });
       emitStatus();
@@ -1114,7 +1426,14 @@ export function createSync(o) {
     get status() { return statusFull(); },
     get tip() { return tip; },
     get epoch() { return epoch; },
-    get mine() { return mine.map((m) => ({ tx_id: m.tx.tx_id, seq: m.seq, epoch: m.epoch })); },
+    get mine() { return mine.map((m) => ({ tx_id: m.tx.tx_id, seq: m.seq, epoch: m.epoch, at: m.at, author_kind: m.tx.author_kind || 'human' })); },
+    /** Правки, снятые «не сохранено» (сервер раз за разом не мог записать): {tx_id, title, cause, message, at}. */
+    get unsaved() { return unsaved.map((u) => ({ tx_id: u.tx.tx_id, title: u.tx.title || '', cause: u.cause, message: u.message, at: u.at })); },
+    retryUnsaved,
+    /** Последние подтверждённые транзакции, новые первыми (≤ 500 в памяти). */
+    journal,
+    /** Кто удалил узел: {author, author_kind, seq, title} или null. */
+    whoRemoved,
     get extra() { return extraLoaded; },
     get clientId() { return clientId; },
     get projectId() { return projectId; },

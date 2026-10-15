@@ -16,7 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { toCommitted, txColumns, chainNext, newEpoch, jsonBytes } from './committed.js';
+import { toCommitted, txColumns, chainNext, newEpoch, jsonBytes, tombstonesObject, pgRejects } from './committed.js';
 import { PAGE_BYTES } from '../limits.js';
 
 const clone = (v) => (v === undefined ? undefined : structuredClone(v));
@@ -64,7 +64,7 @@ export function createMemoryStorage() {
     return j.bySeq.find((r) => r.seq === seq) || null;
   };
 
-  return {
+  const self = {
     kind: 'memory',
 
     async init() {},
@@ -85,11 +85,13 @@ export function createMemoryStorage() {
     },
 
     async createProject({ name = '', kind = 'design', doc, engine }) {
+      const bad = pgRejects({ json: [doc], text: [name, kind] });
+      if (bad) throw bad;
       const now = new Date().toISOString();
       const epoch = newEpoch();
       const project = { id: randomUUID(), name, kind, head_seq: 0, head_chain: '', epoch, epoch_cause: 'init', engine, created_at: now, updated_at: now };
       projects.set(project.id, project);
-      snapshots.set(project.id, [{ seq: 0, doc: clone(doc), engine, chain: '', created_at: now }]);
+      snapshots.set(project.id, [{ seq: 0, doc: clone(doc), engine, chain: '', tombstones: {}, created_at: now }]);
       epochs.set(project.id, [{ epoch, seq: 0, cause: 'init', created_at: now }]);
       journalOf(project.id);
       return clone(project);
@@ -108,6 +110,8 @@ export function createMemoryStorage() {
     async renameProject(id, name) {
       const p = projects.get(String(id));
       if (!p) return null;
+      const bad = pgRejects({ text: [name] });
+      if (bad) throw bad;
       p.name = name;
       p.updated_at = new Date().toISOString();
       return clone(p);
@@ -118,9 +122,10 @@ export function createMemoryStorage() {
       if (!list || !list.length) return null;
       for (let i = list.length - 1; i >= 0; i--) {
         const s = list[i];
-        if (s.seq === 0) return clone(s);
+        const out = () => ({ ...clone(s), tombstones: clone(s.tombstones || {}) });
+        if (s.seq === 0) return out();
         const row = rowAt(projectId, s.seq);
-        if (row && row.chain === s.chain) return clone(s);
+        if (row && row.chain === s.chain) return out();
       }
       return null;
     },
@@ -160,11 +165,15 @@ export function createMemoryStorage() {
       const j = journalOf(p.id);
       const known = j.byTx.get(String(tx.tx_id));
       if (known) return { status: 'existing', committed: toCommitted(clone(known)) };
+      const cols = txColumns(tx);
+      // то, чего не примет Postgres (NUL, одинокий суррогат), — отказ и здесь (→ 400)
+      const bad = pgRejects({ json: [cols.ops, cols.dropped, cols.notes], text: [cols.tx_id, cols.undo_of, cols.redo_of, cols.author, cols.client, cols.title, cols.command_id] });
+      if (bad) throw bad;
       const seq = p.head_seq + 1;
       if (expectSeq !== undefined && seq !== expectSeq) return { status: 'stale', head_seq: p.head_seq, epoch: p.epoch };
       const chain = chainNext(p.head_chain, tx.tx_id, seq);
       if (expectChain !== undefined && chain !== expectChain) return { status: 'stale', reason: 'chain', head_seq: p.head_seq, epoch: p.epoch };
-      const row = { project_id: p.id, seq, ...clone(txColumns(tx)), chain, created_at: new Date().toISOString() };
+      const row = { project_id: p.id, seq, ...clone(cols), chain, created_at: new Date().toISOString() };
       p.head_seq = seq;
       p.head_chain = chain;
       p.updated_at = row.created_at;
@@ -174,7 +183,12 @@ export function createMemoryStorage() {
       return { status: 'committed', committed: toCommitted(clone(row)), epoch: p.epoch };
     },
 
-    async writeSnapshot(projectId, seq, doc, engine, chain = '') {
+    /** Объектная форма writeSnapshot: `{seq, doc, engine, chain, tombstones}`. */
+    async saveSnapshot(projectId, { seq, doc, engine, chain = '', tombstones } = {}) {
+      return self.writeSnapshot(projectId, seq, doc, engine, chain, tombstones);
+    },
+
+    async writeSnapshot(projectId, seq, doc, engine, chain = '', tombstones = {}) {
       const list = snapshots.get(String(projectId));
       if (!list) return false;
       const row = rowAt(projectId, seq);
@@ -184,7 +198,7 @@ export function createMemoryStorage() {
         if (list[at].chain === chain) return false;    // ON CONFLICT DO NOTHING
         list.splice(at, 1);
       }
-      list.push({ seq, doc: clone(doc), engine, chain, created_at: new Date().toISOString() });
+      list.push({ seq, doc: clone(doc), engine, chain, tombstones: tombstonesObject(tombstones), created_at: new Date().toISOString() });
       list.sort((a, b) => a.seq - b.seq);
       return true;
     },
@@ -227,6 +241,8 @@ export function createMemoryStorage() {
 
     async addTrace({ projectId, commandId, body }) {
       if (!projects.has(String(projectId))) return null;
+      const bad = pgRejects({ json: [body], text: [String(commandId)] });
+      if (bad) throw bad;
       const row = { id: String(++traceId), command_id: String(commandId), created_at: new Date().toISOString(), body: clone(body) };
       if (!traces.has(projectId)) traces.set(projectId, []);
       traces.get(projectId).push(row);
@@ -254,4 +270,5 @@ export function createMemoryStorage() {
       traceId = c.traceId;
     }
   };
+  return self;
 }

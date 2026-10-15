@@ -50,6 +50,63 @@ export function parseLlmUrl(raw) {
   return { publicBase, query, auth, secrets };
 }
 
+/** Длина куска секрета, который redact узнаёт в тексте (SPEC §10.1: ключ не уходит наружу). */
+export const SECRET_GRAM = 8;
+
+/**
+ * Все куски длиной SECRET_GRAM из секретов и из их base64/base64url — во всех трёх
+ * выравниваниях (base64 куска ключа совпадает с куском base64 ключа, сдвинутого на
+ * 0, 1 или 2 байта). Секрет короче SECRET_GRAM узнаётся только целиком.
+ * @param {string[]} secrets
+ * @returns {Set<string>}
+ */
+export function secretGrams(secrets) {
+  const out = new Set();
+  const add = (str) => {
+    for (let i = 0; i + SECRET_GRAM <= str.length; i++) out.add(str.slice(i, i + SECRET_GRAM));
+  };
+  for (const sec of secrets || []) {
+    if (typeof sec !== 'string' || sec.length < SECRET_GRAM) continue;
+    add(sec);
+    const bytes = Buffer.from(sec, 'utf8');
+    for (let k = 0; k < 3 && k < bytes.length; k++) {
+      const b64 = bytes.subarray(k).toString('base64').replace(/=+$/, '');
+      // хвост base64 зависит от того, что идёт за секретом, — последние 3 знака не берём
+      const body = b64.slice(0, Math.max(0, b64.length - 3));
+      add(body);
+      add(body.replace(/\+/g, '-').replace(/\//g, '_'));
+    }
+  }
+  return out;
+}
+
+/**
+ * Каждое окно из SECRET_GRAM знаков, совпавшее с куском секрета, закрывается; соседние
+ * и перекрытые окна сливаются в одну замену `***`.
+ * @param {string} s @param {Set<string>} grams
+ * @returns {string}
+ */
+export function maskGrams(s, grams) {
+  if (!grams || !grams.size || s.length < SECRET_GRAM) return s;
+  let out = '';
+  let from = 0;      // начало ещё не выведенного
+  let end = -1;      // конец текущей закрываемой области
+  let start = -1;
+  for (let i = 0; i + SECRET_GRAM <= s.length; i++) {
+    if (!grams.has(s.slice(i, i + SECRET_GRAM))) continue;
+    if (start >= 0 && i <= end) {
+      end = i + SECRET_GRAM;
+    } else {
+      if (start >= 0) { out += s.slice(from, start) + '***'; from = end; }
+      start = i;
+      end = i + SECRET_GRAM;
+    }
+  }
+  if (start < 0) return s;
+  out += s.slice(from, start) + '***';
+  return out + s.slice(end);
+}
+
 /** База + суффикс пути (+ query базы) — всегда через URL, а не склейкой строк. */
 export function endpoint(publicBase, query, suffix) {
   const u = new URL(publicBase);
@@ -87,11 +144,15 @@ export function createLlm(cfg = {}) {
   }
   // самые длинные первыми: иначе замена короткой части оставит хвост длинной
   const secretList = [...new Set(secrets.filter((s) => s && s.length >= 4))].sort((a, b) => b.length - a.length);
+  const grams = secretGrams(secretList);
 
   /** Вычистить секреты из любой строки, уходящей наружу. */
   function redact(text) {
     let s = String(text == null ? '' : text);
     for (const sec of secretList) s = s.split(sec).join('***');
+    // круг 25: и куски ключа от 8 знаков (сервер модели цитирует ключ обрезанным:
+    // «Incorrect API key provided: sk-abc…xyz»), и его base64 (Basic-заголовок в эхе)
+    s = maskGrams(s, grams);
     // на всякий случай — любые userinfo в адресах
     s = s.replace(/(https?:\/\/)[^/\s@]+@/gi, '$1***@');
     return s;

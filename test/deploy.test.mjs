@@ -176,6 +176,15 @@ test('compose: сервисы, healthcheck у document, orchestrator, web; за�
   assert.match(dep('web'), /document:\s*\n\s+condition:\s*service_healthy/);
   assert.match(dep('web'), /orchestrator:\s*\n\s+condition:\s*service_healthy/);
   assert.match(s.web, /\$\{IMAGO_PORT:-8123\}:80/);
+  // круг 25: останов — с запасом на дописывание начатого; миграции на большой базе — не смерть
+  for (const name of ['document', 'orchestrator']) {
+    assert.match(s[name], /stop_grace_period:\s*15s/, `${name}: нет stop_grace_period 15s`);
+  }
+  const hc = sub(s.document, 'healthcheck');
+  const startP = /start_period:\s*(\d+)s/.exec(hc);
+  assert.ok(startP && Number(startP[1]) >= 600, 'document: start_period меньше 10 минут — долгая миграция уронит сервис');
+  const retries = /retries:\s*(\d+)/.exec(hc);
+  assert.ok(retries && Number(retries[1]) >= 10, 'document: мало повторов проверки');
 });
 
 test('nginx: тело команды агенту — не больше 1 МБ, как у самого Orchestrator', async () => {
@@ -183,8 +192,12 @@ test('nginx: тело команды агенту — не больше 1 МБ, 
   assert.equal(directive(b, 'client_max_body_size'), '1m');
   const { MAX_BODY_BYTES } = await import('../server/orchestrator/limits.js');
   assert.equal(MAX_BODY_BYTES, 1024 * 1024, 'предел nginx и Orchestrator разошлись');
-  // остальным — прежние 8 МБ: транзакции Document service до 4 МБ должны проходить
-  assert.equal(directive(nginxConf.slice(0, nginxConf.indexOf('location')), 'client_max_body_size'), '8m');
+  // остальным — 4 МБ, как у Document service (SPEC §9.8): тело 4–8 МБ раньше проходило
+  // nginx, сервис рвал соединение, и клиент видел 502 «сервис лежит» вместо 413 (круг 25)
+  assert.equal(directive(nginxConf.slice(0, nginxConf.indexOf('location')), 'client_max_body_size'), '4m');
+  assert.equal(directive(locationBlock(nginxConf, '/api/'), 'client_max_body_size'), '4m');
+  const { MAX_BODY_BYTES: DOC_MAX } = await import('../server/document/limits.js').catch(() => ({}));
+  if (Number.isFinite(DOC_MAX)) assert.equal(DOC_MAX, 4 * 1024 * 1024, 'предел nginx /api/ и Document service разошлись');
   const m = /error_page\s+413\s*=\s*(@[\w]+)/.exec(b);
   assert.match(returnJson(locationBlock(nginxConf, m[1])).body.message, /1 МБ/);
 });
@@ -457,11 +470,20 @@ test('nginx -t на настоящем конфиге и живые маршру
   assert.match(rest, /event: done/);
   assert.ok(tEnd - tFirst >= 350, `стадия пришла вместе с концом потока (${tFirst} мс из ${tEnd})`);
 
-  // большое тело — 413 тем же JSON
-  const big = await fetch(base + '/api/projects', { method: 'POST', body: 'x'.repeat(9 * 1024 * 1024), headers: { 'content-type': 'application/json' } });
-  assert.equal(big.status, 413);
-  const bigBody = await big.json();
-  assert.equal(bigBody.code, 'too_large');
+  // большое тело — 413 тем же JSON; 5 МБ — уже больше предела Document service (4 МБ):
+  // это 413 от nginx, а не 502 от оборванного сервисом соединения (круг 25)
+  for (const mb of [5, 9]) {
+    const big = await fetch(base + '/api/projects/p/tx', { method: 'POST', body: 'x'.repeat(mb * 1024 * 1024), headers: { 'content-type': 'application/json' } });
+    assert.equal(big.status, 413, `${mb} МБ`);
+    assert.match(big.headers.get('content-type') || '', /application\/json/);
+    const bigBody = await big.json();
+    assert.equal(bigBody.code, 'too_large');
+    assert.equal(bigBody.retryable, false);
+  }
+  assert.ok(!seenDoc.some((r) => r.url.endsWith('/tx')), 'тело больше 4 МБ дошло до Document service');
+  // 3 МБ проходит до сервиса
+  const mid = await fetch(base + '/api/projects/p/tx', { method: 'POST', body: 'x'.repeat(3 * 1024 * 1024), headers: { 'content-type': 'application/json' } });
+  assert.equal(mid.status, 200);
   // команда агенту больше 1 МБ — 413 у nginx, до Orchestrator не доходит
   const bigCmd = await fetch(base + '/agent/command', { method: 'POST', body: 'x'.repeat(2 * 1024 * 1024), headers: { 'content-type': 'application/json' } });
   assert.equal(bigCmd.status, 413);

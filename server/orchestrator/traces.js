@@ -7,6 +7,7 @@
  */
 
 import { TRACE_RING } from './limits.js';
+import { cutText, cleanText } from '../../src/core.js';
 
 /**
  * @param {{doc: ReturnType<import('./docclient.js').createDocClient>, token?: string, path?: string, redact?: (s:string)=>string, log?: object}} o
@@ -24,7 +25,8 @@ export function createTraces({ doc: net, token = '', path = '/api/internal/trace
 
   /** Трасса — только разрешённые поля, строки через redact. */
   function clean(t) {
-    const s = (v, max = 300) => (v == null ? undefined : redact(String(v)).slice(0, max));
+    // круг 25: по кодовым точкам и без \u0000/одиночных суррогатов — трасса пишется в jsonb
+    const s = (v, max = 300) => (v == null ? undefined : cleanText(cutText(redact(String(v)), max)));
     return {
       command_id: s(t.command_id, 128),
       project: s(t.project, 128),

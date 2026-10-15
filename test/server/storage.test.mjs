@@ -9,8 +9,9 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDoc, ENGINE_VERSION, uid, ops } from '../../src/core.js';
 import { createMemoryStorage } from '../../server/document/storage/memory.js';
-import { createPgStorage } from '../../server/document/storage/pg.js';
-import { backends, DB_URL } from './helpers.mjs';
+import { compactDropped } from '../../server/document/storage/committed.js';
+import { viaStorage, DocError, setStorageLog } from '../../server/document/errors.js';
+import { backends, pgStorage } from './helpers.mjs';
 
 const E = ENGINE_VERSION;
 const record = (base_seq, list, extra = {}) => ({ tx_id: uid('tx'), base_seq, ops: list, dropped: [], notes: [], author_kind: 'human', engine: E, ...extra });
@@ -21,11 +22,9 @@ for (const backend of list) {
   describe(`storage · ${backend.name}`, { skip: backend.available ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
     let storage;
     before(async () => {
-      storage = backend.name === 'pg'
-        ? createPgStorage({ connectionString: DB_URL, log: { info() {}, warn() {} } })
-        : createMemoryStorage();
+      // pg — своя временная база этого файла (helpers.mjs): чистить нечего, чужого не трогаем
+      storage = backend.name === 'pg' ? pgStorage() : createMemoryStorage();
       await storage.init();
-      if (backend.name === 'pg') await storage.pool.query('TRUNCATE projects, operations, snapshots, library_versions, project_imports, project_epochs, traces CASCADE');
     });
     after(async () => {
       await storage.close();
@@ -107,6 +106,65 @@ for (const backend of list) {
       assert.equal((await storage.getProject(p.id)).kind, 'library');
     });
 
+    it('снимок несёт надгробия (объект id → родитель), старый — {}; запись журнала — command_id (круг 25)', async () => {
+      const p = await storage.createProject({ name: 'Н', kind: 'design', doc: createDoc('empty'), engine: E });
+      assert.deepEqual((await storage.latestSnapshot(p.id)).tombstones, {}, 'затравка — без надгробий');
+      const r1 = await storage.commitTx(p.id, record(0, [], { command_id: 'cmd_42' }));
+      assert.equal(r1.committed.command_id, 'cmd_42');
+      const r2 = await storage.commitTx(p.id, record(1, []));
+      assert.equal('command_id' in r2.committed, false, 'без команды — поля нет');
+      assert.equal((await storage.findTx(p.id, r1.committed.tx_id)).command_id, 'cmd_42');
+      assert.deepEqual((await storage.txsAfter(p.id, 0)).map((t) => t.command_id), ['cmd_42', undefined]);
+      const doc = createDoc('empty');
+      const tomb = new Map([['n_1', 'b_1'], ['n_2', null]]);
+      assert.equal(await storage.writeSnapshot(p.id, 1, doc, E, r1.committed.chain, tomb), true, 'Map — тоже годится');
+      assert.deepEqual((await storage.latestSnapshot(p.id)).tombstones, { n_1: 'b_1', n_2: null });
+      assert.equal(await storage.saveSnapshot(p.id, { seq: 2, doc, engine: E, chain: r2.committed.chain, tombstones: { n_3: 'b_2' } }), true);
+      const snap = await storage.latestSnapshot(p.id);
+      assert.equal(snap.seq, 2);
+      assert.deepEqual(snap.tombstones, { n_3: 'b_2' });
+      assert.equal(await storage.writeSnapshot(p.id, 2, doc, E, r2.committed.chain), false, 'повтор — DO NOTHING');
+    });
+
+    it('данные, которых база не хранит (\\u0000 в jsonb — 22P05, половинка суррогата — 22P02, NUL в text — 22021): 400 retryable:false, голова не сдвинута', async () => {
+      const p = await storage.createProject({ name: 'Д', kind: 'design', doc: createDoc('empty'), engine: E });
+      const cases = [
+        [record(0, [ops.setToken('colors.x', 'a\u0000b')]), '22P05'],
+        [record(0, [ops.setToken('colors.x', 'a\ud800b')]), '22P02'],
+        [record(0, [], { title: 'имя\u0000' }), '22021']
+      ];
+      for (const [tx, code] of cases) {
+        const err = await viaStorage(storage.commitTx(p.id, tx)).then(() => null, (e) => e);
+        assert.ok(err instanceof DocError, code + ': DocError');
+        assert.equal(err.status, 400, code);
+        assert.equal(err.code, 'bad_request');
+        assert.equal(err.retryable, false, 'клиент снимает её с очереди');
+        assert.equal(err.detail.sqlstate, code);
+        assert.match(err.message, /не принимаются/);
+      }
+      assert.equal((await storage.getProject(p.id)).head_seq, 0, 'номер головы не ушёл вперёд');
+      const ok = await storage.commitTx(p.id, record(0, [ops.setToken('colors.x', 'a b 😀')]));
+      assert.equal(ok.status, 'committed', 'после отказа соединение и проект в порядке');
+      assert.equal(ok.committed.seq, 1);
+      const named = await viaStorage(storage.createProject({ name: 'с\u0000NUL', kind: 'design', doc: createDoc('empty'), engine: E })).then(() => null, (e) => e);
+      assert.equal(named && named.status, 400);
+    });
+
+    it('выжимка dropped: preview режется по кодовым точкам — суррогатная пара не рвётся, запись ложится', async () => {
+      const p = await storage.createProject({ name: 'В', kind: 'design', doc: createDoc('empty'), engine: E });
+      // JSON значения: '"' + 'a'.repeat(118) + '😀…' — 120-я кодовая точка — эмодзи (две единицы UTF-16)
+      for (const pad of [117, 118, 119]) {
+        const value = 'a'.repeat(pad) + '😀'.repeat(600);
+        const dropped = compactDropped([{ index: 0, reason: 'invalid', op: { op: 'set', id: 'n_1', path: 'name', value } }]);
+        const preview = dropped[0].op.preview;
+        assert.ok(preview.isWellFormed(), `pad ${pad}: без половинок суррогатов`);
+        assert.equal([...preview].length, 120);
+        const r = await storage.commitTx(p.id, record((await storage.getProject(p.id)).head_seq, [], { dropped }));
+        assert.equal(r.status, 'committed', `pad ${pad}: запись с выжимкой ложится`);
+        assert.equal(r.committed.dropped[0].op.preview, preview);
+      }
+    });
+
     it('параллельные commitTx с разными tx_id получают разные номера подряд', async () => {
       const p = await storage.createProject({ name: 'П', kind: 'design', doc: createDoc('empty'), engine: E });
       const results = await Promise.all(Array.from({ length: 6 }, (_, i) => storage.commitTx(p.id, record(0, [], { title: 'п' + i }))));
@@ -116,3 +174,27 @@ for (const backend of list) {
     });
   });
 }
+
+describe('viaStorage: причина 503 — в лог одной строкой', () => {
+  it('сбой хранилища → 503 и строка лога без переводов строк и не длиннее ~250 символов; повторы — не чаще раза в секунду', async () => {
+    const lines = [];
+    setStorageLog({ warn: (m) => lines.push(m), info() {} });
+    try {
+      const boom = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432\n' + 'данные пользователя '.repeat(100)), { code: 'ECONNREFUSED' });
+      for (let k = 0; k < 5; k++) {
+        const e = await viaStorage(Promise.reject(boom)).then(() => null, (x) => x);
+        assert.equal(e.status, 503);
+        assert.equal(e.detail.cause, 'storage');
+      }
+      assert.equal(lines.length, 1, 'одинаковые — одной строкой');
+      assert.match(lines[0], /503 \(storage ECONNREFUSED\): connect ECONNREFUSED/);
+      assert.ok(!/\n/.test(lines[0]) && lines[0].length < 300, lines[0]);
+      const t = await viaStorage(Promise.reject(Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }))).then(() => null, (x) => x);
+      assert.equal(t.detail.cause, 'timeout');
+      assert.equal(lines.length, 2);
+      assert.match(lines[1], /503 \(timeout 57014\)/);
+    } finally {
+      setStorageLog(console);
+    }
+  });
+});

@@ -131,7 +131,7 @@ for (const backend of list) {
     });
 
     async function fresh(name = 'Проба') {
-      const created = await http.post('/api/projects', { name });
+      const created = await http.post('/api/projects', { name, demo: true });
       assert.equal(created.status, 201);
       const opened = await http.get('/api/projects/' + created.body.id);
       return { id: created.body.id, doc: opened.body.snapshot.doc, board: artboards(opened.body.snapshot.doc)[0], epoch: created.body.epoch };
@@ -356,6 +356,33 @@ for (const backend of list) {
       }
     });
 
+    it('предел документа в байтах — точный (§9.10): узлы с длинными id не проскакивают за предел по оценке', async () => {
+      const { id, board } = await fresh();
+      await svc.dslts.unload(id);
+      const bytes0 = Buffer.byteLength(JSON.stringify((await svc.dslts.headOf(id)).doc));
+      const max = bytes0 + 20000;
+      const tight = await start({ port: 0, storage: svc.storage, maxDocBytes: max, snapshotEvery: 0, verifyMs: 0, pingInterval: 0, log: quiet });
+      try {
+        const h = api(tight.url);
+        // id длинный, узел короткий: документ растёт втрое быстрее, чем JSON операции (ключ, id, ребёнок родителя)
+        const longText = () => ({ ...text(board.id, 'т'), id: 'n_' + 'x'.repeat(118) + uid('') });
+        let seq = (await h.get(`/api/projects/${id}?head=1`)).body.head_seq;
+        let limited = false;
+        for (let i = 0; i < 200 && !limited; i++) {
+          const r = await h.post(`/api/projects/${id}/tx`, tx(seq, [ops.create(longText())]));
+          assert.equal(r.status, 201);
+          seq = r.body.seq;
+          limited = r.body.dropped.some((d) => d.limit === 'doc_bytes');
+          const head = await tight.dslts.headOf(id);
+          const real = Buffer.byteLength(JSON.stringify(head.doc));
+          assert.ok(real <= max, `документ ${real} > предела ${max} после seq ${seq}`);
+        }
+        assert.ok(limited, 'предел достигнут');
+      } finally {
+        await tight.close({ closeStorage: false });
+      }
+    });
+
     it('dropped в журнале — выжимкой: 50 записей + {more}, большие значения без самого значения', async () => {
       const { id, board } = await fresh();
       await http.post(`/api/projects/${id}/tx`, tx(0, [ops.remove(board.id)]));
@@ -540,7 +567,7 @@ describe('голова секвенсора: хвост короткими ст�
     const b = await start({ port: 0, storage: stingy, snapshotEvery: 0, verifyMs: 0, pingInterval: 0, log: quiet });
     try {
       const h = api(a.url);
-      const created = await h.post('/api/projects', { name: 'Страницы' });
+      const created = await h.post('/api/projects', { name: 'Страницы', demo: true });
       const id = created.body.id;
       const board = artboards((await h.get('/api/projects/' + id)).body.snapshot.doc)[0];
       await b.dslts.headOf(id);   // второй экземпляр загрузил голову на seq 0

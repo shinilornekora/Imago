@@ -13,7 +13,75 @@ import { createHash, randomBytes } from 'node:crypto';
 import { DROPPED_KEEP, DROPPED_OP_BYTES, DROPPED_PREVIEW_CHARS } from '../limits.js';
 
 /** Необязательные поля транзакции: в записи есть, только если заданы. */
-const OPTIONAL = ['undo_of', 'redo_of', 'author', 'client', 'title'];
+const OPTIONAL = ['undo_of', 'redo_of', 'author', 'client', 'title', 'command_id'];
+
+/**
+ * Начало строки — не больше `n` кодовых точек: суррогатная пара не рвётся (половинка
+ * пары — «одинокий суррогат»: jsonb такую строку не примет, 22P02, и вся запись упала бы).
+ * @param {string} s
+ * @param {number} n
+ */
+export function codePointSlice(s, n) {
+  if (typeof s !== 'string') return '';
+  // быстрый путь: в первых n единицах UTF-16 нет суррогатов — режем как есть
+  let i = 0;
+  let points = 0;
+  while (i < s.length && points < n) {
+    const c = s.charCodeAt(i);
+    i += c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00 ? 2 : 1;
+    points++;
+  }
+  return s.slice(0, i);
+}
+
+/**
+ * Надгробия снимка — объект id → родитель (SPEC §9.11). Принимает объект, Map или
+ * массив пар; всё прочее — пусто.
+ * @param {any} t
+ * @returns {Record<string, string|null>}
+ */
+export function tombstonesObject(t) {
+  const out = {};
+  const put = (id, parent) => {
+    if (typeof id === 'string' && id) out[id] = typeof parent === 'string' ? parent : null;
+  };
+  if (t instanceof Map) for (const [id, parent] of t) put(id, parent);
+  else if (Array.isArray(t)) for (const pair of t) Array.isArray(pair) && put(pair[0], pair[1]);
+  else if (t && typeof t === 'object') for (const [id, parent] of Object.entries(t)) put(id, parent);
+  return out;
+}
+
+/**
+ * Что Postgres не примет в записи (SPEC §9.11): `\u0000` в jsonb — 22P05, одинокий
+ * суррогат в jsonb — 22P02, NUL в text — 22021. Адаптер в памяти проверяет то же, чтобы
+ * не быть мягче базы: одна и та же транзакция — один и тот же ответ (400).
+ * @param {{json?: any[], text?: any[]}} cols значения jsonb- и text-колонок
+ * @returns {null|Error & {code: string}}
+ */
+export function pgRejects({ json = [], text = [] }) {
+  const err = (code, message) => Object.assign(new Error(message), { code });
+  let found = null;
+  const walk = (v, depth) => {
+    if (found || depth > 200) return;
+    if (typeof v === 'string') {
+      if (v.includes('\u0000')) found = err('22P05', 'unsupported Unicode escape sequence');
+      else if (!v.isWellFormed()) found = err('22P02', 'invalid input syntax for type json');
+    } else if (Array.isArray(v)) {
+      for (const x of v) walk(x, depth + 1);
+    } else if (v && typeof v === 'object') {
+      for (const [k, x] of Object.entries(v)) {
+        walk(k, depth + 1);
+        walk(x, depth + 1);
+      }
+    }
+  };
+  for (const v of json) walk(v, 0);
+  if (found) return found;
+  for (const v of text) {
+    if (typeof v === 'string' && v.includes('\u0000')) return err('22021', 'invalid byte sequence for encoding "UTF8": 0x00');
+  }
+  return null;
+}
 
 /** Дата из базы (Date) или строки → ISO. */
 function iso(v) {
@@ -89,7 +157,7 @@ function compactOp(op) {
     } else if (k === 'node' && v && typeof v === 'object') {
       // узел: опознавательные поля оставляем — человеку и истории нужно, что это было
       const n = {};
-      for (const f of ['id', 'type', 'name', 'parent']) if (typeof v[f] === 'string') n[f] = v[f].slice(0, 200);
+      for (const f of ['id', 'type', 'name', 'parent']) if (typeof v[f] === 'string') n[f] = codePointSlice(v[f], 200);
       out.node = n;
       heavy = heavy === null ? v : heavy;
     } else {
@@ -98,7 +166,8 @@ function compactOp(op) {
   }
   const json = JSON.stringify(heavy === null ? op : heavy) || '';
   out.valueBytes = size;
-  out.preview = json.slice(0, DROPPED_PREVIEW_CHARS);
+  // по кодовым точкам: половинка суррогатной пары в jsonb — 22P02 и отказ всей записи
+  out.preview = codePointSlice(json, DROPPED_PREVIEW_CHARS);
   return out;
 }
 
@@ -139,6 +208,8 @@ export function txColumns(tx) {
     author_kind: tx.author_kind || 'human',
     client: tx.client ?? null,
     title: tx.title ?? null,
+    // команда агента, породившая транзакцию (SPEC §9.11) — связь журнала с трассой
+    command_id: typeof tx.command_id === 'string' && tx.command_id ? tx.command_id : null,
     engine: tx.engine
   };
 }

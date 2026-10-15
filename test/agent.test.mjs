@@ -13,6 +13,8 @@ import {
 import {
   decideAgentMode, serverStageRec, shellIntentFromServer, normalizeResult,
   variantsFromServer, agentErrorWords, isModelError, queuedLabel, AGENT_MODE_WORDS,
+  agentHealthNotice, agentModeTitle, AGENT_DOWN_WORDS, detachedLostWords, droppedWords, whoDid,
+  presenceAgentWords, cutText, cleanText, isJargon,
 } from '../src/shell.js';
 import * as core from '../src/core.js';
 
@@ -449,23 +451,66 @@ test('createAgentClient: автор берётся при каждом вызо�
 
 /* --------------------------------- shell.js --------------------------------- */
 
-test('режим агента: сервер только в проекте, в сети, при живом Orchestrator', () => {
+test('режим агента: решает /agent/health, а не сокет документа; модель браузера — только своя', () => {
   const up = { ok: true, llm: 'up', document: 'up' };
-  assert.equal(decideAgentMode({ inProject: true, online: true, health: up, hasProvider: false }), 'server');
-  assert.equal(decideAgentMode({ inProject: true, online: true, health: up, hasProvider: true }), 'server');
+  assert.equal(decideAgentMode({ inProject: true, health: up, hasProvider: false }), 'server');
+  assert.equal(decideAgentMode({ inProject: true, health: up, hasProvider: true }), 'server');
   // проект открыт локально (артефакт) — прежний путь
-  assert.equal(decideAgentMode({ inProject: false, online: true, health: up, hasProvider: true }), 'browser');
-  // реплика не в сети — агент сервера транзакцию до нас не донесёт
-  assert.equal(decideAgentMode({ inProject: true, online: false, health: up, hasProvider: true }), 'browser');
-  assert.equal(decideAgentMode({ inProject: true, online: true, health: { ok: false }, hasProvider: false }), 'off');
-  assert.equal(decideAgentMode({ inProject: true, online: true, health: { ...up, document: 'down' }, hasProvider: true }), 'browser');
-  assert.equal(decideAgentMode({ inProject: true, online: true, health: { ...up, llm: 'unconfigured' }, hasProvider: true }), 'browser');
-  assert.equal(decideAgentMode({ inProject: true, online: true, health: { ...up, llm: 'unconfigured' }, hasProvider: false }), 'off');
-  assert.equal(decideAgentMode({ inProject: true, online: true, health: { ...up, llm: 'down' }, hasProvider: true }), 'browser');
-  assert.equal(decideAgentMode({ inProject: true, online: true, health: { ...up, llm: 'down' }, hasProvider: false }), 'server');
+  assert.equal(decideAgentMode({ inProject: false, health: up, hasProvider: true }), 'browser');
+  assert.equal(decideAgentMode({ inProject: false, health: up, hasProvider: false }), 'off');
+  // круг 25 (ревью Д5): реплика переподключается к Hub — Orchestrator жив, агент остаётся на сервере
+  assert.equal(decideAgentMode({ inProject: true, online: false, health: up, hasProvider: true }), 'server');
+  assert.equal(decideAgentMode({ inProject: true, online: false, health: up, hasProvider: false }), 'server');
+  // Orchestrator молчит: своей модели нет — «недоступен», а не «в браузере» (п.1)
+  assert.equal(decideAgentMode({ inProject: true, health: { ok: false }, hasProvider: false }), 'off');
+  assert.equal(decideAgentMode({ inProject: true, health: null, hasProvider: false }), 'off');
+  assert.equal(decideAgentMode({ inProject: true, health: { ok: false }, hasProvider: true }), 'browser');
+  // у сервера лежит модель или документ: своя модель выручит, без неё — пусть скажет сервер
+  assert.equal(decideAgentMode({ inProject: true, health: { ...up, document: 'down' }, hasProvider: true }), 'browser');
+  assert.equal(decideAgentMode({ inProject: true, health: { ...up, document: 'down' }, hasProvider: false }), 'server');
+  assert.equal(decideAgentMode({ inProject: true, health: { ...up, llm: 'unconfigured' }, hasProvider: true }), 'browser');
+  assert.equal(decideAgentMode({ inProject: true, health: { ...up, llm: 'down' }, hasProvider: true }), 'browser');
+  assert.equal(decideAgentMode({ inProject: true, health: { ...up, llm: 'down' }, hasProvider: false }), 'server');
   assert.equal(AGENT_MODE_WORDS.server, 'агент: сервер');
   assert.equal(AGENT_MODE_WORDS.browser, 'агент: в браузере');
   assert.equal(AGENT_MODE_WORDS.off, 'агент недоступен');
+  // подсказки — без адресов и советов администратору
+  for (const t of [
+    agentModeTitle('server', up), agentModeTitle('server', { ...up, llm: 'down' }), agentModeTitle('server', { ...up, document: 'down' }),
+    agentModeTitle('browser', { ok: false }, 'LM Studio'), agentModeTitle('off', { ok: false }),
+  ]) {
+    assert.ok(!/LM Studio запущ|https?:|localhost|\d{3}/.test(t), t);
+  }
+  assert.match(agentModeTitle('off', { ok: false }), /Правки руками сохраняются/);
+});
+
+test('смена ответа /agent/health — слова только по нему и с верным сервисом', () => {
+  const up = { ok: true, llm: 'up', document: 'up' };
+  // первый ответ и смена проекта (тот же ответ) — молчим
+  assert.equal(agentHealthNotice(null, up), null);
+  assert.equal(agentHealthNotice(up, { ...up }), null);
+  assert.equal(agentHealthNotice({ ok: false }, { ok: false, reason: 'timeout' }), null);
+  assert.match(agentHealthNotice(up, { ok: false }).text, /^Сервер агента не отвечает/);
+  assert.match(agentHealthNotice(up, { ok: false }, { hasProvider: true }).text, /в браузере/);
+  // документ лежит — так и сказано, а не «сервер агента недоступен»
+  const nodoc = agentHealthNotice(up, { ...up, document: 'down' }).text;
+  assert.match(nodoc, /сервер документа/);
+  assert.ok(!/агента не отвечает/.test(nodoc));
+  assert.match(agentHealthNotice(up, { ...up, llm: 'down' }).text, /Модель на сервере не отвечает — попробуйте позже/);
+  const back = agentHealthNotice({ ok: false }, up);
+  assert.ok(back.back);
+  assert.match(back.text, /снова/);
+  assert.match(AGENT_DOWN_WORDS.title, /^Сервер агента не отвечает — команда не выполнена$/);
+  assert.match(AGENT_DOWN_WORDS.note, /Правки руками сохраняются/);
+});
+
+test('поток оборвался, транзакции нет — команда не выполнена, и почему', () => {
+  assert.equal(detachedLostWords('собери экран тарифов', 'restarted').title, 'Команда «собери экран тарифов» не выполнена — сервер агента перезапустился');
+  assert.match(detachedLostWords('x', 'down').title, /сервер агента не отвечает$/);
+  assert.match(detachedLostWords('x', 'silent').title, /ответа от сервера агента нет$/);
+  assert.match(detachedLostWords('x').note, /вернулся в строку/);
+  const long = detachedLostWords('😀'.repeat(100)).title;
+  assert.ok(!/\uD83D(?!\uDE00)/.test(long), 'эмодзи разрезан пополам');
 });
 
 test('стадии и очередь словами', () => {
@@ -475,6 +520,14 @@ test('стадии и очередь словами', () => {
   assert.equal(queuedLabel(0), 'В очереди проекта');
   assert.equal(queuedLabel(2), 'В очереди проекта: впереди 2 команды');
   assert.equal(queuedLabel(5), 'В очереди проекта: впереди 5 команд');
+  // круг 25: чья команда впереди — по присутствию
+  assert.equal(queuedLabel(1, ['Аня']), 'В очереди проекта: впереди 1 команда (Аня)');
+  assert.equal(queuedLabel(3, ['Аня', 'Борис', 'Вера']), 'В очереди проекта: впереди 3 команды (Аня, Борис и ещё 1)');
+  assert.equal(queuedLabel(0, ['Аня']), 'В очереди проекта: впереди команда (Аня)');
+  assert.equal(presenceAgentWords({ author: 'Аня', queued: 2 }), 'Аня ждёт агента…');
+  assert.equal(presenceAgentWords({ author: 'Аня', busy: true }), 'Аня: агент работает…');
+  assert.equal(presenceAgentWords({ author: 'Аня', busy: false, queued: false }), '');
+  assert.equal(presenceAgentWords({ busy: true, queued: true }), 'Без имени ждёт агента…');
 });
 
 test('команды оболочки от JEV — в намерения оболочки', () => {
@@ -526,9 +579,26 @@ test('варианты сервера: превью своим движком и
 test('ошибки сервера агента словами', () => {
   const busy = agentErrorWords({ code: 'busy', message: 'очередь полна', retryAfterMs: 12000 });
   assert.match(busy.title, /занят/);
-  assert.match(busy.note, /через 12 с/);
-  const llm = agentErrorWords({ code: 'llm_down', message: 'LM Studio не отвечает' });
-  assert.match(llm.note, /LM Studio/);
+  assert.equal(busy.waitMs, 12000);   // срок считает кнопка «Повторить через N с»
+  // круг 25, п.7: человеку в браузере — не советы администратору и не служебное
+  const llm = agentErrorWords({ code: 'llm_down', message: 'Модель не отвечает — команда не выполнена. Проверьте, что сервер модели запущен, и повторите.', retryAfterMs: 10000 });
+  assert.equal(llm.title, 'Модель на сервере не отвечает');
+  assert.ok(!/LM Studio|запущ/.test(llm.title + llm.note), llm.note);
+  assert.equal(llm.waitMs, 10000);
+  assert.match(llm.note, /^Попробуйте позже$/);
+  // пауза nginx за упавшим сервисом — не предохранитель: ждать нечего
+  assert.equal(agentErrorWords({ code: 'upstream_down', retryAfterMs: 5000 }).waitMs, 0);
+  assert.match(agentErrorWords({ code: 'llm_down' }).note, /Попробуйте позже/);
+  for (const code of ['upstream_down', 'network']) {
+    const w = agentErrorWords({ code, message: 'Failed to fetch' });
+    assert.equal(w.title, AGENT_DOWN_WORDS.title);
+    assert.ok(!/fetch|orchestrator|контейнер/i.test(w.title + w.note), w.note);
+  }
+  // неизвестный код со служебным текстом — свои слова
+  const odd = agentErrorWords({ code: 'weird', message: 'TypeError: Failed to fetch http://127.0.0.1:8090/agent/command 503' });
+  assert.ok(!/fetch|http|503/i.test(odd.title + odd.note), odd.title);
+  // человеческое объяснение сервера у знакомого кода сохраняется
+  assert.match(agentErrorWords({ code: 'too_large', message: 'Правка слишком большая: 6000 операций при пределе 5000' }).note, /6000 операций/);
   assert.ok(isModelError({ code: 'llm_down' }));
   assert.ok(!isModelError({ code: 'busy' }));
   assert.equal(agentErrorWords({ code: 'странное', message: 'своё сообщение' }).title, 'своё сообщение');

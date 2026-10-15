@@ -12,16 +12,20 @@
  *     читает снимок по кругу;
  *   · выгрузка головы по бездействию посреди медленных записей ничего не теряет;
  *   · медленный читатель закрывается (4503), а не копит память экземпляра.
+ * Круг 25: полуоткрытое соединение посреди транзакции записи (ответ базы не доходит,
+ * обрыв база не видит) — замок строки проекта отпускается сам (idle_in_transaction_session_timeout),
+ * соединение с истёкшим query_timeout в пул не возвращается.
  */
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 import WebSocket from 'ws';
 import * as core from '../../src/core.js';
 import { createSync, memoryStorage } from '../../src/sync.js';
 import { start } from '../../server/document/index.js';
 import { createMemoryStorage } from '../../server/document/storage/memory.js';
-import { backends, startFor, startTwin, api, connect, wsUrl, waitFor, quiet } from './helpers.mjs';
+import { backends, startFor, startTwin, api, connect, wsUrl, waitFor, quiet, RUN_ID, DB_URL } from './helpers.mjs';
 
 const { artboards, ops, uid, hashDoc, applyOps, ENGINE_VERSION: E } = core;
 const tx = (base_seq, list, extra = {}) => ({ tx_id: uid('tx'), base_seq, ops: list, engine: E, ...extra });
@@ -69,10 +73,13 @@ const pgUp = list.find((b) => b.name === 'pg').available;
 describe('обрыв LISTEN и соединений · pg', { skip: pgUp ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
   let i1;
   let i2;
+  // имена сеансов — свои на прогон: параллельный прогон на том же кластере их не считает и не рвёт
+  const A1 = 'r24_i1_' + RUN_ID;
+  const A2 = 'r24_i2_' + RUN_ID;
   before(async () => {
     // сверка по таймеру выключена: пропущенное обязано прийти именно после переподключения слушателя
-    i1 = await startFor('pg', { verifyMs: 0 }, { listenRetryMs: 2500, applicationName: 'r24_i1' });
-    i2 = await startTwin('pg', i1, { verifyMs: 0 }, { applicationName: 'r24_i2' });
+    i1 = await startFor('pg', { verifyMs: 0 }, { listenRetryMs: 2500, applicationName: A1 });
+    i2 = await startTwin('pg', i1, { verifyMs: 0 }, { applicationName: A2 });
   });
   after(async () => {
     await i2.close();
@@ -80,12 +87,12 @@ describe('обрыв LISTEN и соединений · pg', { skip: pgUp ? false
   });
 
   const listeners = async (name) => (await i2.storage.pool.query(
-    'SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = $1', [name]
+    'SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND application_name = $1', [name]
   )).rows[0].n;
 
   it('pg_terminate_backend слушателя, другой экземпляр пишет за время обрыва — переподключение и дочитывание (3 круга)', async () => {
     const http2 = api(i2.url);
-    const created = await http2.post('/api/projects', { name: 'LISTEN' });
+    const created = await http2.post('/api/projects', { name: 'LISTEN', demo: true });
     const id = created.body.id;
     const seedDoc = (await http2.get('/api/projects/' + id)).body.snapshot.doc;
     const board = artboards(seedDoc)[0];
@@ -95,7 +102,7 @@ describe('обрыв LISTEN и соединений · pg', { skip: pgUp ? false
     const P = connect(wsUrl(i2, id, { client: 'P' }));
     await P.opened;
     await P.next();
-    assert.equal(await listeners('r24_i1:listen'), 1);
+    assert.equal(await listeners(A1 + ':listen'), 1);
 
     let seq = 0;
     for (let round = 0; round < 3; round++) {
@@ -116,7 +123,7 @@ describe('обрыв LISTEN и соединений · pg', { skip: pgUp ? false
       }
       assert.equal(i1.storage.listening, true, 'слушатель вернулся');
       assert.equal(i1.storage.listenerPid !== pid, true);
-      assert.equal(await listeners('r24_i1:listen'), 1, 'слушатель один (повтор назначается один раз)');
+      assert.equal(await listeners(A1 + ':listen'), 1, 'слушатель один (повтор назначается один раз)');
       // шина присутствия тоже вернулась
       P.send({ type: 'presence', selection: ['r' + round] });
       assert.deepEqual((await S.until((x) => x.type === 'presence', 5000)).selection, ['r' + round]);
@@ -130,7 +137,7 @@ describe('обрыв LISTEN и соединений · pg', { skip: pgUp ? false
 
   it('обрыв всех соединений экземпляра (пул и слушатель) под нагрузкой реплик — все сходятся, без дублей и дыр', async () => {
     const http1 = api(i1.url);
-    const id = (await http1.post('/api/projects', { name: 'Обрыв' })).body.id;
+    const id = (await http1.post('/api/projects', { name: 'Обрыв', demo: true })).body.id;
     const seedDoc = (await i1.storage.latestSnapshot(id)).doc;
     const board = artboards(seedDoc)[0];
     const mk = (svc, clientId) => createSync({
@@ -152,7 +159,10 @@ describe('обрыв LISTEN и соединений · pg', { skip: pgUp ? false
     });
     for (let cut = 0; cut < 2; cut++) {
       await delay(120);
-      await i2.storage.pool.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name LIKE 'r24_i1%' AND pid <> pg_backend_pid()");
+      await i2.storage.pool.query(
+        'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND application_name LIKE $1 AND pid <> pg_backend_pid()',
+        [A1 + '%']
+      );
     }
     await Promise.all(workers);
     stop = true;
@@ -171,8 +181,107 @@ describe('обрыв LISTEN и соединений · pg', { skip: pgUp ? false
     assert.equal(hashDoc(h1.doc), truth);
     assert.equal(hashDoc(h2.doc), truth);
     await waitFor(() => i1.storage.listening, 'слушатель i1 вернулся', 10000);
-    assert.equal(await listeners('r24_i1:listen'), 1);
+    assert.equal(await listeners(A1 + ':listen'), 1);
     await Promise.all(reps.map((r) => r.close()));
+  });
+});
+
+/* ------------------------------ полуоткрытое соединение (pg) ------------------------------ */
+
+/**
+ * TCP-прокси к Postgres: `arm()` — первое соединение, пославшее `INSERT INTO operations`,
+ * больше не получает ответов базы, а его закрытие клиентом база не видит (полуоткрытое:
+ * как пропавшая сеть). Остальные соединения — как есть.
+ */
+async function halfOpenProxy(target) {
+  const pairs = new Set();
+  let armed = false;
+  const state = { trappedAt: 0 };
+  const server = net.createServer((c) => {
+    const s = net.connect(target.port, target.host);
+    const pair = { c, s, drop: false };
+    pairs.add(pair);
+    c.on('data', (d) => {
+      if (armed && !pair.drop && d.includes('INSERT INTO operations')) {
+        pair.drop = true;
+        armed = false;
+        state.trappedAt = Date.now();
+      }
+      if (!s.destroyed) s.write(d);
+    });
+    s.on('data', (d) => { if (!pair.drop && !c.destroyed) c.write(d); });
+    // клиент закрыл — базе не говорим (полуоткрытое), если соединение в ловушке
+    c.on('close', () => { if (!pair.drop) s.destroy(); });
+    s.on('close', () => { c.destroy(); pairs.delete(pair); });
+    c.on('error', () => {});
+    s.on('error', () => {});
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return {
+    port: server.address().port,
+    state,
+    arm() { armed = true; },
+    async close() {
+      for (const p of pairs) { p.c.destroy(); p.s.destroy(); }
+      await new Promise((r) => server.close(r));
+    }
+  };
+}
+
+describe('полуоткрытое соединение посреди записи · pg', { skip: pgUp ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
+  let proxy;
+  let a;
+  let b;
+  const APP = 'half_a_' + RUN_ID;
+  before(async () => {
+    const u = new URL(DB_URL);
+    proxy = await halfOpenProxy({ host: u.hostname, port: Number(u.port || 5432) });
+    const viaProxy = new URL(DB_URL);
+    viaProxy.hostname = '127.0.0.1';
+    viaProxy.port = String(proxy.port);
+    // A — через прокси, дедлайн 1,5 с (query_timeout 2,5 с); B — напрямую, ждёт замок сколько надо
+    a = await startFor('pg', { verifyMs: 0 }, { connectionString: viaProxy.toString(), dbTimeoutMs: 1500, applicationName: APP });
+    b = await startTwin('pg', a, { verifyMs: 0 }, { dbTimeoutMs: 30000 });
+  });
+  after(async () => {
+    await b.close();
+    await a.close();
+    await proxy.close();
+  });
+
+  it('ответ базы на INSERT не дошёл, обрыва база не видит: A — 503 за query_timeout, замок строки проекта отпускается ≤ 20 с, B пишет; пул A цел', async () => {
+    const hb = api(b.url);
+    const ha = api(a.url);
+    const { id } = (await hb.post('/api/projects', { name: 'Полуоткрытое', demo: true })).body;
+    const board = artboards((await b.storage.latestSnapshot(id)).doc)[0];
+    assert.equal((await ha.post(`/api/projects/${id}/tx`, tx(0, [ops.create(text(board.id, 'A0'))]))).status, 201);
+
+    proxy.arm();
+    const t0 = Date.now();
+    const pa = ha.post(`/api/projects/${id}/tx`, tx(1, [ops.create(text(board.id, 'A1'))]));
+    await waitFor(() => proxy.state.trappedAt, 'INSERT в ловушке');
+    const ra = await pa;
+    const aMs = Date.now() - t0;
+    assert.equal(ra.status, 503, JSON.stringify(ra.body));
+    assert.ok(aMs < 4500, `A ответил за query_timeout, без второго ожидания на ROLLBACK: ${aMs} мс`);
+
+    // строка проекта заперта транзакцией A, которую база считает живой
+    const tb = Date.now();
+    const rb = await hb.post(`/api/projects/${id}/tx`, tx(1, [ops.create(text(board.id, 'B1'))]));
+    const released = Date.now() - proxy.state.trappedAt;
+    assert.equal(rb.status, 201, JSON.stringify(rb.body));
+    assert.ok(released <= 20000, `замок отпущен за ${released} мс`);
+    assert.ok(Date.now() - tb > 5000, 'B действительно ждал замок (сценарий не холостой)');
+    assert.equal(rb.body.seq, 2, 'запись A откачена базой — номер не потерян');
+    const idle = (await b.storage.pool.query(
+      "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND application_name = $1 AND state LIKE 'idle in transaction%'", [APP]
+    )).rows[0].n;
+    assert.equal(idle, 0, 'сеанса A, застрявшего в транзакции, нет');
+
+    // пул A: сломанное соединение выброшено, новые запросы идут
+    const again = await ha.post(`/api/projects/${id}/tx`, tx(2, [ops.create(text(board.id, 'A2'))]));
+    assert.equal(again.status, 201, JSON.stringify(again.body));
+    assert.equal(again.body.seq, 3);
   });
 });
 
@@ -186,7 +295,7 @@ for (const backend of list) {
 
     it('первая запись — всегда, дальше — пока сумма не больше maxBytes (pg и память режут одинаково)', async () => {
       const http = api(svc.url);
-      const { id } = (await http.post('/api/projects', { name: 'Страницы' })).body;
+      const { id } = (await http.post('/api/projects', { name: 'Страницы', demo: true })).body;
       const board = artboards((await svc.storage.latestSnapshot(id)).doc)[0];
       for (let k = 0; k < 5; k++) assert.equal((await http.post(`/api/projects/${id}/tx`, tx(k, [ops.set(board.id, 'name', 'x'.repeat(1000) + k)]))).status, 201);
       const seqs = async (limit, maxBytes) => (await svc.storage.txsAfter(id, 0, limit, { maxBytes })).map((t) => t.seq);
@@ -219,7 +328,7 @@ for (const backend of list) {
     it('2 × 60 параллельных транзакций (в том числе одни и те же tx_id в оба экземпляра) — без дыр, без дублей, головы = журнал', async () => {
       const h1 = api(i1.url);
       const h2 = api(i2.url);
-      const { id } = (await h1.post('/api/projects', { name: 'Гонка' })).body;
+      const { id } = (await h1.post('/api/projects', { name: 'Гонка', demo: true })).body;
       const seed = (await i1.storage.latestSnapshot(id)).doc;
       const board = artboards(seed)[0];
       const same = Array.from({ length: 10 }, (_, k) => tx(0, [ops.create(text(board.id, 'общая ' + k))]));
@@ -273,7 +382,7 @@ describe('находки прохода по server/document', () => {
   it('сокет, закрытый до hello (проект ещё проверяется), не остаётся в комнате и не держит голову', async () => {
     const mem = createMemoryStorage();
     const svc = await boot({}, wrap(mem, { getProject: async (id) => { await delay(150); return mem.getProject(id); } }));
-    const { id } = (await api(svc.url).post('/api/projects', { name: 'Утечка' })).body;
+    const { id } = (await api(svc.url).post('/api/projects', { name: 'Утечка', demo: true })).body;
     for (let k = 0; k < 3; k++) {
       const s = connect(wsUrl(svc, id, { since: 0, client: 'z' + k }));
       await s.opened;
@@ -295,8 +404,8 @@ describe('находки прохода по server/document', () => {
   it('кеш кадров ограничен байтами: на комнату и на экземпляр; большой кадр не кешируется, но доходит', async () => {
     const svc = await boot({ frameCache: { roomBytes: 64 * 1024, totalBytes: 96 * 1024 } });
     const http = api(svc.url);
-    const p1 = (await http.post('/api/projects', { name: 'К1' })).body.id;
-    const p2 = (await http.post('/api/projects', { name: 'К2' })).body.id;
+    const p1 = (await http.post('/api/projects', { name: 'К1', demo: true })).body.id;
+    const p2 = (await http.post('/api/projects', { name: 'К2', demo: true })).body.id;
     const b1 = artboards(await seedOf(svc, p1))[0];
     const b2 = artboards(await seedOf(svc, p2))[0];
     const s1 = connect(wsUrl(svc, p1, { client: 's1' }));
@@ -327,7 +436,7 @@ describe('находки прохода по server/document', () => {
   it('повтор уже полученной: клиенту с proto/epoch — ack, прежнему (без них) — error duplicate, retryable:false', async () => {
     const svc = await boot();
     const http = api(svc.url);
-    const created = (await http.post('/api/projects', { name: 'ack' })).body;
+    const created = (await http.post('/api/projects', { name: 'ack', demo: true })).body;
     const board = artboards(await seedOf(svc, created.id))[0];
     const t = tx(0, [ops.set(board.id, 'name', 'Один раз')]);
     const r = await http.post(`/api/projects/${created.id}/tx`, t);
@@ -361,7 +470,7 @@ describe('находки прохода по server/document', () => {
       latestSnapshot: async (id) => { goneReads++; return mem.latestSnapshot(id); }
     }));
     const http = api(svc.url);
-    const { id } = (await http.post('/api/projects', { name: 'Дыра' })).body;
+    const { id } = (await http.post('/api/projects', { name: 'Дыра', demo: true })).body;
     const board = artboards(await seedOf(svc, id))[0];
     for (let k = 0; k < 5; k++) await http.post(`/api/projects/${id}/tx`, tx(k, [ops.create(text(board.id, 't' + k))]));
     hide = true;   // записи 3..5 «потеряны»: голова базы — 5
@@ -402,7 +511,7 @@ describe('находки прохода по server/document', () => {
       commitTx: async (...a) => { await delay(30); return mem.commitTx(...a); }
     }));
     const http = api(svc.url);
-    const { id } = (await http.post('/api/projects', { name: 'Простой' })).body;
+    const { id } = (await http.post('/api/projects', { name: 'Простой', demo: true })).body;
     const seed = await seedOf(svc, id);
     const board = artboards(seed)[0];
     for (let round = 0; round < 3; round++) {
@@ -420,7 +529,7 @@ describe('находки прохода по server/document', () => {
   it('медленный читатель: неотправленного больше предела — сокет закрыт 4503, остальные получают всё', async () => {
     const svc = await boot({ maxBuffered: 64 * 1024 });
     const http = api(svc.url);
-    const { id } = (await http.post('/api/projects', { name: 'Медленный' })).body;
+    const { id } = (await http.post('/api/projects', { name: 'Медленный', demo: true })).body;
     const board = artboards(await seedOf(svc, id))[0];
     const slow = connect(wsUrl(svc, id, { client: 'slow' }));
     const fast = connect(wsUrl(svc, id, { client: 'fast' }));

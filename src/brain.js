@@ -295,7 +295,7 @@ export function parseModelJson(raw) {
   const slice = extractJson(raw);
   const parsed = slice == null ? undefined : tryParse(slice);
   if (parsed === undefined || parsed === null) {
-    throw ERR('schema', 'В ответе модели нет JSON', { text: typeof raw === 'string' ? raw.slice(0, 2000) : '' });
+    throw ERR('schema', 'В ответе модели нет JSON', { text: typeof raw === 'string' ? cutText(raw, 2000) : '' });
   }
   return parsed;
 }
@@ -344,12 +344,101 @@ export const MAX_TREE_NODES = 400;
  */
 export const MAX_CHARS = 5000;
 
+/* Круг 25: строки, уходящие в документ, журнал и трассы. `s.slice(0, n)` режет по
+   UTF-16-единицам и разрывает суррогатную пару (эмодзи в имени: «🚀 Запуск…» →
+   одиночный суррогат) — Postgres не принимает такую строку в jsonb, и запись правки
+   агента падала целиком. Те же правила, что `core.cutText`/`core.cleanText` (тест
+   сверяет): brain грузится и без движка, поэтому копия своя. */
+
+/** Не длиннее `n` кодовых точек; не строка — к строке (null/undefined → ''). */
+export function cutText(s, n) {
+  const str = typeof s === 'string' ? s : s === null || s === undefined ? '' : String(s);
+  const max = typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.floor(n)) : Infinity;
+  if (str.length <= max) return str;
+  let i = 0;
+  let count = 0;
+  while (i < str.length && count < max) {
+    const c = str.charCodeAt(i);
+    const pair = c >= 0xd800 && c <= 0xdbff && i + 1 < str.length && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00;
+    i += pair ? 2 : 1;
+    count++;
+  }
+  return str.slice(0, i);
+}
+
+/** Последние `n` кодовых точек — хвост, тоже без разрыва пары. */
+function cutTail(s, n) {
+  const str = typeof s === 'string' ? s : String(s == null ? '' : s);
+  const max = Math.max(0, Math.floor(n) || 0);
+  if (str.length <= max) return str;
+  let i = str.length;
+  let count = 0;
+  while (i > 0 && count < max) {
+    const c = str.charCodeAt(i - 1);
+    const pair = c >= 0xdc00 && c <= 0xdfff && i - 2 >= 0 && (str.charCodeAt(i - 2) & 0xfc00) === 0xd800;
+    i -= pair ? 2 : 1;
+    count++;
+  }
+  return str.slice(i);
+}
+
+const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+/** Без `\u0000`, одиночные суррогаты → U+FFFD. Не строка — как есть. */
+export function cleanText(s) {
+  if (typeof s !== 'string') return s;
+  let out = s.indexOf('\u0000') >= 0 ? s.replace(/\u0000/g, '') : s;
+  if (typeof out.isWellFormed === 'function') {
+    if (!out.isWellFormed()) out = out.toWellFormed();
+  } else {
+    out = out.replace(LONE_SURROGATE_RE, '�');
+  }
+  return out;
+}
+
+/** cleanText вглубь простых данных; ничего не поменялось — тот же объект (без копий). */
+function cleanDeep(v, depth = 0) {
+  if (typeof v === 'string') return cleanText(v);
+  if (!v || typeof v !== 'object' || depth > 64) return v;
+  if (Array.isArray(v)) {
+    let out = null;
+    for (let i = 0; i < v.length; i++) {
+      const c = cleanDeep(v[i], depth + 1);
+      if (c !== v[i]) { if (!out) out = v.slice(); out[i] = c; }
+    }
+    return out || v;
+  }
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return v;
+  let out = null;
+  for (const k of Object.keys(v)) {
+    const c = cleanDeep(v[k], depth + 1);
+    if (c !== v[k]) { if (!out) out = { ...v }; out[k] = c; }
+  }
+  return out || v;
+}
+
+/**
+ * Результат прогона, который можно записать: строки операций, заголовок, итог,
+ * предупреждения — без `\u0000` и одиночных суррогатов (что бы ни прислала модель).
+ * Превью (документ и геометрия для показа) не трогается: оно не пишется.
+ */
+function cleanResult(res) {
+  if (!res || typeof res !== 'object' || Array.isArray(res)) return res;
+  let out = null;
+  for (const k of Object.keys(res)) {
+    if (k === 'preview' || k === 'geo' || k === 'doc') continue;
+    const c = cleanDeep(res[k]);
+    if (c !== res[k]) { if (!out) out = { ...res }; out[k] = c; }
+  }
+  return out || res;
+}
+
 /** Текст из ответа модели → текст, который можно положить в документ. */
 function clampChars(raw, note, what) {
   const s = String(raw == null ? '' : raw);
   if (s.length <= MAX_CHARS) return s;
   if (note) note(`${what || 'Текст'}: ${s.length} знаков — обрезал до ${MAX_CHARS}, столько в макет не поместится`);
-  return s.slice(0, MAX_CHARS);
+  return cutText(s, MAX_CHARS);
 }
 
 /** Счётчик узлов на весь разбор: предупреждает один раз, дальше молча отбрасывает. */
@@ -1035,7 +1124,7 @@ function clampTurns(turns, maxChars = 60000) {
     const c = turns[idx].content;
     const keep = Math.max(500, Math.floor(c.length - (total - maxChars) - 40));
     if (keep >= c.length) break;
-    turns[idx] = { ...turns[idx], content: c.slice(0, Math.floor(keep * 0.7)) + '\n…[вырезано]…\n' + c.slice(c.length - Math.floor(keep * 0.3)) };
+    turns[idx] = { ...turns[idx], content: cutText(c, Math.floor(keep * 0.7)) + '\n…[вырезано]…\n' + cutTail(c, Math.floor(keep * 0.3)) };
     const next = turns.reduce((s, t) => s + t.content.length, 0);
     if (next >= total) break;
     total = next;
@@ -1141,7 +1230,7 @@ function makeOpenAiProvider(cfg) {
       } catch (e) {
         lastErr = e;
         convo = convo.concat([
-          { role: 'assistant', content: String(raw.text || '').slice(0, 2000) },
+          { role: 'assistant', content: cutText(raw.text || '', 2000) },
           { role: 'user', content: 'Ответ не разобрался как JSON. Верни ТОЛЬКО валидный JSON-объект по схеме: без пояснений, без ограждений ```, без <think>.' },
         ]);
       }
@@ -1173,7 +1262,7 @@ function makeOpenAiProvider(cfg) {
         if (!res.ok) {
           const text = await (res.text ? res.text().catch(() => '') : Promise.resolve(''));
           if (res.status === 429 || res.status >= 500) throw ERR('network', `Сервер модели ответил ${res.status}`, { retryable: true });
-          throw ERR('model', `Сервер модели отверг запрос (${res.status}): ${String(text).slice(0, 300)}`);
+          throw ERR('model', `Сервер модели отверг запрос (${res.status}): ${cutText(text, 300)}`);
         }
         if (body.stream) {
           const out = await readSseStream(res, opts.onText);
@@ -2074,12 +2163,12 @@ export function recognizeVariants(utterance, { doc = null } = {}) {
   if (leadSep) {
     const tail = String(leadSep[1] || '').trim().replace(/^[:,—–-]+\s*/, '').trim();
     // «три варианта: ну это самое» — команды в хвосте нет, значит, просят варианты предыдущей
-    if (tail) return { variantsOf: looksMeaningless(tail) ? '' : tail.slice(0, 200) };
+    if (tail) return { variantsOf: looksMeaningless(tail) ? '' : cutText(tail, 200) };
   }
   const lead = RE_VARIANTS_LEAD.exec(raw);
   if (lead) {
     const tail = String(lead[1] || '').trim().replace(/^[:,—–-]+\s*/, '').trim();
-    if (tail && looksLikeCommand(tail) && RE_TAIL_VERB.test(tail)) return { variantsOf: tail.slice(0, 200) };
+    if (tail && looksLikeCommand(tail) && RE_TAIL_VERB.test(tail)) return { variantsOf: cutText(tail, 200) };
   }
   /* «два варианта шапки» — предмет в родительном падеже, а не команда. Такую просьбу берём
    * только с числом и только когда предмет — слой, который в документе ЕСТЬ: иначе «покажи два
@@ -2138,7 +2227,7 @@ function nameFromWords(raw) {
   if (!t) return '';
   const words = t.split(/\s+/);
   if (words.length > 3 || RE_NOT_NAME.test(t)) return '';
-  return t.slice(0, 60);
+  return cutText(t, 60);
 }
 
 /** Указание на выделенное словами: «это», «этого», «его». */
@@ -3250,7 +3339,7 @@ function digestLine(doc, id, depth, rects, engine) {
   if (n.size) bits.push(`w=${sizeWord(n.size.w)} h=${sizeWord(n.size.h)}`);
   if (n.type === 'text') {
     const chars = String(n.characters == null ? '' : n.characters).replace(/\s+/g, ' ').trim();
-    bits.push(`text="${chars.length > 60 ? chars.slice(0, 57) + '…' : chars}"`);
+    bits.push(`text="${chars.length > 60 ? cutText(chars, 57) + '…' : chars}"`);
     if (n.style) bits.push(`style=${refWord(n.style)}`);
     if (n.align && n.align !== 'left') bits.push(`align=${n.align}`);
     if (n.color) bits.push(`color=${refWord(n.color)}`);
@@ -3625,7 +3714,7 @@ export function describeHistory(history, max = 5) {
   const list = asArray(history).filter((h) => h && (h.utterance || h.summary)).slice(-max);
   if (!list.length) return '';
   return list
-    .map((h, i) => `${i + 1}. «${String(h.utterance || '').trim().slice(0, 160)}» → ${String(h.summary || 'сделано').trim().slice(0, 200)}`)
+    .map((h, i) => `${i + 1}. «${cutText(String(h.utterance || '').trim(), 160)}» → ${cutText(String(h.summary || 'сделано').trim(), 200)}`)
     .join('\n');
 }
 
@@ -3884,7 +3973,7 @@ export function safeSrc(raw, warn, what) {
   if (!v) return undefined;
   const ok = /^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml)[;,]/i.test(v) || /^https:\/\//i.test(v) || /^http:\/\//i.test(v);
   if (!ok) {
-    if (warn) warn(`${what || 'Картинка'}: адрес «${v.slice(0, 40)}${v.length > 40 ? '…' : ''}» не похож на картинку — пропущен`);
+    if (warn) warn(`${what || 'Картинка'}: адрес «${cutText(v, 40)}${v.length > 40 ? '…' : ''}» не похож на картинку — пропущен`);
     return undefined;
   }
   if (/^data:image\/svg\+xml/i.test(v) && SVG_DANGER.test(dataPayload(v))) {
@@ -4208,7 +4297,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
   if (INSTANCE_TYPES.has(type) || (!type && typeof raw.of === 'string' && raw.of.trim())) {
     const list = componentList(engine, doc);
     const called = [raw.of, raw.component, raw.master, raw.name].find((v) => typeof v === 'string' && v.trim()) || '';
-    const who = `Экземпляр${called ? ` «${String(called).trim().slice(0, 40)}»` : ''}`;
+    const who = `Экземпляр${called ? ` «${cutText(String(called).trim(), 40)}»` : ''}`;
     if (!list.length) {
       note(`${who}: библиотеки компонентов в документе нет, ставить экземпляр не из чего — узел отброшен.`
         + ' Соберите узел обычными слоями или сначала сделайте компонент');
@@ -4225,7 +4314,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     const spec = {
       type: 'instance',
       name: typeof raw.name === 'string' && raw.name.trim() && raw.name.trim() !== info.name
-        ? raw.name.trim().slice(0, 80) : undefined,
+        ? cutText(raw.name.trim(), 80) : undefined,
       of: info.id,
       compName: info.name,
       props: instanceProps(raw.props !== undefined ? raw.props : raw.values, info, doc, note, who),
@@ -4256,7 +4345,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     return null;
   }
 
-  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 80) : undefined;
+  const name = typeof raw.name === 'string' && raw.name.trim() ? cutText(raw.name.trim(), 80) : undefined;
   const spec = { type, name };
 
   if (type === 'text') {
@@ -4267,13 +4356,13 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     }
     spec.characters = clampChars(chars || name, note, `Текст «${name || 'без имени'}»`);
     if (/lorem\s+ipsum|dolor\s+sit\s+amet/i.test(spec.characters)) {
-      note(`Текст «${spec.characters.slice(0, 30)}…» похож на заглушку Lorem ipsum`);
+      note(`Текст «${cutText(spec.characters, 30)}…» похож на заглушку Lorem ipsum`);
     }
-    spec.style = normStyle(raw.style, doc, note, `Текст «${name || spec.characters.slice(0, 20)}»`);
+    spec.style = normStyle(raw.style, doc, note, `Текст «${name || cutText(spec.characters, 20)}»`);
     // круг 7, п.1: выключка вне перечисления («justify», «space-between») больше не молчит
     spec.align = raw.align == null || raw.align === ''
       ? 'left'
-      : (pickEnum(raw.align, 'align', { warn: note, what: `Текст «${name || spec.characters.slice(0, 20)}», выключка`, fallback: 'left' }) || 'left');
+      : (pickEnum(raw.align, 'align', { warn: note, what: `Текст «${name || cutText(spec.characters, 20)}», выключка`, fallback: 'left' }) || 'left');
     const color = treeColor(raw.color != null ? raw.color : raw.fill, `Текст «${name || ''}»`);
     if (color) spec.color = color;
     spec.size = {
@@ -4393,9 +4482,9 @@ function specToNodes(spec, parentId, ids, out) {
 }
 
 function defaultName(spec) {
-  if (spec.type === 'text') return String(spec.characters || 'Текст').slice(0, 24);
+  if (spec.type === 'text') return cutText(spec.characters || 'Текст', 24);
   // экземпляр без своего имени зовётся как компонент: в списке слоёв так его и узнают
-  if (spec.type === 'instance') return String(spec.compName || 'Экземпляр').slice(0, 24);
+  if (spec.type === 'instance') return cutText(spec.compName || 'Экземпляр', 24);
   return { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка' }[spec.type] || 'Узел';
 }
 
@@ -6070,7 +6159,7 @@ function copyName(doc, base, usedLower) {
   const stripped = raw.replace(/\s*\(копия(?:\s+\d+)?\)\s*$/iu, '').trim() || raw;
   let cand = `${stripped} (копия)`;
   for (let i = 2; taken.has(cand.toLowerCase()) && i < 100; i++) cand = `${stripped} (копия ${i})`;
-  return cand.slice(0, 80);
+  return cutText(cand, 80);
 }
 
 const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
@@ -6253,7 +6342,7 @@ function componentFromNode({ engine, doc, id, name, note }) {
   const master = node && node.type === 'instance' ? nodeOf(doc, node.of)
     : (node && node.component && inLibrary(doc, engine, id) ? node : null);
   if (master && master.component) {
-    const fresh = String(name == null ? '' : name).trim().replace(/^[«"']+|[»"'.,!?]+$/g, '').slice(0, 60);
+    const fresh = cutText(String(name == null ? '' : name).trim().replace(/^[«"']+|[»"'.,!?]+$/g, ''), 60);
     const was = String(master.component.name || '').trim();
     if (!fresh) {
       note(`${nameOrId(doc, id)} — это уже компонент «${was}», второй раз в библиотеку он не попадёт.`
@@ -6278,7 +6367,7 @@ function componentFromNode({ engine, doc, id, name, note }) {
     note(`${nameOrId(doc, id)} компонентом сделать нельзя: ${(can && can.reason) || 'так нельзя'}`);
     return none;
   }
-  const clean = String(name == null ? '' : name).trim().replace(/^[«"']+|[»"'.,!?]+$/g, '').slice(0, 60);
+  const clean = cutText(String(name == null ? '' : name).trim().replace(/^[«"']+|[»"'.,!?]+$/g, ''), 60);
   const props = proposeProps(doc, id);
   let list = [];
   try {
@@ -7654,18 +7743,20 @@ async function withExternalLibrary(options, run, finish) {
  * (`libraryAdded: [{name, source}]` — что перенесено).
  */
 export async function runCommand(options = {}) {
-  return withExternalLibrary(options, runCommandCore, finishExternal);
+  // круг 25: строки результата — пригодные к записи (см. cleanResult)
+  return cleanResult(await withExternalLibrary(options, runCommandCore, finishExternal));
 }
 
 /** Варианты (SPEC §1.6) — с тем же внешним словарём, что runCommand: перенос — у каждого свой. */
 export async function runVariants(options = {}) {
-  return withExternalLibrary(options, runVariantsCore, (list, doc, plan, engine) => asArray(list).map((v) => {
+  const list = await withExternalLibrary(options, runVariantsCore, (got, doc, plan, engine) => asArray(got).map((v) => {
     const fixed = finishExternal(v, doc, plan, engine);
     if (fixed !== v && fixed.preview && fixed.preview.doc) {
       fixed.fingerprint = shortHash(visibleFingerprint(fixed.preview.doc));
     }
     return fixed;
   }));
+  return Array.isArray(list) ? list.map(cleanResult) : list;
 }
 
 /**
@@ -7845,7 +7936,7 @@ async function runCommandCore(options = {}) {
     const wantVariants = insideVariants ? null : recognizeVariants(utterance, { doc });
     if (wantVariants) {
       const of = wantVariants.variantsOf;
-      const title = of ? `Показываю варианты: ${of}`.slice(0, 120) : 'Показываю варианты';
+      const title = of ? cutText(`Показываю варианты: ${of}`, 120) : 'Показываю варианты';
       const variantsPlan = {
         intent: 'variants',
         title,
@@ -8066,7 +8157,7 @@ async function runCommandCore(options = {}) {
       emit('repair', forHuman[0], { detail: forHuman.slice(0, 5).join('; ') });
       checkAbort(signal);
       messages = messages.concat([
-        { role: 'assistant', content: JSON.stringify(data).slice(0, 8000) },
+        { role: 'assistant', content: cutText(JSON.stringify(data), 8000) },
         { role: 'user', content: PROMPTS.repair(problems.slice(0, 8), data, schemaEntry) },
       ]);
       try {
@@ -8185,7 +8276,7 @@ async function runCommandCore(options = {}) {
  * равно отказ: подставляем осмысленную русскую фразу, иначе оболочке нечего показать.
  */
 function cannotText(raw) {
-  const s = String(raw == null ? '' : raw).trim().replace(/\s+/g, ' ').slice(0, 400);
+  const s = cutText(String(raw == null ? '' : raw).trim().replace(/\s+/g, ' '), 400);
   if (s.length >= 12) return s;
   return 'Этого в редакторе нет: модель документа так не умеет. Скажите, что сделать вместо этого.';
 }
@@ -8220,12 +8311,12 @@ function normalizePlan(raw, guess) {
   const intents = ['create', 'edit', 'theme', 'ask', 'clarify', 'refuse'];
   const plan = {
     intent: intents.includes(String(raw && raw.intent)) ? String(raw.intent) : guess.intent,
-    title: String((raw && raw.title) || '').trim().slice(0, 120) || 'Правка макета',
-    summary: String((raw && raw.summary) || '').trim().slice(0, 400),
+    title: cutText(String((raw && raw.title) || '').trim(), 120) || 'Правка макета',
+    summary: cutText(String((raw && raw.summary) || '').trim(), 400),
     steps: asArray(raw && raw.steps).map((s) => String(s).trim()).filter(Boolean).slice(0, 6),
     targets: asArray(raw && raw.targets).map((s) => String(s).trim()).filter(Boolean).slice(0, 12),
   };
-  const clarify = String((raw && raw.clarify) || '').trim().slice(0, 300);
+  const clarify = cutText(String((raw && raw.clarify) || '').trim(), 300);
   if (clarify) plan.clarify = clarify;
   /* Круг 18: три готовых ответа к переспросу. Чистим жёстко — человек их НАЖИМАЕТ, и то, что
      нажалось, уходит командой как есть: обрывок или вопрос вместо команды стоил бы ему прогона. */
@@ -8240,7 +8331,7 @@ function normalizePlan(raw, guess) {
   }).slice(0, 3);
   if (uniq.length) plan.clarifyOptions = uniq;
   // круг 9, п.4: отказ несёт объяснение; модель иногда кладёт его в summary — принимаем и так
-  const cannot = String((raw && raw.cannot) || '').trim().slice(0, 400);
+  const cannot = cutText(String((raw && raw.cannot) || '').trim(), 400);
   if (cannot) plan.cannot = cannot;
   else if (plan.intent === 'refuse') plan.cannot = plan.summary || plan.title;
   if (!plan.steps.length) plan.steps = [plan.summary || plan.title];
@@ -8618,7 +8709,7 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
   const container = scope.containerId && nodeOf(doc, scope.containerId);
   const asArtboard = explicit || wholeScreen || (!insert && (!container || container.type === 'page'));
   if (planOnlyNew && !asArtboard) {
-    note(`План модели говорит про новый экран («${String((plan && plan.title) || '').slice(0, 60)}»),`
+    note(`План модели говорит про новый экран («${cutText((plan && plan.title) || '', 60)}»),`
       + ` а в команде экран не назван — кладу внутрь текущего ${nameOrId(doc, insert ? insert.parentId : scope.containerId)}.`
       + ' Нужна отдельная доска — скажите «новая доска»');
   }

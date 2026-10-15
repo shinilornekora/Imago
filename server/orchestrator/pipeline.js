@@ -13,9 +13,11 @@
 
 import * as core from '../../src/core.js';
 import { OrchError, toOrchError, notFound, badRequest, llmUnconfigured, cancelled as cancelledErr } from './errors.js';
-import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS } from './limits.js';
+import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS, SHUTDOWN_GRACE_MS, SHUTDOWN_ABORT_WAIT_MS } from './limits.js';
 
-const { ENGINE_VERSION, uid } = core;
+const { ENGINE_VERSION, uid, cutText, cleanText } = core;
+/** Длина `command_id` транзакции, которую хранит Document service (круг 25). */
+const TX_COMMAND_ID_MAX = 64;
 
 /** Стадии brain → ключи §10.3. Не названные — не показываются (их смысл несёт result). */
 const BRAIN_STAGE = {
@@ -380,7 +382,7 @@ export function createPipeline(deps) {
     }
     const out = await write(task, {
       project: cmd.project, base_seq: st.seq, ops: globalizeIds(res.ops), client: cmd.client,
-      title: (res.plan && res.plan.title) || cmd.text,
+      title: (res.plan && res.plan.title) || cmd.text, command_id: cmd.command_id,
     }, step);
     const result = resultOf(out, res);
     Object.assign(trace, { tx_id: out.tx_id, seq: out.seq, ops: result.applied, dropped: result.dropped.length });
@@ -435,7 +437,7 @@ export function createPipeline(deps) {
   }
 
   /** Запись транзакции агента (шаг 12/13). */
-  async function write(task, { project, base_seq, ops, client, title }, step) {
+  async function write(task, { project, base_seq, ops, client, title, command_id: commandId }, step) {
     if (task.ctrl && task.ctrl.signal.aborted) throw cancelledErr();
     if (step) step('write');
     const tx = {
@@ -444,8 +446,13 @@ export function createPipeline(deps) {
       ops,
       author: AGENT_AUTHOR,
       author_kind: 'agent',
+      // client — вкладка автора команды: её реплика узнаёт транзакцию как свою (§10.5)
       ...(client ? { client } : {}),
-      title: String(title || '').slice(0, 200),
+      // круг 25: команда, из которой родилась правка, — история и трассы связываются по
+      // ней. Document service хранит поле до 64 знаков; длиннее (контракт /agent/command
+      // допускает 128) не шлём вовсе — лучше без связи, чем отказ записи
+      ...(typeof commandId === 'string' && commandId && commandId.length <= TX_COMMAND_ID_MAX ? { command_id: commandId } : {}),
+      title: cleanText(cutText(String(title || ''), 200)),
       engine: ENGINE_VERSION,
     };
     // с этого места «стоп» запись не отменяет: она уже ушла, повтор идёт по тому же tx_id
@@ -514,7 +521,7 @@ export function createPipeline(deps) {
     const item = typeof variant === 'number'
       ? entry.items[variant]
       : entry.items.find((v) => v.key === variant) || (/^\d+$/.test(String(variant)) ? entry.items[Number(variant)] : undefined);
-    if (!item) throw badRequest(`Нет такого варианта: ${String(variant).slice(0, 40)}. Есть: ${entry.items.map((v) => v.key).join(', ')}`);
+    if (!item) throw badRequest(`Нет такого варианта: ${cutText(String(variant), 40)}. Есть: ${entry.items.map((v) => v.key).join(', ')}`);
     if (entry.applied) {
       if (entry.applied.key === item.key) return entry.applied.result;
       throw badRequest(`Уже выбран вариант «${entry.applied.label}» — второй поверх него не записываю`);
@@ -539,6 +546,7 @@ export function createPipeline(deps) {
         try {
           const out = await write(task, {
             project: entry.project, base_seq: entry.base_seq, ops: item.ops, client: entry.client, title: item.title,
+            command_id: commandId,
           });
           const result = resultOf(out, { summary: item.summary, warnings: item.warnings, libraryAdded: item.libraryAdded });
           entry.applied = { key: item.key, label: item.label, result };
@@ -579,15 +587,33 @@ export function createPipeline(deps) {
     };
   }
 
-  /** Перестать принимать, дождаться выполняемых (до grace), остальное прервать. */
-  async function close(graceMs = 10000) {
+  /**
+   * Перестать принимать; выполняемым — дедлайн `graceMs` (успели — записаны), потом
+   * отмена и не дольше `abortWaitMs` на то, чтобы свернуться (круг 25: весь останов —
+   * в 8 с, Docker убивает через 10). Ждущие в очереди отменяются сразу: начинать их
+   * незачем. Возвращает, сколько команд пришлось прервать.
+   * @returns {Promise<{aborted: number}>}
+   */
+  async function close(graceMs = SHUTDOWN_GRACE_MS, abortWaitMs = SHUTDOWN_ABORT_WAIT_MS) {
     closing = true;
+    for (const t of [...active.values()]) {
+      if (t.ctrl && !t.ctrl.signal.aborted && queues.get(t.project) && queues.get(t.project).waiting.includes(t)) {
+        stop(t.cmd.command_id);
+      }
+    }
     const all = () => [...active.values()].map((t) => t.finished).filter(Boolean);
-    const settled = Promise.allSettled(all());
-    const timer = new Promise((r) => setTimeout(r, graceMs).unref());
-    await Promise.race([settled, timer]);
-    for (const t of active.values()) if (t.ctrl) t.ctrl.abort();
-    await Promise.race([Promise.allSettled(all()), new Promise((r) => setTimeout(r, 3000).unref())]);
+    const wait = (ms) => new Promise((r) => { const h = setTimeout(r, ms); if (h.unref) h.unref(); });
+    await Promise.race([Promise.allSettled(all()), wait(graceMs)]);
+    let aborted = 0;
+    for (const t of active.values()) {
+      if (t.ctrl && !t.ctrl.signal.aborted) {
+        aborted++;
+        log.warn(`[orchestrator] останов: команда ${t.id} не уложилась в ${graceMs} мс — прерываю`);
+        t.ctrl.abort();
+      }
+    }
+    await Promise.race([Promise.allSettled(all()), wait(abortWaitMs)]);
+    return { aborted };
   }
 
   return {

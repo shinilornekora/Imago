@@ -12,7 +12,52 @@
 import {
   artboards, isArtboard, subtreeIds, placeholderName,
 } from './core.js';
+// круг 25: cutText/cleanText появляются в core параллельно — берём оттуда, если уже есть
+import * as CORE_NS from './core.js';
 import { recognizeAction } from './brain.js';
+
+/* ------------------------------ строки человеку ------------------------------ */
+
+/**
+ * Строка не длиннее n символов — по кодовым точкам, а не по UTF-16: `.slice(0, n)` резал
+ * эмодзи и редкие иероглифы пополам, и в имени оставался «битый» полусимвол (круг 25, п.7).
+ * Обрезанное кончается «…» (если `ellipsis`). Берётся из core, когда он это умеет.
+ * @param {string} s
+ * @param {number} n
+ * @param {{ellipsis?: boolean}} [o]
+ */
+export function cutText(s, n, { ellipsis = false } = {}) {
+  const str = String(s == null ? '' : s);
+  const max = Math.max(0, Math.trunc(Number(n) || 0));
+  if (!ellipsis && typeof CORE_NS.cutText === 'function') return CORE_NS.cutText(str, max);
+  const cps = Array.from(str);
+  if (cps.length <= max) return str;
+  if (!ellipsis) return cps.slice(0, max).join('');
+  return `${cps.slice(0, Math.max(0, max - 1)).join('').trimEnd()}…`;
+}
+
+/**
+ * Строка для человека: без управляющих и невидимых символов, одиночные пробелы, без краёв.
+ * Сначала — `core.cleanText` (без `\u0000` и одиночных суррогатов), если core его уже умеет.
+ */
+export function cleanText(s) {
+  const str = String(s == null ? '' : s);
+  const safe = typeof CORE_NS.cleanText === 'function' ? CORE_NS.cleanText(str) : str;
+  return String(safe)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Служебное, что человеку не показывают: адреса, коды HTTP, «JSON», «fetch», сырые id и
+ * латинские слова из стека. Такую строку оболочка не произносит — у неё есть свои слова.
+ */
+const JARGON = /https?:\/\/|\blocalhost\b|\b\d{3}\b|json|fetch|econn|enotfound|etimedout|socket|stack|undefined|null\b|\b[a-z]+_[a-z_]+\b|\b(?:tx|cmd|c|f|t|lib)_[a-z0-9]{6,}\b|[a-z]{5,}/i;
+export function isJargon(text) {
+  return JARGON.test(String(text || ''));
+}
 
 /** Где выполняется команда агента — слова для строки состояния. */
 export const AGENT_MODE_WORDS = Object.freeze({
@@ -22,35 +67,91 @@ export const AGENT_MODE_WORDS = Object.freeze({
 });
 
 /**
- * Где работать агенту. На сервере — только когда проект открыт через Document service,
- * реплика в сети, `/agent/health` ответил и Orchestrator видит документ; модель у
- * сервера должна быть настроена. Иначе — прежний путь, brain в браузере, если у браузера
- * есть своя модель; без неё агент недоступен.
+ * Где работать агенту (круг 25). Решает ответ `/agent/health`, а не сокет Document
+ * service: пока Hub переподключается, Orchestrator жив и читает документ сам — команда
+ * уходила в браузер зря (ревью, Д5). На сервере — когда проект открыт через Document
+ * service и Orchestrator ответил `ok`. Модель браузера идёт в дело, только если её
+ * включил человек (`hasProvider`): в серверной сборке её по умолчанию нет, и прежде
+ * команда уходила на localhost:1234 и падала «Failed to fetch» (п.1).
  *
- * @param {{inProject: boolean, online: boolean, health: object|null, hasProvider: boolean}} s
+ *   • health.ok, документ и модель у сервера живы → server;
+ *   • health.ok, но модель или документ у сервера лежат: своя модель есть → browser,
+ *     нет → server (сервер сам скажет, что не так, и это честнее «недоступен»);
+ *   • health не ok или его ещё нет → browser при своей модели, иначе off.
+ *
+ * @param {{inProject: boolean, health: object|null, hasProvider: boolean}} s
  * @returns {'server'|'browser'|'off'}
  */
-export function decideAgentMode({ inProject = false, online = false, health = null, hasProvider = false } = {}) {
+export function decideAgentMode({ inProject = false, health = null, hasProvider = false } = {}) {
   const h = health && health.ok === true ? health : null;
-  if (inProject && online && h && h.document === 'up') {
-    if (h.llm === 'up') return 'server';
-    // модель у сервера лежит: своя в браузере выручит; нет своей — пусть скажет сервер
-    if (h.llm === 'down' && !hasProvider) return 'server';
+  if (inProject && h) {
+    if (h.document === 'up' && h.llm === 'up') return 'server';
+    return hasProvider ? 'browser' : 'server';
   }
   return hasProvider ? 'browser' : 'off';
 }
 
 /** Подробности о режиме — для подсказки у строки состояния. */
 export function agentModeTitle(mode, health, providerWords = '') {
+  const h = health && health.ok === true ? health : null;
   if (mode === 'server') {
-    const model = health && health.model ? ` · модель ${health.model}` : '';
-    const llm = health && health.llm === 'down' ? ' · модель серверу сейчас не отвечает' : '';
-    return `Команды агента выполняет сервер${model}${llm}`;
+    if (h && h.document !== 'up') return 'Команды агента выполняет сервер, но сейчас он не видит документ — правки руками сохраняются';
+    if (h && h.llm === 'unconfigured') return 'Команды агента выполняет сервер, но модель на нём не настроена — это забота администратора';
+    if (h && h.llm !== 'up') return 'Команды агента выполняет сервер, но модель на нём сейчас не отвечает — попробуйте позже';
+    return 'Команды агента выполняет сервер';
   }
   if (mode === 'browser') {
-    return `Команды агента выполняются в этом браузере${providerWords ? ` (${providerWords})` : ''}`;
+    const why = h ? 'модель на сервере сейчас не отвечает' : 'сервер агента не отвечает';
+    return `Команды агента выполняются в этом браузере${providerWords ? ` (${providerWords})` : ''}: ${why}`;
   }
-  return 'Агента нет: сервер агента не отвечает, а своей модели у браузера не настроено';
+  return 'Сервер агента не отвечает — команды агента не выполняются. Правки руками сохраняются';
+}
+
+/**
+ * Что сказать человеку, когда ответ `/agent/health` изменился (круг 25, п.2). Только по
+ * ответу health — не по сокету документа, не при смене проекта; null — молчать.
+ * Первый ответ (prev нет) не объявляется: человек ещё ничего не потерял.
+ * @param {object|null} prev прежний ответ health
+ * @param {object|null} next новый
+ * @param {{hasProvider?: boolean}} [o]
+ * @returns {{text: string, kind: 'plain'|'error', back?: boolean}|null}
+ */
+export function agentHealthNotice(prev, next, { hasProvider = false } = {}) {
+  if (!prev || !next) return null;
+  const was = prev.ok === true ? (prev.document !== 'up' ? 'nodoc' : prev.llm !== 'up' ? 'nollm' : 'up') : 'down';
+  const now = next.ok === true ? (next.document !== 'up' ? 'nodoc' : next.llm !== 'up' ? 'nollm' : 'up') : 'down';
+  if (was === now) return null;
+  const local = hasProvider ? ' Команды пока выполняются в браузере.' : '';
+  if (now === 'up') {
+    const text = { down: 'Сервер агента снова на связи.', nodoc: 'Сервер документа снова на связи — агент работает.', nollm: 'Модель на сервере снова отвечает.' }[was];
+    return { text, kind: 'plain', back: true };
+  }
+  if (now === 'down') return { text: `Сервер агента не отвечает.${local || ' Правки руками сохраняются.'}`, kind: 'plain' };
+  if (now === 'nodoc') return { text: `Сервер агента не видит документ — сервер документа не отвечает.${local}`, kind: 'plain' };
+  if (was === 'up') return { text: `Модель на сервере не отвечает — попробуйте позже.${local}`, kind: 'plain' };
+  return null;
+}
+
+/** Orchestrator не ответил на команду, а своей модели у браузера нет (п.1). */
+export const AGENT_DOWN_WORDS = Object.freeze({
+  title: 'Сервер агента не отвечает — команда не выполнена',
+  note: 'Правки руками сохраняются. Текст команды остался в строке.',
+});
+
+/**
+ * Поток команды оборвался, а транзакция так и не пришла (круг 25, п.3).
+ * @param {string} utterance
+ * @param {'restarted'|'down'|'silent'} why перезапустился / не отвечает / молчит
+ */
+export function detachedLostWords(utterance, why = 'restarted') {
+  const what = cutText(cleanText(utterance), 60, { ellipsis: true });
+  const head = what ? `Команда «${what}» не выполнена` : 'Команда не выполнена';
+  const tail = {
+    restarted: 'сервер агента перезапустился',
+    down: 'сервер агента не отвечает',
+    silent: 'ответа от сервера агента нет',
+  }[why] || 'сервер агента перезапустился';
+  return { title: `${head} — ${tail}`, note: 'Текст команды вернулся в строку. Правки руками сохраняются.' };
 }
 
 /** Стадии §10.3 словами человека — когда сервер не прислал свою подпись. */
@@ -77,11 +178,35 @@ export function serverStageRec(data = {}) {
   return rec;
 }
 
-/** Событие `queued` словами. */
-export function queuedLabel(position) {
+/**
+ * Событие `queued` словами. `ahead` — имена тех, чья команда впереди (из присутствия:
+ * у них `busy`/`queued`, §9.9), если оболочка их знает.
+ * @param {number} position
+ * @param {string[]} [ahead]
+ */
+export function queuedLabel(position, ahead = []) {
   const n = Number(position);
-  if (!Number.isFinite(n) || n <= 0) return 'В очереди проекта';
-  return `В очереди проекта: впереди ${n} ${plural(n, 'команда', 'команды', 'команд')}`;
+  const names = (Array.isArray(ahead) ? ahead : []).map((a) => cutText(cleanText(a), 40, { ellipsis: true })).filter(Boolean);
+  const whose = names.length
+    ? ` (${names.slice(0, 2).join(', ')}${names.length > 2 ? ` и ещё ${names.length - 2}` : ''})`
+    : '';
+  if (!Number.isFinite(n) || n <= 0) return names.length ? `В очереди проекта: впереди команда${whose}` : 'В очереди проекта';
+  return `В очереди проекта: впереди ${n} ${plural(n, 'команда', 'команды', 'команд')}${whose}`;
+}
+
+/**
+ * Чужое присутствие с `busy`/`queued` (§9.9) словами: «Аня ждёт агента…».
+ * @param {{author?: string, busy?: boolean|number, queued?: boolean|number}} p
+ * @returns {string} пусто — агент на этого человека не работает
+ */
+export function presenceAgentWords(p) {
+  if (!p || typeof p !== 'object') return '';
+  const name = cutText(cleanText(p.author), 40, { ellipsis: true }) || 'Без имени';
+  const queued = p.queued === true || (typeof p.queued === 'number' && p.queued > 0);
+  const busy = p.busy === true || (typeof p.busy === 'number' && p.busy > 0);
+  if (queued) return `${name} ждёт агента…`;
+  if (busy) return `${name}: агент работает…`;
+  return '';
 }
 
 /** Повтор по Retry-After словами. */
@@ -164,36 +289,186 @@ export function shellIntentFromServer(shell) {
   }
 }
 
-/** Ошибки сервера агента словами: заголовок и что делать (§10.2). */
+/**
+ * Ошибки сервера агента словами: заголовок и что делать (§10.2). Человек в браузере не
+ * администратор: «запустите LM Studio» и «проверьте контейнер orchestrator» ему не по
+ * силам и не по адресу (круг 25, п.7) — ему говорим, что делать ему: подождать, повторить,
+ * поправить команду. Тексты сервера к знакомому коду приписываются, только если в них нет
+ * служебного (адресов, кодов, «JSON», латиницы).
+ */
 const ERROR_WORDS = {
-  busy: ['Агент на сервере занят командами этого проекта', 'Повторите чуть позже.'],
-  llm_down: ['Модель недоступна серверу агента', 'Проверьте, что LM Studio запущена и в ней включён сервер (Developer → Start Server).'],
+  busy: ['Агент занят командами этого проекта', 'Повторите чуть позже.'],
+  llm_down: ['Модель на сервере не отвечает', 'Попробуйте позже.'],
   llm_failed: ['Модель ответила ошибкой', 'Попробуйте ещё раз или скажите иначе.'],
-  document_down: ['Сервер агента не достучался до документа', 'Повторите через несколько секунд.'],
-  too_large: ['Команда слишком большая для сервера агента', 'Скажите короче или выделите узел поменьше.'],
-  bad_request: ['Сервер агента не понял команду', 'Обновите страницу: версия клиента могла устареть.'],
-  not_found: ['Проекта нет на сервере агента', 'Откройте проект заново.'],
-  upstream_down: ['Сервер агента недоступен', 'Проверьте, что запущен контейнер orchestrator.'],
+  document_down: ['Сервер агента не видит документ', 'Повторите через несколько секунд — правки руками сохраняются.'],
+  document_failed: ['Сервер агента не смог прочитать документ', 'Повторите через несколько секунд.'],
+  too_large: ['Команда слишком большая для агента', 'Скажите короче или выделите узел поменьше.'],
+  bad_request: ['Сервер агента не понял команду', 'Обновите страницу: версия редактора могла устареть.'],
+  not_found: ['Проекта нет на сервере', 'Откройте проект заново.'],
+  upstream_down: [AGENT_DOWN_WORDS.title, 'Правки руками сохраняются.'],
   upstream_timeout: ['Сервер агента не ответил вовремя', 'Повторите команду.'],
-  network: ['Сервер агента недоступен', 'Проверьте связь и повторите.'],
+  network: [AGENT_DOWN_WORDS.title, 'Правки руками сохраняются.'],
   timeout: ['Сервер агента не ответил вовремя', 'Повторите команду.'],
-  bad_response: ['Сервер агента прислал непонятный ответ', 'Повторите команду.'],
+  bad_response: ['Сервер агента ответил непонятно', 'Повторите команду.'],
+  shutting_down: ['Сервер агента перезапускается', 'Повторите через несколько секунд.'],
+  worker_failed: ['Агент на сервере сбился на этой команде', 'Повторите или скажите иначе.'],
+  internal: ['Агент на сервере сбился на этой команде', 'Повторите или скажите иначе.'],
+  engine: ['Версия редактора устарела', 'Обновите страницу.'],
 };
+
+/* Коды, у которых текст сервера человеку не добавляет ничего, кроме совета администратору
+   («проверьте, что сервер модели запущен»): своих слов достаточно. */
+const OWN_SILENT = new Set(['llm_down', 'upstream_down', 'network', 'document_down', 'document_failed',
+  'shutting_down', 'busy', 'timeout', 'upstream_timeout', 'worker_failed', 'internal', 'engine', 'bad_response']);
 
 /**
  * @param {{code?: string, message?: string, retryAfterMs?: number|null}} err
- * @returns {{title: string, note: string}}
+ * @returns {{title: string, note: string, waitMs: number}}
  */
 export function agentErrorWords(err) {
   const e = err || {};
-  const [title, hint] = ERROR_WORDS[e.code] || [String(e.message || 'Агент на сервере не справился'), ''];
-  const own = String(e.message || '').trim();
+  const known = ERROR_WORDS[e.code];
+  const own = cleanText(e.message || '');
+  const ownOk = own && !isJargon(own);
+  const [title, hint] = known || [ownOk ? own : 'Агент на сервере не справился с командой', 'Повторите или скажите иначе.'];
   const bits = [];
-  if (own && own !== title && ERROR_WORDS[e.code]) bits.push(own.replace(/\s*[.:;]\s*$/, ''));
-  if (Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0) {
-    bits.push(`повторить можно через ${Math.max(1, Math.round(e.retryAfterMs / 1000))} с`);
-  } else if (hint) bits.push(hint.replace(/\s*[.]\s*$/, ''));
-  return { title, note: bits.join(' · ') };
+  if (known && ownOk && !OWN_SILENT.has(e.code) && own !== title && !own.startsWith(title)) bits.push(own.replace(/\s*[.:;]\s*$/, ''));
+  /* Пауза Retry-After — только от самого сервера агента (очередь, предохранитель модели).
+     Упавший сервер nginx помечает тем же заголовком, но там ждать нечего: повтор спросит
+     заново, жив ли он. */
+  const fromProxy = e.code === 'upstream_down' || e.code === 'upstream_timeout' || e.code === 'network';
+  const waitMs = !fromProxy && Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0 ? e.retryAfterMs : 0;
+  // срок повтора считает сама кнопка «Повторить через N с» — в тексте он застыл бы
+  if (hint) bits.push(hint.replace(/\s*[.]\s*$/, ''));
+  return { title, note: bits.join(' · '), waitMs };
+}
+
+/* ------------------------- dropped: что не применилось и почему ------------------------- */
+
+/* Мужские имена на -а/-я и общие, по которым род не угадать: глагол тогда — «удалил(а)». */
+const MALE_A = new Set(['никита', 'илья', 'кузьма', 'фома', 'лука', 'миша', 'паша', 'гоша', 'вова', 'дима',
+  'лёша', 'леша', 'коля', 'толя', 'петя', 'ваня', 'серёжа', 'сережа', 'митя', 'федя', 'юра', 'гриша', 'костя',
+  'алёша', 'алеша', 'стёпа', 'степа', 'боря', 'гена', 'жора', 'сёма', 'сема', 'тёма', 'тема', 'вася', 'лёва', 'лева',
+  'добрыня', 'савва', 'данила', 'фока', 'ерёма', 'кирюша', 'андрюша', 'миха']);
+const ANY_A = new Set(['саша', 'женя', 'валя', 'шура', 'слава', 'стася', 'сима', 'тоша', 'мира']);
+
+/**
+ * Глагол прошедшего времени в роде автора: «Аня удалила», «Борис удалил», «Агент удалил».
+ * Род по имени угадывается по окончанию; где не угадать — «удалил(а)».
+ * @param {{author?: string, author_kind?: string}|null} who
+ * @param {string} verb мужская форма: «удалил»
+ * @returns {string} «Аня удалила» / «кто-то удалил»
+ */
+export function whoDid(who, verb) {
+  if (!who) return `кто-то ${verb}`;
+  if (who.author_kind === 'agent') return `агент ${verb}`;
+  if (who.author_kind === 'system') return `система ${verb}а`;
+  const name = cutText(cleanText(who.author), 40, { ellipsis: true });
+  if (!name) return `кто-то ${verb}`;
+  const first = name.split(' ')[0].toLowerCase();
+  if (ANY_A.has(first)) return `${name} ${verb}(а)`;
+  if (/[ая]$/.test(first) && !MALE_A.has(first)) return `${name} ${verb}а`;
+  return `${name} ${verb}`;
+}
+
+/** Какой правки касалась отброшенная операция: существительное и согласованный глагол. */
+function droppedSubject(op, nameOf) {
+  const o = op && typeof op === 'object' ? op : {};
+  const nm = (id) => {
+    const n = cutText(cleanText(typeof nameOf === 'function' ? nameOf(id) : ''), 40, { ellipsis: true });
+    return n ? ` «${n}»` : '';
+  };
+  switch (o.op) {
+    case 'set':
+      if (o.path === 'name') {
+        /* Своё же переименование уже видно в имени слоя: «Переименование «Карточка Ани»» о
+           слое, который был «Карточкой встречи», — путаница. Тогда говорим, во что. */
+        const now = typeof nameOf === 'function' ? cleanText(nameOf(o.id)) : '';
+        const to = cutText(cleanText(o.value), 40, { ellipsis: true });
+        if (to && (!now || now === cleanText(o.value))) return { noun: `Переименование в «${to}»`, failed: 'не применилось' };
+        return { noun: `Переименование${nm(o.id)}`, failed: 'не применилось' };
+      }
+      return { noun: `Правка${nm(o.id)}`, failed: 'не применилась' };
+    case 'move': return { noun: `Перенос${nm(o.id)}`, failed: 'не применился' };
+    case 'create': {
+      const n = cutText(cleanText(o.node && (o.node.name || o.node.text)), 40, { ellipsis: true });
+      return { noun: `Добавление${n ? ` «${n}»` : ' слоя'}`, failed: 'не применилось' };
+    }
+    case 'remove': return { noun: `Удаление${nm(o.id)}`, failed: 'не применилось' };
+    case 'setToken': return { noun: 'Правка шкалы', failed: 'не применилась' };
+    default: return { noun: 'Правка', failed: 'не применилась' };
+  }
+}
+
+/** Причина отказа словами; who — кто помешал (для removed/orphan). */
+function droppedReason(d, who, many) {
+  const reason = d && (d.limit || d.reason);
+  switch (reason) {
+    case 'removed':
+      return who ? `${whoDid(who, 'удалил')} ${many ? 'эти слои' : 'этот слой'}` : (many ? 'эти слои уже удалены' : 'этот слой уже удалён');
+    case 'orphan':
+      return who ? `${whoDid(who, 'удалил')} слой, куда он добавлялся` : 'слой, куда он добавлялся, уже удалён';
+    case 'cycle': return 'перенос положил бы слой внутрь самого себя';
+    case 'exists': return 'такой слой уже есть';
+    case 'stale':
+      return who
+        ? `с тех пор ${whoDid(who, 'изменил')} то же самое, а эта правка сделана до восстановления базы из резервной копии`
+        : 'она сделана до восстановления базы из резервной копии, а документ с тех пор другой';
+    case 'doc_nodes': return 'документ упёрся в предел числа слоёв';
+    case 'doc_bytes': return 'документ упёрся в предел размера';
+    case 'merge_budget': return 'сервер не успел её разобрать';
+    case 'ops_per_tx': return 'в ней слишком много операций';
+    case 'tx_bytes': return 'она слишком большая';
+    default: return 'она не подошла к документу';
+  }
+}
+
+/**
+ * Отброшенное сервером (§9.1 `dropped`) — человеку конкретно (круг 25, п.5): что, почему
+ * и кто помешал. «Переименование «Карточка встречи» не применилось — Аня удалила этот
+ * слой». «Остальное применено» — только если применять было что.
+ *
+ * @param {{
+ *   dropped: object[],                  // записи dropped: {index, op, reason, limit?, by?, label?} и {more}
+ *   applied?: number,                   // сколько операций транзакции легло
+ *   nameOf?: (id: string) => string,    // имя слоя (в том числе уже удалённого)
+ *   whoOf?: (d: object) => object|null, // кто помешал: d.by или whoRemoved реплики
+ *   agent?: boolean,                    // транзакция агента: «Часть правки агента…»
+ * }} o
+ * @returns {{title: string, note: string, stale: boolean}}
+ */
+export function droppedWords({ dropped = [], applied = 0, nameOf = null, whoOf = null, agent = false } = {}) {
+  const list = (Array.isArray(dropped) ? dropped : []).filter((d) => d && typeof d === 'object');
+  const real = list.filter((d) => !(typeof d.more === 'number' && d.index === undefined && d.reason === undefined));
+  const more = list.reduce((n, d) => n + (real.includes(d) ? 0 : Math.max(0, d.more || 0)), 0);
+  const total = real.length + more;
+  const first = real[0] || {};
+  const reasonOf = (d) => d.limit || d.reason || 'invalid';
+  const sameReason = real.every((d) => reasonOf(d) === reasonOf(first));
+  const who = (d) => (d && d.by && typeof d.by === 'object' ? d.by : (typeof whoOf === 'function' ? whoOf(d) : null));
+  const firstWho = who(first);
+  const sameWho = real.every((d) => {
+    const w = who(d);
+    return (w && w.author) === (firstWho && firstWho.author) && (w && w.author_kind) === (firstWho && firstWho.author_kind);
+  });
+  const stale = reasonOf(first) === 'stale';
+  let title;
+  if (total <= 1) {
+    const subj = droppedSubject(first.op, nameOf);
+    const noun = agent ? `${subj.noun} от агента` : subj.noun;
+    title = `${noun} ${subj.failed} — ${droppedReason(first, firstWho, false)}`;
+  } else {
+    const head = agent
+      ? `${total} ${plural(total, 'правка агента не применилась', 'правки агента не применились', 'правок агента не применились')}`
+      : `${total} ${plural(total, 'правка не применилась', 'правки не применились', 'правок не применились')}`;
+    title = sameReason
+      ? `${head} — ${droppedReason(first, sameWho ? firstWho : null, true)}`
+      : `${head}: ${[...new Set(real.map((d) => droppedReason(d, null, false)))].slice(0, 2).join('; ')}`;
+  }
+  const notes = [];
+  if (applied > 0) notes.push('Остальное в правке применено.');
+  if (stale) notes.push('Посмотрите на холст и при необходимости сделайте правку заново.');
+  return { title, note: notes.join(' '), stale };
 }
 
 /** Ошибка модели: тут может выручить своя модель браузера. */

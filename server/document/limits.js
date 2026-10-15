@@ -73,6 +73,109 @@ export const FRAME_CACHE_FRAMES = 256;
 export const FRAME_CACHE_ROOM_BYTES = 4 * 1024 * 1024;
 export const FRAME_CACHE_TOTAL_BYTES = 64 * 1024 * 1024;
 
+/**
+ * Запись (SPEC §9.10): предел «в полёте» и очередей. На сокет — не больше
+ * WS_INFLIGHT необработанных транзакций (сверх — чтение сокета на паузе, а то, что
+ * уже прочитано, получает `error busy`). Очередь мьютекса проекта и всего экземпляра
+ * ограничена байтами тел транзакций (и числом на проект): сверх — 503 `busy` +
+ * Retry-After (HTTP) / `error busy` (WS). HTTP-запись — под семафором.
+ */
+export const WS_INFLIGHT = 2;
+export const QUEUE_PROJECT_BYTES = 32 * 1024 * 1024;
+export const QUEUE_PROJECT_TXS = 256;
+export const QUEUE_TOTAL_BYTES = 128 * 1024 * 1024;
+export const HTTP_WRITE_CONCURRENCY = 8;
+export const HTTP_WRITE_QUEUE = 64;
+/** Retry-After для «занято» по записи, с. */
+export const BUSY_RETRY_S = 1;
+
+/**
+ * Переигрывание после отката базы (SPEC §9.10): транзакция с `replay_of_epoch`
+ * старше REPLAY_MAX_AGE_MS не переигрывается (клиент показывает человеку, сервер
+ * отбрасывает её `set` с `reason:'stale'`); поиск более новых чужих записей тех же
+ * листьев — не дальше REPLAY_SCAN_TXS транзакций журнала (дальше — `stale`).
+ */
+export const REPLAY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const REPLAY_SCAN_TXS = 5000;
+/** Вложенность значений в операциях и документе: глубже — 400 (jsonb и рекурсия не бесконечны). */
+export const MAX_VALUE_DEPTH = 64;
+/** id в операциях (узлы, родители, соседи): не длиннее стольких символов. */
+export const MAX_OP_ID = 512;
+/** command_id транзакции (связь с трассой агента). */
+export const MAX_COMMAND_ID = 128;
+
+/* ------------------------------- строки ------------------------------- */
+
+/**
+ * Строка годна для jsonb/text Postgres: без U+0000 и без одиночных суррогатных
+ * половин (JSON.stringify пишет их как `\ud800`, и jsonb их не принимает).
+ * @param {string} s
+ */
+export function isCleanText(s) {
+  return typeof s === 'string' && s.indexOf('\u0000') < 0 && s.isWellFormed();
+}
+
+/** U+0000 — вон, одиночные суррогаты — U+FFFD. Чистая строка возвращается как есть. */
+export function cleanText(s) {
+  if (typeof s !== 'string') return s;
+  if (isCleanText(s)) return s;
+  return s.replace(/\u0000/g, '').toWellFormed();
+}
+
+/**
+ * Обрезать до `n` кодовых точек: суррогатная пара не рвётся пополам (иначе
+ * обрезок — одиночная половина, и запись в jsonb падает).
+ */
+export function cutText(s, n) {
+  if (typeof s !== 'string' || s.length <= n) return s;
+  let end = n;
+  const c = s.charCodeAt(end - 1);
+  if (c >= 0xd800 && c <= 0xdbff) end -= 1;
+  return s.slice(0, end);
+}
+
+/**
+ * Очистка значения целиком (строки и ключи объектов, рекурсивно): копия делается
+ * только там, где есть что чистить. Глубже `maxDepth` — исключение `depth` (вызывающий
+ * отвечает 400).
+ * @param {any} v
+ * @param {number} [maxDepth]
+ */
+export function cleanDeep(v, maxDepth = MAX_VALUE_DEPTH) {
+  const walk = (x, depth) => {
+    if (typeof x === 'string') return cleanText(x);
+    if (!x || typeof x !== 'object') return x;
+    if (depth > maxDepth) {
+      const e = new Error('слишком глубокая вложенность');
+      e.code = 'depth';
+      throw e;
+    }
+    if (Array.isArray(x)) {
+      let out = null;
+      for (let i = 0; i < x.length; i++) {
+        const y = walk(x[i], depth + 1);
+        if (y !== x[i]) {
+          if (!out) out = x.slice();
+          out[i] = y;
+        }
+      }
+      return out || x;
+    }
+    let out = null;
+    for (const k of Object.keys(x)) {
+      const y = walk(x[k], depth + 1);
+      const k2 = isCleanText(k) ? k : cleanText(k);
+      if (y !== x[k] || k2 !== k) {
+        if (!out) out = { ...x };
+        if (k2 !== k) delete out[k];
+        out[k2] = y;
+      }
+    }
+    return out || x;
+  };
+  return walk(v, 0);
+}
+
 /** Числа, которые обязан знать клиент (сверяются тестом с `LIMITS` из src/sync.js). */
 export const CLIENT_LIMITS = Object.freeze({
   txBytes: MAX_BODY_BYTES,
@@ -81,4 +184,5 @@ export const CLIENT_LIMITS = Object.freeze({
   docNodes: MAX_DOC_NODES,
   presenceSelection: PRESENCE_SELECTION,
   presenceHeartbeatMs: PRESENCE_HEARTBEAT_MS,
+  replayMaxAgeMs: REPLAY_MAX_AGE_MS,
 });

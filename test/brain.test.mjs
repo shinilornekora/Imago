@@ -6028,3 +6028,76 @@ test('круг24: «верни обратно» — повтор, как в об
   assert.equal(recognizeAction('верни как было'), 'undo');
   assert.equal(recognizeAction('поменяй обратно цвет кнопки'), null);
 });
+
+/* ── круг 25: строки в документ — по кодовым точкам, без \u0000 и одиночных суррогатов ── */
+
+const wellFormed = (s) => typeof s === 'string' && s.isWellFormed() && !s.includes('\u0000');
+
+test('круг 25: cutText/cleanText brain — те же, что у core (сверка на случайных строках)', async () => {
+  const brain = await import('../src/brain.js');
+  const core = await import('../src/core.js');
+  const parts = ['a', 'я', '😀', '👍🏽', '\ud800', '\udfff', '\u0000', ' ', '𝒜', 'é'];
+  let s = 1;
+  const rnd = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = 0; i < 2000; i++) {
+    let str = '';
+    const len = Math.floor(rnd() * 40);
+    for (let k = 0; k < len; k++) str += parts[Math.floor(rnd() * parts.length)];
+    const n = Math.floor(rnd() * 45);
+    assert.equal(brain.cutText(str, n), core.cutText(str, n), JSON.stringify([str, n]));
+    assert.equal(brain.cleanText(str), core.cleanText(str));
+    assert.ok([...brain.cutText(str, n)].length <= n);
+    assert.ok(str.startsWith(brain.cutText(str, n)));
+    assert.ok(wellFormed(brain.cleanText(str)));
+    // целая пара не рвётся: из корректной строки — корректная
+    if (str.isWellFormed()) assert.ok(brain.cutText(str, n).isWellFormed(), JSON.stringify([str, n]));
+  }
+  assert.equal(brain.cutText('😀😀😀', 2), '😀😀');
+  assert.equal(brain.cutText(null, 3), '');
+  assert.equal(brain.cutText(12345, 3), '123');
+  assert.equal(brain.cleanText('a\u0000b\ud83d'), 'ab�');
+  assert.equal(brain.cleanText(5), 5);
+});
+
+test('круг 25: имя по тексту из эмодзи режется по кодовым точкам — пара не рвётся, запись в базу не падает', async () => {
+  const core = await import('../src/core.js');
+  const { treeToOps } = await import('../src/brain.js');
+  const doc = core.createDoc();
+  const board = core.artboards(doc)[0].id;
+  const characters = '🚀'.repeat(13) + ' Запуск';   // граница 24 единиц UTF-16 — между парами
+  const odd = 'ж' + '🚀'.repeat(30);                // граница 24 единиц — посреди пары: slice(0, 24) оставлял одиночный суррогат
+  const { ops } = treeToOps({
+    doc, engine: core, parentId: board, warn: () => {},
+    tree: { type: 'frame', children: [{ type: 'text', text: odd }, { type: 'text', text: characters }, { type: 'instance', compName: '🎉'.repeat(40) }] },
+  });
+  const names = ops.map((o) => o.node.name).filter(Boolean);
+  assert.ok(names.length >= 2, JSON.stringify(names));
+  for (const n of names) {
+    assert.ok(wellFormed(n), 'имя валидно: ' + JSON.stringify(n));
+    assert.ok([...n].length <= 80);
+  }
+  const textName = ops.find((o) => o.node.characters === odd).node.name;
+  assert.equal(textName, 'ж' + '🚀'.repeat(23), 'ровно 24 кодовые точки');
+  assert.equal(core.applyOps(doc, ops).error, undefined);
+});
+
+test('круг 25: результат runCommand без \u0000 и одиночных суррогатов — в операциях, заголовке, предупреждениях', async () => {
+  const doc = makeDoc();
+  const engine = makeStubEngine();
+  const dirty = 'Цена\u0000 \ud83d за месяц';
+  const provider = makeFakeProvider({
+    plan: { ...PLAN_CREATE, title: 'План\u0000 ' + '😀'.repeat(70) },
+    tree: { type: 'text', name: 'Сноска\ud800', text: dirty, style: 'body' },
+  });
+  const res = await runCommand({ doc, selection: ['btn'], utterance: 'добавь подпись', provider, engine });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.ops.length, 1);
+  assert.equal(res.ops[0].node.characters, 'Цена � за месяц');
+  assert.equal(res.ops[0].node.name, 'Сноска�');
+  const walk = (v) => {
+    if (typeof v === 'string') assert.ok(wellFormed(v), 'строка результата: ' + JSON.stringify(v));
+    else if (v && typeof v === 'object') for (const k of Object.keys(v)) if (k !== 'preview') walk(v[k]);
+  };
+  walk(res);
+  assert.ok(wellFormed(res.plan.title) && [...res.plan.title].length <= 120);
+});

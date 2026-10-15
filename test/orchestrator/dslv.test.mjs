@@ -82,3 +82,33 @@ test('процесс: SIGTERM — аккуратный выход с кодом 
   assert.equal(code, 0, out);
   assert.match(out, /SIGTERM/);
 });
+
+test('круг 25: воркер не видит секретов окружения — ключа модели, INTERNAL_TOKEN, адресов с учётными данными', async (t) => {
+  const { workerEnv } = await import('../../server/orchestrator/dslv/index.js');
+  const env = workerEnv({
+    PATH: '/usr/bin', LANG: 'ru_RU.UTF-8', LC_ALL: 'C', TZ: 'UTC', NODE_ENV: 'production', HOME: '/root',
+    LLM_API_KEY: 'sk-1', INTERNAL_TOKEN: 't', LLM_BASE_URL: 'https://u:p@h/v1', DATABASE_URL: 'postgres://x', NODE_OPTIONS: '--max-old-space-size=8000',
+    AWS_SECRET_ACCESS_KEY: 'a', SOMETHING: 'b',
+  });
+  assert.deepEqual(Object.keys(env).sort(), ['HOME', 'LANG', 'LC_ALL', 'NODE_ENV', 'NODE_OPTIONS', 'PATH', 'TZ']);
+  assert.equal(env.NODE_OPTIONS, '');
+
+  // и на деле: воркер, запущенный при ключе в окружении процесса, его не видит
+  const saved = { k: process.env.LLM_API_KEY, t: process.env.INTERNAL_TOKEN };
+  process.env.LLM_API_KEY = 'sk-test-worker-env-0123456789';
+  process.env.INTERNAL_TOKEN = 'internal-test-token-0123456789';
+  t.after(() => {
+    if (saved.k === undefined) delete process.env.LLM_API_KEY; else process.env.LLM_API_KEY = saved.k;
+    if (saved.t === undefined) delete process.env.INTERNAL_TOKEN; else process.env.INTERNAL_TOKEN = saved.t;
+  });
+  const document = await startDocument();
+  const llm = await startFakeLlm(SCRIPT);
+  const orch = await startOrch({ document, llm: { baseUrl: llm.base }, workers: 1 });
+  t.after(async () => { await orch.close(); await document.close(); await llm.close(); });
+  const p = await createProject(document);
+  const r = await command(orch.url, { command_id: cid(), project: p.id, text: 'собери экран тарифов', __test: 'env' });
+  const err = r.events.find((e) => e.event === 'error');
+  assert.ok(err, JSON.stringify(r.events));
+  assert.match(err.data.message, /env .*PATH/);
+  assert.doesNotMatch(err.data.message, /LLM_API_KEY|INTERNAL_TOKEN|LLM_BASE_URL/);
+});

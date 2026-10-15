@@ -54,7 +54,7 @@ for (const backend of list) {
 
     /** Новый проект с демо-документом; возвращает id и первую доску. */
     async function fresh(name = 'Проба') {
-      const created = await http.post('/api/projects', { name });
+      const created = await http.post('/api/projects', { name, demo: true });
       assert.equal(created.status, 201);
       const opened = await http.get('/api/projects/' + created.body.id);
       const board = artboards(opened.body.snapshot.doc)[0];
@@ -75,7 +75,7 @@ for (const backend of list) {
       assert.equal((await http.get('/nope')).status, 404);
     });
 
-    it('создать → открыть: снимок seq 0, пустой хвост, документ createDoc()', async () => {
+    it('создать → открыть: снимок seq 0, пустой хвост; без doc — пустая страница, демо — только по {demo:true}', async () => {
       const created = await http.post('/api/projects', { name: 'Первый' });
       assert.equal(created.status, 201);
       assert.equal(created.body.head_seq, 0);
@@ -93,7 +93,12 @@ for (const backend of list) {
       const doc = opened.body.snapshot.doc;
       assert.ok(doc.nodes[doc.root], 'корень среди узлов');
       assert.ok(doc.tokens && doc.tokens.colors && Array.isArray(doc.tokens.spacing), 'снимок несёт токены целиком');
-      assert.ok(artboards(doc).length >= 1, 'демо-документ с досками');
+      assert.equal(artboards(doc).length, 0, 'новый проект пуст — без демо-досок');
+      assert.equal(Object.keys(doc.nodes).length, 1, 'только корень-страница');
+      const demo = await http.post('/api/projects', { name: 'Демо', demo: true });
+      assert.equal(demo.status, 201);
+      const demoDoc = (await http.get('/api/projects/' + demo.body.id)).body.snapshot.doc;
+      assert.ok(artboards(demoDoc).length >= 1, 'демо — по просьбе');
 
       const listed = await http.get('/api/projects');
       assert.equal(listed.status, 200);

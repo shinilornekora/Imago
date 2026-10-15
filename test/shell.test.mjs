@@ -190,3 +190,78 @@ test('«стоп» после записи: строка честная и зо�
   assert.match(w.note, /Ctrl\+Z/);
   assert.match(stoppedWriteWords(null, 'сделай синим').note, /сделай синим/);
 });
+
+/* ------------------------------ круг 25 ------------------------------ */
+
+test('dropped словами: что не применилось, почему и кто помешал', async () => {
+  const { droppedWords, whoDid } = await import('../src/shell.js');
+  const rename = { op: 'set', id: 'card', path: 'name', value: 'Новая' };
+  const one = droppedWords({
+    dropped: [{ index: 0, op: rename, reason: 'removed', by: { author: 'Аня', author_kind: 'human' } }],
+    nameOf: (id) => (id === 'card' ? 'Карточка встречи' : ''),
+  });
+  assert.equal(one.title, 'Переименование «Карточка встречи» не применилось — Аня удалила этот слой');
+  // применять было нечего — «остальное применено» не говорим
+  assert.equal(one.note, '');
+  // кто помешал — из реплики (whoRemoved), если сервер by не прислал; часть правки легла
+  const two = droppedWords({
+    dropped: [{ index: 1, op: { op: 'move', id: 'a' }, reason: 'removed' }, { index: 2, op: { op: 'set', id: 'b', path: 'fill' }, reason: 'removed' }],
+    applied: 3,
+    whoOf: () => ({ author: 'Борис', author_kind: 'human' }),
+  });
+  assert.equal(two.title, '2 правки не применились — Борис удалил эти слои');
+  assert.equal(two.note, 'Остальное в правке применено.');
+  // агент удалил; никто не известен
+  assert.match(droppedWords({ dropped: [{ index: 0, op: { op: 'set', id: 'x', path: 'fill' }, reason: 'removed', by: { author: 'Агент', author_kind: 'agent' } }] }).title, /— агент удалил этот слой$/);
+  assert.match(droppedWords({ dropped: [{ index: 0, op: { op: 'set', id: 'x', path: 'fill' }, reason: 'removed' }] }).title, /— этот слой уже удалён$/);
+  // родитель удалён
+  assert.match(droppedWords({ dropped: [{ index: 0, op: { op: 'create', node: { id: 'n', name: 'Кнопка', parent: 'p' } }, reason: 'orphan', by: { author: 'Вера' } }] }).title,
+    /^Добавление «Кнопка» не применилось — Вера удалила слой, куда он добавлялся$/);
+  // правка устарела после восстановления базы — свои слова
+  const stale = droppedWords({ dropped: [{ index: 0, op: rename, reason: 'stale' }], nameOf: () => 'Шапка' });
+  assert.ok(stale.stale);
+  assert.match(stale.title, /^Переименование «Шапка» не применилось — она сделана до восстановления базы/);
+  assert.match(stale.note, /заново/);
+  assert.match(droppedWords({ dropped: [{ index: 0, op: rename, reason: 'stale', by: { author: 'Аня' } }], nameOf: () => 'Шапка' }).title,
+    /не применилось — с тех пор Аня изменила то же самое, а эта правка сделана до восстановления базы/);
+  // своё переименование уже в имени слоя — говорим, во что переименовывали
+  assert.equal(droppedWords({ dropped: [{ index: 0, op: rename, reason: 'removed', by: { author: 'Аня' } }], nameOf: () => 'Новая' }).title,
+    'Переименование в «Новая» не применилось — Аня удалила этот слой');
+  // выжимка журнала {more: N} — в счёт, не в причины
+  assert.match(droppedWords({ dropped: [{ index: 0, op: rename, reason: 'removed' }, { more: 4 }] }).title, /^5 правок не применились/);
+  // правка агента
+  assert.match(droppedWords({ dropped: [{ index: 0, op: rename, reason: 'removed', by: { author: 'Аня' } }], agent: true, nameOf: () => 'Шапка' }).title,
+    /^Переименование «Шапка» от агента не применилось — Аня удалила/);
+  // род по имени: где не угадать — «удалил(а)»
+  assert.equal(whoDid({ author: 'Никита' }, 'удалил'), 'Никита удалил');
+  assert.equal(whoDid({ author: 'Саша' }, 'удалил'), 'Саша удалил(а)');
+  assert.equal(whoDid({ author: 'Мария Петрова' }, 'удалил'), 'Мария Петрова удалила');
+  assert.equal(whoDid(null, 'удалил'), 'кто-то удалил');
+  assert.equal(whoDid({ author: '  ' }, 'удалил'), 'кто-то удалил');
+});
+
+test('строки по кодовым точкам и без служебного', async () => {
+  const { cutText, cleanText, isJargon } = await import('../src/shell.js');
+  assert.equal(cutText('ab😀cd', 3), 'ab😀');
+  assert.equal(cutText('абвгдеж', 4, { ellipsis: true }), 'абв…');
+  assert.equal(cutText('коротко', 40), 'коротко');
+  assert.equal(Array.from(cutText('😀'.repeat(50), 40)).length, 40);
+  assert.equal(cleanText('  а\u0001б \n в\u200b '), 'а б в');
+  // \u0000 core.cleanText выбрасывает вовсе (jsonb его не принимает)
+  assert.equal(cleanText('а\u0000б'), 'аб');
+  for (const bad of ['Failed to fetch', 'http://localhost:1234/v1', 'сервер ответил 503', 'ответ не JSON', 'tx_abc123def456']) {
+    assert.ok(isJargon(bad), bad);
+  }
+  for (const ok of ['Правка слишком большая: 6000 операций', 'Модель на сервере не отвечает']) assert.ok(!isJargon(ok), ok);
+});
+
+test('серверная сборка: модель браузера по умолчанию выключена, соло — включена', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../tools/build.mjs', import.meta.url), 'utf8');
+  const m = /const defaultsFor = \(serverMode\) => \(serverMode\s*\?\s*`([\s\S]*?)`\s*:\s*`([\s\S]*?)`\);/.exec(src);
+  assert.ok(m, 'defaultsFor не найден');
+  assert.match(m[1], /server: true/);
+  assert.match(m[1], /enabled: false/);
+  assert.match(m[2], /server: false/);
+  assert.match(m[2], /enabled: true/);
+});

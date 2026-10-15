@@ -47,9 +47,17 @@ services:
     healthcheck:
       <<: *node-health
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      # Миграции идут при старте и на большой базе длятся минутами (003 считает цепочку
+      # всего журнала); всё это время /api/health отвечает 503 migrating. Сбои проверки в
+      # start_period не считаются — сервис здоров с первого 200, а не умирает через 100 с.
+      # Запас — 10 минут на миграции и ещё 20 проверок по 5 с после них.
+      start_period: 600s
+      retries: 20
     depends_on:
       db:
         condition: service_healthy
+    # SIGTERM: сервис дописывает начатые транзакции и закрывает сокеты (код 1001) — не убивать через 10 с
+    stop_grace_period: 15s
     restart: unless-stopped
 
   orchestrator:
@@ -74,6 +82,8 @@ services:
     depends_on:
       document:
         condition: service_healthy
+    # SIGTERM: новые команды — 503 shutting_down, идущие доводятся до записи
+    stop_grace_period: 15s
     restart: unless-stopped
 
   web:

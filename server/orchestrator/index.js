@@ -39,7 +39,7 @@ import { createTraces } from './traces.js';
 import { createPipeline } from './pipeline.js';
 import { createRequestHandler } from './http.js';
 import jev from './jev/index.js';
-import { SHUTDOWN_GRACE_MS } from './limits.js';
+import { SHUTDOWN_GRACE_MS, SHUTDOWN_FLUSH_MS, SHUTDOWN_HARD_MS } from './limits.js';
 
 const num = (v) => (v === undefined || v === null || v === '' ? undefined : Number(v));
 
@@ -114,7 +114,8 @@ export async function start(opts = {}) {
       await pipeline.close(graceMs);
       handler.closeStreams();
       await dslv.close();
-      await traces.flush();
+      // трассы — не дольше SHUTDOWN_FLUSH_MS: недошедшая трасса не держит останов
+      await Promise.race([traces.flush(), new Promise((r) => setTimeout(r, SHUTDOWN_FLUSH_MS).unref())]);
       server.closeAllConnections && server.closeAllConnections();
     })();
     return closing;
@@ -166,7 +167,11 @@ if (launchedDirectly()) {
     if (stopping) return;
     stopping = true;
     console.info(`[orchestrator] ${sig}: останавливаюсь`);
-    setTimeout(() => process.exit(1), SHUTDOWN_GRACE_MS + 8000).unref();
+    // круг 25: Docker шлёт SIGKILL через 10 с — весь останов обязан уложиться в 8
+    setTimeout(() => {
+      console.warn(`[orchestrator] останов не уложился в ${SHUTDOWN_HARD_MS} мс — выхожу`);
+      process.exit(1);
+    }, SHUTDOWN_HARD_MS).unref();
     started
       .then((svc) => (svc ? svc.close().then(() => svc) : null))
       .then(() => process.exit(0), (e) => {

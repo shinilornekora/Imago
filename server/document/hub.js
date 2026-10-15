@@ -49,7 +49,8 @@ import { DocError, badRequest, internalBody } from './errors.js';
 import { projectSummary } from './storage/committed.js';
 import {
   MAX_BODY_BYTES, WS_ENVELOPE_BYTES, PRESENCE_PER_SECOND as PRESENCE_RATE, PRESENCE_SELECTION, PRESENCE_ID_CHARS,
-  PRESENCE_PAYLOAD_BYTES, PRESENCE_TTL_MS, FRAME_CACHE_FRAMES, FRAME_CACHE_ROOM_BYTES, FRAME_CACHE_TOTAL_BYTES
+  PRESENCE_PAYLOAD_BYTES, PRESENCE_TTL_MS, FRAME_CACHE_FRAMES, FRAME_CACHE_ROOM_BYTES, FRAME_CACHE_TOTAL_BYTES,
+  WS_INFLIGHT, BUSY_RETRY_S, isCleanText, cleanText, cutText
 } from './limits.js';
 
 /** Предел сообщения — тело транзакции (4 МБ) плюс конверт; больше — ws закрывает сокет кодом 1009. */
@@ -59,6 +60,8 @@ export const PRESENCE_PER_SECOND = PRESENCE_RATE;
 /** Неотправленного в сокет больше этого — читатель не успевает: закрыть, пусть догоняет из базы. */
 export const MAX_BUFFERED = 32 * 1024 * 1024;
 const MAX_AUTHOR = 200;
+/** Имя для показа: без U+0000 и одиночных суррогатов (уходит в NOTIFY и в jsonb), не длиннее MAX_AUTHOR кодовых точек. */
+const nameOf = (v) => (typeof v === 'string' && v ? cutText(cleanText(v), MAX_AUTHOR) : undefined);
 const isFlag = (v) => typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v));
 const utf8 = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
 /** Коды закрытия: 4400 форма запроса, 4404 нет проекта, 4410 эпоха сменилась, 4503 хранилище/занято. */
@@ -74,13 +77,14 @@ export const CLOSE = { bad: 4400, notFound: 4404, epoch: 4410, unavailable: 4503
  *   pingInterval?: number,
  *   presenceTtlMs?: number,
  *   maxBuffered?: number,
+ *   maxInflight?: number,
  *   frameCache?: {frames?: number, roomBytes?: number, totalBytes?: number},
  *   log?: {warn:Function, info:Function}
  * }} opts
  */
 export function createHub({
   server, dslr, dslts, bus = null, instanceId = 'i', pingInterval = 30000,
-  presenceTtlMs = PRESENCE_TTL_MS, maxBuffered = MAX_BUFFERED, frameCache = {}, log = console
+  presenceTtlMs = PRESENCE_TTL_MS, maxBuffered = MAX_BUFFERED, maxInflight = WS_INFLIGHT, frameCache = {}, log = console
 }) {
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE });
   const cacheFrames = frameCache.frames > 0 ? frameCache.frames : FRAME_CACHE_FRAMES;
@@ -96,6 +100,7 @@ export function createHub({
   const rooms = new Map();
   let cachedBytes = 0;
   let clientCounter = 0;
+  let busyRefused = 0;
   let tokenCounter = 0;
   let closing = false;
 
@@ -261,8 +266,8 @@ export function createHub({
    * PRESENCE_PAYLOAD_BYTES (полезная нагрузка NOTIFY < 8000 байт).
    */
   function presenceBody(ws, raw, now) {
-    const b = { k: 'presence', p: ws.projectId, i: instanceId, c: ws.clientId, a: ws.author ? String(ws.author).slice(0, MAX_AUTHOR) : undefined, s: [], at: new Date(now).toISOString() };
-    if (typeof raw.board === 'string' && raw.board.length <= PRESENCE_ID_CHARS) b.b = raw.board;
+    const b = { k: 'presence', p: ws.projectId, i: instanceId, c: ws.clientId, a: nameOf(ws.author), s: [], at: new Date(now).toISOString() };
+    if (typeof raw.board === 'string' && raw.board.length <= PRESENCE_ID_CHARS && isCleanText(raw.board)) b.b = raw.board;
     if (isFlag(raw.busy)) b.busy = raw.busy;
     if (isFlag(raw.queued)) b.queued = raw.queued;
     const src = Array.isArray(raw.selection) ? raw.selection : [];
@@ -270,7 +275,7 @@ export function createHub({
     let truncated = false;
     for (const id of src) {
       if (typeof id !== 'string') continue;
-      if (id.length > PRESENCE_ID_CHARS) { truncated = true; continue; }
+      if (id.length > PRESENCE_ID_CHARS || !isCleanText(id)) { truncated = true; continue; }
       if (b.s.length >= PRESENCE_SELECTION) { truncated = true; break; }
       const cost = utf8(id) + (b.s.length ? 1 : 0);
       if (cost > budget) { truncated = true; break; }
@@ -311,7 +316,7 @@ export function createHub({
       ws.presenceCount = 0;
     }
     if (++ws.presenceCount > PRESENCE_PER_SECOND) return;
-    if (typeof raw.author === 'string' && raw.author) ws.author = raw.author.slice(0, MAX_AUTHOR);
+    if (typeof raw.author === 'string' && raw.author) ws.author = nameOf(raw.author);
     const body = presenceBody(ws, raw, now);
     ws.announced = true;
     ws.presenceAt = now;
@@ -429,11 +434,25 @@ export function createHub({
     ws.lastSeq = view.snapshot.seq;
   }
 
-  async function onTx(ws, projectId, raw) {
-    const txId = raw && typeof raw.tx_id === 'string' ? raw.tx_id : undefined;
+  /**
+   * Транзакция с сокета. «В полёте» на сокет — не больше maxInflight (§9.10): на
+   * пределе чтение сокета ставится на паузу (TCP держит остальное у клиента), а то,
+   * что уже прочитано сверх предела, получает `error busy` (retryable) — клиент
+   * пришлёт позже. Без этого каждое сообщение сразу шло в очередь мьютекса, и
+   * поток транзакций по 4 МБ съедал память экземпляра.
+   */
+  async function onTx(ws, projectId, raw, bytes) {
+    const txId = raw && typeof raw.tx_id === 'string' && raw.tx_id.length <= 128 && isCleanText(raw.tx_id) ? raw.tx_id : undefined;
+    if (ws.inflight >= maxInflight) {
+      busyRefused += 1;
+      send(ws, errorMessage(new DocError(503, 'busy', 'с этого сокета уже пишется — пришлите позже', { retryable: true, retryAfter: BUSY_RETRY_S, detail: { limit: 'socket_inflight' } }), txId));
+      return;
+    }
+    ws.inflight += 1;
+    if (ws.inflight >= maxInflight && !ws.isPaused) ws.pause();
     try {
-      if (raw && typeof raw === 'object' && typeof raw.author === 'string' && raw.author) ws.author = raw.author.slice(0, MAX_AUTHOR);
-      const { committed, existing } = await dslts.commit(projectId, raw, { author: ws.author });
+      if (raw && typeof raw === 'object' && typeof raw.author === 'string' && raw.author) ws.author = nameOf(raw.author);
+      const { committed, existing } = await dslts.commit(projectId, raw, { author: ws.author, bytes });
       // новая транзакция уже разослана подпиской (автору тоже); сохранённая — повтор
       // после разрыва: досылаем автору, если этот сокет её ещё не видел, иначе — ack
       // (кадры до lastSeq уже ушли этим сокетом раньше ack — порядок клиенту виден)
@@ -456,6 +475,9 @@ export function createHub({
       }
     } catch (e) {
       send(ws, errorMessage(e, txId));
+    } finally {
+      ws.inflight -= 1;
+      if (ws.inflight < maxInflight && ws.isPaused) ws.resume();
     }
   }
 
@@ -472,8 +494,9 @@ export function createHub({
     ws.isAlive = true;
     ws.projectId = projectId;
     ws.token = ++tokenCounter;
-    ws.clientId = (url.searchParams.get('client') || ('c_' + (++clientCounter).toString(36) + '_' + Date.now().toString(36))).slice(0, PRESENCE_ID_CHARS);
-    ws.author = url.searchParams.get('author') ? url.searchParams.get('author').slice(0, MAX_AUTHOR) : undefined;
+    ws.clientId = cutText(cleanText(url.searchParams.get('client') || ('c_' + (++clientCounter).toString(36) + '_' + Date.now().toString(36))), PRESENCE_ID_CHARS);
+    ws.author = nameOf(url.searchParams.get('author'));
+    ws.inflight = 0;
     ws.knowsAck = !!(tip || epoch || proto >= 2);
     ws.lastSeq = -1;
     ws.catchingUp = true;
@@ -495,7 +518,7 @@ export function createHub({
       ws.close(1001, 'server shutting down');
       return;
     }
-    if (!projectId) return refuse('нужен параметр project', 'project');
+    if (!projectId || !isCleanText(projectId)) return refuse('нужен параметр project', 'project');
     if (since !== undefined && (!Number.isInteger(since) || since < -1)) return refuse('since: целое ≥ 0 (или -1 — «ничего не знаю»)', 'since');
     if ((tip && tip.length > 128) || (epoch && epoch.length > 64)) return refuse('tip/epoch: слишком длинные', 'tip');
 
@@ -516,7 +539,7 @@ export function createHub({
       if (!ws.ready) return;   // до hello сообщения не принимаем: проект ещё не проверен
       switch (msg.type) {
         case 'tx':
-          onTx(ws, projectId, msg.tx);
+          onTx(ws, projectId, msg.tx, data.length);
           break;
         case 'presence':
           onPresence(ws, projectId, msg);
@@ -622,6 +645,8 @@ export function createHub({
       const room = rooms.get(projectId);
       return room ? [...room.remote.values()].map((e) => ({ instance: e.i, client: e.c })) : [];
     },
+    /** Сколько транзакций сокеты получили `busy` сверх предела «в полёте» (тестам). */
+    busyRefused: () => busyRefused,
     /** Прогнать TTL присутствия сейчас (тестам). */
     sweepPresence,
     /** Закрыть все сокеты кодом 1001 («уходим») и снять таймеры; чужим экземплярам — bye. */

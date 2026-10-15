@@ -122,3 +122,29 @@ test('globalizeIds: короткие id созданных узлов → core.u
   assert.equal(out[5].id, 'zz', 'узел не из этой пачки — как был');
   assert.equal(ops[0].node.id, 'f1', 'вход не мутирован');
 });
+
+test('круг 25: redact закрывает куски ключа от 8 знаков и base64 ключа в любом выравнивании', () => {
+  const key = 'sk-proj-Q7f2LmZx9wPa3RtY8vKc0HsJ';
+  const llm = createLlm({ baseUrl: 'http://127.0.0.1:9/v1', apiKey: key });
+  const cases = [
+    `Incorrect API key provided: ${key.slice(0, 12)}**********${key.slice(-4)}.`,
+    `ключ ${key.slice(5, 19)} в логе`,
+    `Bearer ${key}`,
+    'base64: ' + Buffer.from(key).toString('base64'),
+    'basic: ' + Buffer.from('user:' + key).toString('base64'),
+    'b64 части: ' + Buffer.from(key.slice(7, 30)).toString('base64'),
+    'b64url: ' + Buffer.from('x' + key).toString('base64url'),
+  ];
+  for (const text of cases) {
+    const out = llm.redact(text);
+    assert.ok(out.includes('***'), 'закрыто: ' + out);
+    // ни одного окна в 8 знаков от ключа или его base64 не осталось
+    for (let i = 0; i + 8 <= key.length; i++) assert.ok(!out.includes(key.slice(i, i + 8)), out);
+    const b64 = Buffer.from(key).toString('base64');
+    for (let i = 0; i + 8 <= b64.length - 3; i++) assert.ok(!out.includes(b64.slice(i, i + 8)), out);
+  }
+  // обычный текст не трогается, короткие совпадения (< 8) — тоже
+  const plain = 'Модель ответила 401: неверный ключ (sk-…). Проверьте LLM_API_KEY.';
+  assert.equal(llm.redact(plain), plain);
+  assert.equal(llm.redact('прочее sk-proj слово'), 'прочее sk-proj слово');
+});

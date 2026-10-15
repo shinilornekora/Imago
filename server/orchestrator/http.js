@@ -11,6 +11,7 @@
  */
 
 import { OrchError, badRequest, toOrchError } from './errors.js';
+import { cutText } from '../../src/core.js';
 import {
   MAX_BODY_BYTES, MAX_TEXT, MAX_ID, MAX_SELECTION, MAX_HISTORY, MAX_HISTORY_CHARS, MAX_AUTHOR,
   MAX_VARIANTS, SSE_PING_MS,
@@ -108,8 +109,8 @@ export function parseCommand(body, { testHooks = false } = {}) {
   if (body.history !== undefined && body.history !== null) {
     if (!Array.isArray(body.history)) throw badRequest('history: массив {utterance, summary}');
     history = body.history.slice(-MAX_HISTORY).filter((h) => h && typeof h.utterance === 'string').map((h) => ({
-      utterance: h.utterance.slice(0, MAX_HISTORY_CHARS),
-      summary: typeof h.summary === 'string' ? h.summary.slice(0, MAX_HISTORY_CHARS) : '',
+      utterance: cutText(h.utterance, MAX_HISTORY_CHARS),
+      summary: typeof h.summary === 'string' ? cutText(h.summary, MAX_HISTORY_CHARS) : '',
     }));
   }
   return {
@@ -124,7 +125,7 @@ export function parseCommand(body, { testHooks = false } = {}) {
     mode,
     n: body.n == null ? null : body.n,
     history,
-    ...(testHooks && (body.__test === 'oom' || body.__test === 'spin') ? { test: body.__test } : {}),
+    ...(testHooks && (body.__test === 'oom' || body.__test === 'spin' || body.__test === 'env') ? { test: body.__test } : {}),
   };
 }
 

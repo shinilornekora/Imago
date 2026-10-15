@@ -5,32 +5,103 @@
  *
  * База берётся из TEST_DATABASE_URL или DATABASE_URL; нет переменной или нет
  * подключения — pg-прогоны помечаются skip, memory идут всегда.
+ *
+ * Изоляция (круг 25): каждый тестовый файл (node --test — процесс на файл) работает в
+ * СВОЕЙ временной базе `<база>_t<pid>_<случайное>` на том же кластере: создаётся при
+ * первой проверке доступности, удаляется после всех тестов файла (DROP … WITH FORCE).
+ * Так параллельные прогоны `npm test` с одной TEST_DATABASE_URL не чистят друг другу
+ * таблицы, не слышат чужих NOTIFY и не делят advisory-lock миграций; базы прогонов,
+ * чей процесс умер, убираются при следующем старте. Нет права CREATE DATABASE — своя
+ * схема в указанной базе (`search_path` в адресе) и свой канал NOTIFY.
+ * `DB_URL` — адрес этой временной базы (живая привязка: заполнен после pgAvailable()).
  */
 
+import { after } from 'node:test';
+import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import WebSocket from 'ws';
 import { start } from '../../server/document/index.js';
 import { createMemoryStorage } from '../../server/document/storage/memory.js';
 import { createPgStorage } from '../../server/document/storage/pg.js';
 
-export const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || '';
+/** База, которую назвал прогон (в ней ничего не трогаем, кроме создания своей). */
+export const BASE_DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || '';
+/** Адрес базы этого тестового файла; '' — базы нет. */
+export let DB_URL = '';
+/** Метка прогона: application_name, имена схем, канал NOTIFY в режиме схемы. */
+export const RUN_ID = process.pid.toString(36) + randomBytes(3).toString('hex');
+/** Канал NOTIFY экземпляров этого файла (свой только в режиме схемы; во временной базе — обычный). */
+let channel;
 const quiet = { info() {}, warn() {} };
 
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+};
+
+/** Временная база (или схема) этого файла. */
+async function isolate() {
+  const admin = new pg.Client({ connectionString: BASE_DB_URL, connectionTimeoutMillis: 2000 });
+  await admin.connect();
+  try {
+    await admin.query('SELECT 1');
+    const baseName = (await admin.query('SELECT current_database() AS d')).rows[0].d;
+    const prefix = (baseName.replace(/[^a-z0-9_]/gi, '_').slice(0, 30) + '_t').toLowerCase();
+    // базы прогонов, чей процесс умер (упал, убит по таймауту), — убрать
+    const stale = (await admin.query('SELECT datname FROM pg_database WHERE datname LIKE $1', [prefix + '%'])).rows;
+    for (const { datname } of stale) {
+      const m = datname.startsWith(prefix) ? /^([0-9a-z]+)([0-9a-f]{6})_x$/.exec(datname.slice(prefix.length)) : null;
+      const pid = m ? parseInt(m[1], 36) : NaN;
+      if (Number.isFinite(pid) && !alive(pid)) await admin.query(`DROP DATABASE IF EXISTS "${datname}"`).catch(() => {});
+    }
+    const name = `${prefix}${process.pid.toString(36)}${randomBytes(3).toString('hex')}_x`;
+    const url = new URL(BASE_DB_URL);
+    try {
+      await admin.query(`CREATE DATABASE "${name}"`);
+      url.pathname = '/' + name;
+      after(async () => {
+        const c = new pg.Client({ connectionString: BASE_DB_URL });
+        await c.connect().catch(() => {});
+        await c.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`).catch(() => {});
+        await c.end().catch(() => {});
+      });
+      return url.toString();
+    } catch (e) {
+      if (e.code !== '42501') throw e;
+      // нет права создавать базы — своя схема в указанной базе и свой канал NOTIFY
+      const schema = 'tst_' + RUN_ID;
+      await admin.query(`CREATE SCHEMA "${schema}"`);
+      channel = 'imago_doc_' + RUN_ID;
+      url.searchParams.set('options', `-c search_path=${schema}`);
+      after(async () => {
+        const c = new pg.Client({ connectionString: BASE_DB_URL });
+        await c.connect().catch(() => {});
+        await c.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {});
+        await c.end().catch(() => {});
+      });
+      return url.toString();
+    }
+  } finally {
+    await admin.end().catch(() => {});
+  }
+}
+
 let pgProbe;
-/** Есть ли база: проверяется один раз на процесс. */
+/** Есть ли база: проверяется (и создаётся своя) один раз на процесс. */
 export function pgAvailable() {
   if (!pgProbe) {
     pgProbe = (async () => {
-      if (!DB_URL) return false;
-      const client = new pg.Client({ connectionString: DB_URL, connectionTimeoutMillis: 2000 });
+      if (!BASE_DB_URL) return false;
       try {
-        await client.connect();
-        await client.query('SELECT 1');
+        DB_URL = await isolate();
         return true;
       } catch (_) {
+        DB_URL = '';
         return false;
-      } finally {
-        await client.end().catch(() => {});
       }
     })();
   }
@@ -44,7 +115,12 @@ export async function backends() {
   return list;
 }
 
-/** Чистая база перед прогоном: таблицы этого круга, каскадом. */
+/** Хранилище pg этого файла (своя база; в режиме схемы — свой канал NOTIFY). */
+export function pgStorage(storageOpts = {}) {
+  return createPgStorage({ connectionString: DB_URL, log: quiet, ...(channel ? { channel } : {}), ...storageOpts });
+}
+
+/** Чистая база перед прогоном: таблицы этого круга, каскадом (база — своя, чужое не трогаем). */
 async function resetPg(storage) {
   await storage.pool.query('TRUNCATE projects, operations, snapshots, library_versions, project_imports, project_epochs, traces CASCADE');
 }
@@ -54,9 +130,8 @@ async function resetPg(storage) {
  * (по умолчанию глушим, тесты о них не спрашивают).
  */
 export async function startFor(backend, opts = {}, storageOpts = {}) {
-  const storage = backend === 'pg'
-    ? createPgStorage({ connectionString: DB_URL, log: quiet, ...storageOpts })
-    : createMemoryStorage();
+  if (backend === 'pg' && !DB_URL) await pgAvailable();
+  const storage = backend === 'pg' ? pgStorage(storageOpts) : createMemoryStorage();
   const svc = await start({ port: 0, storage, snapshotEvery: 50, pingInterval: 0, log: quiet, ...opts });
   if (backend === 'pg') await resetPg(storage);
   return svc;
@@ -216,9 +291,7 @@ export async function restoreBackup(storage, projectId, backup) {
 
 /** Второй экземпляр сервиса над той же базой: память — то же хранилище, pg — свой пул и свой LISTEN. */
 export async function startTwin(backend, first, opts = {}, storageOpts = {}) {
-  const storage = backend === 'pg'
-    ? createPgStorage({ connectionString: DB_URL, log: quiet, ...storageOpts })
-    : first.storage;
+  const storage = backend === 'pg' ? pgStorage(storageOpts) : first.storage;
   const svc = await start({ port: 0, storage, snapshotEvery: 50, pingInterval: 0, log: quiet, ...opts });
   const close = () => svc.close({ closeStorage: backend === 'pg' });
   return { ...svc, close };

@@ -38,8 +38,9 @@ erDiagram
         text author_kind "human · agent · system"
         text client "clientId вкладки"
         text title "как показать в истории"
+        text command_id "команда агента, породившая запись; NULL — человек (круг 25)"
         int engine
-        text chain "sha256(prev_chain + tx_id + seq) — якорь цепочки"
+        text chain "sha256(prev_chain + tx_id + seq); CHECK not null; NULL от старого экземпляра — считает триггер"
         timestamptz created_at
     }
     SNAPSHOTS {
@@ -48,6 +49,7 @@ erDiagram
         jsonb doc "root · nodes · tokens · meta — целиком"
         int engine
         text chain "chain записи seq; снимок без совпадения с журналом не отдаётся"
+        jsonb tombstones "id удалённого → родитель; '{}' у снимков до круга 25"
         timestamptz created_at
     }
     PROJECT_EPOCHS {

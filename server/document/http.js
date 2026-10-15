@@ -17,8 +17,10 @@ import path from 'node:path';
 import { createDoc, ENGINE_VERSION } from '../../src/core.js';
 import { DocError, badRequest, notFound, tooLarge, internalBody, viaStorage } from './errors.js';
 import { jsonBytes } from './storage/committed.js';
+import { createSemaphore } from './dslr.js';
 import {
-  MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX
+  MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX,
+  HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, isCleanText, cleanText, cutText, cleanDeep
 } from './limits.js';
 
 /** Предел тела запроса (совместимость: прежде экспортировался отсюда). */
@@ -101,6 +103,7 @@ function readJSON(req, max = MAX_BODY_BYTES) {
     });
     req.on('end', () => {
       if (done) return;
+      req.bodyBytes = size;
       if (!size) {
         resolve(null);
         return;
@@ -121,9 +124,9 @@ function authorOf(req) {
   if (!h) return undefined;
   try {
     // заголовок — latin1; имя по-русски клиент шлёт как UTF-8 в percent-encoding
-    return decodeURIComponent(String(h)).slice(0, 200);
+    return cutText(cleanText(decodeURIComponent(String(h))), 200);
   } catch (_) {
-    return String(h).slice(0, 200);
+    return cutText(cleanText(String(h)), 200);
   }
 }
 
@@ -183,11 +186,33 @@ async function serveStatic(req, res, root, pathname) {
   createReadStream(file).pipe(res);
 }
 
+/** Значение для jsonb: строки и ключи чистые (§9.10); глубже предела — 400. */
+function cleanBody(v, what) {
+  try {
+    return cleanDeep(v);
+  } catch (e) {
+    if (e && e.code === 'depth') throw badRequest(`${what}: вложенность глубже ${MAX_VALUE_DEPTH}`);
+    throw e;
+  }
+}
+
+/** Имя проекта: чистая строка не длиннее MAX_PROJECT_NAME кодовых точек. */
+const projectName = (v) => cutText(cleanText(String(v)), MAX_PROJECT_NAME);
+
 /**
- * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, internalToken?: string, log?: object}} deps
+ * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, internalToken?: string, log?: object,
+ *   writes?: {max?: number, queue?: number, retryAfter?: number}}} deps
+ *   `writes` — семафор HTTP-записи (`POST …/tx`): одновременно и в очереди; сверх — 503 busy
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void}
  */
-export function createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log = console }) {
+export function createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log = console, writes = {} }) {
+  // запись по HTTP — под семафором (§9.10): тело читается, только когда есть место
+  const writeGate = createSemaphore({
+    max: writes.max || HTTP_WRITE_CONCURRENCY,
+    queue: writes.queue !== undefined ? writes.queue : HTTP_WRITE_QUEUE,
+    retryAfter: writes.retryAfter || BUSY_RETRY_S,
+    message: 'сервер занят записью — повторите чуть позже'
+  });
   const root = staticDir ? path.resolve(staticDir) : null;
   const token = typeof internalToken === 'string' && internalToken && internalToken !== PLACEHOLDER_TOKEN ? internalToken : null;
   if (internalToken === PLACEHOLDER_TOKEN) log.warn('[document/http] INTERNAL_TOKEN = «change-me» — это заглушка; внутренние маршруты закрыты, пока не задан настоящий токен');
@@ -239,8 +264,9 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         const projectId = body.project_id || body.project;
         const commandId = body.command_id;
         if (typeof projectId !== 'string' || !projectId) throw badRequest('project: id проекта');
-        if (typeof commandId !== 'string' || !commandId || commandId.length > 128) throw badRequest('command_id: строка до 128 символов');
-        const saved = await viaStorage(storage.addTrace({ projectId, commandId, body }));
+        if (typeof commandId !== 'string' || !commandId || commandId.length > 128 || !isCleanText(commandId)) throw badRequest('command_id: строка до 128 символов');
+        if (!isCleanText(projectId)) throw notFound();
+        const saved = await viaStorage(storage.addTrace({ projectId, commandId, body: cleanBody(body, 'трасса') }));
         if (!saved) throw notFound();
         sendJSON(res, 201, { id: saved.id, created_at: saved.created_at });
         return;
@@ -260,14 +286,15 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       if (method === 'POST') {
         const body = (await readJSON(req)) || {};
         if (typeof body !== 'object' || Array.isArray(body)) throw badRequest('тело должно быть объектом');
-        const name = body.name === undefined || body.name === null ? '' : String(body.name).slice(0, MAX_PROJECT_NAME);
+        const name = body.name === undefined || body.name === null ? '' : projectName(body.name);
         const kind = body.kind === undefined || body.kind === null ? 'design' : body.kind;
         if (!PROJECT_KINDS.has(kind)) throw badRequest('kind: design | library');
         let doc;
         if (body.doc === undefined || body.doc === null) {
-          doc = createDoc();
+          // новый проект — пустая страница; демо-документ — только по просьбе (§9.10)
+          doc = createDoc(body.demo === true ? undefined : 'empty');
         } else {
-          const d = body.doc;
+          const d = cleanBody(body.doc, 'doc');
           // минимальная проверка формы; остальное приводит createDoc(seed) — тот же путь, что импорт JSON на клиенте
           if (!d || typeof d !== 'object' || Array.isArray(d) || !d.nodes || typeof d.nodes !== 'object' || typeof d.root !== 'string' || !d.nodes[d.root]) {
             throw badRequest('doc: объект с nodes и root, корень должен быть среди узлов');
@@ -308,8 +335,9 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       }
       if (method === 'PATCH') {
         const body = await readJSON(req);
-        if (!body || typeof body !== 'object' || typeof body.name !== 'string' || !body.name.trim()) throw badRequest('name: непустая строка');
-        const project = await viaStorage(storage.renameProject(id, body.name.trim().slice(0, MAX_PROJECT_NAME)));
+        const name = body && typeof body === 'object' && typeof body.name === 'string' ? projectName(body.name).trim() : '';
+        if (!name) throw badRequest('name: непустая строка');
+        const project = await viaStorage(storage.renameProject(id, name));
         if (!project) throw notFound();
         sendJSON(res, 200, { id: project.id, name: project.name, kind: project.kind, head_seq: project.head_seq });
         return;
@@ -348,9 +376,11 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       // POST /api/projects/:id/tx
       if (parts[3] === 'tx') {
         if (method !== 'POST') throw methodNotAllowed();
-        const body = await readJSON(req);
-        const { committed, existing } = await dslts.commit(id, body, { author: authorOf(req) });
-        sendJSON(res, existing ? 200 : 201, committed);
+        await writeGate.run(async () => {
+          const body = await readJSON(req);
+          const { committed, existing } = await dslts.commit(id, body, { author: authorOf(req), bytes: req.bodyBytes });
+          sendJSON(res, existing ? 200 : 201, committed);
+        });
         return;
       }
       // GET /api/projects/:id/traces?limit= — последние трассы, только чтение

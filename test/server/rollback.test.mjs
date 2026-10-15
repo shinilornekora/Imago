@@ -92,7 +92,7 @@ for (const backend of list) {
     it('два экземпляра, реплики sync.js: restore → запись агентом под тем же seq → досылка офлайн-клиентом — все сходятся, эпоха сменилась один раз', async () => {
       const h1 = api(i1.url);
       const h2 = api(i2.url);
-      const created = await h1.post('/api/projects', { name: 'Откат' });
+      const created = await h1.post('/api/projects', { name: 'Откат', demo: true });
       assert.equal(created.status, 201);
       const id = created.body.id;
       const epoch0 = created.body.epoch;
@@ -207,7 +207,7 @@ for (const backend of list) {
 
     it('откат без записей: сверка головы с базой меняет эпоху, сокеты закрываются 4410, реплика переоткрывается', async () => {
       const h1 = api(i1.url);
-      const created = await h1.post('/api/projects', { name: 'Тихий откат' });
+      const created = await h1.post('/api/projects', { name: 'Тихий откат', demo: true });
       const id = created.body.id;
       const board = artboards((await h1.get('/api/projects/' + id)).body.snapshot.doc)[0];
       const A = replica(i1, id, 'A');
@@ -231,6 +231,128 @@ for (const backend of list) {
       assert.equal(hashDoc(A.sync.view), hashDoc(B.sync.view));
       assert.equal((await i1.storage.epochs(id)).length, 2, 'и только один раз');
       await Promise.all([A.sync.close(), B.sync.close()]);
+    });
+
+    /* ------------------------------ круг 25 (SPEC §9.10) ------------------------------ */
+
+    /** Проект с доской, реплики в сети, бэкап — общее начало сценариев отката. */
+    async function rolloutStart(name, clients) {
+      const h1 = api(i1.url);
+      const created = await h1.post('/api/projects', { name, demo: true });
+      const id = created.body.id;
+      const seed = (await h1.get('/api/projects/' + id)).body.snapshot.doc;
+      const board = artboards(seed)[0];
+      const reps = clients.map(([svc, cid, storage]) => replica(svc, id, cid, storage || memoryStorage()));
+      await Promise.all(reps.map((r) => r.sync.open()));
+      await waitFor(() => reps.every((r) => r.sync.status.online), 'все в сети');
+      return { h1, id, seed, board, reps };
+    }
+    /** Откат: restore + сверка (эпоха меняется, сокеты закрываются 4410). */
+    async function rollTo(id, backup) {
+      await restoreBackup(i1.storage, id, backup);
+      await i2.dslts.verify();
+      await i1.dslts.verify();
+      await waitFor(async () => (await i1.storage.epochs(id)).length >= 2, 'эпоха сменилась');
+    }
+
+    it('(а) транзакция агента по команде вкладки — тоже «своя»: после отката реплика её переигрывает', async () => {
+      const { h1, id, board, reps: [A] } = await rolloutStart('Агент и откат', [[i1, 'A']]);
+      const backup = await takeBackup(i1.storage, id);
+      // Orchestrator пишет по команде вкладки A: client — её clientId
+      const agentTx = { tx_id: uid('tx'), base_seq: 0, engine: E, author: 'Агент', author_kind: 'agent', client: 'A', title: 'Агент: заголовок', command_id: 'cmd_1', ops: [ops.set(board.id, 'name', 'Доска агента')] };
+      const r = await api(i2.url).post(`/api/projects/${id}/tx`, agentTx);
+      assert.equal(r.status, 201);
+      await waitFor(() => A.sync.confirmed.seq === 1, 'A увидел транзакцию агента');
+      assert.ok(A.sync.mine.some((m) => m.tx_id === agentTx.tx_id && m.author_kind === 'agent'), 'агентная транзакция вкладки — в mine');
+      assert.equal(A.sync.journal()[0].command_id, 'cmd_1', 'журнал реплики несёт command_id');
+      await rollTo(id, backup);
+      await waitFor(async () => (await journal(h1, id)).some((t) => t.tx_id === agentTx.tx_id) && A.sync.status.pending === 0 && A.sync.status.online, 'правка агента переиграна', 10000);
+      const log = await journal(h1, id);
+      assert.deepEqual(log.map((t) => t.tx_id), [agentTx.tx_id]);
+      assert.equal(log[0].author_kind, 'agent');
+      assert.equal(A.sync.view.nodes[board.id].name, 'Доска агента');
+      await A.sync.close();
+    });
+
+    it('(б) окно переигрывания 200: 120 своих правок после бэкапа переиграны все и по порядку', async () => {
+      const { h1, id, board, reps: [A] } = await rolloutStart('Окно', [[i1, 'A']]);
+      const backup = await takeBackup(i1.storage, id);
+      const mineTx = [];
+      for (let k = 0; k < 120; k++) mineTx.push(A.sync.commit([ops.set(board.id, 'name', 'Имя ' + k)], { title: 'шаг ' + k }).tx.tx_id);
+      await waitFor(() => A.sync.confirmed.seq === 120 && A.sync.status.pending === 0, 'все 120 подтверждены', 20000);
+      const before = hashDoc(A.sync.view);
+      await rollTo(id, backup);
+      await waitFor(async () => (await journal(h1, id)).length === 120 && A.sync.status.pending === 0 && A.sync.status.online, 'все 120 переиграны', 20000);
+      const log = await journal(h1, id);
+      assert.deepEqual(log.map((t) => t.tx_id), mineTx, 'тот же набор и тот же порядок');
+      assert.equal(log.reduce((n, t) => n + t.dropped.length, 0), 0, 'своё по порядку не устаревает');
+      assert.equal(hashDoc(A.sync.view), before, 'документ — как до отката');
+      assert.equal(A.sync.view.nodes[board.id].name, 'Имя 119');
+      await A.sync.close();
+    });
+
+    it('(в) вкладка, закрытая до restore, не затирает своим старым значением более новое чужое: set → stale', async () => {
+      const s5 = memoryStorage();
+      const { h1, id, board, reps: [R5, R2] } = await rolloutStart('Старое против нового', [[i1, 'R5', s5], [i2, 'R2']]);
+      const node = text(board.id, 'исходное');
+      R5.sync.commit([ops.create(node)]);
+      await waitFor(() => R5.sync.status.pending === 0 && R2.sync.confirmed.seq === 1, 'узел у обоих');
+      const backup = await takeBackup(i1.storage, id);
+      // вторая правка R5 — заодно и лист, которого никто больше не трогал: он должен вернуться
+      R5.sync.commit([ops.set(node.id, 'characters', 'СТАРОЕ (до restore)'), ops.set(node.id, 'name', 'имя от R5')], { title: 'Правка R5' });
+      await waitFor(() => R5.sync.status.pending === 0 && R2.sync.confirmed.seq === 2, 'правка R5 подтверждена');
+      await R5.sync.close();   // вкладка закрыта, журнал остался
+      await rollTo(id, backup);
+      await waitFor(() => R2.sync.status.online && R2.sync.confirmed.seq === 1 && R2.sync.status.pending === 0, 'R2 в новой эпохе на seq 1', 10000);
+      R2.sync.commit([ops.set(node.id, 'characters', 'НОВОЕ (после restore)')]);
+      await waitFor(() => R2.sync.status.pending === 0 && R2.sync.confirmed.seq === 2, 'R2 записал новое');
+      // R5 открывается позже со старым журналом
+      const dropped = [];
+      const R5b = replica(i1, id, 'R5', s5, { onDropped: (c) => dropped.push(c) });
+      await R5b.sync.open();
+      await waitFor(async () => (await journal(h1, id)).length === 3 && R5b.sync.status.pending === 0 && R5b.sync.status.online, 'R5 переиграл', 10000);
+      const log = await journal(h1, id);
+      const last = log[2];
+      assert.deepEqual(last.dropped.map((d) => [d.index, d.reason]), [[0, 'stale']], 'старое значение устарело');
+      assert.equal(last.ops.length, 1, 'лист, которого никто не трогал, вернулся');
+      await waitFor(() => R2.sync.confirmed.seq === 3);
+      for (const r of [R5b, R2]) {
+        assert.equal(r.sync.view.nodes[node.id].characters, 'НОВОЕ (после restore)', 'новое не затёрто');
+        assert.equal(r.sync.view.nodes[node.id].name, 'имя от R5');
+      }
+      await waitFor(() => dropped.length === 1, 'R5 узнал, что правка устарела');
+      assert.equal(dropped[0].label, 'Правка R5');
+      assert.equal(dropped[0].dropped[0].reason, 'stale');
+      assert.equal(dropped[0].dropped[0].by && dropped[0].dropped[0].by.author, 'Имя R2', 'кто переписал');
+      await Promise.all([R5b.sync.close(), R2.sync.close()]);
+    });
+
+    it('(в) предел давности: своё старше суток после отката не переигрывается — человеку «N правок … не восстановлены»', async () => {
+      const s5 = memoryStorage();
+      const { h1, id, board, reps: [R5] } = await rolloutStart('Давность', [[i1, 'R5', s5]]);
+      const backup = await takeBackup(i1.storage, id);
+      R5.sync.commit([ops.set(board.id, 'name', 'позавчера')]);
+      R5.sync.commit([ops.set(board.id, 'fill', '#ff0000')]);
+      await waitFor(() => R5.sync.confirmed.seq === 2 && R5.sync.status.pending === 0);
+      await R5.sync.close();
+      // первая правка — двухдневной давности
+      const rec = s5.map.get(id);
+      rec.mine[0].at = new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString();
+      await rollTo(id, backup);
+      const R5b = replica(i1, id, 'R5', s5);
+      await R5b.sync.open();
+      await waitFor(async () => (await journal(h1, id)).length === 1 && R5b.sync.status.pending === 0 && R5b.sync.status.online, 'свежая переиграна', 10000);
+      const log = await journal(h1, id);
+      assert.equal(log[0].tx_id, rec.mine[1].tx.tx_id);
+      const err = R5b.log.errors.find((e) => e.code === 'replay_expired');
+      assert.ok(err, JSON.stringify(R5b.log.errors));
+      assert.equal(err.count, 1);
+      assert.match(err.message, /1 правка из прошлой версии не восстановлена/);
+      // сервер сам тоже не принимает переигрывание старше суток
+      const stale = await h1.post(`/api/projects/${id}/tx`, { tx_id: uid('tx'), base_seq: 0, engine: E, client: 'X', replay_of_epoch: 'old', replay_at: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString(), ops: [ops.set(board.id, 'name', 'древнее')] });
+      assert.equal(stale.status, 201);
+      assert.deepEqual(stale.body.dropped.map((d) => d.reason), ['stale']);
+      await R5b.sync.close();
     });
   });
 }

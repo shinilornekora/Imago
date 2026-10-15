@@ -69,6 +69,10 @@ async function run(id, job) {
       const hog = [];
       for (;;) hog.push(new Array(1e6).fill(Math.random()));
     }
+    if (testHooks && job.test === 'env') {
+      // круг 25: что воркер видит в окружении (только имена) — проверка, что секретов нет
+      throw new Error('env ' + Object.keys(process.env).sort().join(','));
+    }
     if (testHooks && job.test === 'spin') {
       for (;;) { /* бесконечный счёт: проверка таймаута */ }
     }
@@ -76,7 +80,7 @@ async function run(id, job) {
       if (!rec || rec.partial !== undefined) return;
       parentPort.postMessage({
         type: 'stage', id,
-        rec: { stage: rec.stage, label: rec.label, ...(rec.detail ? { detail: String(rec.detail).slice(0, 500) } : {}), ...(rec.variant != null ? { variant: rec.variant } : {}) },
+        rec: { stage: rec.stage, label: rec.label, ...(rec.detail ? { detail: core.cutText(rec.detail, 500) } : {}), ...(rec.variant != null ? { variant: rec.variant } : {}) },
       });
     };
     const common = {
