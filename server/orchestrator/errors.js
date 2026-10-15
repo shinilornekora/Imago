@@ -24,7 +24,7 @@ export class OrchError extends Error {
     if (extra.retryAfter !== undefined) this.retryAfter = extra.retryAfter;
   }
 
-  /** Тело ответа и SSE-события `error`. */
+  /** Тело ответа и SSE-события `error`; `retry_after` (с) — когда срок повтора известен (круг 26). */
   body() {
     return {
       error: true,
@@ -32,6 +32,7 @@ export class OrchError extends Error {
       message: this.message,
       retryable: this.retryable,
       ...(this.detail !== undefined ? { detail: this.detail } : {}),
+      ...(Number.isFinite(this.retryAfter) && this.retryAfter > 0 ? { retry_after: this.retryAfter } : {}),
     };
   }
 }
@@ -40,11 +41,15 @@ export const badRequest = (message, detail) => new OrchError(400, 'bad_request',
 export const notFound = (message) => new OrchError(404, 'not_found', message, { retryable: false });
 export const documentDown = (message = 'Сервис документов недоступен — команда не выполнена. Правки не потеряны; попробуйте через несколько секунд.') =>
   new OrchError(503, 'document_down', message, { retryAfter: 5 });
-export const llmDown = (message = 'Модель недоступна — команда не выполнена. Попробуйте позже или проверьте, что сервер модели запущен.') =>
+/* Круг 26: текст `llm_down` — для человека в браузере, без советов администратору
+   («проверьте, что сервер модели запущен», имя переменной окружения): их пишет в лог
+   pipeline (`adminHint`). */
+export const LLM_DOWN_MESSAGE = 'Модель сейчас недоступна — команда не выполнена. Повторите чуть позже.';
+export const LLM_UNCONFIGURED_MESSAGE = 'Модель на сервере пока не подключена — команды оболочки работают, правки агентом — нет.';
+export const llmDown = (message = LLM_DOWN_MESSAGE) =>
   new OrchError(503, 'llm_down', message, { retryAfter: 10 });
-export const llmUnconfigured = () => new OrchError(503, 'llm_down',
-  'Модель не подключена: на сервере агента не задан адрес модели (LLM_BASE_URL). Команды оболочки работают, правки агентом — нет.',
-  { retryAfter: 60 });
+export const llmUnconfigured = () => new OrchError(503, 'llm_down', LLM_UNCONFIGURED_MESSAGE,
+  { retryAfter: 60, detail: { cause: 'unconfigured' } });
 export const cancelled = () => new OrchError(499, 'cancelled', 'Команда остановлена', { retryable: false });
 
 /** Всё, что не OrchError, — внутренний сбой: наружу общая фраза, подробности — в лог. */

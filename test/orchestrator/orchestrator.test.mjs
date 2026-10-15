@@ -480,14 +480,31 @@ test('останов: выполняемая команда доводится, 
   const p = await createProject(document);
 
   const s = commandStream(orch.url, { command_id: cid(), project: p.id, text: 'собери экран тарифов' });
-  await waitFor(() => llm.completions().length === 1);
-  const closing = orch.close(5000);
+  await waitFor(() => llm.completions().length === 1, 60000);
+  /* Круг 26: дедлайн — с запасом под нагрузкой (три параллельных `npm test`: остаток
+     команды — второй ответ модели, воркер, запись — шёл дольше прежних 5 с). Проверяем
+     суть: команда, начатая до останова, доведена и записана, а не прервана; и останов
+     ждёт её не дольше, чем она идёт (относительно, а не абсолютным порогом). */
+  const t0 = Date.now();
+  const closing = orch.close(60000);
   setTimeout(() => g.open(), 100);
+  let resultAt = 0;
+  s.until((e) => e.event === 'result', 60000).then(() => { resultAt = Date.now(); }, () => {});
   await closing;
+  const closedAt = Date.now();
+  /* поток дочитывается клиентом позже, чем сервер закрыл его: события смотрим после
+     конца чтения (прежде — сразу после close(), и под нагрузкой result ещё не был разобран) */
+  await s.done();
   const res = s.events.find((e) => e.event === 'result');
   assert.ok(res, JSON.stringify(s.events.map((e) => e.event)));
+  assert.ok(!s.events.some((e) => e.event === 'error'), 'не прервана');
   assert.equal((await journal(document, p.id)).head_seq, 1);
   assert.equal(orch.dslv.alive, 0, 'воркеры сняты');
+  if (resultAt) {
+    const tail = closedAt - resultAt;
+    const run = resultAt - t0;
+    assert.ok(tail <= Math.max(3000, run), `после итога останов шёл ${tail} мс при команде ${run} мс`);
+  }
 });
 
 test('трассы доходят до настоящего Document service с тем же INTERNAL_TOKEN', async (t) => {

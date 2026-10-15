@@ -5,6 +5,7 @@
  */
 
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import { start as startDocumentService } from '../../server/document/index.js';
 import { createMemoryStorage } from '../../server/document/storage/memory.js';
 import { start as startOrchestrator } from '../../server/orchestrator/index.js';
@@ -215,6 +216,32 @@ export async function waitFor(fn, timeout = 10000, step = 30) {
     if (Date.now() - t0 > timeout) throw new Error('условие не наступило за ' + timeout + ' мс');
     await new Promise((r) => setTimeout(r, step));
   }
+}
+
+/**
+ * Orchestrator отдельным процессом (`node <args>`) на PORT=0 (круг 26: фиксированные порты
+ * сталкивались у параллельных прогонов `npm test`). Порт — из строки «слушаю http://…:PORT».
+ * → {child, out(), port: Promise<number>, url: Promise<string>, exited: Promise<{code, signal}>}
+ */
+export function spawnOrchestrator(args, { env = {}, cwd, timeoutMs = 30000 } = {}) {
+  const full = { ...process.env, PORT: '0', HOST: '127.0.0.1', ...env };
+  delete full.NODE_OPTIONS;
+  const child = spawn(process.execPath, args, { env: full, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  const exited = new Promise((r) => child.on('exit', (code, signal) => r({ code, signal })));
+  const port = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Orchestrator не сказал «слушаю» за ' + timeoutMs + ' мс: ' + out)), timeoutMs);
+    const onData = (d) => {
+      out += d;
+      const m = /слушаю http:\/\/127\.0\.0\.1:(\d+)/.exec(out);
+      if (m) { clearTimeout(timer); resolve(Number(m[1])); }
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', (d) => { out += d; });
+    exited.then(({ code, signal }) => { clearTimeout(timer); reject(new Error(`Orchestrator вышел до «слушаю» (${code ?? signal}): ${out}`)); });
+  });
+  port.catch(() => {});
+  return { child, out: () => out, port, url: port.then((p) => `http://127.0.0.1:${p}`), exited };
 }
 
 let seq = 0;

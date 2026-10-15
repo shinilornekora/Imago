@@ -61,6 +61,23 @@ const RETRY_AFTER_MAX = 30;       // Retry-After больше этого (с) н
 const EPOCH_REOPEN_MS = 250;      // переоткрытие после 4410 — сразу, с разбросом, чтобы вкладки не били в такт
 const CLOSE_EPOCH = 4410;         // сервер: эпоха журнала сменилась (SPEC §9.8)
 const CLOSE_TOO_BIG = 1009;       // ws: сообщение больше предела
+const VALUE_DEPTH = 64;           // вложенность значений: глубже сервер ответит 400 (MAX_VALUE_DEPTH)
+const COMMAND_ID_CHARS = 128;     // command_id транзакции: длиннее сервер выбросит (MAX_COMMAND_ID)
+
+/**
+ * Числа протокола, которые клиент держит рядом с серверными (круг 26): тест
+ * `test/server/hardening.test.mjs` сверяет их с server/document (limits.js, hub.js) —
+ * равенством там, где клиент обязан совпадать, и неравенством там, где клиент
+ * обязан быть не строже/не чаще сервера.
+ */
+export const WIRE = Object.freeze({
+  presenceGapMs: PRESENCE_GAP,       // ≥ 1000 / PRESENCE_PER_SECOND сервера
+  presenceTtlMs: PRESENCE_TTL,       // ≥ PRESENCE_TTL_MS сервера (сервер скажет left раньше)
+  opsPage: OPS_PAGE,                 // ≤ MAX_LIMIT сервера
+  valueDepth: VALUE_DEPTH,           // = MAX_VALUE_DEPTH
+  commandIdChars: COMMAND_ID_CHARS,  // = MAX_COMMAND_ID
+  closeEpoch: CLOSE_EPOCH,           // = hub CLOSE.epoch
+});
 
 /**
  * Пределы сервера (server/document/limits.js CLIENT_LIMITS — тест сверяет числа):
@@ -111,7 +128,7 @@ export function cleanText(v) {
 /** Строки и ключи значения целиком; копия — только там, где есть что чистить. */
 function cleanDeep(v, depth = 0) {
   if (typeof v === 'string') return cleanText(v);
-  if (!v || typeof v !== 'object' || depth > 64) return v;
+  if (!v || typeof v !== 'object' || depth > VALUE_DEPTH) return v;
   if (Array.isArray(v)) {
     let out = null;
     for (let i = 0; i < v.length; i++) {
@@ -1297,7 +1314,7 @@ export function createSync(o) {
     };
     if (author) tx.author = cleanText(author);
     if (meta.title) tx.title = cleanText(String(meta.title).slice(0, 200));
-    if (typeof meta.command_id === 'string' && meta.command_id && meta.command_id.length <= 128 && isCleanText(meta.command_id)) tx.command_id = meta.command_id;
+    if (typeof meta.command_id === 'string' && meta.command_id && meta.command_id.length <= COMMAND_ID_CHARS && isCleanText(meta.command_id)) tx.command_id = meta.command_id;
     if (meta.undo_of) tx.undo_of = String(meta.undo_of);
     if (meta.redo_of) tx.redo_of = String(meta.redo_of);
     let bytes = 0;

@@ -326,17 +326,20 @@ const NGINX = (() => {
   return r.status === 0 ? r.stdout.trim() : '';
 })();
 
-/** Свободный порт из выданного диапазона (8730–8739). */
+/**
+ * Свободный порт для nginx: случайный от ядра (listen 0), круг 26 — фиксированный
+ * диапазон сталкивался у параллельных прогонов `npm test` (проверка «свободен» и запуск
+ * nginx — не атомарны, а три прогона перебирали одни и те же 10 портов).
+ */
 async function freePort() {
-  for (let p = 8730; p <= 8739; p++) {
-    const ok = await new Promise((resolve) => {
-      const s = net.createServer();
-      s.once('error', () => resolve(false));
-      s.listen(p, '127.0.0.1', () => s.close(() => resolve(true)));
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
     });
-    if (ok) return p;
-  }
-  throw new Error('нет свободного порта 8730–8739');
+  });
 }
 
 function listen(handler) {
@@ -416,17 +419,27 @@ test('nginx -t на настоящем конфиге и живые маршру
   let orchUp = true;
   t.after(() => (orchUp ? orch.close() : null));
 
-  const port = await freePort();
-  const conf = testConfig(dir, port, doc.port, orch.port);
-  const check = spawnSync(NGINX, ['-t', '-p', dir, '-c', conf, '-e', join(dir, 'error.log')], { encoding: 'utf8' });
-  assert.equal(check.status, 0, `nginx -t: ${check.stderr}`);
-
-  const proc = spawn(NGINX, ['-p', dir, '-c', conf, '-e', join(dir, 'error.log')], { stdio: 'ignore' });
+  // порт мог занять кто-то между выбором и запуском nginx — тогда другой порт (до 3 раз)
+  let port = 0;
+  let proc = null;
+  for (let attempt = 0; attempt < 3 && !proc; attempt++) {
+    port = await freePort();
+    const conf = testConfig(dir, port, doc.port, orch.port);
+    const check = spawnSync(NGINX, ['-t', '-p', dir, '-c', conf, '-e', join(dir, 'error.log')], { encoding: 'utf8' });
+    assert.equal(check.status, 0, `nginx -t: ${check.stderr}`);
+    const p = spawn(NGINX, ['-p', dir, '-c', conf, '-e', join(dir, 'error.log')], { stdio: 'ignore' });
+    let gone = false;
+    p.once('exit', () => { gone = true; });
+    let up = false;
+    for (let i = 0; i < 100 && !gone && !up; i++) {
+      try { await fetch(`http://127.0.0.1:${port}/`); up = true; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    if (up && !gone) proc = p;
+    else { try { p.kill('SIGKILL'); } catch { /* уже нет */ } }
+  }
+  assert.ok(proc, 'nginx не поднялся');
   t.after(() => { try { proc.kill('SIGTERM'); } catch { /* уже нет */ } });
   const base = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 50; i++) {
-    try { await fetch(base + '/'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
-  }
 
   // статика
   const home = await fetch(base + '/');

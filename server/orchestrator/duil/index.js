@@ -20,8 +20,8 @@ import { MAX_LIBRARIES, PROJECT_LIST_TTL_MS, PROJECT_LIST_STALE_MS } from '../li
  * словарь и выжимку каждой библиотеки. Теперь:
  *   • список библиотек живёт `PROJECT_LIST_TTL_MS` (60 с), одно чтение на всех
  *     (параллельные команды ждут то же); не прочитался — берётся прежний, пока он не
- *     старше `PROJECT_LIST_STALE_MS`; запрос — с `?kind=library` (сервис, который
- *     фильтр знает, отдаст только библиотеки; прочий — всё, фильтруем сами);
+ *     старше `PROJECT_LIST_STALE_MS`; запрос — с `?kind=library&limit=` (сервис, который
+ *     фильтр знает, отдаст только библиотеки, новые первыми; прочий — всё, фильтруем сами);
  *   • свежесть самих библиотек — по их журналу через DSLR (дочитывание хвоста,
  *     дёшево), словарь и выжимка пересчитываются только при новом head_seq.
  * @param {{dslr: ReturnType<import('../dslr/index.js').createDslrClient>, log?: object, listTtlMs?: number}} o
@@ -37,7 +37,9 @@ export function createDuil({ dslr, log = console, listTtlMs = PROJECT_LIST_TTL_M
     if (!listing) {
       listing = (async () => {
         try {
-          const all = await dslr.list({ query: 'kind=library' });
+          // круг 26: сервис режет список на страницы (по умолчанию 200) — берём ровно
+          // столько, сколько пойдёт в прогон (плюс сам проект команды, его исключаем)
+          const all = await dslr.list({ query: `kind=library&limit=${MAX_LIBRARIES + 1}` });
           stats.lists++;
           const projects = all.filter((p) => p && p.kind === 'library');
           listed = { at: Date.now(), projects };

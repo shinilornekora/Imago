@@ -6,7 +6,6 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createDslrClient, estimateBytes } from '../../server/orchestrator/dslr/index.js';
 import { createDuil } from '../../server/orchestrator/duil/index.js';
@@ -14,6 +13,7 @@ import { createDocClient } from '../../server/orchestrator/docclient.js';
 import * as limits from '../../server/orchestrator/limits.js';
 import {
   startDocument, startFakeLlm, startOrch, command, commandStream, createProject, call, cid, quiet, PLAN_CREATE, TREE_OK,
+  spawnOrchestrator,
 } from './helpers.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -85,7 +85,7 @@ test('DUIL: список библиотек — одно чтение на TTL �
   const dslr = {
     async list(o) {
       lists++;
-      assert.equal(o.query, 'kind=library', 'просим только библиотеки');
+      assert.equal(o.query, `kind=library&limit=${limits.MAX_LIBRARIES + 1}`, 'просим только библиотеки и не больше, чем пойдёт в прогон');
       await gate;
       return [{ id: 'L1', name: 'Кит', kind: 'library' }, { id: 'D1', name: 'Макет', kind: 'design' }];
     },
@@ -111,6 +111,30 @@ test('DUIL: список библиотек — одно чтение на TTL �
   const r = await failing.slice({});
   assert.equal(r.libraries.length, 0);
   assert.ok(r.warnings.length);
+});
+
+test('DUIL над настоящим Document service: только библиотеки, не больше MAX_LIBRARIES, проект команды исключён', async (t) => {
+  const document = await startDocument();
+  t.after(() => document.close());
+  const base = `http://127.0.0.1:${document.port}`;
+  const libs = [];
+  for (let i = 0; i < limits.MAX_LIBRARIES + 3; i++) {
+    const r = await call(base, 'POST', '/api/projects', { name: 'Кит ' + i, kind: 'library', demo: true });
+    libs.push(r.body.id);
+    await call(base, 'POST', '/api/projects', { name: 'Макет ' + i, demo: true });
+  }
+  // фильтр сервиса: только библиотеки
+  const listed = await call(base, 'GET', '/api/projects?kind=library&limit=3');
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.projects.length, 3);
+  assert.equal(listed.body.more, true);
+  assert.ok(listed.body.projects.every((p) => p.kind === 'library'));
+  const dslr = createDslrClient({ doc: createDocClient({ baseUrl: base }), log: quiet });
+  const duil = createDuil({ dslr, log: quiet });
+  const newest = libs[libs.length - 1];
+  const slice = await duil.slice({ exclude: newest });
+  assert.equal(slice.libraries.length, limits.MAX_LIBRARIES);
+  assert.ok(slice.libraries.every((l) => libs.includes(l.id) && l.id !== newest));
 });
 
 test('транзакция агента несёт command_id и client автора команды', async (t) => {
@@ -148,20 +172,14 @@ test('останов с командой в работе: прерывается
   const llm = await startFakeLlm(SCRIPT, { gate: new Promise(() => {}) });
   t.after(async () => { await document.close(); await llm.close(); });
   const p = await createProject(document);
-  const port = 8716;
-  const env = {
-    ...process.env, PORT: String(port), HOST: '127.0.0.1',
-    DOCUMENT_URL: `http://127.0.0.1:${document.port}`, LLM_BASE_URL: llm.base, LLM_MODEL: 'fake-model',
-  };
-  delete env.NODE_OPTIONS;
-  const child = spawn(process.execPath, ['server/orchestrator/index.js'], { env, cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  // круг 26: PORT=0, порт — из строки «слушаю»
+  const proc = spawnOrchestrator(['server/orchestrator/index.js'], {
+    cwd: ROOT, env: { DOCUMENT_URL: `http://127.0.0.1:${document.port}`, LLM_BASE_URL: llm.base, LLM_MODEL: 'fake-model' },
+  });
+  const child = proc.child;
   t.after(() => { try { child.kill('SIGKILL'); } catch { /* уже вышел */ } });
-  let out = '';
-  child.stdout.on('data', (d) => { out += d; });
-  child.stderr.on('data', (d) => { out += d; });
-  const exited = new Promise((r) => child.on('exit', (code, signal) => r({ code, signal })));
-  for (let i = 0; i < 100 && !/слушаю/.test(out); i++) await new Promise((r) => setTimeout(r, 50));
-  assert.match(out, /слушаю/, out);
+  const port = await proc.port;
+  const exited = proc.exited;
 
   const s = commandStream(`http://127.0.0.1:${port}`, { command_id: cid(), project: p.id, text: 'собери экран тарифов' });
   await s.until((e) => e.event === 'stage' && e.data.key === 'llm');
@@ -172,11 +190,11 @@ test('останов с командой в работе: прерывается
   child.kill('SIGTERM');
   const res = await exited;
   const ms = Date.now() - t0;
-  assert.equal(res.signal, null, out);
-  assert.equal(res.code, 0, out);
-  assert.ok(ms < limits.SHUTDOWN_HARD_MS, `останов ${ms} мс: ` + out);
+  assert.equal(res.signal, null, proc.out());
+  assert.equal(res.code, 0, proc.out());
+  assert.ok(ms < limits.SHUTDOWN_HARD_MS, `останов ${ms} мс: ` + proc.out());
   assert.ok(ms >= limits.SHUTDOWN_GRACE_MS - 200, `команде дали дедлайн (${ms} мс)`);
-  assert.match(out, /не уложилась .* прерываю/);
+  assert.match(proc.out(), /не уложилась .* прерываю/);
   await s.done();
   const err = s.events.find((e) => e.event === 'error');
   assert.ok(err, JSON.stringify(s.events.map((e) => e.event)));

@@ -26,6 +26,7 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ENGINE_VERSION } from '../../src/core.js';
@@ -83,8 +84,12 @@ export async function start(opts = {}) {
     log,
   });
   const traces = createTraces({ doc, token: internalToken, path: opts.tracePath, redact: llm.redact, log });
+  // круг 26: id процесса и время старта — в /agent/health; клиент по смене instance узнаёт,
+  // что Orchestrator перезапустился (команда, чей поток оборвался, пропала вместе с процессом)
+  const instance = opts.instance || 'orch_' + randomBytes(6).toString('hex');
+  const startedAt = new Date().toISOString();
   const pipeline = createPipeline({
-    dslr, dslts, duil, dslv, llm, traces, jev, log,
+    dslr, dslts, duil, dslv, llm, traces, jev, log, instance, startedAt,
     docHealth: () => doc.health(),
     maxQueue: opts.queueMax !== undefined ? opts.queueMax : num(env.QUEUE_MAX),
     variantsTtlMs: opts.variantsTtlMs,
@@ -104,7 +109,7 @@ export async function start(opts = {}) {
   const where = llm.describe();
   log.info(`[orchestrator] слушаю http://${host}:${actualPort} · движок ${ENGINE_VERSION} · документы ${doc.base}`
     + ` · модель ${where.base ? `${where.kind} ${where.base}${where.model ? ' ' + where.model : ''}` : 'не подключена'}`
-    + ` · воркеров ${dslv.size}`);
+    + ` · воркеров ${dslv.size} · экземпляр ${instance}`);
 
   let closing = null;
   const close = (graceMs = SHUTDOWN_GRACE_MS) => {
@@ -131,6 +136,8 @@ export async function start(opts = {}) {
     dslts,
     dslv,
     llm,
+    instance,
+    startedAt,
     url: `http://127.0.0.1:${actualPort}`,
   };
 }

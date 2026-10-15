@@ -12,7 +12,7 @@
  */
 
 import * as core from '../../src/core.js';
-import { OrchError, toOrchError, notFound, badRequest, llmUnconfigured, cancelled as cancelledErr } from './errors.js';
+import { OrchError, toOrchError, notFound, badRequest, llmDown, llmUnconfigured, cancelled as cancelledErr } from './errors.js';
 import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS, SHUTDOWN_GRACE_MS, SHUTDOWN_ABORT_WAIT_MS } from './limits.js';
 
 const { ENGINE_VERSION, uid, cutText, cleanText } = core;
@@ -89,7 +89,7 @@ export function globalizeIds(ops) {
  * @param {{
  *   dslr: object, dslts: object, duil: object, dslv: object, llm: object, traces: object,
  *   docHealth: () => Promise<'up'|'down'>, jev: {classify: Function},
- *   maxQueue?: number, variantsTtlMs?: number, log?: object
+ *   maxQueue?: number, variantsTtlMs?: number, log?: object, instance?: string, startedAt?: string
  * }} deps
  */
 export function createPipeline(deps) {
@@ -97,6 +97,24 @@ export function createPipeline(deps) {
   const log = deps.log || console;
   const maxQueue = deps.maxQueue == null ? MAX_QUEUE_PER_PROJECT : deps.maxQueue;
   const variantsTtl = deps.variantsTtlMs || VARIANTS_TTL_MS;
+  const instance = deps.instance || '';
+  const startedAt = deps.startedAt || new Date().toISOString();
+
+  /* Круг 26: совет администратору — в лог, а не человеку в браузер; одна строка на
+     причину не чаще раза в минуту (модель лежит — каждая команда скажет то же). */
+  const hinted = new Map();
+  function adminHint(key, text) {
+    const now = Date.now();
+    if (now - (hinted.get(key) || 0) < 60000) return;
+    hinted.set(key, now);
+    log.warn(`[orchestrator] ${text}`);
+  }
+  const where = () => {
+    const d = typeof llm.describe === 'function' ? llm.describe() : {};
+    return d && d.base ? `${d.kind || 'openai'} ${d.base}` : 'адрес не задан';
+  };
+  const hintUnconfigured = () => adminHint('unconfigured', 'модель не подключена: задайте LLM_BASE_URL (и LLM_MODEL, LLM_API_KEY) в окружении Orchestrator — пока правки агентом не выполняются');
+  const hintDown = (why) => adminHint('down', `модель не отвечает (${where()})${why ? `: ${why}` : ''} — проверьте, что сервер модели запущен и доступен из контейнера Orchestrator`);
 
   const queues = new Map();     // project → {running: Task|null, waiting: Task[]}
   const active = new Map();     // command_id → Task (ждёт или выполняется)
@@ -174,10 +192,8 @@ export function createPipeline(deps) {
       needsModel ? llm.health() : Promise.resolve(null),
     ]);
     if (doc !== 'up') throw Object.assign(new OrchError(503, 'document_down', 'Сервис документов недоступен — команда не выполнена. Правки не потеряны; попробуйте через несколько секунд.', { retryAfter: 5 }));
-    if (model && model.llm === 'unconfigured') throw llmUnconfigured();
-    if (model && model.llm === 'down') {
-      throw new OrchError(503, 'llm_down', 'Модель не отвечает — команда не выполнена. Проверьте, что сервер модели запущен, и повторите.', { retryAfter: 10 });
-    }
+    if (model && model.llm === 'unconfigured') { hintUnconfigured(); throw llmUnconfigured(); }
+    if (model && model.llm === 'down') { hintDown(''); throw llmDown(); }
   }
 
   /* ── команда ─────────────────────────────────────────────────────────── */
@@ -319,7 +335,11 @@ export function createPipeline(deps) {
       // сеть, оборванная «стопом», — это остановка, а не авария сервиса
       if (signal.aborted && (err.code === 'internal' || (e && e.network))) err = cancelledErr();
       if (!(e instanceof OrchError)) log.warn(`[orchestrator] команда ${cmd.command_id}: ${llm.redact(e && e.stack ? e.stack : e)}`);
-      sink.send('error', { code: err.code, message: llm.redact(err.message), retryable: err.retryable });
+      // retry_after (с) — когда срок повтора известен: клиент считает его на кнопке «Повторить»
+      sink.send('error', {
+        code: err.code, message: llm.redact(err.message), retryable: err.retryable,
+        ...(Number.isFinite(err.retryAfter) && err.retryAfter > 0 ? { retry_after: err.retryAfter } : {}),
+      });
       trace.status = err.code === 'cancelled' ? 'cancelled' : 'error';
       trace.code = err.code;
     } finally {
@@ -343,9 +363,11 @@ export function createPipeline(deps) {
     const msg = llm.redact(error && error.message ? error.message : 'Сбой модели');
     if (!error) return new OrchError(502, 'llm_failed', msg);
     if (error.kind === 'cancelled') return cancelledErr();
-    if (error.code === 'llm_unconfigured') return llmUnconfigured();
+    if (error.code === 'llm_unconfigured') { hintUnconfigured(); return llmUnconfigured(); }
     if (error.kind === 'network') {
-      return new OrchError(503, 'llm_down', `Модель не ответила — команда не выполнена. ${msg}`.trim(), { retryAfter: 10 });
+      // подробности сети (адрес, ECONNREFUSED) — администратору в лог, человеку — нейтрально
+      hintDown(msg);
+      return llmDown();
     }
     return new OrchError(502, 'llm_failed', msg, { retryable: error.retryable !== false });
   }
@@ -581,6 +603,9 @@ export function createPipeline(deps) {
       // ok — сам агент отвечает; что с документами и моделью — в полях document и llm
       ok: true,
       engine: ENGINE_VERSION,
+      // круг 26: id процесса и время старта — смена instance значит «перезапустился»
+      instance,
+      started_at: startedAt,
       llm: model.llm,
       document,
       ...(model.model ? { model: model.model } : {}),

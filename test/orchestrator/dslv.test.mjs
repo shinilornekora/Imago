@@ -6,9 +6,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { startDocument, startFakeLlm, startOrch, command, createProject, call, cid, PLAN_CREATE, TREE_OK } from './helpers.mjs';
+import { startDocument, startFakeLlm, startOrch, command, createProject, call, cid, PLAN_CREATE, TREE_OK, spawnOrchestrator } from './helpers.mjs';
 
 const SCRIPT = { plan: PLAN_CREATE, tree: TREE_OK };
 
@@ -65,22 +64,16 @@ test('ожидание модели не съедает счётное врем�
 
 test('процесс: SIGTERM — аккуратный выход с кодом 0', async () => {
   const entry = fileURLToPath(new URL('../../server/orchestrator/index.js', import.meta.url));
-  const env = { ...process.env, PORT: '8711', HOST: '127.0.0.1', DOCUMENT_URL: 'http://127.0.0.1:9', LLM_BASE_URL: '' };
-  delete env.NODE_OPTIONS;
-  const child = spawn(process.execPath, [entry], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-  let out = '';
-  child.stdout.on('data', (d) => { out += d; });
-  child.stderr.on('data', (d) => { out += d; });
-  const exited = new Promise((r) => child.on('exit', (code, signal) => r({ code, signal })));
-  for (let i = 0; i < 100 && !/слушаю/.test(out); i++) await new Promise((r) => setTimeout(r, 50));
-  assert.match(out, /слушаю http:\/\/127\.0\.0\.1:8711/);
-  const h = await call('http://127.0.0.1:8711', 'GET', '/agent/health');
+  // круг 26: PORT=0, порт — из строки «слушаю» (фиксированный сталкивался у параллельных прогонов)
+  const proc = spawnOrchestrator([entry], { env: { DOCUMENT_URL: 'http://127.0.0.1:9', LLM_BASE_URL: '' } });
+  const url = await proc.url;
+  const h = await call(url, 'GET', '/agent/health');
   assert.equal(h.body.llm, 'unconfigured');
   assert.equal(h.body.document, 'down');
-  child.kill('SIGTERM');
-  const { code } = await exited;
-  assert.equal(code, 0, out);
-  assert.match(out, /SIGTERM/);
+  proc.child.kill('SIGTERM');
+  const { code } = await proc.exited;
+  assert.equal(code, 0, proc.out());
+  assert.match(proc.out(), /SIGTERM/);
 });
 
 test('круг 25: воркер не видит секретов окружения — ключа модели, INTERNAL_TOKEN, адресов с учётными данными', async (t) => {

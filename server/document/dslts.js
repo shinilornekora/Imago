@@ -31,7 +31,7 @@
  * переигрывание после отката (`replay_of_epoch`) не затирает более новое чужое (`stale`).
  */
 
-import { applyOps, rebase, collectTombstones, ENGINE_VERSION } from '../../src/core.js';
+import { applyOps, applyBatches, rebase, collectTombstones, ENGINE_VERSION } from '../../src/core.js';
 import { DocError, badRequest, notFound, tooLarge, unavailable, viaStorage } from './errors.js';
 import { chainNext, compactDropped, jsonBytes } from './storage/committed.js';
 import {
@@ -266,7 +266,9 @@ export function mergeIntoHead(head, tx, lim = {}) {
     else map.push(i);
   }
   const input = stale ? map.map((i) => src[i]) : src;
-  const rb = rebase(head.doc, input, { tombstones: head.tombstones });
+  // бюджет действует и внутри самого слияния (круг 26): rebase 5000 операций над
+  // большим документом не должен съесть время под мьютексом проекта до проверки
+  const rb = rebase(head.doc, input, { tombstones: head.tombstones, deadline: started + budget });
   for (const d of rb.dropped) dropped.push({ ...d, index: map[d.index] });
   notes = rb.notes.map((n) => ({ ...n, index: map[n.index] }));
   let kept = rb.ops.slice();
@@ -428,21 +430,32 @@ export function createSequencer({
     }
   }
 
-  /** Применить записанную транзакцию к голове (загрузка хвоста, догон за другим экземпляром). */
-  function absorb(head, projectId, committed) {
-    for (const [id, parent] of collectTombstones(head.doc, committed.ops)) head.tombstones.set(id, parent);
-    const res = applyOps(head.doc, committed.ops);
-    if (res.error) {
+  /**
+   * Применить страницу записанных транзакций к голове (загрузка хвоста, догон за
+   * другим экземпляром) одним черновиком — `core.applyBatches` (круг 26): словарь
+   * узлов копируется раз на страницу, а не дважды на транзакцию. Итог тот же, что у
+   * поштучного collectTombstones + applyOps (тест сверяет).
+   */
+  function absorbPage(head, projectId, page) {
+    if (!page.length) return;
+    const before = head.doc;
+    const res = applyBatches(before, page.map((tx) => tx.ops));
+    for (const [id, parent] of res.tombstones) head.tombstones.set(id, parent);
+    for (let i = 0; i < page.length; i++) {
+      const err = res.results[i] && res.results[i].error;
       // применённая форма обязана проходить строго; если нет — журнал и движок разошлись,
       // молчать нельзя, но и вставать нельзя: голова идёт дальше по номерам
-      log.warn(`[document/dslts] ${projectId}: seq ${committed.seq} не применяется: ${res.error.message}`);
-    } else {
-      head.docBytes += docBytesDelta(head.doc, res.doc);
+      if (err) log.warn(`[document/dslts] ${projectId}: seq ${page[i].seq} не применяется: ${err.message}`);
+    }
+    if (res.doc !== before) {
+      head.docBytes += docBytesDelta(before, res.doc);
       head.doc = res.doc;
     }
-    head.head_seq = committed.seq;
-    if (typeof committed.chain === 'string') head.chain = committed.chain;
-    remember(head, committed);
+    for (const committed of page) {
+      head.head_seq = committed.seq;
+      if (typeof committed.chain === 'string') head.chain = committed.chain;
+      remember(head, committed);
+    }
   }
 
   function dropHead(projectId) {
@@ -491,7 +504,7 @@ export function createSequencer({
       for (;;) {
         const page = await viaStorage(storage.txsAfter(projectId, head.head_seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES }));
         if (!page.length) break;
-        for (const tx of page) absorb(head, projectId, tx);
+        absorbPage(head, projectId, page);
       }
       heads.set(projectId, head);
     }
@@ -551,14 +564,23 @@ export function createSequencer({
     for (;;) {
       const page = await viaStorage(storage.txsAfter(projectId, head.head_seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES }));
       if (!page.length) break;
-      for (const tx of page) {
-        const expected = chainNext(head.chain, tx.tx_id, tx.seq);
-        if (tx.seq !== head.head_seq + 1 || (typeof tx.chain === 'string' && tx.chain !== expected)) {
-          await rollback(projectId, head, p, `цепочка рвётся на seq ${tx.seq}`);
-          return 'rollback';
-        }
-        absorb(head, projectId, tx);
-        emit({ kind: 'tx', projectId, committed: tx });
+      // цепочка проверяется до применения: целый префикс страницы ложится одной
+      // пачкой и уходит сокетам, на разрыве — откат (как прежде, поштучно)
+      let seq = head.head_seq;
+      let chain = head.chain;
+      let ok = 0;
+      for (; ok < page.length; ok++) {
+        const tx = page[ok];
+        if (tx.seq !== seq + 1 || (typeof tx.chain === 'string' && tx.chain !== chainNext(chain, tx.tx_id, tx.seq))) break;
+        seq = tx.seq;
+        if (typeof tx.chain === 'string') chain = tx.chain;
+      }
+      const good = ok === page.length ? page : page.slice(0, ok);
+      absorbPage(head, projectId, good);
+      for (const tx of good) emit({ kind: 'tx', projectId, committed: tx });
+      if (ok < page.length) {
+        await rollback(projectId, head, p, `цепочка рвётся на seq ${page[ok].seq}`);
+        return 'rollback';
       }
     }
     return 'caught-up';

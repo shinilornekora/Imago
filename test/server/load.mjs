@@ -98,7 +98,7 @@ async function waitFor(fn, what, ms = 60000) {
  */
 async function rawPhase(services) {
   const created = await (await fetch(services[0].url + '/api/projects', {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Нагрузка · сырые' })
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Нагрузка · сырые', demo: true })
   })).json();
   const id = created.id;
   const seed = (await (await fetch(`${services[0].url}/api/projects/${id}`)).json()).snapshot.doc;
@@ -233,7 +233,7 @@ async function main() {
 async function replicaPhase(services, replicas) {
   {
     const created = await (await fetch(services[0].url + '/api/projects', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Нагрузка' })
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Нагрузка', demo: true })
     })).json();
     const id = created.id;
     const seed = (await (await fetch(`${services[0].url}/api/projects/${id}`)).json()).snapshot.doc;

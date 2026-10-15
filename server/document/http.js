@@ -20,7 +20,8 @@ import { jsonBytes } from './storage/committed.js';
 import { createSemaphore } from './dslr.js';
 import {
   MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX,
-  HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, isCleanText, cleanText, cutText, cleanDeep
+  HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, PROJECTS_PAGE, PROJECTS_PAGE_MAX,
+  isCleanText, cleanText, cutText, cleanDeep
 } from './limits.js';
 
 /** Предел тела запроса (совместимость: прежде экспортировался отсюда). */
@@ -137,6 +138,22 @@ function intParam(url, name, { min = -Infinity, max = Infinity } = {}) {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < min || n > max) throw badRequest(`${name}: целое${Number.isFinite(min) ? ` от ${min}` : ''}${Number.isFinite(max) ? ` до ${max}` : ''}`);
   return n;
+}
+
+/** Курсор списка проектов: непрозрачная строка (base64url JSON `[at, id]`). */
+const encodeCursor = (c) => Buffer.from(JSON.stringify([c.at, c.id])).toString('base64url');
+/** `after=` → {at, id} | undefined; негодный — 400 (а не тихо первая страница). */
+function cursorParam(raw) {
+  if (raw === null || raw === '') return undefined;
+  let v = null;
+  try {
+    if (raw.length <= 256) v = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+  } catch (_) { v = null; }
+  if (!Array.isArray(v) || v.length !== 2 || typeof v[0] !== 'string' || typeof v[1] !== 'string'
+    || !Number.isFinite(Date.parse(v[0])) || !v[1] || v[1].length > 64 || !isCleanText(v[1])) {
+    throw badRequest('after: курсор из поля next предыдущей страницы');
+  }
+  return { at: v[0], id: v[1] };
 }
 
 const flag = (url, name) => {
@@ -279,8 +296,15 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
     // GET|POST /api/projects
     if (parts.length === 2) {
       if (method === 'GET') {
-        const list = await viaStorage(storage.listProjects());
-        sendJSON(res, 200, { projects: list.map((p) => ({ id: p.id, name: p.name, kind: p.kind, head_seq: p.head_seq, updated_at: p.updated_at })) });
+        // круг 26: фильтр по виду (агент берёт только библиотеки) и страницы по ключу
+        const kind = url.searchParams.get('kind') || undefined;
+        if (kind !== undefined && !PROJECT_KINDS.has(kind)) throw badRequest('kind: design | library');
+        const limit = intParam(url, 'limit', { min: 1, max: PROJECTS_PAGE_MAX }) || PROJECTS_PAGE;
+        const after = cursorParam(url.searchParams.get('after'));
+        const page = await viaStorage(storage.listProjectsPage({ kind, limit, after }));
+        const body = { projects: page.projects.map((p) => ({ id: p.id, name: p.name, kind: p.kind, head_seq: p.head_seq, updated_at: p.updated_at })), more: page.more };
+        if (page.more && page.next) body.next = encodeCursor(page.next);
+        sendJSON(res, 200, body);
         return;
       }
       if (method === 'POST') {

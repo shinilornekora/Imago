@@ -103,6 +103,26 @@ export function createMemoryStorage() {
         .map(clone);
     },
 
+    /**
+     * Страница списка (круг 26): новые по updated_at первыми, при равенстве — id по
+     * убыванию; `after` — {at, id} последней строки прежней страницы (ключ, не смещение:
+     * новые проекты между страницами не сдвигают её).
+     * @param {{kind?: string, limit?: number, after?: {at: string, id: string}}} [o]
+     * @returns {Promise<{projects: object[], more: boolean, next: {at: string, id: string}|null}>}
+     */
+    async listProjectsPage({ kind, limit = 200, after } = {}) {
+      const key = (p) => [p.updated_at, p.id];
+      const before = (a, b) => (a[0] !== b[0] ? a[0] > b[0] : a[1] > b[1]);   // a раньше в списке, чем b
+      const all = [...projects.values()]
+        .filter((p) => !kind || p.kind === kind)
+        .filter((p) => !after || before([after.at, after.id], key(p)))
+        .sort((a, b) => (before(key(a), key(b)) ? -1 : before(key(b), key(a)) ? 1 : 0));
+      const page = all.slice(0, limit);
+      const last = page[page.length - 1];
+      const more = all.length > limit;
+      return { projects: page.map(clone), more, next: more && last ? { at: last.updated_at, id: last.id } : null };
+    },
+
     async getProject(id) {
       return clone(projects.get(String(id))) || null;
     },

@@ -533,6 +533,29 @@ async function createProject(name) {
   return apiJson('/api/projects', { method: 'POST', body: { name: name || 'Новый проект' } });
 }
 
+/* Круг 26: сервис отдаёт список проектов страницами (`?limit=&after=`, ответ `more` и
+   `next`); шторка берёт первую, остальное — кнопкой «Показать ещё». Сервис прежней
+   версии параметров не знает и отдаёт всё — `more` у него нет, кнопки тоже. */
+const PROJECTS_PAGE = 50;
+
+/** Страница списка проектов: {projects, next} (next — курсор следующей или null). */
+async function fetchProjectsPage(after) {
+  const q = `?limit=${PROJECTS_PAGE}${after ? `&after=${encodeURIComponent(after)}` : ''}`;
+  const got = await apiJson('/api/projects' + q);
+  const projects = Array.isArray(got && got.projects) ? got.projects : [];
+  return { projects, next: got && got.more === true && typeof got.next === 'string' ? got.next : null };
+}
+
+/** Сводка одного проекта (`?head=1` — без документа): null, если его нет (404). */
+async function fetchProjectHead(id) {
+  try {
+    return await apiJson(`/api/projects/${encodeURIComponent(id)}?head=1`);
+  } catch (e) {
+    if (e && e.status === 404) return null;
+    throw e;
+  }
+}
+
 /**
  * Серверный режим: выбрать проект и открыть реплику. Проект — из ?project= в ссылке; без
  * него — последний по времени правки, а если проектов нет — новый «Новый проект» с
@@ -549,7 +572,7 @@ async function initServer(health) {
     setRunnable(false);
   }
   server = {
-    engine: health ? health.engine : null, project: null, sync: null, others: [], migrated: false, list: [],
+    engine: health ? health.engine : null, project: null, sync: null, others: [], migrated: false, list: [], listNext: null,
     status: { online: false, pending: 0, syncing: true, error: null },
     authorAsked: false, metaFresh: false, waiting: false,
   };
@@ -569,10 +592,12 @@ async function initServer(health) {
   }
   let project = null;
   try {
-    const got = await apiJson('/api/projects');
-    server.list = Array.isArray(got && got.projects) ? got.projects : [];
+    const page = await fetchProjectsPage();
+    server.list = page.projects;
+    server.listNext = page.next;
     if (wanted) {
-      project = server.list.find((p) => p && p.id === wanted) || null;
+      // проект из ссылки может быть и дальше первой страницы — спрашиваем его самого
+      project = server.list.find((p) => p && p.id === wanted) || (await fetchProjectHead(wanted));
       if (!project) {
         toast(`Проекта «${clip(wanted, 24)}» на сервере нет — открыл последний.`, 'plain', 8000);
       }
@@ -603,9 +628,8 @@ async function refreshProjectMeta() {
   server.metaFresh = true;
   const id = server.project.id;
   try {
-    const got = await apiJson('/api/projects');
-    server.list = Array.isArray(got && got.projects) ? got.projects : [];
-    const p = server.list.find((x) => x && x.id === id);
+    // круг 26: сводка самого проекта (`?head=1`), а не весь список — он теперь страницами
+    const p = await fetchProjectHead(id);
     if (p && server.project && server.project.id === id) {
       server.project.name = p.name || server.project.name;
       server.project.kind = p.kind || server.project.kind;
@@ -824,7 +848,7 @@ function onSyncError(e) {
       actions: [
         { label: 'Открыть последний', primary: true, onClick: async () => {
           try {
-            const got = await apiJson('/api/projects');
+            const got = await apiJson('/api/projects?limit=1');
             const p = latestProject(got && got.projects) || await createProject('Новый проект');
             hideMsg();
             openProject(p);
@@ -1342,7 +1366,7 @@ const serverAgent = {
   lost: new Map(),     // command_id → {utterance, lostAt}: сказано «не выполнена» (круг 25, п.3)
   probedAt: 0,
   absent: false,       // /agent/ на этом сервере нет вовсе (Document service со STATIC_DIR)
-  healthFailedAt: 0,   // когда /agent/health в последний раз не ответил (круг 25: «перезапустился»)
+  healthFailedAt: 0,   // когда /agent/health в последний раз не ответил (перезапуск — по смене instance, круг 26)
   lastFailed: null,    // {utterance, variants}: команда, которой помешал сбой агента или модели
   watch: null,         // таймер: пока висит карточка «модель/агент не отвечает», спрашиваем health
   queuedAhead: [],     // имена из присутствия, чьи команды впереди в очереди проекта
@@ -1507,7 +1531,11 @@ async function runOnServer(utterance, { variants, ctrl, runId }) {
   let out;
   const commandId = AGENT.newCommandId();
   const startedAt = Date.now();
-  serverAgent.current = { commandId, utterance, at: startedAt };
+  /* Круг 26: какой процесс Orchestrator принял команду — по /agent/health (поле instance).
+     Поток оборвётся — ответ с другим instance значит, что процесс перезапустился и
+     команды больше нет; тот же instance — он жив и, может быть, ещё её доделывает. */
+  const instance = serverAgent.health && serverAgent.health.ok && serverAgent.health.instance ? serverAgent.health.instance : '';
+  serverAgent.current = { commandId, utterance, at: startedAt, instance };
   try {
     out = await agentClient.run({
       command_id: commandId,
@@ -1575,7 +1603,7 @@ async function runOnServer(utterance, { variants, ctrl, runId }) {
   if (out.result) { presentServerResult(out.result, utterance); return true; }
   if (out.status === 'detached') {
     addChat('you', utterance);
-    awaitDetached(commandId, utterance, { variants, startedAt });
+    awaitDetached(commandId, utterance, { variants, startedAt, instance });
     return true;
   }
   // поток кончился штатно, а итога нет: агенту нечего было менять
@@ -1600,11 +1628,11 @@ const DETACHED_DOWN_GRACE_MS = 5000;
 /* Команды, которые объявлены невыполненными: если транзакция всё-таки придёт — скажем. */
 const DETACHED_LOST_MS = 3 * 60 * 1000;
 
-function awaitDetached(commandId, utterance, { variants = false, startedAt = Date.now() } = {}) {
+function awaitDetached(commandId, utterance, { variants = false, startedAt = Date.now(), instance = '' } = {}) {
   endDetached();
   const d = {
     commandId, utterance, variants, startedAt, at: Date.now(), timer: null,
-    downSince: 0, wasDown: false,
+    downSince: 0, wasDown: false, instance,
   };
   serverAgent.detached = d;
   showMsg('plain', 'Связь с агентом прервалась — проверяю, выполнена ли команда', {
@@ -1617,6 +1645,19 @@ function awaitDetached(commandId, utterance, { variants = false, startedAt = Dat
     if (serverAgent.detached !== d) return;
     const now = Date.now();
     const ok = !!(h && h.ok);
+    /* Круг 26: перезапуск узнаём по смене instance процесса, а не по «был недоступен —
+       стал доступен»: короткий сбой связи без перезапуска команду не губит, а перезапуск
+       быстрее одной проверки иначе не был бы виден вовсе. */
+    const inst = ok && typeof h.instance === 'string' ? h.instance : '';
+    if (inst && d.instance) {
+      if (inst !== d.instance) { lostDetached(d, 'restarted'); return; }
+      // тот же процесс жив: ждём транзакцию полный срок, сбои связи между проверками не в счёт
+      if (now - d.at >= DETACHED_WAIT_MS) { lostDetached(d, 'silent'); return; }
+      d.timer = setTimeout(step, DETACHED_PROBE_MS);
+      return;
+    }
+    // сервер агента прежней версии (без instance) или процесс не был известен — прежняя эвристика
+    if (inst && !d.instance && !d.wasDown) d.instance = inst;
     /* Сокет документа тоже лёг — значит, пропала связь (сеть, вход), а не Orchestrator: он,
        может быть, доделывает команду, и транзакция придёт с догоном. Ждём полный срок. */
     const netDown = !(server && server.status && server.status.online);
@@ -2010,13 +2051,39 @@ async function openProjects() {
   if (!server) return;
   openSheet('Проекты', (body) => fillProjects(body, server.list, { loading: true }), { size: 'auto', key: 'projects' });
   let list = null;
+  let next = null;
   try {
-    const got = await apiJson('/api/projects');
-    list = Array.isArray(got && got.projects) ? got.projects : [];
+    const page = await fetchProjectsPage();
+    list = page.projects;
+    next = page.next;
   } catch { list = null; }
   if (state.sheetOpen !== 'projects') return;
-  if (list) server.list = list;
+  if (list) { server.list = list; server.listNext = next; }
   openSheet('Проекты', (body) => fillProjects(body, list, { loading: false }), { size: 'auto', key: 'projects' });
+}
+
+/** Перерисовать шторку проектов по уже загруженному списку (без запроса). */
+function redrawProjects() {
+  if (!server || state.sheetOpen !== 'projects') return;
+  openSheet('Проекты', (body) => fillProjects(body, server.list, { loading: false }), { size: 'auto', key: 'projects' });
+}
+
+/** «Показать ещё»: следующая страница дописывается к списку (повторы — по id — вон). */
+async function moreProjects(btn) {
+  if (!server || !server.listNext) return;
+  btn.disabled = true;
+  btn.textContent = 'Загружаю…';
+  try {
+    const page = await fetchProjectsPage(server.listNext);
+    const have = new Set((server.list || []).map((p) => p && p.id));
+    server.list = [...(server.list || []), ...page.projects.filter((p) => p && !have.has(p.id))];
+    server.listNext = page.next;
+    redrawProjects();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Показать ещё';
+    toast(`Список не догрузился: ${humanError(e)}`, 'error', 8000);
+  }
 }
 
 function fillProjects(body, list, { loading } = {}) {
@@ -2102,7 +2169,8 @@ function fillProjects(body, list, { loading } = {}) {
             if (server.project && server.project.id === p.id) { server.project.name = p.name; setDocNameText(p.name); }
           } catch (e) { toast(`Имя не сохранилось: ${humanError(e)}`, 'error', 8000); }
         }
-        if (state.sheetOpen === 'projects') openProjects();
+        // список не перечитываем: догруженные страницы остались бы за бортом
+        redrawProjects();
       };
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); finish(true); }
@@ -2118,6 +2186,16 @@ function fillProjects(body, list, { loading } = {}) {
     head.append(open, rename);
     item.append(head, meta);
     body.appendChild(item);
+  }
+  // круг 26: проектов больше страницы — догружаем по кнопке (сервис прежней версии отдаёт всё)
+  if (!loading && list && list === server.list && server.listNext) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'btn subtle wide';
+    more.dataset.role = 'projects-more';
+    more.textContent = 'Показать ещё';
+    more.addEventListener('click', () => moreProjects(more));
+    body.appendChild(more);
   }
 }
 

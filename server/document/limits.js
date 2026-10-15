@@ -41,6 +41,12 @@ export const TRACES_MAX = 200;
 export const PAGE_TXS = 500;
 export const MAX_LIMIT = 5000;
 export const PAGE_BYTES = 2 * 1024 * 1024;
+/**
+ * Список проектов (`GET /api/projects?kind=&limit=&after=`, круг 26): страница по
+ * умолчанию и наибольшая; дальше — `after` = `next` предыдущей страницы, `more: true`.
+ */
+export const PROJECTS_PAGE = 200;
+export const PROJECTS_PAGE_MAX = 1000;
 /** Тяжёлые чтения (полный снимок): одновременно и в очереди; переполнение → 503 busy + Retry-After. */
 export const HEAVY_CONCURRENCY = 4;
 export const HEAVY_QUEUE = 32;

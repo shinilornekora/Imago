@@ -170,11 +170,17 @@ export async function readError(res, { accepted = false } = {}) {
     message: typeof b.message === 'string' && b.message ? b.message : (text && !body ? text.slice(0, 200) : `сервер агента ответил ${status}`),
     retryable: typeof b.retryable === 'boolean' ? b.retryable : status === 429 || status >= 500,
     status,
-    retryAfterMs: parseRetryAfter(header('retry-after')),
+    // заголовок главнее; без него — поле тела `retry_after` (с), круг 26
+    retryAfterMs: parseRetryAfter(header('retry-after')) ?? secondsMs(b.retry_after),
     upstream,
     detail: b.detail,
     accepted,
   });
+}
+
+/** `retry_after` тела или события (секунды) → мс; не число или ≤ 0 — null. */
+function secondsMs(v) {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v * 1000) : null;
 }
 
 function defaultCode(status) {
@@ -263,6 +269,9 @@ export async function health(opts = {}) {
       llm: ['up', 'down', 'unconfigured'].includes(body.llm) ? body.llm : 'down',
       document: body.document === 'up' ? 'up' : 'down',
       ...(body.model ? { model: String(body.model) } : {}),
+      // круг 26: id процесса Orchestrator и время старта — смена instance значит «перезапустился»
+      ...(typeof body.instance === 'string' && body.instance ? { instance: body.instance.slice(0, 64) } : {}),
+      ...(typeof body.started_at === 'string' ? { started_at: body.started_at.slice(0, 40) } : {}),
     };
   } catch (e) {
     return { ok: false, reason: t.signal.aborted ? 'timeout' : 'network', message: String((e && e.message) || e) };
@@ -447,6 +456,8 @@ export async function runServerCommand(p = {}) {
       case 'error':
         out.error = new AgentError({
           code: data.code, message: data.message, retryable: data.retryable, detail: data.detail, accepted: true,
+          // круг 26: срок повтора и в событии потока — кнопка «Повторить» считает его так же, как у 503
+          retryAfterMs: secondsMs(data.retry_after),
         });
         terminal = true;
         break;

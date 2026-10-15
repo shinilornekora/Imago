@@ -5,6 +5,7 @@
  *   init() · close() · kind
  *   createProject({name, kind, doc, engine}) → Project   (снимок при seq 0 — сразу, эпоха — новая)
  *   listProjects() → Project[] · getProject(id) → Project|null · renameProject(id, name)
+ *   listProjectsPage({kind?, limit?, after?: {at, id}}) → {projects, more, next: {at, id}|null}   (круг 26)
  *     Project = {id, name, kind, head_seq, head_chain, epoch, epoch_cause, engine, created_at, updated_at}
  *   latestSnapshot(projectId) → {seq, doc, engine, chain, tombstones, created_at}|null   (только снимок, чей chain совпадает с журналом)
  *   txsAfter(projectId, seq, limit, {maxBytes}?) → Committed[]   (первая — всегда, дальше — пока влезает в maxBytes)
@@ -555,6 +556,29 @@ export function createPgStorage(opts = {}) {
     async listProjects() {
       const res = await pool.query('SELECT * FROM projects ORDER BY updated_at DESC, created_at DESC');
       return res.rows.map(projectOf);
+    },
+
+    /**
+     * Страница списка (круг 26), ключом (updated_at, id) по убыванию. Ключ курсора —
+     * время с микросекундами (как в базе: ISO projectOf режет до мс, и строки одной
+     * миллисекунды на границе страницы терялись бы или повторялись).
+     * @param {{kind?: string, limit?: number, after?: {at: string, id: string}}} [o]
+     */
+    async listProjectsPage({ kind, limit = 200, after } = {}) {
+      if (after && !okId(after.id)) return { projects: [], more: false, next: null };
+      const res = await pool.query(
+        `SELECT *, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_at
+           FROM projects
+          WHERE ($1::text IS NULL OR kind = $1)
+            AND ($2::timestamptz IS NULL OR (updated_at, id) < ($2::timestamptz, $3::uuid))
+          ORDER BY updated_at DESC, id DESC
+          LIMIT $4`,
+        [kind || null, after ? after.at : null, after ? after.id : null, limit + 1]
+      );
+      const more = res.rows.length > limit;
+      const rows = more ? res.rows.slice(0, limit) : res.rows;
+      const last = rows[rows.length - 1];
+      return { projects: rows.map(projectOf), more, next: more && last ? { at: last.cursor_at, id: last.id } : null };
     },
 
     async getProject(id) {

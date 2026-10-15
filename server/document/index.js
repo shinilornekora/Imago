@@ -12,6 +12,12 @@
  *   INTERNAL_TOKEN   токен внутренних маршрутов (`POST /api/internal/traces`); не задан или
  *                    «change-me» — внутренние маршруты отвечают 403
  *   PRESENCE_TTL_MS  без вестей от клиента столько — он ушёл (45000; клиент шлёт сердцебиение раз в 15 с)
+ *   WS_INFLIGHT      необработанных транзакций на сокет (2), сверх — пауза чтения и `error busy`
+ *   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE   семафор `POST …/tx`: одновременно (8) и в очереди (64)
+ *   QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES   очередь записи: на проект
+ *                    (32 МиБ, 256 транзакций) и на экземпляр (128 МиБ); сверх — 503 busy
+ *   Числа — целые; пустое — умолчание из limits.js; негодное — предупреждение в лог и умолчание
+ *   (опечатка в окружении не должна снимать предел). Итог — `svc.config`.
  *   STATIC_DIR       каталог клиента (index.html, app.js, styles.css, src/*.js) — для прогонов без nginx
  *
  * Порт открывается СРАЗУ, до миграций базы (SPEC §9.11): пока они идут,
@@ -44,7 +50,54 @@ import { createSequencer } from './dslts.js';
 import { createHub } from './hub.js';
 import { createRequestHandler } from './http.js';
 import { migrating, setStorageLog } from './errors.js';
-import { SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, PAGE_BYTES, VERIFY_MS, PRESENCE_TTL_MS } from './limits.js';
+import {
+  SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, PAGE_BYTES, VERIFY_MS, PRESENCE_TTL_MS,
+  WS_INFLIGHT, HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES,
+  DB_TIMEOUT_MS
+} from './limits.js';
+
+/**
+ * Пределы, которые можно задать окружением (круг 26): имя переменной → [опция start(),
+ * умолчание из limits.js, наименьшее допустимое]. Опция start() главнее окружения.
+ */
+export const ENV_LIMITS = Object.freeze({
+  SNAPSHOT_EVERY: ['snapshotEvery', SNAPSHOT_EVERY, 0],
+  SNAPSHOT_KEEP: ['snapshotKeep', SNAPSHOT_KEEP, 1],
+  PRESENCE_TTL_MS: ['presenceTtlMs', PRESENCE_TTL_MS, 1000],
+  DB_TIMEOUT_MS: ['dbTimeoutMs', DB_TIMEOUT_MS, 100],
+  WS_INFLIGHT: ['maxInflight', WS_INFLIGHT, 1],
+  HTTP_WRITE_CONCURRENCY: ['writesMax', HTTP_WRITE_CONCURRENCY, 1],
+  HTTP_WRITE_QUEUE: ['writesQueue', HTTP_WRITE_QUEUE, 0],
+  QUEUE_PROJECT_BYTES: ['queueProjectBytes', QUEUE_PROJECT_BYTES, 1],
+  QUEUE_PROJECT_TXS: ['queueProjectTxs', QUEUE_PROJECT_TXS, 1],
+  QUEUE_TOTAL_BYTES: ['queueTotalBytes', QUEUE_TOTAL_BYTES, 1],
+});
+
+/**
+ * Итоговые пределы: опция → окружение → умолчание. Негодное в окружении (не целое,
+ * меньше допустимого) — строка в лог и умолчание.
+ * @param {object} opts опции start()
+ * @param {Record<string, string|undefined>} env
+ * @param {{warn: Function}} log
+ * @returns {Record<string, number>} по именам опций
+ */
+export function limitsFrom(opts, env, log) {
+  const out = {};
+  for (const [name, [key, def, min]] of Object.entries(ENV_LIMITS)) {
+    const fromOpt = key === 'writesMax' ? opts.writes && opts.writes.max : key === 'writesQueue' ? opts.writes && opts.writes.queue : opts[key];
+    if (fromOpt !== undefined) { out[key] = fromOpt; continue; }
+    const raw = env[name];
+    if (raw === undefined || String(raw).trim() === '') { out[key] = def; continue; }
+    const n = Number(String(raw).trim());
+    if (!Number.isSafeInteger(n) || n < min) {
+      log.warn(`[document] ${name}=${JSON.stringify(String(raw).slice(0, 40))} — не целое от ${min}; беру ${def}`);
+      out[key] = def;
+      continue;
+    }
+    out[key] = n;
+  }
+  return out;
+}
 
 /**
  * @param {{
@@ -69,6 +122,12 @@ import { SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AF
  *   instanceId?: string,
  *   presenceTtlMs?: number,
  *   maxBuffered?: number,
+ *   maxInflight?: number,
+ *   writes?: {max?: number, queue?: number, retryAfter?: number},
+ *   queueProjectBytes?: number,
+ *   queueProjectTxs?: number,
+ *   queueTotalBytes?: number,
+ *   dbTimeoutMs?: number,
  *   frameCache?: {frames?: number, roomBytes?: number, totalBytes?: number},
  *   log?: {info:Function, warn:Function}
  * }} [opts] всё необязательно — умолчания из окружения и limits.js
@@ -97,8 +156,8 @@ export async function launch(opts = {}) {
   const num = (v, d) => (v !== undefined ? v : d);
   const port = opts.port !== undefined ? opts.port : Number(env.PORT || 8080);
   const host = opts.host || env.HOST || '0.0.0.0';
-  const snapshotEvery = num(opts.snapshotEvery, Number(env.SNAPSHOT_EVERY || SNAPSHOT_EVERY));
-  const snapshotKeep = num(opts.snapshotKeep, Number(env.SNAPSHOT_KEEP || SNAPSHOT_KEEP));
+  const config = limitsFrom(opts, env, log);
+  const { snapshotEvery, snapshotKeep } = config;
   const staticDir = opts.staticDir !== undefined ? opts.staticDir : (env.STATIC_DIR || undefined);
   const databaseUrl = opts.databaseUrl !== undefined ? opts.databaseUrl : env.DATABASE_URL;
   const internalToken = opts.internalToken !== undefined ? opts.internalToken : (env.INTERNAL_TOKEN || '');
@@ -107,7 +166,7 @@ export async function launch(opts = {}) {
   let storage = opts.storage;
   if (!storage) {
     if (databaseUrl) {
-      storage = createPgStorage({ connectionString: databaseUrl, log });
+      storage = createPgStorage({ connectionString: databaseUrl, log, dbTimeoutMs: config.dbTimeoutMs });
     } else {
       log.warn('[document] DATABASE_URL не задан — хранилище в памяти, данные не переживут перезапуск');
       storage = createMemoryStorage();
@@ -171,7 +230,8 @@ export async function launch(opts = {}) {
     const dslts = createSequencer({
       storage, instanceId, snapshotEvery, snapshotKeep, idleMs: opts.idleMs,
       verifyMs: num(opts.verifyMs, VERIFY_MS),
-      mergeBudgetMs: opts.mergeBudgetMs, maxDocNodes: opts.maxDocNodes, maxDocBytes: opts.maxDocBytes, log
+      mergeBudgetMs: opts.mergeBudgetMs, maxDocNodes: opts.maxDocNodes, maxDocBytes: opts.maxDocBytes, log,
+      queueProjectBytes: config.queueProjectBytes, queueProjectTxs: config.queueProjectTxs, queueTotalBytes: config.queueTotalBytes
     });
     // шина присутствия между экземплярами (SPEC §9.9): эфемерный канал хранилища
     const bus = typeof storage.publish === 'function' && typeof storage.onNotify === 'function'
@@ -180,14 +240,15 @@ export async function launch(opts = {}) {
     server.off('upgrade', earlyUpgrade);
     const hub = createHub({
       server, dslr, dslts, bus, instanceId, pingInterval: opts.pingInterval,
-      presenceTtlMs: num(opts.presenceTtlMs, Number(env.PRESENCE_TTL_MS || PRESENCE_TTL_MS)),
+      presenceTtlMs: config.presenceTtlMs, maxInflight: config.maxInflight,
       maxBuffered: opts.maxBuffered, frameCache: opts.frameCache, log
     });
     parts = { dslr, dslts, hub };
-    handler = createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log });
+    const writes = { ...(opts.writes || {}), max: config.writesMax, queue: config.writesQueue };
+    handler = createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log, writes });
     state = 'ready';
     log.info(`[document] слушаю http://${host}:${actualPort} · готов за ${Date.now() - t0} мс · движок ${ENGINE_VERSION} · хранилище ${storage.kind} · экземпляр ${instanceId}${staticDir ? ` · статика ${path.resolve(staticDir)}` : ''}`);
-    svc = { server, port: actualPort, url, storage, dslr, dslts, hub, instanceId, close };
+    svc = { server, port: actualPort, url, storage, dslr, dslts, hub, instanceId, config, close };
     return svc;
   })();
   ready.catch(() => { if (state === 'starting') state = 'failed'; });
@@ -212,7 +273,7 @@ export async function launch(opts = {}) {
   }
 
   return {
-    server, port: actualPort, url, storage, instanceId, ready, close,
+    server, port: actualPort, url, storage, instanceId, config, ready, close,
     get state() { return state; }
   };
 }

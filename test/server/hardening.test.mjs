@@ -8,7 +8,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDoc, artboards, ops, uid, hashDoc, applyOps, ENGINE_VERSION } from '../../src/core.js';
-import { LIMITS as CLIENT_SIDE } from '../../src/sync.js';
+import { LIMITS as CLIENT_SIDE, WIRE } from '../../src/sync.js';
+import { CLOSE } from '../../server/document/hub.js';
 import * as limits from '../../server/document/limits.js';
 import { chainNext, compactDropped } from '../../server/document/storage/committed.js';
 import { mergeIntoHead } from '../../server/document/dslts.js';
@@ -54,6 +55,17 @@ describe('пределы и выжимки', () => {
     assert.equal(limits.MAX_TRACE_BYTES, 64 * 1024);
   });
 
+  it('круг 26: прочие числа протокола клиента связаны с сервером (src/sync.js WIRE)', () => {
+    assert.ok(WIRE.presenceGapMs >= 1000 / limits.PRESENCE_PER_SECOND, 'присутствие не чаще, чем пропускает сервер');
+    assert.ok(WIRE.presenceTtlMs >= limits.PRESENCE_TTL_MS, 'клиент не убирает соавтора раньше, чем сервер скажет left');
+    assert.ok(CLIENT_SIDE.presenceHeartbeatMs * 2 < limits.PRESENCE_TTL_MS, 'сердцебиение успевает дважды до TTL');
+    assert.ok(WIRE.opsPage >= 1 && WIRE.opsPage <= limits.MAX_LIMIT, 'страница догона в пределах сервера');
+    assert.equal(WIRE.valueDepth, limits.MAX_VALUE_DEPTH);
+    assert.equal(WIRE.commandIdChars, limits.MAX_COMMAND_ID);
+    assert.equal(WIRE.closeEpoch, CLOSE.epoch);
+    assert.ok(CLIENT_SIDE.presenceSelection <= limits.PRESENCE_SELECTION);
+  });
+
   it('chainNext — sha256(prev + tx_id + seq), hex', () => {
     const c1 = chainNext('', 'tx_a', 1);
     assert.match(c1, /^[0-9a-f]{64}$/);
@@ -95,9 +107,23 @@ describe('пределы и выжимки', () => {
     const normal = mergeIntoHead({ doc, tombstones: new Map() }, t, { applyOps: strict });
     assert.deepEqual(normal.dropped.map((d) => [d.index, d.reason, d.limit]), [[1, 'invalid', undefined], [3, 'invalid', undefined]]);
     assert.equal(normal.ops.length, 2);
-    const starved = mergeIntoHead({ doc, tombstones: new Map() }, t, { applyOps: strict, mergeBudgetMs: -1 });
+    // бюджет кончается на проверке строгим applyOps (первое применение «думает» дольше бюджета)
+    let first = true;
+    const slow = (d, list) => {
+      if (first) {
+        first = false;
+        const until = Date.now() + 80;
+        while (Date.now() < until) { /* ждём */ }
+      }
+      return strict(d, list);
+    };
+    const starved = mergeIntoHead({ doc, tombstones: new Map() }, t, { applyOps: slow, mergeBudgetMs: 40 });
     assert.deepEqual(starved.dropped.map((d) => [d.index, d.reason, d.limit]), [[1, 'invalid', 'merge_budget'], [2, 'invalid', 'merge_budget'], [3, 'invalid', 'merge_budget']]);
     assert.deepEqual(starved.ops, [good]);
+    // круг 26: бюджет действует и внутри rebase — исчерпан до слияния, отброшено всё
+    const none = mergeIntoHead({ doc, tombstones: new Map() }, t, { applyOps: strict, mergeBudgetMs: -1 });
+    assert.deepEqual(none.dropped.map((d) => [d.index, d.reason, d.limit]), [[0, 'invalid', 'merge_budget'], [1, 'invalid', 'merge_budget'], [2, 'invalid', 'merge_budget'], [3, 'invalid', 'merge_budget']]);
+    assert.deepEqual(none.ops, []);
   });
 
   it('семафор тяжёлых чтений: max одновременно, очередь, переполнение → 503 busy + retry_after', async () => {
