@@ -1818,8 +1818,10 @@ function onServerAgentEvent(ev, runId, variants) {
     const pos = ev.data && Number.isFinite(ev.data.position) ? ev.data.position : 0;
     setAgentPresence({ queued: pos > 0 ? pos : true });
     // чья команда впереди — по присутствию: у тех, над чьими командами агент сейчас работает
-    const ahead = (server ? server.others : []).filter((p) => p && (p.busy === true || (typeof p.busy === 'number' && p.busy > 0)));
-    onAgentStage({ stage: 'srv:queued', label: queuedLabel(pos, ahead.map((p) => p.author || 'Без имени')) }, 0, runId);
+    // круг 27: `scope: 'workers'` — команда ждёт свободного исполнителя агента, не очередь проекта
+    const scope = ev.data && ev.data.scope === 'workers' ? 'workers' : 'project';
+    const ahead = scope === 'workers' ? [] : (server ? server.others : []).filter((p) => p && (p.busy === true || (typeof p.busy === 'number' && p.busy > 0)));
+    onAgentStage({ stage: 'srv:queued', label: queuedLabel(pos, ahead.map((p) => p.author || 'Без имени'), scope) }, 0, runId);
   } else if (ev.type === 'stage') {
     setAgentPresence({ busy: true });
     onAgentStage(serverStageRec(ev.data), variants ? 3 : 0, runId);
@@ -2070,7 +2072,9 @@ function presentServerResult(raw, utterance, { variant = null } = {}) {
     actions: [{ label: 'Отменить', onClick: () => undoTx(r.txId) }],
     undoTx: r.txId,
   });
-  const wait = { label, human: r.summary || headline, select: r.select };
+  // в «Историю» — что сделано (result.title = tx.title, круг 27), а не пересказ модели;
+  // сервер прежней версии title не шлёт — тогда settleAgentTx берёт tx.title записи
+  const wait = { label, human: r.title, select: r.select };
   const got = serverAgent.arrived.get(r.txId);
   if (got) {
     serverAgent.arrived.delete(r.txId);

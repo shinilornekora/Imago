@@ -524,6 +524,9 @@ test('стадии и очередь словами', () => {
   assert.equal(queuedLabel(1, ['Аня']), 'В очереди проекта: впереди 1 команда (Аня)');
   assert.equal(queuedLabel(3, ['Аня', 'Борис', 'Вера']), 'В очереди проекта: впереди 3 команды (Аня, Борис и ещё 1)');
   assert.equal(queuedLabel(0, ['Аня']), 'В очереди проекта: впереди команда (Аня)');
+  // круг 27: ждём свободного исполнителя агента — не очередь проекта
+  assert.equal(queuedLabel(3, ['Аня'], 'workers'), 'Ждёт свободного исполнителя агента…');
+  assert.equal(queuedLabel(2, [], 'project'), 'В очереди проекта: впереди 2 команды');
   assert.equal(presenceAgentWords({ author: 'Аня', queued: 2 }), 'Аня ждёт агента…');
   assert.equal(presenceAgentWords({ author: 'Аня', busy: true }), 'Аня: агент работает…');
   assert.equal(presenceAgentWords({ author: 'Аня', busy: false, queued: false }), '');
@@ -553,6 +556,10 @@ test('итог сервера: applied и dropped числом и списком
   const b = normalizeResult({ applied: 0, dropped: 0, summary: 'это кнопка' });
   assert.equal(b.txId, '');
   assert.equal(b.applied, 0);
+  // круг 27: title — что сделано (tx.title), отдельно от пересказа модели
+  assert.equal(b.title, '');
+  assert.equal(normalizeResult({ tx_id: 't', summary: 'Готово, сделал', title: ' Добавил «Экран тарифов» новой доской ' }).title, 'Добавил «Экран тарифов» новой доской');
+  assert.equal(normalizeResult({ title: 5 }).title, '');
 });
 
 test('варианты сервера: превью своим движком из операций или документа', () => {

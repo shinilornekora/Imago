@@ -16,6 +16,10 @@
  *   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE   семафор `POST …/tx`: одновременно (8) и в очереди (64)
  *   QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES   очередь записи: на проект
  *                    (32 МиБ, 256 транзакций) и на экземпляр (128 МиБ); сверх — 503 busy
+ *   TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX   прореживание надгробий головы (10000, 500, 50000)
+ *   RECENT_TXS, RECENT_BYTES   память головы о последних транзакциях (500 выжимок, 16 МиБ)
+ *   WRITE_BODY_BYTES, BODY_TIMEOUT_MS   HTTP-запись: бюджет читаемых тел на экземпляр (64 МиБ;
+ *                    сверх — 503 busy) и срок тела (30000 мс; дольше — 408)
  *   Числа — целые; пустое — умолчание из limits.js; негодное — предупреждение в лог и умолчание
  *   (опечатка в окружении не должна снимать предел). Итог — `svc.config`.
  *   STATIC_DIR       каталог клиента (index.html, app.js, styles.css, src/*.js) — для прогонов без nginx
@@ -53,7 +57,7 @@ import { migrating, setStorageLog } from './errors.js';
 import {
   SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, PAGE_BYTES, VERIFY_MS, PRESENCE_TTL_MS,
   WS_INFLIGHT, HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES,
-  DB_TIMEOUT_MS
+  DB_TIMEOUT_MS, TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES, WRITE_BODY_BYTES, BODY_TIMEOUT_MS
 } from './limits.js';
 
 /**
@@ -71,6 +75,19 @@ export const ENV_LIMITS = Object.freeze({
   QUEUE_PROJECT_BYTES: ['queueProjectBytes', QUEUE_PROJECT_BYTES, 1],
   QUEUE_PROJECT_TXS: ['queueProjectTxs', QUEUE_PROJECT_TXS, 1],
   QUEUE_TOTAL_BYTES: ['queueTotalBytes', QUEUE_TOTAL_BYTES, 1],
+  // круг 27: надгробия и память головы (секвенсор), бюджет и таймаут тел HTTP-записи
+  TOMB_KEEP_SEQ: ['tombKeepSeq', TOMB_KEEP_SEQ, 0],
+  TOMB_PRUNE_EVERY: ['tombPruneEvery', TOMB_PRUNE_EVERY, 1],
+  TOMB_MAX: ['tombMax', TOMB_MAX, 0],
+  RECENT_TXS: ['recentTxs', RECENT_TXS, 1],
+  RECENT_BYTES: ['recentBytes', RECENT_BYTES, 1],
+  WRITE_BODY_BYTES: ['writesBodyBytes', WRITE_BODY_BYTES, 1],
+  BODY_TIMEOUT_MS: ['writesBodyTimeoutMs', BODY_TIMEOUT_MS, 1000],
+});
+
+/** Опции start(), которые живут внутри `opts.writes` (ключ итога → поле writes). */
+const WRITES_KEYS = Object.freeze({
+  writesMax: 'max', writesQueue: 'queue', writesBodyBytes: 'bodyBytes', writesBodyTimeoutMs: 'bodyTimeoutMs'
 });
 
 /**
@@ -84,7 +101,7 @@ export const ENV_LIMITS = Object.freeze({
 export function limitsFrom(opts, env, log) {
   const out = {};
   for (const [name, [key, def, min]] of Object.entries(ENV_LIMITS)) {
-    const fromOpt = key === 'writesMax' ? opts.writes && opts.writes.max : key === 'writesQueue' ? opts.writes && opts.writes.queue : opts[key];
+    const fromOpt = WRITES_KEYS[key] ? opts.writes && opts.writes[WRITES_KEYS[key]] : opts[key];
     if (fromOpt !== undefined) { out[key] = fromOpt; continue; }
     const raw = env[name];
     if (raw === undefined || String(raw).trim() === '') { out[key] = def; continue; }
@@ -123,7 +140,9 @@ export function limitsFrom(opts, env, log) {
  *   presenceTtlMs?: number,
  *   maxBuffered?: number,
  *   maxInflight?: number,
- *   writes?: {max?: number, queue?: number, retryAfter?: number},
+ *   writes?: {max?: number, queue?: number, retryAfter?: number, bodyBytes?: number, bodyTimeoutMs?: number},
+ *   tombKeepSeq?: number, tombPruneEvery?: number, tombMax?: number,
+ *   recentTxs?: number, recentBytes?: number,
  *   queueProjectBytes?: number,
  *   queueProjectTxs?: number,
  *   queueTotalBytes?: number,
@@ -231,7 +250,9 @@ export async function launch(opts = {}) {
       storage, instanceId, snapshotEvery, snapshotKeep, idleMs: opts.idleMs,
       verifyMs: num(opts.verifyMs, VERIFY_MS),
       mergeBudgetMs: opts.mergeBudgetMs, maxDocNodes: opts.maxDocNodes, maxDocBytes: opts.maxDocBytes, log,
-      queueProjectBytes: config.queueProjectBytes, queueProjectTxs: config.queueProjectTxs, queueTotalBytes: config.queueTotalBytes
+      queueProjectBytes: config.queueProjectBytes, queueProjectTxs: config.queueProjectTxs, queueTotalBytes: config.queueTotalBytes,
+      tombKeepSeq: config.tombKeepSeq, tombPruneEvery: config.tombPruneEvery, tombMax: config.tombMax,
+      recentTxs: config.recentTxs, recentBytes: config.recentBytes
     });
     // шина присутствия между экземплярами (SPEC §9.9): эфемерный канал хранилища
     const bus = typeof storage.publish === 'function' && typeof storage.onNotify === 'function'
@@ -244,7 +265,10 @@ export async function launch(opts = {}) {
       maxBuffered: opts.maxBuffered, frameCache: opts.frameCache, log
     });
     parts = { dslr, dslts, hub };
-    const writes = { ...(opts.writes || {}), max: config.writesMax, queue: config.writesQueue };
+    const writes = {
+      ...(opts.writes || {}), max: config.writesMax, queue: config.writesQueue,
+      bodyBytes: config.writesBodyBytes, bodyTimeoutMs: config.writesBodyTimeoutMs
+    };
     handler = createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log, writes });
     state = 'ready';
     log.info(`[document] слушаю http://${host}:${actualPort} · готов за ${Date.now() - t0} мс · движок ${ENGINE_VERSION} · хранилище ${storage.kind} · экземпляр ${instanceId}${staticDir ? ` · статика ${path.resolve(staticDir)}` : ''}`);

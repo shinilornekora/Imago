@@ -170,6 +170,119 @@ test('sync r27 (I4): onProject — сводка из hello и из рассыл�
   await a.sync.close();
 });
 
+test('sync r28 (I4): рассылка project разбирается в любой момент после hello — во время догона, после gone, при правке в полёте, на новом сокете', async () => {
+  const doc0 = seedDoc();
+  const h = harness();
+  let release = null;
+  h.fetch = (u) => {
+    assert.match(u.pathname, /\/ops$/);
+    return new Promise((r) => { release = r; });
+  };
+  let opened = 0;
+  h.onOpen = (ws) => {
+    opened += 1;
+    ws.in({ type: 'hello', head_seq: 0, engine: E, epoch: 'e1', tip: '', gone: false, project: { id: 'p1', name: 'Имя 0', kind: 'design' } });
+  };
+  const a = replica(h, { storage: await legacyJournal({ seq: 0, doc: doc0, epoch: 'e1' }) });
+  await a.sync.open();
+  await until(() => a.log.projects.length === 1, 'сводка из hello');
+  const ws = h.sockets[0];
+  const names = () => a.log.projects.map((p) => p.name);
+
+  // 1. правка в полёте (подтверждения ещё нет)
+  a.sync.commit([ops.set('r1', 'name', 'в полёте')]);
+  await until(() => h.sent.some((m) => m.type === 'tx'), 'правка ушла');
+  ws.in({ type: 'project', project: { id: 'p1', name: 'Имя 1' } });
+  assert.deepEqual(names(), ['Имя 0', 'Имя 1'], 'при правке в полёте');
+  const mineTx = h.sent.find((m) => m.type === 'tx').tx;
+  ws.in({ type: 'tx', tx: { ...mineTx, seq: 1, dropped: [] } });
+  await until(() => a.sync.pending.length === 0, 'подтверждение');
+
+  // 2. во время догона по HTTP (живые транзакции копятся в буфер — project нет)
+  ws.in({ type: 'tx', tx: { tx_id: 'tx_f', seq: 3, ops: [ops.set('ab', 'fill', '#000000')], client: 'Z', dropped: [] } });
+  await until(() => !!release, 'догон начался');
+  ws.in({ type: 'project', project: { id: 'p1', name: 'Имя 2', kind: 'design', head_seq: 3 } });
+  assert.deepEqual(names(), ['Имя 0', 'Имя 1', 'Имя 2'], 'во время догона — сразу, не после');
+  release({ status: 200, body: { head_seq: 3, epoch: 'e1', tip: '', more: false, txs: [
+    { tx_id: 'tx_e', seq: 2, ops: [ops.set('r1', 'name', 'чужое')], client: 'Z', dropped: [] },
+    { tx_id: 'tx_f', seq: 3, ops: [ops.set('ab', 'fill', '#000000')], client: 'Z', dropped: [] },
+  ] } });
+  await until(() => a.sync.confirmed.seq === 3, 'догон закончился');
+
+  // 3. сразу после gone (снимок принят)
+  ws.in({ type: 'gone', snapshot: { seq: 5, doc: doc0, chain: 'c5', tombstones: { v: 2, parents: {}, seq: {} } }, head_seq: 5, epoch: 'e1', tip: 'c5' });
+  ws.in({ type: 'project', project: { id: 'p1', name: 'Имя 3' } });
+  await until(() => a.sync.confirmed.seq === 5, 'снимок');
+  assert.equal(names().at(-1), 'Имя 3', 'после gone');
+
+  // 4. разрыв и новый сокет: hello с прежним именем, потом рассылка
+  ws.close(1006);
+  await until(() => opened === 2 && a.sync.status.online, 'переподключились');
+  h.sockets.at(-1).in({ type: 'project', project: { id: 'p1', name: 'Имя 4' } });
+  assert.equal(names().at(-1), 'Имя 4', 'на новом сокете');
+  // чужой id и мусор — мимо, реплика жива
+  h.sockets.at(-1).in({ type: 'project', project: { id: 'другой', name: 'Чужой' } });
+  h.sockets.at(-1).in({ type: 'project', project: null });
+  h.sockets.at(-1).in({ type: 'project' });
+  assert.equal(names().at(-1), 'Имя 4');
+  assert.ok(!names().includes('Чужой'));
+  assert.equal(a.sync.status.online, true);
+  await a.sync.close();
+});
+
+test('sync r28: same подтверждения — ленивое и запоминаемое; верно и при предсказанной, и при другой форме; дешевле hashDoc', async () => {
+  // документ побольше, чтобы сравнить цену с hashDoc
+  let doc0 = seedDoc();
+  const many = [];
+  for (let i = 0; i < 3000; i++) many.push(ops.create(rect('n' + i, 'ab')));
+  doc0 = apply(doc0, many);
+  const h = harness();
+  h.onOpen = (ws) => ws.in({ type: 'hello', head_seq: 0, engine: E, epoch: 'e1', tip: '', gone: false });
+  const infos = [];
+  const a = replica(h, { storage: await legacyJournal({ seq: 0, doc: doc0, epoch: 'e1' }), opts: { onChange: (v, info) => { if (info.reason === 'confirmed') infos.push(info); } } });
+  await a.sync.open();
+  await until(() => a.sync.status.online, 'в сети');
+  const ws = h.sockets[0];
+  let seq = 0;
+  async function roundTrip(name, serverOps) {
+    h.sent.length = 0;
+    a.sync.commit([ops.set('r1', 'name', name)]);
+    await until(() => h.sent.some((m) => m.type === 'tx'), 'ушла ' + name);
+    const tx = h.sent.find((m) => m.type === 'tx').tx;
+    seq += 1;
+    const applied = serverOps ? serverOps(tx) : tx.ops;
+    const t0 = performance.now();
+    ws.in({ type: 'tx', tx: { ...tx, seq, ops: applied, dropped: applied.length ? [] : [{ index: 0, op: tx.ops[0], reason: 'invalid' }] } });
+    const took = performance.now() - t0;
+    await until(() => a.sync.pending.length === 0, 'подтверждена');
+    return { info: infos.at(-1), took };
+  }
+  // 1. предсказанная форма — true сразу (обычное свойство)
+  const fast = await roundTrip('A');
+  assert.equal(Object.getOwnPropertyDescriptor(fast.info, 'same').value, true);
+  // 2. форма другая, документ тот же (лишний set тем же значением) — true по сравнению
+  const eq = await roundTrip('B', (tx) => [...tx.ops, ops.set('r1', 'fill', '#cccccc')]);
+  assert.equal(typeof Object.getOwnPropertyDescriptor(eq.info, 'same').get, 'function', 'не посчитано заранее');
+  // 3. сервер отбросил правку — view вернулся к confirmed: same = false
+  const diff = await roundTrip('C', () => []);
+  assert.equal(diff.info.same, false);
+  assert.equal(a.sync.view.nodes.r1.name, 'B');
+  assert.equal({ ...diff.info }.same, false, 'перечисляемое: копия оболочки видит его');
+  // отложенное сравнение — над теми документами, что были при подтверждении (прочитано
+  // только сейчас, после ещё двух подтверждений), и запоминается
+  const later = await roundTrip('D', (tx) => [...tx.ops, ops.set('r1', 'fill', '#cccccc')]);
+  assert.equal(eq.info.same, true);
+  assert.equal(eq.info.same, true, 'запомнено');
+  assert.equal(later.info.same, true);
+  // цена подтверждения без чтения same — меньше одного hashDoc документа (было два на каждое)
+  let th = performance.now();
+  for (let i = 0; i < 3; i++) hashDoc(a.sync.view);
+  th = (performance.now() - th) / 3;
+  const slow = await roundTrip('E', (tx) => [...tx.ops, ops.set('r1', 'fill', '#cccccc')]);
+  assert.ok(slow.took < th * 4 + 20, `подтверждение ${slow.took.toFixed(1)} мс при hashDoc ${th.toFixed(1)} мс`);
+  await a.sync.close();
+});
+
 test('sync r27 (I5): после отката переигрываемая несёт base_seq полученного снимка и replay_of_epoch', async () => {
   const doc0 = seedDoc();
   const X = { tx_id: 'tx_old', base_seq: 4, ops: [ops.set('r1', 'name', 'до отката')], engine: E, client: 'A', author_kind: 'human' };

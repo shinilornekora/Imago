@@ -3,7 +3,7 @@
 Процесс «документ» из SPEC §8.1: модули **DSLR** (чтение), **DSLTS** (секвенсор — единственный
 писатель) и **Hub** (рассылка по WebSocket) в одном процессе Node 22, без фреймворков.
 Контракт — SPEC §9 (укрепление круга 23 — §9.8, круг 24 — §9.9, круг 25 — §9.10, хранилище
-круга 25 — §9.11): он нормативен и для клиента `src/sync.js`.
+круга 25 — §9.11, круг 26 — §9.12, круг 27 — §9.13): он нормативен и для клиента `src/sync.js`.
 
 ```
 server/document/
@@ -16,7 +16,8 @@ server/document/
   limits.js             все пределы и умолчания (клиент держит те же в src/sync.js LIMITS); чистка строк для jsonb
   storage/pg.js         PostgreSQL (pg.Pool с дедлайном), LISTEN/NOTIFY, раннер миграций
   storage/migrations/   NNN_имя.sql|mjs: 001 схема · 002 chain и эпоха · 003 chain старого журнала пачками ·
-                        004 traces · 005 надгробия снимка, command_id · 006 дозаполнение и CHECK chain
+                        004 traces · 005 надгробия снимка, command_id · 006 дозаполнение и CHECK chain ·
+                        007 надгробия «неизвестно» (tombstones_meta, tombstones_chain) · 008 индекс страниц проектов
   storage/memory.js     тот же интерфейс в памяти (с уведомлениями и backup/restore) — тесты и соло-режим
   storage/committed.js  форма записи журнала, chain, выжимка dropped — общие для адаптеров
 ```
@@ -43,19 +44,28 @@ DATABASE_URL=postgres://imago:imago@127.0.0.1:5432/imago node server/document/in
 | `SNAPSHOT_KEEP` | `5` | сколько последних снимков хранить; снимок seq 0 (затравка) не удаляется никогда |
 | `PRESENCE_TTL_MS` | `45000` | присутствие без вестей столько — `left` (клиент шлёт сердцебиение раз в 15 с) |
 | `WS_INFLIGHT` | `2` | необработанных транзакций на сокет; сверх — пауза чтения сокета и `error busy` (`socket_inflight`) |
-| `HTTP_WRITE_CONCURRENCY` | `8` | `POST …/tx` одновременно (семафор записи) |
-| `HTTP_WRITE_QUEUE` | `64` | `POST …/tx` в очереди семафора; сверх — `503 busy` + `Retry-After` |
+| `HTTP_WRITE_CONCURRENCY` | `8` | запись по HTTP (`POST …/tx`, `POST /api/projects`, `PATCH`) одновременно (семафор записи) |
+| `HTTP_WRITE_QUEUE` | `64` | запись по HTTP в очереди семафора; сверх — `503 busy` + `Retry-After` |
+| `WRITE_BODY_BYTES` | `67108864` | бюджет читаемых тел HTTP-записи на экземпляр, байт (64 МиБ; по заявленному `Content-Length`, без него — по пределу тела 4 МБ); сверх — `503 busy` (`body_bytes_total`), тело не читается |
+| `BODY_TIMEOUT_MS` | `30000` | тело записи не пришло за столько — `408 timeout` (`body_timeout`), соединение закрывается; от `1000`. Запрос целиком node и так обрывает через 35 с (`requestTimeout`) — больше 35000 смысла нет |
 | `QUEUE_PROJECT_BYTES` | `33554432` | очередь мьютекса проекта, байт тел транзакций (32 МиБ); пустая очередь принимает всегда |
 | `QUEUE_PROJECT_TXS` | `256` | очередь мьютекса проекта, транзакций |
 | `QUEUE_TOTAL_BYTES` | `134217728` | очереди всех проектов экземпляра, байт (128 МиБ); сверх — `503 busy` (`queue_total`) |
+| `TOMB_KEEP_SEQ` | `10000` | надгробия головы: на границе прореживания уходят удалённые раньше, чем за столько seq до неё (не делайте меньше окна переигрывания 5000) |
+| `TOMB_PRUNE_EVERY` | `500` | граница прореживания надгробий — номер головы, кратный этому |
+| `TOMB_MAX` | `50000` | надгробий в голове (и в снимке) не больше стольких — самые старые уходят |
+| `RECENT_TXS` | `500` | выжимок последних транзакций в памяти головы (идемпотентность, окно `stale`) |
+| `RECENT_BYTES` | `16777216` | те же выжимки, байт (16 МиБ) |
 | `INTERNAL_TOKEN` | — | токен `POST /api/internal/traces` (заголовок `X-Internal-Token`); не задан или `change-me` — 403 |
 | `STATIC_DIR` | — | каталог клиента (`index.html`, `app.js`, `styles.css`, `src/*.js`) — раздаётся с верными MIME, чтобы гонять без nginx: `STATIC_DIR=. node server/document/index.js` из корня репозитория |
 
 Числа пределов — целые; пустая переменная — умолчание из `limits.js`; негодная (не целое,
 меньше допустимого) — строка в лог и то же умолчание: опечатка в окружении не снимает предел.
 Опция `start()`/`launch()` (`snapshotEvery`, `snapshotKeep`, `presenceTtlMs`, `dbTimeoutMs`,
-`maxInflight`, `writes: {max, queue}`, `queueProjectBytes`, `queueProjectTxs`,
-`queueTotalBytes`) главнее окружения; итог — `svc.config`.
+`maxInflight`, `writes: {max, queue, bodyBytes, bodyTimeoutMs}`, `queueProjectBytes`,
+`queueProjectTxs`, `queueTotalBytes`, `tombKeepSeq`, `tombPruneEvery`, `tombMax`, `recentTxs`,
+`recentBytes`) главнее окружения; итог — `svc.config` (ключи `writes.*` там — `writesMax`,
+`writesQueue`, `writesBodyBytes`, `writesBodyTimeoutMs`).
 
 ### Старт, миграции, останов
 
@@ -80,8 +90,12 @@ detail:{phase:'connect'|'lock'|'migrate'|'init', migration, progress}, retry_aft
 | 004 | `traces` | — |
 | 005 | `snapshots.tombstones`, `operations.command_id`; триггеры ещё раз | миг |
 | 006 | дозаполнение без замка → короткий `SHARE ROW EXCLUSIVE` → `CHECK (chain IS NOT NULL) NOT VALID` → `VALIDATE` | писатели ждут миллисекунды |
+| 007 | `snapshots.tombstones` без `NOT NULL`, умолчание `NULL`; `tombstones_meta`, `tombstones_chain` (надгробия «неизвестно», SPEC §9.13) | миг |
+| 008 | индекс `projects_updated_id (updated_at DESC, id DESC)` — обычно `CONCURRENTLY`; если замок миграций ждёт экземпляр прежней версии — обычный `CREATE INDEX` | без замка / `SHARE` на миллисекунды |
 
-DDL ждёт замок не дольше `lock_timeout` (1 с) и повторяется (до 60 раз). Упавшая миграция
+DDL ждёт замок не дольше `lock_timeout` (1 с) и повторяется (до 60 раз). Замок миграций
+этот круг берёт опросом (`pg_try_advisory_lock`), чтобы ждущий экземпляр не держал снимок
+(иначе `CREATE INDEX CONCURRENTLY` в 008 ловил взаимную блокировку). Упавшая миграция
 откатывается и не учитывается, ошибка называет файл, процесс выходит с кодом 1; следующий
 старт продолжает с неё. `SIGTERM`/`SIGINT` (обработчики ставятся до миграций) во время
 миграций обрывают их соединение — база откатывает текущую пачку, выход 0. Останов готового

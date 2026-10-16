@@ -1,7 +1,7 @@
 # Orchestrator
 
 Процесс «агент» из SPEC §8.1: ведёт команду человека по шагам 3–13 с доски. Контракт —
-SPEC §10 (нормативен и для клиента `src/agent.js`). Node 22, `node:http`, без фреймворков и
+SPEC §10 (нормативен и для клиента `src/agent.js`; дополнения по кругам — §10.5–§10.8). Node 22, `node:http`, без фреймворков и
 без новых зависимостей. **К базе не прикасается**: стейт читает у Document service
 (`GET /api/projects/:id`, дальше `…/ops?since=`), пишет транзакцией (`POST …/tx`) с
 `author_kind:'agent'`. Движок, промпты и компилятор патча — те же `src/core.js` и
@@ -12,7 +12,7 @@ server/orchestrator/
   index.js        вход: окружение, сборка модулей, SIGTERM/SIGINT; export start(opts)
   http.js         маршруты §10.2, SSE §10.3, лимит тела 1 МБ, единое тело ошибки
   pipeline.js     шаги jev → read → library → llm/validate → write → result; очередь на проект; стоп; варианты + apply
-  jev/            «оболочка или модель»: recognizeAction/recognizeVariants из brain + узкий перенос shellIntent из app.js
+  jev/            «оболочка или модель»: словарь оболочки `src/shell.js` (shellIntent — один на app.js и JEV) + recognizeVariants из brain
   dslr/           чтение стейта: кеш {seq, doc, chain, epoch}, хвост ops?since=&tip=&epoch= по `more`, сброс при откате базы
   duil/           срез библиотек: проекты kind=library → внешний словарь в прогон brain (library)
   dslv/           пул worker_threads: прогон brain (план → патч → операции → раскладка → validate → починка)
@@ -56,8 +56,8 @@ curl -N -X POST localhost:8090/agent/command -H 'content-type: application/json'
 | `WORKER_TIMEOUT_MS` | `60000` | счётное время прогона (ожидание модели не считается) |
 | `QUEUE_MAX` | `4` | ждущих команд на проект; больше — `429 busy` |
 | `WORKER_JOBS` | `4` | заданий на воркер одновременно, пока они ждут модель (круг 27) |
-| `POOL_QUEUE_MAX` | `32` | заданий, ждущих свободный воркер; больше — `error busy` |
-| `POOL_QUEUE_WAIT_MS` | `30000` | сколько задание ждёт воркер; дольше — `error busy` |
+| `POOL_QUEUE_MAX` | `32` | заданий, ждущих свободный воркер; больше — `error busy` (429, `retry_after: 5`) |
+| `POOL_QUEUE_WAIT_MS` | `30000` | сколько задание ждёт воркер; дольше — `error busy` (`retry_after: 10`) |
 
 Адрес модели собирается через `URL`: суффикс (`chat/completions`, `models`, `v1/messages`)
 дописывается к пути, query базы идёт после него (`…/v1/chat/completions?api-version=…`).

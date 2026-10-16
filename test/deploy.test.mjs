@@ -125,6 +125,35 @@ test('nginx: /api/internal/ снаружи закрыт — 403 JSON, раньш
   assert.match(locationBlock(nginxConf, '/api/'), /proxy_set_header\s+X-Internal-Token\s+""/);
 });
 
+test('nginx: записи на /api/ — client_body_timeout и limit_conn на адрес, сверх — 429 JSON busy (круг 27)', () => {
+  const server = nginxConf.slice(nginxConf.indexOf('server {'));
+  const timeout = seconds(directive(server.slice(0, server.indexOf('location')), 'client_body_timeout'));
+  assert.ok(timeout > 0 && timeout <= 30, `client_body_timeout ${timeout} с — не дольше срока тела Document service (30 с)`);
+  // ключ зоны — адрес только у записей: чтения (GET/HEAD) пустым ключом не считаются
+  const zone = /limit_conn_zone\s+\$(\w+)\s+zone=(\w+):\d+m;/.exec(nginxConf);
+  assert.ok(zone, 'нет limit_conn_zone');
+  const map = new RegExp(`map\\s+\\$request_method\\s+\\$${zone[1]}\\s*\\{([^}]*)\\}`).exec(nginxConf);
+  assert.ok(map, `ключ ${zone[1]} — не по методу запроса`);
+  assert.match(map[1], /GET\s+"";/);
+  assert.match(map[1], /HEAD\s+"";/);
+  assert.match(map[1], /default\s+\$binary_remote_addr;/);
+  const api = locationBlock(nginxConf, '/api/');
+  const lim = new RegExp(`limit_conn\\s+${zone[2]}\\s+(\\d+);`).exec(api);
+  assert.ok(lim, '/api/: нет limit_conn');
+  assert.ok(Number(lim[1]) >= 8 && Number(lim[1]) <= 64, `предел ${lim[1]} — неразумный`);
+  assert.equal(directive(api, 'limit_conn_status'), '429');
+  const busy = /error_page\s+429\s*=\s*(@\w+)/.exec(api);
+  assert.ok(busy, '/api/: 429 отдаст HTML');
+  const named = locationBlock(nginxConf, busy[1]);
+  const r = returnJson(named);
+  assert.equal(r.status, 429);
+  assert.equal(r.body.code, 'busy');
+  assert.equal(r.body.retryable, true);
+  assert.match(named, /add_header\s+Retry-After\s+\d+\s+always/);
+  // /ws предел записей не задевает (апгрейд — GET, и сокет долгий)
+  assert.doesNotMatch(locationBlock(nginxConf, '/ws'), /limit_conn\s/);
+});
+
 test('nginx: ошибки 413/502/503/504 — единый JSON, апстрим назван и помечен заголовком', () => {
   assert.ok(!/proxy_intercept_errors\s+on/.test(nginxConf), 'свои ошибки сервисов nginx подменять не должен');
   assert.match(nginxConf, /error_page\s+413\s*=\s*@too_large/);
@@ -360,8 +389,11 @@ function testConfig(dir, port, docPort, orchPort) {
     .replace(/listen\s+80;/, `listen 127.0.0.1:${port};`)
     .replace(/root\s+\/usr\/share\/nginx\/html;/, `root ${join(dir, 'html')};`)
     .replace('http://document:8080', `http://127.0.0.1:${docPort}`)
-    .replace('http://orchestrator:8090', `http://127.0.0.1:${orchPort}`);
+    .replace('http://orchestrator:8090', `http://127.0.0.1:${orchPort}`)
+    // срок тела — 1 с вместо 30, чтобы проверить его в прогоне
+    .replace(/client_body_timeout\s+\d+s;/, 'client_body_timeout 1s;');
   assert.notEqual(site, nginxConf);
+  assert.match(site, /client_body_timeout 1s;/);
   writeFileSync(join(dir, 'site.conf'), site);
   const main = `
 daemon off;
@@ -369,7 +401,7 @@ master_process off;
 worker_processes 1;
 pid ${join(dir, 'nginx.pid')};
 error_log ${join(dir, 'error.log')} warn;
-events { worker_connections 64; }
+events { worker_connections 256; }
 http {
   default_type application/octet-stream;
   types { text/html html; text/javascript js; text/css css; }
@@ -505,6 +537,52 @@ test('nginx -t на настоящем конфиге и живые маршру
   const bigCmdBody = await bigCmd.json();
   assert.equal(bigCmdBody.code, 'too_large');
   assert.equal(bigCmdBody.retryable, false);
+
+  // круг 27: медленные тела записей. Капающее тело (байт раз в 200 мс) client_body_timeout не
+  // ловит — его держит limit_conn: 32 таких с адреса, 33-я запись — 429 JSON busy, чтение — идёт.
+  const limit = Number(/limit_conn\s+\w+\s+(\d+);/.exec(locationBlock(nginxConf, '/api/'))[1]);
+  const slow = [];
+  const drip = setInterval(() => { for (const x of slow) if (!x.destroyed) x.write(' '); }, 200);
+  const rawPost = (path, len) => {
+    const sock = net.connect(port, '127.0.0.1');
+    sock.on('error', () => {});
+    sock.reply = '';
+    sock.on('data', (d) => { sock.reply += d.toString(); });
+    sock.write(`POST ${path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${len}\r\n\r\n{`);
+    return sock;
+  };
+  try {
+    for (let i = 0; i < limit; i++) slow.push(rawPost('/api/projects/p/tx', 100000));
+    await new Promise((r) => setTimeout(r, 600));
+    const over = await fetch(base + '/api/projects/p/tx', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+    assert.equal(over.status, 429, `запись сверх ${limit} медленных`);
+    assert.equal(over.headers.get('retry-after'), '1');
+    const overBody = await over.json();
+    assert.equal(overBody.code, 'busy');
+    assert.equal(overBody.retryable, true);
+    const read = await fetch(base + '/api/health');
+    assert.equal(read.status, 200, 'чтение предел записей не задевает');
+    assert.ok(slow.every((x) => x.reply === ''), 'капающее тело оборвано раньше времени');
+  } finally {
+    clearInterval(drip);
+    for (const x of slow) x.destroy();
+  }
+  // тело замолчало дольше client_body_timeout (в прогоне 1 с) — nginx закрывает запрос (408),
+  // до сервиса оно не доходит; соединения капавших отпущены — запись снова проходит
+  const stalled = rawPost('/api/projects/stalled/tx', 1000);
+  const tStall = Date.now();
+  await new Promise((resolve) => { stalled.on('close', resolve); setTimeout(resolve, 8000); });
+  stalled.destroy();
+  assert.ok(Date.now() - tStall < 7000, `молчащее тело держалось ${Date.now() - tStall} мс`);
+  assert.ok(stalled.reply === '' || /^HTTP\/1\.1 408/.test(stalled.reply), stalled.reply.slice(0, 80));
+  assert.ok(!seenDoc.some((r) => r.url.includes('stalled')), 'молчащее тело дошло до Document service');
+  let again = null;
+  for (let i = 0; i < 20; i++) {
+    again = await fetch(base + '/api/projects/p/tx', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+    if (again.status !== 429) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(again.status, 200, 'после медленных запись снова проходит');
 
   // апстрим лежит — JSON с upstream и X-Imago-Upstream: down
   await orch.close();

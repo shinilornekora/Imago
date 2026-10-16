@@ -180,11 +180,16 @@ export function serverStageRec(data = {}) {
 
 /**
  * Событие `queued` словами. `ahead` — имена тех, чья команда впереди (из присутствия:
- * у них `busy`/`queued`, §9.9), если оболочка их знает.
+ * у них `busy`/`queued`, §9.9), если оболочка их знает. `scope` (круг 27, §10.8):
+ * `'project'` — очередь проекта (по одной команде на проект), `'workers'` — команда
+ * принята и ждёт свободного исполнителя (воркера) агента: очередь проекта ни при чём,
+ * впереди — команды любых проектов, их имён оболочка не знает.
  * @param {number} position
  * @param {string[]} [ahead]
+ * @param {'project'|'workers'} [scope]
  */
-export function queuedLabel(position, ahead = []) {
+export function queuedLabel(position, ahead = [], scope = 'project') {
+  if (scope === 'workers') return 'Ждёт свободного исполнителя агента…';
   const n = Number(position);
   const names = (Array.isArray(ahead) ? ahead : []).map((a) => cutText(cleanText(a), 40, { ellipsis: true })).filter(Boolean);
   const whose = names.length
@@ -719,6 +724,8 @@ export function normalizeResult(r) {
     dropped: Array.isArray(x.dropped) ? x.dropped : [],
     droppedCount: count(x.dropped),
     summary: String(x.summary || '').trim(),
+    // круг 27: что сделано, словами по операциям (= tx.title записи) — для «Истории»
+    title: typeof x.title === 'string' ? x.title.trim() : '',
     warnings: Array.isArray(x.warnings) ? x.warnings.map((w) => String(w || '')).filter(Boolean) : [],
     select: Array.isArray(x.select) ? x.select.filter((id) => typeof id === 'string') : [],
   };

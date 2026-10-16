@@ -314,6 +314,28 @@ function sameDoc(a, b) {
   return true;
 }
 
+/**
+ * Сведения подтверждения для onChange. `same` («view не изменился») — ленивое и
+ * запоминаемое (круг 28): предсказанная форма — `true` сразу; иначе структурное
+ * сравнение `sameDoc` считается при первом чтении поля, а не на каждом подтверждении.
+ * Документы неизменяемы (черновики движка запечатаны), поэтому отложенное сравнение
+ * видит те же prev/cur, что в момент подтверждения.
+ */
+function confirmedInfo(tx, inverse, fast, prev, cur) {
+  const info = { reason: 'confirmed', tx, inverse };
+  if (fast) { info.same = true; return info; }
+  let same;
+  Object.defineProperty(info, 'same', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      if (same === undefined) same = sameDoc(prev, cur);
+      return same;
+    },
+  });
+  return info;
+}
+
 /** Сколько операций отброшено: запись `{more: N}` прибавляет N. */
 function droppedCount(list) {
   let n = 0;
@@ -1054,7 +1076,7 @@ export function createSync(o) {
       let inverse = [];
       try { inverse = core.invertOps(before, c.ops); } catch (e) { report('invert', e); }
       if (Array.isArray(c.dropped) && c.dropped.length) call(o.onDropped, explainDropped(c, own));
-      call(o.onChange, view, { reason: 'confirmed', tx: c, inverse, same: fast || sameDoc(prevView, view) });
+      call(o.onChange, view, confirmedInfo(c, inverse, fast, prevView, view));
       sendNext();
       return;
     }
