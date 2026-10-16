@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createDoc, applyOps, hashDoc, artboards, ops, uid, ENGINE_VERSION } from '../../src/core.js';
+import { createDoc, applyOps, hashDoc, artboards, ops, uid, libraryNode, ENGINE_VERSION } from '../../src/core.js';
 import { backends, startFor, api, connect, wsUrl } from './helpers.mjs';
 
 const E = ENGINE_VERSION;
@@ -94,7 +94,9 @@ for (const backend of list) {
       assert.ok(doc.nodes[doc.root], 'корень среди узлов');
       assert.ok(doc.tokens && doc.tokens.colors && Array.isArray(doc.tokens.spacing), 'снимок несёт токены целиком');
       assert.equal(artboards(doc).length, 0, 'новый проект пуст — без демо-досок');
-      assert.equal(Object.keys(doc.nodes).length, 1, 'только корень-страница');
+      // круг 27 (I7): пустой проект — в текущем формате: корень-страница и страница-библиотека
+      assert.equal(Object.keys(doc.nodes).length, 2, 'корень-страница и библиотека');
+      assert.ok(libraryNode(doc), 'библиотека на месте — миграции оболочке делать нечего');
       const demo = await http.post('/api/projects', { name: 'Демо', demo: true });
       assert.equal(demo.status, 201);
       const demoDoc = (await http.get('/api/projects/' + demo.body.id)).body.snapshot.doc;

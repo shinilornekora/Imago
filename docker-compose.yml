@@ -97,11 +97,15 @@ services:
       timeout: 3s
       retries: 10
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+    # Редактор поднимается и без агента: правки руками и совместная работа живут на document,
+    # а orchestrator может стартовать позже или лежать (модель, ключи) — тогда в шапке
+    # «агент недоступен». Поэтому ждём только, что его контейнер запущен, а не здоров;
+    # nginx находит его по имени при каждом запросе (resolver), а не при старте.
     depends_on:
       document:
         condition: service_healthy
       orchestrator:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
 volumes:

@@ -6101,3 +6101,139 @@ test('круг 25: результат runCommand без \u0000 и одиночн
   walk(res);
   assert.ok(wellFormed(res.plan.title) && [...res.plan.title].length <= 120);
 });
+
+/* ── Круг 27 ─────────────────────────────────────────────────────────────── */
+
+const core27 = await import('../src/core.js');
+const { asksNewScreen, checkOutcome, describeChange } = await import('../src/brain.js');
+const PLAN_EDIT27 = { intent: 'edit', title: 'Укрупнил заголовок', summary: 'Ставлю стиль h1.', steps: ['Поставить h1'], targets: ['Заголовок экрана'] };
+const demo27 = () => core27.createDoc();
+const byName27 = (doc, name) => Object.values(doc.nodes).find((n) => n.name === name);
+
+test('круг27 п.4: «h1» в документе без h1 → крупнейший стиль, а не «текст»; заголовок стал крупнее', async () => {
+  const doc = demo27();
+  const title = byName27(doc, 'Заголовок экрана');
+  const patch = { edits: [{ op: 'set', target: 'Заголовок экрана', path: 'style', value: 'h1' }] };
+  const res = await runCommand({
+    doc, selection: [], utterance: 'сделай заголовок крупнее', engine: core27,
+    provider: makeFakeProvider({ plan: PLAN_EDIT27, patch: [patch, patch] }),
+  });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  const op = res.ops.find((o) => o.id === title.id);
+  assert.ok(op, JSON.stringify(res.ops));
+  const token = typeof op.value === 'object' ? op.value.token : op.value;
+  assert.equal(token, 'display', 'крупный — крупнейший стиль документа');
+  assert.ok(!res.warnings.some((w) => /^Проверка макета: просили крупнее/.test(w)), res.warnings.join(' | '));
+  assert.ok(res.warnings.some((w) => /«h1».*понял как «крупный»/.test(w)), res.warnings.join(' | '));
+  // подпись для истории — что сделано, словами инспектора, без «h1»
+  assert.match(res.changeSummary, /Стиль текста «Заголовок экрана»: «заголовок» → «крупный»/);
+  assert.doesNotMatch(res.changeSummary, /h1|Ставлю/);
+});
+
+test('круг27 п.4: смысловые имена стилей — h2/h3/caption/mono/24px; незнакомое в правке не подменяется «текстом»', () => {
+  const doc = demo27();
+  const id = byName27(doc, 'Заголовок экрана').id;
+  const ctx = { id };
+  const pick = (v) => coerceValue(v, 'style', doc, () => {}, ctx);
+  assert.equal(pick('h1'), 'display');
+  assert.equal(pick('Heading-1'), 'display');
+  assert.equal(pick('h2'), 'title');
+  assert.equal(pick('h3'), 'heading');
+  assert.equal(pick('subtitle'), 'heading');
+  assert.equal(pick('small'), 'caption');
+  assert.equal(pick('paragraph'), 'body');
+  assert.equal(pick('code'), 'mono');
+  assert.equal(pick('крупный'), 'display');
+  assert.equal(pick(33), 'display', 'кегль — ближайший по размеру');
+  assert.deepEqual(pick({ token: 'h1', fontWeight: 700 }), { token: 'display', fontWeight: 700 });
+  assert.equal(coerceValue('h1', 'style.token', doc, () => {}, ctx), 'display');
+  const warns = [];
+  assert.equal(coerceValue('brandFancy', 'style', doc, (w) => warns.push(w), ctx), undefined, 'правка пропущена');
+  assert.match(warns.join(' | '), /стиля «brandFancy» в документе нет.*правка пропущена, стиль остался «заголовок»/);
+});
+
+test('круг27 п.4: незнакомый стиль у стилизованного узла — правка пропущена, а не «текст»; успеха нет', async () => {
+  const doc = demo27();
+  const patch = { edits: [{ op: 'set', target: 'Заголовок экрана', path: 'style', value: 'brandFancy' }] };
+  const res = await runCommand({
+    doc, selection: [], utterance: 'сделай заголовок крупнее', engine: core27,
+    provider: makeFakeProvider({ plan: PLAN_EDIT27, patch: [patch, patch] }),
+  });
+  assert.ok(!res.ops.some((o) => o.op === 'set' && (o.value === 'body' || (o.value && o.value.token === 'body'))), JSON.stringify(res.ops));
+  assert.ok(!res.ops.length || res.error, 'применять нечего');
+  assert.ok(res.warnings.some((w) => /правка пропущена/.test(w)) || res.error, res.warnings.join(' | '));
+});
+
+test('круг27 п.4: «крупнее», а стиль поставлен мельче — замечание «Проверка макета», а не успех', async () => {
+  const doc = demo27();
+  const patch = { edits: [{ op: 'set', target: 'Заголовок экрана', path: 'style', value: 'caption' }] };
+  const res = await runCommand({
+    doc, selection: [], utterance: 'сделай заголовок крупнее', engine: core27,
+    provider: makeFakeProvider({ plan: PLAN_EDIT27, patch: [patch, patch] }),
+  });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.ok(res.warnings.some((w) => /^Проверка макета: просили крупнее, а «Заголовок экрана» стал мельче: 24 → 13 px/.test(w)), res.warnings.join(' | '));
+  // и прямой вызов: тот же размер — тоже замечание
+  const t = byName27(doc, 'Заголовок экрана');
+  const after = core27.applyOps(doc, [{ op: 'set', id: t.id, path: 'style', value: 'title' }]).doc;
+  const same = checkOutcome({ doc, after, ops: [{ op: 'set', id: t.id, path: 'style', value: 'title' }], utterance: 'сделай заголовок крупнее' });
+  assert.match(same.join(' | '), /не изменился \(24 px\)/);
+  assert.deepEqual(checkOutcome({ doc, after, ops: [], utterance: 'сделай заголовок крупнее' }), []);
+});
+
+test('круг27 п.5: «новой доской», «на новом экране», «отдельной доской» — просьба о новом экране', () => {
+  for (const s of ['собери экран тарифов новой доской', 'сделай это на новом экране', 'новый экран', 'заведи новую доску',
+    'положи отдельной доской', 'ещё одним экраном', 'на отдельном макете', 'собери экран тарифов', 'создай доску настроек']) {
+    assert.equal(asksNewScreen(s), true, s);
+  }
+  for (const s of ['собери в этом экране отзывы', 'добавь отзывы', 'сделай заголовок крупнее', 'собери здесь экран кнопок']) {
+    assert.equal(asksNewScreen(s), false, s);
+  }
+});
+
+test('круг27 п.5: второй «собери экран …» при выделении агента — новой доской, а не внутрь первого', async () => {
+  const doc = demo27();
+  const first = doc.nodes[doc.root].children[0];
+  const run = (selectionBy) => runCommand({
+    doc, selection: [first], selectionBy, utterance: 'собери экран тарифов', engine: core27, activeArtboardId: first,
+    provider: makeFakeProvider({ plan: PLAN_CREATE, tree: [TREE_OK, TREE_OK] }),
+  });
+  const byAgent = await run('agent');
+  assert.equal(byAgent.error, undefined, JSON.stringify(byAgent.error));
+  const top = byAgent.ops.find((o) => o.op === 'create');
+  assert.equal(top.node.parent, doc.root, 'новой доской на холсте');
+  assert.match(byAgent.changeSummary, /новой доской/);
+  // выделение человека — его решение: внутрь, но со словами об этом
+  const byHuman = await run('human');
+  const top2 = byHuman.ops.find((o) => o.op === 'create');
+  assert.equal(top2.node.parent, first);
+  assert.ok(byHuman.warnings.some((w) => /Собираю внутри выделенного/.test(w)), byHuman.warnings.join(' | '));
+  // а явное «новой доской» перебивает и выделение человека
+  const said = await runCommand({
+    doc, selection: [first], selectionBy: 'human', utterance: 'собери экран тарифов новой доской', engine: core27,
+    provider: makeFakeProvider({ plan: PLAN_CREATE, tree: [TREE_OK, TREE_OK] }),
+  });
+  assert.equal(said.ops.find((o) => o.op === 'create').node.parent, doc.root);
+});
+
+test('круг27 п.5: размещение «новый экран», а результат лёг внутрь — замечание', () => {
+  const doc = demo27();
+  const first = doc.nodes[doc.root].children[0];
+  const ops = [{ op: 'create', node: { id: 'f_x1', type: 'frame', name: 'Экран тарифов', parent: first } }];
+  const w = checkOutcome({ doc, after: doc, ops, placement: { asArtboard: true } });
+  assert.match(w.join(' | '), /^Проверка макета: просили отдельную доску, а «Экран тарифов» лёг внутрь «Маршрут дня»/);
+  assert.deepEqual(checkOutcome({ doc, after: doc, ops: [{ ...ops[0], node: { ...ops[0].node, parent: doc.root } }], placement: { asArtboard: true } }), []);
+});
+
+test('круг27 п.6: describeChange — что сделано словами', () => {
+  const doc = demo27();
+  const t = byName27(doc, 'Заголовок экрана');
+  const d = byName27(doc, 'Дата');
+  assert.equal(describeChange([], doc), '');
+  assert.equal(describeChange([{ op: 'remove', id: d.id }], doc), 'Удалил «Дата»');
+  const two = describeChange([
+    { op: 'set', id: t.id, path: 'style', value: 'display' },
+    { op: 'create', node: { id: 't_new', type: 'text', name: 'Подзаголовок', parent: t.parent } },
+  ], doc, null, core27);
+  assert.match(two, /^Добавил «Подзаголовок» в «.+»; стиль текста «Заголовок экрана»: «заголовок» → «крупный»$/);
+});

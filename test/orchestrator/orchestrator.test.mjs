@@ -58,7 +58,9 @@ test('команда для модели: транзакция агента в �
   assert.equal(tx.client, 'c_tab1');
   assert.equal(tx.base_seq, 0);
   assert.equal(tx.engine, ENGINE_VERSION);
-  assert.equal(tx.title, PLAN_CREATE.title);
+  // круг 27: подпись записи — что сделано (по операциям), а не заголовок плана модели
+  assert.equal(tx.title, 'Добавил «Экран тарифов» новой доской');
+  assert.equal(result.title, tx.title);
   assert.ok(tx.ops.some((o) => o.op === 'create' && o.node.characters === 'Выберите тариф'));
   // id созданных узлов — глобальные (core.uid), ссылки на них переписаны согласованно
   const creates = tx.ops.filter((o) => o.op === 'create');
@@ -142,7 +144,8 @@ test('очередь проекта: две команды по одной, вт
   await waitFor(() => llm.completions().length === 1);
   const b = commandStream(orch.url, { command_id: cid('b'), project: p.id, text: 'собери экран тарифов' });
   const queued = await b.until((e) => e.event === 'queued');
-  assert.deepEqual(queued.data, { position: 1 });
+  // круг 27: scope — чья очередь: проекта (команды по одной) или пула воркеров
+  assert.deepEqual(queued.data, { position: 1, scope: 'project' });
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(llm.completions().length, 1, 'вторая не дошла до модели, пока идёт первая');
 

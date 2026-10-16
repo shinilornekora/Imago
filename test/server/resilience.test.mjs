@@ -551,3 +551,105 @@ describe('находки прохода по server/document', () => {
     await fast.close();
   });
 });
+
+/* -------------------- соединение слушателя и пул под чтением снимков (круг 27) -------------------- */
+
+describe('соединение слушателя и пул · pg (круг 27)', { skip: pgUp ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
+  it('параллельные publish и пинг на соединении слушателя — по очереди: нет предупреждения node-pg «already executing», слушатель жив', async () => {
+    // предупреждение node-pg — раз на процесс (util.deprecate): проверяем в отдельном процессе
+    const { spawn } = await import('node:child_process');
+    const pgUrl = new URL('../../server/document/storage/pg.js', import.meta.url).href;
+    const code = `
+      import { createPgStorage } from ${JSON.stringify(pgUrl)};
+      const warnings = [];
+      process.on('warning', (w) => warnings.push(String(w && w.message)));
+      const s = createPgStorage({ connectionString: process.env.U, listenPingMs: 3, log: { info() {}, warn() {} } });
+      await s.init();
+      let got = 0, resync = 0;
+      s.onNotify((m) => { if (m.k === 'presence') got++; if (m.k === 'resync') resync++; });
+      let sent = 0;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 600) {
+        for (let i = 0; i < 20; i++) if (s.publish({ k: 'presence', p: 'x', i: 'i', c: 'c' + sent })) sent++;
+        await new Promise((r) => setTimeout(r, 1));
+      }
+      await new Promise((r) => setTimeout(r, 300));
+      const listening = s.listening;
+      await s.close();
+      await new Promise((r) => setImmediate(r));
+      console.log(JSON.stringify({ warnings, sent, got, resync, listening }));
+    `;
+    const out = await new Promise((resolve, reject) => {
+      const env = { ...process.env, U: DB_URL };
+      delete env.NODE_OPTIONS;
+      const ch = spawn(process.execPath, ['--input-type=module', '-e', code], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let so = '';
+      let se = '';
+      ch.stdout.on('data', (d) => { so += d; });
+      ch.stderr.on('data', (d) => { se += d; });
+      ch.on('error', reject);
+      ch.on('exit', (c) => (c === 0 ? resolve(JSON.parse(so.trim().split('\n').pop())) : reject(new Error('процесс: ' + c + ' ' + se))));
+    });
+    assert.deepEqual(out.warnings.filter((w) => /already executing/.test(w)), [], 'запрос поверх выполняющегося');
+    assert.ok(out.sent > 100, 'отправлено ' + out.sent);
+    assert.ok(out.got >= out.sent * 0.9, `дошло ${out.got} из ${out.sent}`);
+    assert.equal(out.resync, 0, 'слушатель не переподключался (пинг не ложно «мёртв»)');
+    assert.equal(out.listening, true);
+  });
+
+  it('шторм чтений большого снимка не выедает пул: запись транзакций идёт (без «timeout exceeded when trying to connect»)', async () => {
+    const { pgStorage } = await import('./helpers.mjs');
+    const s = pgStorage({ max: 10, connectionTimeoutMillis: 1500, listen: false });
+    await s.init();
+    try {
+      // проект с документом ~6 МБ
+      const nodes = {};
+      for (let i = 0; i < 6000; i++) nodes['n' + i] = { id: 'n' + i, type: 'text', characters: 'x'.repeat(1000) };
+      const big = await s.createProject({ name: 'большой', kind: 'design', doc: { root: 'n0', nodes }, engine: E });
+      const small = await s.createProject({ name: 'малый', kind: 'design', doc: core.createDoc('empty'), engine: E });
+      const t1 = Date.now();
+      await s.latestSnapshot(big.id);
+      const one = Date.now() - t1;
+      let maxActive = 0;
+      const reads = Promise.all(Array.from({ length: 60 }, () => s.latestSnapshot(big.id).then((x) => {
+        maxActive = Math.max(maxActive, s.snapshotReads.active);
+        return x ? 'ok' : 'null';
+      }, (e) => e.code || e.message)));
+      await delay(100);
+      const errors = [];
+      const lat = [];
+      for (let i = 0; i < 10; i++) {
+        const t = Date.now();
+        try {
+          const r = await s.commitTx(small.id, tx(i, []));
+          assert.equal(r.status, 'committed');
+        } catch (e) {
+          errors.push(e.message);
+        }
+        lat.push(Date.now() - t);
+        assert.ok(s.snapshotReads.active <= s.snapshotReads.max);
+      }
+      const rs = await reads;
+      assert.deepEqual(errors, [], 'запись во время шторма');
+      assert.ok(Math.max(...lat) < 1500, `запись не ждёт соединения дольше connectionTimeoutMillis: ${lat.join(',')} (одно чтение ${one} мс)`);
+      assert.deepEqual([...new Set(rs)], ['ok'], 'все чтения дождались места: ' + [...new Set(rs)].join(','));
+      assert.ok(maxActive <= 4, 'одновременно не больше предела: ' + maxActive);
+      // предел и очередь: сверх очереди — 503 busy сразу
+      const tiny = pgStorage({ max: 10, listen: false, snapshotReads: 1, snapshotReadQueue: 0 });
+      await tiny.init();
+      try {
+        const [a, b] = await Promise.allSettled([tiny.latestSnapshot(big.id), tiny.latestSnapshot(big.id)]);
+        assert.equal(a.status, 'fulfilled');
+        assert.equal(b.status, 'rejected');
+        assert.equal(b.reason.status, 503);
+        assert.equal(b.reason.code, 'busy');
+        assert.equal(b.reason.detail.cause, 'snapshot_reads');
+        assert.ok((await tiny.latestSnapshotMeta(big.id)).seq === 0, 'лёгкое чтение — без предела');
+      } finally {
+        await tiny.close();
+      }
+    } finally {
+      await s.close();
+    }
+  });
+});

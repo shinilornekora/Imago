@@ -198,6 +198,9 @@ test('останов с командой в работе: прерывается
   await s.done();
   const err = s.events.find((e) => e.event === 'error');
   assert.ok(err, JSON.stringify(s.events.map((e) => e.event)));
-  assert.equal(err.data.code, 'cancelled');
+  // круг 27 (I6): прервал останов процесса, а не человек — shutting_down, повторяемо
+  assert.equal(err.data.code, 'shutting_down');
+  assert.equal(err.data.retryable, true);
+  assert.ok(err.data.retry_after > 0);
   assert.equal(limits.SHUTDOWN_GRACE_MS + limits.SHUTDOWN_ABORT_WAIT_MS + limits.SHUTDOWN_FLUSH_MS <= limits.SHUTDOWN_HARD_MS, true);
 });

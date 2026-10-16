@@ -4061,15 +4061,114 @@ function normColor(raw, doc, warn, what) {
   return undefined;
 }
 
-function normStyle(raw, doc, warn, what) {
+/**
+ * Круг 27: имена стилей, которых в документе нет, но смысл которых ясен — «h1», «display»,
+ * «hero», «caption», «small», «mono»… Модель пишет так по привычке к вебу; раньше всё
+ * незнакомое молча превращалось в «текст» (body), и «сделай заголовок крупнее» с ответом
+ * `h1` ставило заголовку ОБЫЧНЫЙ текст: заголовок уменьшался, а агент рапортовал успех.
+ * rank — место среди заголовочных стилей документа по кеглю (0 — крупнейший).
+ */
+const TYPE_ALIASES = [
+  [/^(h0|h1|display\w*|hero|headline\w*|jumbo|huge|giant|x{1,3}l|[2-9]xl|large|big|bigger|title1|heading1|крупн\p{L}*|огромн\p{L}*|больш\p{L}*)$/iu, { rank: 0 }],
+  [/^(h2|title\w*|heading2|header|заголов\p{L}*)$/iu, { rank: 1 }],
+  [/^(h[3-6]|heading\w*|subheading|subtitle|subhead|section\w*|lead|подзаголов\p{L}*)$/iu, { rank: 2 }],
+  [/^(body\w*|text|p|paragraph|regular|normal|default|base|md|medium|основн\p{L}*|текст|обычн\p{L}*)$/iu, { kind: 'body' }],
+  [/^(caption\w*|small|smaller|sm|xs|tiny|footnote|note|label|meta|hint|overline|micro|fine|подпис\p{L}*|мелк\p{L}*|сноск\p{L}*)$/iu, { kind: 'small' }],
+  [/^(mono\w*|code|monospace|моноширин\p{L}*)$/iu, { kind: 'mono' }],
+];
+
+/** Кегль токена типографики (или undefined). */
+function typeSize(types, name) {
+  const t = types && types[name];
+  const n = t && typeof t === 'object' ? Number(t.fontSize) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+const isMonoType = (types, name) => /mono|code/i.test(name) || /mono/i.test(String((types[name] && types[name].font) || ''));
+
+/** Обычный текст документа: по имени, иначе — первый токен. */
+function bodyTypeName(names) {
+  return ['body', 'text', 'base', 'p', 'default', 'regular'].find((k) => names.includes(k)) || names[0];
+}
+
+/**
+ * Незнакомое имя стиля → ближайший по смыслу токен документа (или null). Заголовочные
+ * ранги берутся среди стилей КРУПНЕЕ обычного текста, по убыванию кегля: «h1» — крупнейший
+ * в документе, «h2» — следующий; в документе без заголовков — крупнейший из всех.
+ */
+function typeAlias(types, raw) {
+  const names = Object.keys(types || {});
+  if (!names.length) return null;
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return null;
+  // русское слово инспектора («крупный», «подпись») — это и есть токен
+  const ru = Object.keys(TYPE_TOKEN_RU).find((k) => names.includes(k) && TYPE_TOKEN_RU[k] === s.toLowerCase());
+  if (ru) return ru;
+  const plain = names.filter((k) => !isMonoType(types, k));
+  const bySize = (list) => list
+    .filter((k) => typeSize(types, k) !== undefined)
+    .sort((a, b) => typeSize(types, b) - typeSize(types, a));
+  // «24px», «24» — кегль: ближайший по размеру стиль
+  const px = /^\d+(?:[.,]\d+)?\s*(px|пт|pt)?$/i.test(s) ? Number(s.replace(',', '.').replace(/[^\d.]/g, '')) : NaN;
+  if (Number.isFinite(px) && px > 0) {
+    const sized = bySize(plain.length ? plain : names);
+    if (!sized.length) return null;
+    return sized.reduce((best, k) => (Math.abs(typeSize(types, k) - px) < Math.abs(typeSize(types, best) - px) ? k : best), sized[0]);
+  }
+  const key = s.replace(/[\s_-]+/g, '');
+  const hit = TYPE_ALIASES.find(([re]) => re.test(key));
+  if (!hit) return null;
+  const want = hit[1];
+  const body = bodyTypeName(plain.length ? plain : names);
+  if (want.kind === 'body') return body || null;
+  if (want.kind === 'mono') return names.find((k) => isMonoType(types, k)) || null;
+  const sized = bySize(plain);
+  if (!sized.length) return null;
+  if (want.kind === 'small') return sized[sized.length - 1];
+  const bodySize = typeSize(types, body);
+  const heads = bodySize === undefined ? sized : sized.filter((k) => typeSize(types, k) > bodySize);
+  const list = heads.length ? heads : [sized[0]];
+  return list[Math.min(want.rank, list.length - 1)];
+}
+
+/**
+ * Стиль текста из ответа модели → токен документа.
+ * @param {{mode?: 'create'|'edit', cur?: any}} [opts] mode 'edit' — правка существующего узла
+ *   (круг 27): незнакомый и непереводимый стиль НЕ подменяется обычным текстом — правка
+ *   пропускается с объяснением (undefined), стиль узла остаётся прежним. В создании узла
+ *   (mode 'create') подстановка обычного текста осталась: узлу нужен хоть какой-то стиль.
+ */
+function normStyle(raw, doc, warn, what, opts = {}) {
   const types = (doc && doc.tokens && doc.tokens.type) || {};
   const names = Object.keys(types);
-  if (raw && typeof raw === 'object') return raw;
+  const edit = opts.mode === 'edit';
+  if (raw && typeof raw === 'object') {
+    // {token:"h1", fontWeight:700}: токен — по тем же правилам, свои поправки остаются
+    if (raw.token === undefined || raw.token === null || raw.token === '') return raw;
+    const token = normStyle(String(raw.token), doc, warn, what, opts);
+    if (token === undefined) return undefined;
+    return token === raw.token ? raw : { ...raw, token };
+  }
   const s = String(raw == null ? '' : raw).trim();
   if (s && Object.prototype.hasOwnProperty.call(types, s)) return s;
   const ci = names.find((k) => k.toLowerCase() === s.toLowerCase());
   if (ci) return ci;
-  const fallback = ['body', 'text', 'base', 'p', 'default'].find((k) => names.includes(k)) || names[0];
+  const alias = typeAlias(types, s);
+  if (alias) {
+    // в правке об этом стоит сказать: человек увидит в истории «крупный», а не «h1»
+    if (edit) warn(`${what}: стиля «${s}» в документе нет — понял как «${ruToken('type', alias)}»`);
+    return alias;
+  }
+  if (edit) {
+    if (!names.length) { if (s) warn(`${what}: в документе нет стилей текста — правка пропущена`); return undefined; }
+    const cur = opts.cur;
+    const curToken = cur && typeof cur === 'object' ? cur.token : cur;
+    warn(`${what}: стиля «${s || '—'}» в документе нет, и по смыслу он ни на один не похож — правка пропущена`
+      + (curToken ? `, стиль остался «${ruToken('type', curToken)}»` : '')
+      + `. Есть: ${names.slice(0, 8).map((k) => `«${ruToken('type', k)}»`).join(', ')}`);
+    return undefined;
+  }
+  const fallback = bodyTypeName(names);
   if (!fallback) return s || undefined;
   // круг 16, п.9: имя токена человек читает словом — «текст», а не «body»
   if (s) warn(`${what}: стиля «${s}» в документе нет — поставил «${ruToken('type', fallback)}»`);
@@ -5797,7 +5896,14 @@ export function coerceValue(raw, path, doc, warn, ctx = null) {
     return pickEnum(v, p, { warn: note, what: `Правка «${ruPath(p)}»` });
   }
   if (p === 'fill' || p === 'color' || p === 'stroke') return normColor(v, doc, note, `Правка «${ruPath(p)}»`);
-  if (p === 'style') return normStyle(v, doc, note, 'Правка «стиль текста»');
+  if (p === 'style' || p === 'style.token') {
+    // круг 27: правка существующего узла — незнакомый стиль не подменяется обычным текстом
+    const node = ctx && ctx.id ? nodeOf(doc, ctx.id) : null;
+    const cur = node ? node.style : undefined;
+    const got = normStyle(v, doc, note, 'Правка «стиль текста»', { mode: 'edit', cur: p === 'style.token' && cur && typeof cur === 'object' ? cur.token : cur });
+    if (p === 'style.token' && got && typeof got === 'object') return got.token;
+    return got;
+  }
   if (p === 'characters') {
     // круг 13, п.1: текст снять нельзя, но «пусто» — законное содержимое; о молчаливом
     // опустошении слоя предупреждаем, иначе забытое значение читается как выполненная правка
@@ -8011,7 +8117,10 @@ async function runCommandCore(options = {}) {
     };
 
     /* — 1. Классификация — */
-    const scope = resolveScope(doc, selection, engine, { activeArtboardId, selectionBy });
+    /* Круг 27: выделение, которое поставил сам агент (оболочка выделяет созданное), для
+     * «собери экран …» — не место работы: второй экран иначе ложился внутрь первого. */
+    const agentSelIgnored = selectionBy === 'agent' && asArray(selection).length > 0 && asksNewScreen(utterance);
+    const scope = resolveScope(doc, agentSelIgnored ? [] : selection, engine, { activeArtboardId, selectionBy });
     const hasSelection = scope.kind === 'selection';
     // круг 9, п.6: узлы области работы выигрывают у одноимённых с чужого артборда
     const guess = classifyUtterance(utterance, { hasSelection, doc, prefer: new Set(collectSubtree(doc, scope.ids)) });
@@ -8242,9 +8351,19 @@ async function runCommandCore(options = {}) {
     }
     if (repaired && !attempt.blocking.length) serviceNote('Первый ответ модели пришлось чинить');
 
+    /* Круг 27: итог против просьбы («крупнее», а стало мельче; «новой доской», а легло внутрь)
+     * — замечание, а не успех; и подпись записи — что сделано, а не пересказ модели. */
+    const afterDoc = attempt.preview && attempt.preview.doc;
+    if (!attempt.nothingChanged) {
+      for (const w of checkOutcome({ doc, after: afterDoc, ops: attempt.ops, utterance, placement })) warn(w);
+    }
+    let changeSummary = '';
+    try { changeSummary = describeChange(attempt.ops, doc, afterDoc, engine); } catch { changeSummary = ''; }
+
     emit('done', plan ? plan.summary : '', { title: plan ? plan.title : '' });
     return {
       ops: attempt.ops, preview: attempt.preview, plan, answer,
+      ...(changeSummary ? { changeSummary } : {}),
       // круг 7, п.5: правки, которые на экране не видны, — отдельным полем, а не только словами
       ...(attempt.geometryUnchanged ? { geometryUnchanged: attempt.geometryUnchanged } : {}),
       /**
@@ -8382,8 +8501,33 @@ function buildUserTurn(utterance, plan, persona) {
   return parts.join('\n');
 }
 
-/** Явная просьба о новом экране: «новый экран», «ещё один экран», «отдельный артборд». */
-const RE_NEW_ARTBOARD = rx('(нов(ый|ую|ое|ая)|ещ[её]\\s+од(ин|ну)|отдельн(ый|ую|ое|ая)|втор(ой|ую|ая)|друг(ой|ую|ая))\\s+\\p{L}*\\s*(экран|артборд|доск|макет|страниц)');
+/**
+ * Явная просьба о новом экране: «новый экран», «ещё один экран», «отдельный артборд».
+ * Круг 27: и в косвенных падежах — «новой доской», «отдельной доской», «на новом экране»,
+ * «ещё одним экраном», «на другом макете»: раньше узнавались только именительный и винительный,
+ * и «собери экран тарифов новой доской» ложилось внутрь текущего экрана.
+ */
+const RE_NEW_ARTBOARD = rx('(нов(ый|ую|ое|ая|ой|ом|ым|ого|ому|ые|ых|ыми)|ещ[её]\\s+од(ин|ну|ной|ним|ном|ного|ному)'
+  + '|отдельн(ый|ую|ое|ая|ой|ом|ым|ого|ому|ые|ых|ыми)|втор(ой|ую|ая|ом|ым|ого|ому)|друг(ой|ую|ая|ом|им|ого|ому))'
+  + '\\s+(\\p{L}+\\s+)?(экран|артборд|доск|макет|страниц)');
+/**
+ * Круг 27: «здесь», «в этом экране», «внутри выделенного» — место названо как ТЕКУЩЕЕ: такая
+ * команда к выделению и относится, кто бы его ни поставил.
+ */
+const RE_HERE_PLACE = rx('(здесь|сюда|тут|внутр\\p{L}*|(в|во|на)\\s+(эт(ом|ой|от|у|и)|текущ\\p{L}*|выделенн\\p{L}*|выбранн\\p{L}*))');
+
+/**
+ * Круг 27: просьба собрать НОВЫЙ экран («собери экран тарифов», «создай доску», «новый
+ * экран»), к которой выделение, поставленное агентом, отношения не имеет. Оболочка после
+ * правки выделяет созданный экран (selectionBy:'agent'), и второй «собери экран …» ложился
+ * ВНУТРЬ первого: агент принимал своё же выделение за указание человека.
+ */
+export function asksNewScreen(utterance) {
+  const s = String(utterance == null ? '' : utterance);
+  if (!s.trim()) return false;
+  if (RE_NEW_ARTBOARD.test(s)) return true;
+  return RE_WHOLE_SCREEN.test(s) && !RE_HERE_PLACE.test(s);
+}
 const RE_ARTBOARD_WORD = rx('(артборд|доск[аиуеой])', true);
 /** Просьба собрать экран целиком: «собери экран оформления», «свёрстай лендинг». */
 const RE_WHOLE_SCREEN = rx('(собери|создай|создать|св[её]рстай|сверстай|построй|нарисуй|сгенерируй)\\s+(\\p{L}+\\s+){0,2}?(экран|лендинг|страниц|артборд|доск|макет)');
@@ -8704,7 +8848,8 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
   const planOnlyNew = !saidNew && !saidWhole && scope.kind !== 'selection'
     && (RE_NEW_ARTBOARD.test(planText) || RE_WHOLE_SCREEN.test(planText));
   const explicit = saidNew;
-  const wholeScreen = scope.kind !== 'selection' && saidWhole;
+  // круг 27: выделение агента («вот что я сделал») просьбу собрать экран не перебивает
+  const wholeScreen = saidWhole && (scope.kind !== 'selection' || scope.selectionBy === 'agent') && !RE_HERE_PLACE.test(spoken);
   const insert = explicit || wholeScreen ? null : findInsertTarget(doc, spoken, scope, engine, geo);
   const container = scope.containerId && nodeOf(doc, scope.containerId);
   const asArtboard = explicit || wholeScreen || (!insert && (!container || container.type === 'page'));
@@ -8712,6 +8857,11 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
     note(`План модели говорит про новый экран («${cutText((plan && plan.title) || '', 60)}»),`
       + ` а в команде экран не назван — кладу внутрь текущего ${nameOrId(doc, insert ? insert.parentId : scope.containerId)}.`
       + ' Нужна отдельная доска — скажите «новая доска»');
+  } else if (saidWhole && !asArtboard && scope.kind === 'selection') {
+    /* Круг 27: «собери экран …» при выделении человека собирается ВНУТРИ выделенного — так он
+     * решил выделением; но сказать об этом надо: по словам команды ждут отдельный экран. */
+    note(`Собираю внутри выделенного ${nameOrId(doc, insert ? insert.parentId : scope.containerId)}: выделение ваше.`
+      + ' Нужен отдельный экран — снимите выделение или скажите «новой доской»');
   }
 
   if (insert) {
@@ -9288,6 +9438,162 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
   return out;
 }
 
+/* ── Круг 27: итог против просьбы и описание сделанного ─────────────────────── */
+
+/** «крупнее», «больше», «увеличь» / «мельче», «меньше», «уменьши». */
+const RE_ASK_BIGGER = rx('((по)?крупнее|крупн(ым|ой|ее|ый|ая|ого)|увелич\\p{L}*|(по)?больше)', true);
+const RE_ASK_SMALLER = rx('((по)?мельче|мелк(им|ой|ий|ая|ого)|уменьш\\p{L}*|(по)?меньше)', true);
+const STYLE_SIZE_PATHS = new Set(['style', 'style.token', 'style.fontSize']);
+
+/** Кегль текста: свой fontSize поверх стиля, иначе — кегль токена (по умолчанию — обычного текста). */
+function textSizeOf(doc, node) {
+  if (!node || node.type !== 'text') return undefined;
+  const types = (doc && doc.tokens && doc.tokens.type) || {};
+  const st = node.style;
+  if (st && typeof st === 'object') {
+    const own = Number(st.fontSize);
+    if (Number.isFinite(own) && own > 0) return own;
+    return typeSize(types, st.token || bodyTypeName(Object.keys(types)));
+  }
+  return typeSize(types, typeof st === 'string' && st ? st : bodyTypeName(Object.keys(types)));
+}
+
+/**
+ * Итог правки против того, о чём просили (круг 27). Возвращает предупреждения с префиксом
+ * «Проверка макета:» — оболочка показывает такое сообщение как замечание, а не как успех.
+ *   • «сделай заголовок крупнее», а стиль поставлен мельче или тот же — так и говорим;
+ *   • просили новую доску (размещение — новый экран), а созданное легло внутрь слоя.
+ */
+export function checkOutcome({ doc, after, ops, utterance = '', placement = null }) {
+  const out = [];
+  const list = asArray(ops);
+  const said = String(utterance || '');
+  const bigger = RE_ASK_BIGGER.test(said) && !RE_ASK_SMALLER.test(said);
+  const smaller = RE_ASK_SMALLER.test(said) && !RE_ASK_BIGGER.test(said);
+  if ((bigger || smaller) && after) {
+    const seen = new Set();
+    const rows = [];
+    for (const op of list) {
+      if (!op || op.op !== 'set' || !STYLE_SIZE_PATHS.has(String(op.path)) || seen.has(op.id)) continue;
+      const was = nodeOf(doc, op.id);
+      const now = nodeOf(after, op.id);
+      if (!was || !now || was.type !== 'text') continue;
+      seen.add(op.id);
+      const a = textSizeOf(doc, was);
+      const b = textSizeOf(after, now);
+      if (a === undefined || b === undefined) continue;
+      rows.push({ id: op.id, a, b });
+    }
+    const good = rows.filter((r) => (bigger ? r.b > r.a : r.b < r.a));
+    const wrong = rows.filter((r) => (bigger ? r.b < r.a : r.b > r.a));
+    const same = rows.filter((r) => r.b === r.a);
+    const word = bigger ? 'крупнее' : 'мельче';
+    if (wrong.length) {
+      const r = wrong[0];
+      out.push(`Проверка макета: просили ${word}, а ${nameOrId(after, r.id)} стал ${bigger ? 'мельче' : 'крупнее'}:`
+        + ` ${Math.round(r.a)} → ${Math.round(r.b)} px${wrong.length > 1 ? ` (и ещё ${wrong.length - 1})` : ''}.`
+        + ' Отмените правку или назовите стиль сами');
+    } else if (rows.length && !good.length && same.length) {
+      const r = same[0];
+      out.push(`Проверка макета: просили ${word}, а размер ${nameOrId(after, r.id)} не изменился (${Math.round(r.a)} px).`
+        + ' Назовите стиль или кегль сами');
+    }
+  }
+  if (placement && placement.asArtboard && doc) {
+    const born = new Set(list.filter((o) => o && o.op === 'create' && o.node && o.node.id).map((o) => o.node.id));
+    const tops = list.filter((o) => o && o.op === 'create' && o.node && !born.has(o.node.parent));
+    const inside = tops.find((o) => {
+      const parent = nodeOf(doc, o.node.parent);
+      return parent && parent.type !== 'page' && o.node.parent !== doc.root;
+    });
+    if (inside) {
+      out.push(`Проверка макета: просили отдельную доску, а «${inside.node.name || 'новый слой'}» лёг внутрь`
+        + ` ${nameOrId(doc, inside.node.parent)}. Отмените правку и скажите «собери … новой доской»`);
+    }
+  }
+  return out;
+}
+
+/** Имя узла для описания: из документа до правки или из самой операции создания. */
+function changeName(doc, born, id) {
+  const n = nodeOf(doc, id) || born.get(id);
+  if (!n) return 'слой';
+  if (n.name) return `«${cutText(String(n.name), 60)}»`;
+  return nameOrId(doc, id);
+}
+
+/**
+ * Круг 27: что сделано — словами по операциям, для подписи записи в истории (tx.title).
+ * Раньше туда шёл заголовок плана модели («Ставлю стиль h1.») — пересказ намерения, а не
+ * сделанного, и с внутренними именами. Здесь — те же слова, что в инспекторе:
+ * «Стиль текста «Заголовок экрана»: «заголовок» → «крупный»», «Добавил «Экран тарифов» новой доской».
+ */
+export function describeChange(ops, doc, after = null, engine = null) {
+  const list = asArray(ops).filter((o) => o && typeof o === 'object');
+  if (!list.length || !doc) return '';
+  const creates = list.filter((o) => o.op === 'create' && o.node && o.node.id);
+  const born = new Map(creates.map((o) => [o.node.id, o.node]));
+  const phrases = [];
+  const tops = creates.filter((o) => !born.has(o.node.parent));
+  if (tops.length) {
+    const parentId = tops[0].node.parent;
+    const parent = nodeOf(doc, parentId);
+    const onCanvas = !parent || parent.type === 'page' || parentId === doc.root;
+    const where = onCanvas ? (tops[0].node.type === 'frame' ? ' новой доской' : '') : ` в ${changeName(doc, born, parentId)}`;
+    phrases.push(tops.length === 1
+      ? `добавил ${changeName(doc, born, tops[0].node.id)}${where}`
+      : `добавил ${tops.length} ${plural(tops.length, 'слой', 'слоя', 'слоёв')}${where}`);
+  }
+  const removes = list.filter((o) => o.op === 'remove' && o.id && !born.has(o.id));
+  if (removes.length === 1) phrases.push(`удалил ${changeName(doc, born, removes[0].id)}`);
+  else if (removes.length) phrases.push(`удалил ${removes.length} ${plural(removes.length, 'слой', 'слоя', 'слоёв')}`);
+  const moves = list.filter((o) => o.op === 'move' && o.id && !born.has(o.id));
+  if (moves.length === 1) {
+    const to = moves[0].parent && moves[0].parent !== (nodeOf(doc, moves[0].id) || {}).parent ? ` в ${changeName(doc, born, moves[0].parent)}` : '';
+    phrases.push(`перенёс ${changeName(doc, born, moves[0].id)}${to}`);
+  } else if (moves.length) {
+    phrases.push(`перенёс ${moves.length} ${plural(moves.length, 'слой', 'слоя', 'слоёв')}`);
+  }
+  // одинаковая правка у нескольких слоёв — одной строкой
+  const groups = new Map();
+  for (const op of list) {
+    if (op.op !== 'set' || !op.id || born.has(op.id)) continue;
+    const path = String(op.path || '');
+    const node = nodeOf(doc, op.id);
+    const cleared = !Object.prototype.hasOwnProperty.call(op, 'value') || op.value === undefined;
+    let to;
+    try { to = cleared ? '«не задано»' : valueWords(op.value, path, after || doc, engine); } catch { to = ''; }
+    const key = `${path}|${to}`;
+    const g = groups.get(key) || { path, to, ids: [], from: new Set() };
+    g.ids.push(op.id);
+    try { g.from.add(valueWords(node ? currentValue(node, path) : undefined, path, doc, engine)); } catch { /* без «было» */ }
+    groups.set(key, g);
+  }
+  for (const g of groups.values()) {
+    const what = ruPath(g.path);
+    const from = g.from.size === 1 ? [...g.from][0] : '';
+    const change = from && from !== g.to ? `${from} → ${g.to}` : g.to;
+    phrases.push(g.ids.length === 1
+      ? `${what} ${changeName(doc, born, g.ids[0])}: ${change}`
+      : `${what} у ${g.ids.length} ${plural(g.ids.length, 'слоя', 'слоёв', 'слоёв')}: ${change}`);
+  }
+  const tokens = list.filter((o) => o.op === 'setToken');
+  if (tokens.length) {
+    const kinds = new Set(tokens.map((o) => String(o.path || '').split('.')[0]));
+    const word = kinds.size === 1 && kinds.has('colors') ? 'палитра'
+      : kinds.size === 1 && kinds.has('type') ? 'типографика'
+        : kinds.size === 1 && (kinds.has('spacing') || kinds.has('radii')) ? (kinds.has('spacing') ? 'шкала отступов' : 'шкала скруглений')
+          : 'оформление документа';
+    phrases.push(`${word}: ${tokens.length} ${plural(tokens.length, 'правка', 'правки', 'правок')}`);
+  }
+  if (!phrases.length) return '';
+  const rest = phrases.length - 2;
+  const text = rest > 0
+    ? `${phrases.slice(0, 2).join('; ')} и ещё ${rest} ${plural(rest, 'правка', 'правки', 'правок')}`
+    : phrases.join('; ');
+  return cutText(text.charAt(0).toUpperCase() + text.slice(1), 200);
+}
+
 /** Ключ нарушения: чтобы не вменять агенту то, что было в документе до него. */
 function violationKey(v) {
   if (typeof v === 'string') return v;
@@ -9603,6 +9909,8 @@ async function runVariantsCore(options = {}) {
     fingerprint: res.preview && res.preview.doc ? shortHash(visibleFingerprint(res.preview.doc)) : null,
     preview: res.preview,
     plan: res.plan,
+    // круг 27: что сделано — словами, для подписи записи в истории
+    ...(res.changeSummary ? { changeSummary: res.changeSummary } : {}),
     answer: res.answer,
     clarify: res.clarify,
     // круг 18: готовые ответы доходят и до варианта — иначе переспрос там снова стал бы тупиком

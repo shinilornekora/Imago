@@ -16,11 +16,12 @@ import { timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { createDoc, ENGINE_VERSION } from '../../src/core.js';
 import { DocError, badRequest, notFound, tooLarge, internalBody, viaStorage } from './errors.js';
-import { jsonBytes } from './storage/committed.js';
+import { jsonBytes, projectSummary } from './storage/committed.js';
 import { createSemaphore } from './dslr.js';
 import {
   MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX,
   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, PROJECTS_PAGE, PROJECTS_PAGE_MAX,
+  WRITE_BODY_BYTES, BODY_TIMEOUT_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
   isCleanText, cleanText, cutText, cleanDeep
 } from './limits.js';
 
@@ -72,51 +73,83 @@ function sendError(res, e) {
 }
 
 /**
- * Тело запроса как JSON: пусто → null; больше предела → 413; не JSON → 400.
- * Слишком большое тело не дочитываем и не рвём соединение сразу: чтение
- * останавливается, ответ 413 уходит, и только потом обработчик закрывает
- * соединение (см. createRequestHandler) — иначе клиент вместо 413 видел бы
- * обрыв и не понял бы, что транзакцию надо разбить, а не повторить.
+ * Таймауты приёма запроса на http.Server (круг 27): заголовки — HEADERS_TIMEOUT_MS,
+ * запрос целиком (с телом) — REQUEST_TIMEOUT_MS; node сам отвечает 408 и закрывает
+ * соединение. Свой таймер тела (BODY_TIMEOUT_MS) в readBody — точнее: проверка node
+ * идёт раз в connectionsCheckingInterval.
+ * @param {import('node:http').Server} server
  */
-function readJSON(req, max = MAX_BODY_BYTES) {
+export function applyServerTimeouts(server) {
+  if (!server || typeof server !== 'object') return;
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * Тело запроса байтами: пусто → null; больше предела → 413; не пришло целиком за
+ * `timeoutMs` → 408 (медленное тело, slowloris). Слишком большое или медленное тело
+ * не дочитываем и не рвём соединение сразу: чтение останавливается, ответ уходит, и
+ * только потом обработчик закрывает соединение (см. createRequestHandler) — иначе
+ * клиент вместо 413 видел бы обрыв и не понял бы, что транзакцию надо разбить, а не
+ * повторить.
+ * @returns {Promise<Buffer|null>}
+ */
+function readBody(req, max = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
-    const tooLargeBody = () => {
+    let done = false;
+    let timer = null;
+    const finish = (fn, v) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      fn(v);
+    };
+    const stop = (e) => {
       req.pause();
-      reject(tooLarge(`тело больше ${max} байт`, { detail: { limit: 'body_bytes', max } }));
+      finish(reject, e);
     };
     const declared = Number(req.headers['content-length']);
     if (Number.isFinite(declared) && declared > max) {
-      tooLargeBody();
+      stop(tooLarge(`тело больше ${max} байт`, { detail: { limit: 'body_bytes', max } }));
       return;
     }
-    let done = false;
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => stop(new DocError(408, 'timeout', `тело запроса не пришло за ${Math.round(timeoutMs / 1000)} с`, { retryable: true, detail: { limit: 'body_timeout', ms: timeoutMs } })), timeoutMs);
+      if (timer.unref) timer.unref();
+    }
     req.on('data', (chunk) => {
       if (done) return;
       size += chunk.length;
       if (size > max) {
-        done = true;
-        tooLargeBody();
+        stop(tooLarge(`тело больше ${max} байт`, { detail: { limit: 'body_bytes', max } }));
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
-      if (done) return;
       req.bodyBytes = size;
-      if (!size) {
-        resolve(null);
-        return;
-      }
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      } catch (_) {
-        reject(badRequest('тело не JSON'));
-      }
+      finish(resolve, size ? Buffer.concat(chunks) : null);
     });
-    req.on('error', (e) => reject(badRequest('обрыв тела запроса: ' + e.message)));
+    req.on('error', (e) => finish(reject, badRequest('обрыв тела запроса: ' + e.message)));
+    req.on('aborted', () => finish(reject, badRequest('клиент оборвал тело запроса')));
   });
+}
+
+/** Байты тела → JSON: null → null; не JSON → 400. */
+function parseBody(buf) {
+  if (!buf) return null;
+  try {
+    return JSON.parse(buf.toString('utf8'));
+  } catch (_) {
+    throw badRequest('тело не JSON');
+  }
+}
+
+/** Тело запроса как JSON (чтения и внутренние маршруты). */
+async function readJSON(req, max = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS) {
+  return parseBody(await readBody(req, max, timeoutMs));
 }
 
 /** Автор из заголовка X-Author (SPEC §9: авторизации нет, имя — самоназванное). */
@@ -218,18 +251,49 @@ const projectName = (v) => cutText(cleanText(String(v)), MAX_PROJECT_NAME);
 
 /**
  * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, internalToken?: string, log?: object,
- *   writes?: {max?: number, queue?: number, retryAfter?: number}}} deps
- *   `writes` — семафор HTTP-записи (`POST …/tx`): одновременно и в очереди; сверх — 503 busy
+ *   writes?: {max?: number, queue?: number, retryAfter?: number, bodyBytes?: number, bodyTimeoutMs?: number}}} deps
+ *   `writes` — запись по HTTP (`POST …/tx`, `POST /api/projects`, `PATCH`): семафор (одновременно и в
+ *   очереди; сверх — 503 busy), бюджет байт читаемых тел на экземпляр, таймаут тела
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void}
  */
 export function createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log = console, writes = {} }) {
-  // запись по HTTP — под семафором (§9.10): тело читается, только когда есть место
+  const retryAfter = writes.retryAfter || BUSY_RETRY_S;
+  // запись по HTTP — под семафором (§9.10)
   const writeGate = createSemaphore({
     max: writes.max || HTTP_WRITE_CONCURRENCY,
     queue: writes.queue !== undefined ? writes.queue : HTTP_WRITE_QUEUE,
-    retryAfter: writes.retryAfter || BUSY_RETRY_S,
+    retryAfter,
     message: 'сервер занят записью — повторите чуть позже'
   });
+  const bodyBudget = writes.bodyBytes > 0 ? writes.bodyBytes : WRITE_BODY_BYTES;
+  const bodyTimeoutMs = writes.bodyTimeoutMs !== undefined ? writes.bodyTimeoutMs : BODY_TIMEOUT_MS;
+  let bodyBytesUsed = 0;
+
+  /**
+   * Запись (круг 27): тело читается в бюджете байт экземпляра (заявленный
+   * Content-Length, без него — предел тела; бюджет занят — 503 busy, тело не читаем),
+   * слот семафора записи берётся только ПОСЛЕ того, как тело дочитано: медленное тело
+   * держит байты бюджета (и не дольше таймаута тела), но не слот. Разбор JSON и вся
+   * работа — уже под слотом.
+   * @param {(body: any) => Promise<void>} fn
+   */
+  async function writeRoute(req, fn, max = MAX_BODY_BYTES) {
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > max) throw tooLarge(`тело больше ${max} байт`, { detail: { limit: 'body_bytes', max } });
+    const need = Number.isFinite(declared) && declared >= 0 ? declared : max;
+    if (bodyBytesUsed > 0 && bodyBytesUsed + need > bodyBudget) {
+      throw new DocError(503, 'busy', 'сервер принимает слишком много записей сразу — повторите чуть позже', {
+        retryable: true, retryAfter, detail: { limit: 'body_bytes_total' }
+      });
+    }
+    bodyBytesUsed += need;
+    try {
+      const buf = await readBody(req, max, bodyTimeoutMs);
+      await writeGate.run(() => fn(parseBody(buf)));
+    } finally {
+      bodyBytesUsed -= need;
+    }
+  }
   const root = staticDir ? path.resolve(staticDir) : null;
   const token = typeof internalToken === 'string' && internalToken && internalToken !== PLACEHOLDER_TOKEN ? internalToken : null;
   if (internalToken === PLACEHOLDER_TOKEN) log.warn('[document/http] INTERNAL_TOKEN = «change-me» — это заглушка; внутренние маршруты закрыты, пока не задан настоящий токен');
@@ -276,7 +340,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       }
       if (parts.length === 3 && parts[2] === 'traces') {
         if (method !== 'POST') throw methodNotAllowed();
-        const body = await readJSON(req, MAX_TRACE_BYTES);
+        const body = await readJSON(req, MAX_TRACE_BYTES, bodyTimeoutMs);
         if (!body || typeof body !== 'object' || Array.isArray(body)) throw badRequest('трасса: JSON-объект');
         const projectId = body.project_id || body.project;
         const commandId = body.command_id;
@@ -308,28 +372,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         return;
       }
       if (method === 'POST') {
-        const body = (await readJSON(req)) || {};
-        if (typeof body !== 'object' || Array.isArray(body)) throw badRequest('тело должно быть объектом');
-        const name = body.name === undefined || body.name === null ? '' : projectName(body.name);
-        const kind = body.kind === undefined || body.kind === null ? 'design' : body.kind;
-        if (!PROJECT_KINDS.has(kind)) throw badRequest('kind: design | library');
-        let doc;
-        if (body.doc === undefined || body.doc === null) {
-          // новый проект — пустая страница; демо-документ — только по просьбе (§9.10)
-          doc = createDoc(body.demo === true ? undefined : 'empty');
-        } else {
-          const d = cleanBody(body.doc, 'doc');
-          // минимальная проверка формы; остальное приводит createDoc(seed) — тот же путь, что импорт JSON на клиенте
-          if (!d || typeof d !== 'object' || Array.isArray(d) || !d.nodes || typeof d.nodes !== 'object' || typeof d.root !== 'string' || !d.nodes[d.root]) {
-            throw badRequest('doc: объект с nodes и root, корень должен быть среди узлов');
-          }
-          if (Object.keys(d.nodes).length > MAX_DOC_NODES) throw tooLarge(`doc: не больше ${MAX_DOC_NODES} узлов`, { detail: { limit: 'doc_nodes', max: MAX_DOC_NODES } });
-          doc = createDoc(d);
-        }
-        if (name) doc.meta = { ...(doc.meta || {}), name };
-        if (jsonBytes(doc) > MAX_DOC_BYTES) throw tooLarge('doc: больше предела документа', { detail: { limit: 'doc_bytes', max: MAX_DOC_BYTES } });
-        const project = await viaStorage(storage.createProject({ name, kind, doc, engine: ENGINE_VERSION }));
-        sendJSON(res, 201, { id: project.id, name: project.name, kind: project.kind, head_seq: 0, engine: project.engine, epoch: project.epoch, tip: '', created_at: project.created_at, updated_at: project.updated_at });
+        await writeRoute(req, (raw) => createProject(res, raw || {}));
         return;
       }
       throw methodNotAllowed();
@@ -358,17 +401,49 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         return;
       }
       if (method === 'PATCH') {
-        const body = await readJSON(req);
-        const name = body && typeof body === 'object' && typeof body.name === 'string' ? projectName(body.name).trim() : '';
-        if (!name) throw badRequest('name: непустая строка');
-        const project = await viaStorage(storage.renameProject(id, name));
-        if (!project) throw notFound();
-        sendJSON(res, 200, { id: project.id, name: project.name, kind: project.kind, head_seq: project.head_seq });
+        await writeRoute(req, async (body) => {
+          const name = body && typeof body === 'object' && typeof body.name === 'string' ? projectName(body.name).trim() : '';
+          if (!name) throw badRequest('name: непустая строка');
+          const project = await viaStorage(storage.renameProject(id, name));
+          if (!project) throw notFound();
+          // I4: живое имя — сокетам проекта на всех экземплярах
+          if (typeof dslts.projectChanged === 'function') dslts.projectChanged(projectSummary(project));
+          sendJSON(res, 200, { id: project.id, name: project.name, kind: project.kind, head_seq: project.head_seq });
+        }, MAX_TRACE_BYTES);
         return;
       }
       throw methodNotAllowed();
     }
+    return route2(req, res, url, method, parts, id);
+  }
 
+  /** POST /api/projects: тело уже прочитано и разобрано (под слотом записи). */
+  async function createProject(res, body) {
+    if (typeof body !== 'object' || Array.isArray(body)) throw badRequest('тело должно быть объектом');
+    const name = body.name === undefined || body.name === null ? '' : projectName(body.name);
+    const kind = body.kind === undefined || body.kind === null ? 'design' : body.kind;
+    if (!PROJECT_KINDS.has(kind)) throw badRequest('kind: design | library');
+    let doc;
+    if (body.doc === undefined || body.doc === null) {
+      // новый проект — пустая страница; демо-документ — только по просьбе (§9.10)
+      doc = createDoc(body.demo === true ? undefined : 'empty');
+    } else {
+      const d = cleanBody(body.doc, 'doc');
+      // минимальная проверка формы; остальное приводит createDoc(seed) — тот же путь, что импорт JSON на клиенте
+      if (!d || typeof d !== 'object' || Array.isArray(d) || !d.nodes || typeof d.nodes !== 'object' || typeof d.root !== 'string' || !d.nodes[d.root]) {
+        throw badRequest('doc: объект с nodes и root, корень должен быть среди узлов');
+      }
+      if (Object.keys(d.nodes).length > MAX_DOC_NODES) throw tooLarge(`doc: не больше ${MAX_DOC_NODES} узлов`, { detail: { limit: 'doc_nodes', max: MAX_DOC_NODES } });
+      doc = createDoc(d);
+    }
+    if (name) doc.meta = { ...(doc.meta || {}), name };
+    if (jsonBytes(doc) > MAX_DOC_BYTES) throw tooLarge('doc: больше предела документа', { detail: { limit: 'doc_bytes', max: MAX_DOC_BYTES } });
+    const project = await viaStorage(storage.createProject({ name, kind, doc, engine: ENGINE_VERSION }));
+    sendJSON(res, 201, { id: project.id, name: project.name, kind: project.kind, head_seq: 0, engine: project.engine, epoch: project.epoch, tip: '', created_at: project.created_at, updated_at: project.updated_at });
+  }
+
+  /** Маршруты `/api/projects/:id/…`. */
+  async function route2(req, res, url, method, parts, id) {
     if (parts.length === 4) {
       // GET /api/projects/:id/ops?since=&limit=[&tip=&epoch=]
       if (parts[3] === 'ops') {
@@ -400,8 +475,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       // POST /api/projects/:id/tx
       if (parts[3] === 'tx') {
         if (method !== 'POST') throw methodNotAllowed();
-        await writeGate.run(async () => {
-          const body = await readJSON(req);
+        await writeRoute(req, async (body) => {
           const { committed, existing } = await dslts.commit(id, body, { author: authorOf(req), bytes: req.bodyBytes });
           sendJSON(res, existing ? 200 : 201, committed);
         });

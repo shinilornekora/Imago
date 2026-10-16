@@ -295,7 +295,9 @@ test('sync: обрыв — правки копятся, журнал пишет�
   const rec = storage.map.get('p1');
   assert.equal(rec.seq, 0);
   assert.equal(rec.clientId, 'A');
-  assert.equal(rec.doc.nodes.r1.name, 'Плашка', 'в журнале confirmed, а не view');
+  // круг 27: документ — отдельной записью <id>#doc (пишется реже очереди)
+  assert.equal(rec.doc, undefined, 'в записи очереди документа нет');
+  assert.equal(storage.map.get('p1#doc').doc.nodes.r1.name, 'Плашка', 'в журнале confirmed, а не view');
   await a.sync.close();
 
   // «перезагрузка вкладки»: новая реплика на том же журнале, сервер вернулся
@@ -386,7 +388,7 @@ test('sync: идемпотентность — дубликат по tx_id да�
   await a.sync.close();
 });
 
-test('sync: без локальной копии — снимок с сервера, потом сокет; проекта нет — onError(not-found)', async () => {
+test('sync: без локальной копии — снимок с сервера, потом сокет; проекта нет — onError(not_found)', async () => {
   const server = new FakeServer(seedDoc());
   server.commit({ tx_id: 'tx_z1', base_seq: 0, ops: [ops.set('ab', 'name', 'Хвост')], engine: ENGINE_VERSION, client: 'Z' });
   const a = client(server, 'A');
@@ -406,7 +408,9 @@ test('sync: без локальной копии — снимок с серве�
   const missingErrors = [];
   const v = await missing.open();
   assert.equal(v, null);
-  assert.equal(missingErrors[0].code, 'not-found');
+  assert.equal(missingErrors[0].code, 'not_found');
+  assert.equal(missing.status.error, 'not_found');
+  assert.equal(missing.status.label, 'проект не найден на сервере');
   await missing.close();
 });
 
@@ -860,4 +864,68 @@ test('sync: надгробия снимка (gone) — прогноз слиян
   assert.deepEqual(r.dropped, []);
   assert.equal(r.applied[0].node.parent, 'ab');
   await a.sync.close();
+});
+
+/* ------------------------------ круг 27 ------------------------------ */
+
+test('sync (круг 27): gone с головой дальше снимка — после догона очередь идёт сама, без новых правок', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  const b = client(server, 'B');
+  await a.sync.open(); await b.sync.open();
+  await until(() => a.sync.status.online && b.sync.status.online);
+  a.sync.offline(); b.sync.offline();
+  server.down = true;
+  a.sync.commit([ops.set('r1', 'name', 'от A')]);
+  b.sync.commit([ops.set('ab', 'name', 'от B')]);
+  server.commit({ tx_id: 'tx_z1', base_seq: 0, ops: [ops.set('r1', 'fill', '#111111')], engine: ENGINE_VERSION, client: 'Z' });
+  server.forget();
+  // за снимком — ещё запись: gone придёт с head_seq > snapshot.seq, реплика пойдёт догонять по HTTP
+  server.commit({ tx_id: 'tx_z2', base_seq: 1, ops: [ops.set('r1', 'fill', '#222222')], engine: ENGINE_VERSION, client: 'Z' });
+  server.down = false;
+  a.sync.reconnect();
+  await until(() => a.log.gone.length === 1, 'A получил снимок');
+  await until(() => a.sync.status.pending === 0, 'очередь A дослана после догона (раньше стояла)');
+  b.sync.reconnect();
+  await until(() => b.sync.status.pending === 0, 'и у второй вкладки, переподключившейся после записи первой');
+  await until(() => a.sync.confirmed.seq === 4 && b.sync.confirmed.seq === 4);
+  assert.equal(server.log.length, 4);
+  assert.equal(hashDoc(a.sync.view), hashDoc(server.doc));
+  assert.equal(hashDoc(b.sync.view), hashDoc(server.doc));
+  await a.sync.close(); await b.sync.close();
+});
+
+test('sync (круг 27): дренаж очереди — подтверждение в предсказанной форме не меняет view (same, тот же hashDoc), итог = сервер', async () => {
+  const server = new FakeServer(seedDoc());
+  const a = client(server, 'A');
+  const z = client(server, 'Z');
+  await a.sync.open(); await z.sync.open();
+  await until(() => a.sync.status.online && z.sync.status.online);
+  a.sync.offline();
+  for (let k = 0; k < 25; k++) {
+    a.sync.commit([ops.set('r1', 'name', 'имя ' + k)]);
+    if (k % 5 === 0) a.sync.commit([ops.create({ type: 'rect', id: 'a' + k, name: 'A' + k, parent: 'ab', radius: 0, fill: '#000000', size: { w: { mode: 'fixed', value: 5 }, h: { mode: 'fixed', value: 5 } } })]);
+    if (k === 12) a.sync.commit([ops.remove('a5')]);
+  }
+  const confirmedAt = a.log.changes.length;
+  const offlineView = hashDoc(a.sync.view);   // commit не зовёт onChange: последний вид — здесь
+  a.sync.reconnect();
+  // чужие правки посреди дренажа: после них прогноз пересчитывается
+  await until(() => a.sync.status.pending < 20, 'дренаж пошёл');
+  z.sync.commit([ops.set('ab', 'fill', '#abcdef')]);
+  z.sync.commit([ops.remove('a10')]);
+  await until(() => a.sync.status.pending === 0 && z.sync.status.pending === 0, 'всё дослано');
+  await until(() => a.sync.confirmed.seq === server.seq && z.sync.confirmed.seq === server.seq);
+  const after = a.log.changes.slice(confirmedAt);
+  let prev = offlineView;
+  let fast = 0;
+  for (const c of after) {
+    const h = hashDoc(c.view);
+    if (c.reason === 'confirmed' && c.same) { fast += 1; assert.equal(h, prev, 'same — значит тот же документ'); }
+    prev = h;
+  }
+  assert.ok(fast >= 20, `большинство подтверждений без переигрывания: ${fast}`);
+  assert.equal(hashDoc(a.sync.view), hashDoc(server.doc));
+  assert.equal(hashDoc(z.sync.view), hashDoc(server.doc));
+  await a.sync.close(); await z.sync.close();
 });

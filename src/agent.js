@@ -378,6 +378,10 @@ export async function runServerCommand(p = {}) {
 
   const body = { command_id: commandId, project: p.project, text: p.text };
   if (Array.isArray(p.selection)) body.selection = p.selection.slice();
+  /* Круг 27, I6: кто поставил выделение. 'agent' — его оставил прошлый итог агента, и
+     человек его не трогал: «а теперь синее» относится к сделанному, а не к выбору человека. */
+  const by = p.selection_by ?? p.selectionBy;
+  if (by === 'agent' || by === 'human') body.selection_by = by;
   if (p.board) body.board = p.board;
   if (Number.isFinite(p.base_seq)) body.base_seq = p.base_seq;
   if (p.client) body.client = p.client;

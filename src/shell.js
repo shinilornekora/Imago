@@ -210,9 +210,16 @@ export function presenceAgentWords(p) {
 }
 
 /** Повтор по Retry-After словами. */
-export function retryLabel(waitMs) {
+export function retryLabel(waitMs, code = '') {
   const s = Math.max(1, Math.round((Number(waitMs) || 0) / 1000));
-  return `Сервер агента занят — повторю через ${s} с`;
+  // круг 27, п.7: 503 бывает не только от занятости — называем то, что случилось
+  const why = {
+    document_down: 'Сервер агента не видит документ',
+    document_failed: 'Сервер агента не смог прочитать документ',
+    llm_down: 'Модель на сервере не отвечает',
+    shutting_down: 'Сервер агента перезапускается',
+  }[code] || 'Сервер агента занят';
+  return `${why} — повторю через ${s} с`;
 }
 
 /**
@@ -310,7 +317,8 @@ const ERROR_WORDS = {
   network: [AGENT_DOWN_WORDS.title, 'Правки руками сохраняются.'],
   timeout: ['Сервер агента не ответил вовремя', 'Повторите команду.'],
   bad_response: ['Сервер агента ответил непонятно', 'Повторите команду.'],
-  shutting_down: ['Сервер агента перезапускается', 'Повторите через несколько секунд.'],
+  // круг 27, I6: и идущая команда, и ждавшие в очереди — не выполнены, а не «остановлены»
+  shutting_down: ['Сервер агента перезапускается — команда не выполнена', 'Текст команды остался в строке — повторите через несколько секунд.'],
   worker_failed: ['Агент на сервере сбился на этой команде', 'Повторите или скажите иначе.'],
   internal: ['Агент на сервере сбился на этой команде', 'Повторите или скажите иначе.'],
   engine: ['Версия редактора устарела', 'Обновите страницу.'],
@@ -540,6 +548,161 @@ export function stoppedWriteWords(tx, utterance = '') {
     title: 'Агент успел записать правку до остановки — можно отменить',
     note: short ? `«${short}» уже на холсте. Отменить — кнопкой ниже или Ctrl+Z.` : 'Отменить — кнопкой ниже или Ctrl+Z.',
   };
+}
+
+/* -------------------- круг 27: оборванный поток и «стоп» без DOM -------------------- */
+
+/**
+ * Транзакция команды, которая пришла по сокету РАНЬШЕ, чем оборвался поток (круг 27, п.1):
+ * Hub разослал её, а итог `result` до вкладки не дошёл. Она лежит среди «пришедших без
+ * итога» (`arrived`: tx_id → {tx, mine, at}); не найти её здесь — значит объявить команду
+ * невыполненной, а после «Повторить» записать её второй раз.
+ *
+ * Узнаём по `command_id` в транзакции. Без него (Orchestrator прежней версии) — своя
+ * транзакция агента (`mine`), пришедшая после начала команды.
+ * @param {Map<string, {tx: object, mine?: boolean, at?: number}>|Iterable} arrived
+ * @param {{commandId?: string, startedAt?: number}} o
+ * @returns {string|null} tx_id или null
+ */
+export function arrivedTxOf(arrived, { commandId = '', startedAt = 0 } = {}) {
+  if (!arrived) return null;
+  for (const [id, got] of arrived) {
+    const tx = got && got.tx;
+    if (!tx) continue;
+    if (tx.command_id) {
+      if (commandId && tx.command_id === commandId) return id;
+      continue;
+    }
+    if (got.mine && Number(got.at) >= Number(startedAt || 0)) return id;
+  }
+  return null;
+}
+
+/** Сроки ожидания оборванной команды (app.js: awaitDetached). */
+export const DETACHED_TIMES = Object.freeze({ waitMs: 25000, probeMs: 2500, downGraceMs: 5000 });
+
+/**
+ * Один шаг проверки оборванной команды (круг 25, п.3; круг 26 — instance; круг 27, п.1 —
+ * сначала пришедшая транзакция). Решение без DOM и таймеров: оболочка зовёт его на входе
+ * и после каждого ответа `/agent/health`.
+ *
+ *   • транзакция команды уже пришла (`arrivedId`) → `arrived` — что бы ни ответил health;
+ *   • health ok с другим instance → `lost: restarted`; тот же instance → ждать полный срок;
+ *   • instance неизвестен: был недоступен и снова ok → `restarted`; не отвечает дольше
+ *     downGraceMs → `down` (если связь пропала у всей вкладки — ждём полный срок);
+ *   • срок вышел → `lost: down|silent`.
+ *
+ * `d` — состояние ожидания {at, instance, wasDown, downSince, netDown}; функция дописывает в
+ * него то, что узнала (wasDown, downSince, netDown, instance).
+ * @param {object} d
+ * @param {{health?: object|null, netDown?: boolean, now?: number, arrivedId?: string|null, times?: object}} o
+ * @returns {{verdict: 'arrived', txId: string}|{verdict: 'lost', why: 'restarted'|'down'|'silent'}|{verdict: 'wait'}}
+ */
+export function detachedVerdict(d, o = {}) {
+  const { netDown = false, now = Date.now(), arrivedId = null, times = DETACHED_TIMES } = o || {};
+  if (arrivedId) return { verdict: 'arrived', txId: arrivedId };
+  if (!o || o.health === undefined) return { verdict: 'wait' };   // проверки ещё не было — только транзакция
+  const health = o.health;
+  const t = { ...DETACHED_TIMES, ...(times || {}) };
+  const ok = !!(health && health.ok);
+  const inst = ok && typeof health.instance === 'string' ? health.instance : '';
+  if (inst && d.instance) {
+    if (inst !== d.instance) return { verdict: 'lost', why: 'restarted' };
+    if (now - d.at >= t.waitMs) return { verdict: 'lost', why: 'silent' };
+    return { verdict: 'wait' };
+  }
+  if (inst && !d.instance && !d.wasDown) d.instance = inst;
+  if (netDown) d.netDown = true;
+  if (!ok) {
+    d.wasDown = true;
+    if (!d.downSince) d.downSince = now;
+  }
+  if (!d.netDown) {
+    if (ok && d.wasDown) return { verdict: 'lost', why: 'restarted' };
+    if (!ok && now - d.downSince >= t.downGraceMs) return { verdict: 'lost', why: 'down' };
+  }
+  if (now - d.at >= t.waitMs) return { verdict: 'lost', why: ok ? 'silent' : 'down' };
+  return { verdict: 'wait' };
+}
+
+/**
+ * Что сказать, когда прогон кончился «стопом» (круг 27, п.2). Если транзакция команды
+ * пришла ещё до «стопа», оболочка уже сказала «агент успел записать — можно отменить»
+ * (`settled`): «Команда остановлена» с возвратом текста в строку затёрло бы правду, и
+ * «Повторить» записал бы её второй раз.
+ * @param {{settled?: boolean, replacing?: boolean}} o
+ * @returns {'settled'|'replaced'|'cancelled'}
+ */
+export function stoppedRunVerdict({ settled = false, replacing = false } = {}) {
+  if (settled) return 'settled';
+  if (replacing) return 'replaced';
+  return 'cancelled';
+}
+
+/**
+ * Есть ли в документе что-то, кроме служебного: корневой страницы и библиотеки компонентов
+ * (круг 27, I7). Новый пустой проект мигрировать — не «документ из прежней версии».
+ * @param {{root?: string, nodes?: object}} doc
+ * @returns {number} сколько пользовательских узлов
+ */
+export function userNodeCount(doc) {
+  if (!doc || !doc.nodes) return 0;
+  let n = 0;
+  for (const node of Object.values(doc.nodes)) {
+    if (!node || node.id === doc.root) continue;
+    if (node.type === 'page' && node.parent === doc.root && (node.role === 'library' || CORE_NS.isLibrary?.(doc, node))) continue;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Сервер агента перезапускается (I6, `shutting_down`): команда не выполнена — и та, что шла,
+ * и те, что ждали очереди.
+ * @param {string[]} [queued] тексты команд, что стояли в очереди вкладки
+ */
+export function shuttingDownWords(queued = []) {
+  const list = (Array.isArray(queued) ? queued : []).map((t) => cutText(cleanText(t), 40, { ellipsis: true })).filter(Boolean);
+  const more = list.length
+    ? ` Не выполнены и ${list.length === 1 ? 'команда' : 'команды'} из очереди: ${list.map((t) => `«${t}»`).join(', ')} — «Повторить» выполнит все по порядку.`
+    : '';
+  return {
+    title: 'Сервер агента перезапускается — команда не выполнена',
+    note: `Текст команды остался в строке — повторите через несколько секунд.${more}`,
+  };
+}
+
+/** Сеть пропала у самой вкладки (navigator.onLine): дело не в сервере агента (круг 27, п.7). */
+export const OFFLINE_WORDS = Object.freeze({
+  title: 'Нет сети — команда не выполнена',
+  note: 'Компьютер не в сети. Правки руками сохраняются в этой вкладке и уйдут на сервер, когда сеть вернётся; текст команды остался в строке.',
+});
+
+/**
+ * Проект пропал с сервера (I3: базу восстановили из резервной копии, проект удалили), а
+ * его вид у вкладки есть — работу можно сохранить новым проектом.
+ */
+export const PROJECT_GONE_WORDS = Object.freeze({
+  title: 'Проекта больше нет на сервере',
+  note: 'Например, базу восстановили из резервной копии. Ваша работа сохранена в этой вкладке.',
+  action: 'Сохранить как новый проект',
+});
+
+/**
+ * Строка ленты стадий без служебного (круг 27, п.7): «Нет связи с моделью
+ * (http://localhost:1234/v1): Failed to fetch» → «Нет связи с моделью». Адрес в скобках
+ * и латинский хвост после двоеточия срезаются; если и после этого строка — жаргон, её нет.
+ * @param {string} text
+ * @returns {string}
+ */
+export function stageText(text) {
+  let t = cleanText(text);
+  if (!t) return '';
+  t = t.replace(/\s*\((?:https?:\/\/|localhost|\d{1,3}\.)[^)]*\)/gi, '');
+  t = t.replace(/\s*:\s*[A-Za-z][^А-Яа-яЁё]*$/, '');
+  t = t.replace(/\s*https?:\/\/\S+/gi, '').trim();
+  if (!t || /^[^А-Яа-яЁё]*$/.test(t)) return '';
+  return t;
 }
 
 /**

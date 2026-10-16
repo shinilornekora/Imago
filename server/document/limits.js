@@ -6,6 +6,11 @@
  * сервер заведомо отвергнет (иначе транзакция крутилась бы в очереди вечно).
  */
 
+import * as core from '../../src/core.js';
+
+/** `core.cleanKey`, если движок его даёт (круг 27); иначе — своя чистка ключа. */
+const coreCleanKey = typeof core.cleanKey === 'function' ? core.cleanKey : null;
+
 /** Тело запроса и сообщение WebSocket: транзакция (или документ проекта) ≤ 4 МБ → иначе 413. */
 export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 /** Запас на конверт сообщения сокета `{"type":"tx","tx":…}` поверх тела транзакции. */
@@ -103,6 +108,36 @@ export const BUSY_RETRY_S = 1;
  */
 export const REPLAY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const REPLAY_SCAN_TXS = 5000;
+/**
+ * Надгробия (круг 27, I1): id удалённого узла → последний родитель и seq удаления.
+ * Прореживаются детерминированно — по номеру, а не по часам, чтобы голова в памяти и
+ * голова, поднятая со снимка, на одном seq знали одно и то же: на каждой границе
+ * TOMB_PRUNE_EVERY уходят надгробия с seq < граница − TOMB_KEEP_SEQ (окно не меньше
+ * окна переигрывания REPLAY_SCAN_TXS); сверх TOMB_MAX остаются самые новые.
+ * Последствие: `create` в родителя, удалённого давно, — `dropped: orphan`, а не `reparented`.
+ */
+export const TOMB_KEEP_SEQ = 10000;
+export const TOMB_PRUNE_EVERY = 500;
+export const TOMB_MAX = 50000;
+/**
+ * Память головы о последних транзакциях (идемпотентность, окно `stale`): выжимки
+ * (tx_id, seq, chain, client, время, листья set/setToken) — не больше стольких штук и
+ * стольких байт; целиком транзакции голова не держит (круг 27: 500 × 3,9 МБ = 2 ГБ).
+ */
+export const RECENT_TXS = 500;
+export const RECENT_BYTES = 16 * 1024 * 1024;
+/**
+ * HTTP-запись (круг 27): тела записей (`POST …/tx`, `POST /api/projects`) читаются в
+ * пределах бюджета байт на экземпляр (заявленный Content-Length или предел тела);
+ * сверх — 503 busy без чтения. Слот семафора записи берётся ПОСЛЕ того, как тело
+ * дочитано: медленное тело (slowloris) не держит слот. Тело не дочитано за
+ * BODY_TIMEOUT_MS — 408, соединение закрывается.
+ */
+export const WRITE_BODY_BYTES = 64 * 1024 * 1024;
+export const BODY_TIMEOUT_MS = 30000;
+/** Таймауты http.Server: заголовки и запрос целиком (тело) — node сам отвечает 408. */
+export const HEADERS_TIMEOUT_MS = 20000;
+export const REQUEST_TIMEOUT_MS = 35000;
 /** Вложенность значений в операциях и документе: глубже — 400 (jsonb и рекурсия не бесконечны). */
 export const MAX_VALUE_DEPTH = 64;
 /** id в операциях (узлы, родители, соседи): не длиннее стольких символов. */
@@ -141,13 +176,43 @@ export function cutText(s, n) {
 }
 
 /**
+ * Ключи, которые чистка отбрасывает вместе со значением (как `core.cleanKey`, круг 27):
+ * имена прототипа. Присваивание `out['__proto__'] = …` меняло бы прототип копии, а
+ * `constructor`/`prototype` в данных — приглашение к той же путанице у читающего кода.
+ */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * Ключ объекта после очистки (§9.10, круг 27): строка чистится, как значение; ключ,
+ * который после чистки называет прототип (`__proto__`, в том числе `"__proto__\u0000"`),
+ * отбрасывается — `null`. Если `core` даёт свой `cleanKey` — он главнее (одно правило
+ * для клиента и сервера); его ответ всё равно проверяется здесь.
+ * @param {string} k
+ * @returns {string|null}
+ */
+export function cleanKey(k) {
+  const k2 = typeof coreCleanKey === 'function' ? coreCleanKey(k) : cleanText(typeof k === 'string' ? k : String(k));
+  return typeof k2 !== 'string' || UNSAFE_KEYS.has(k2) || !isCleanText(k2) ? null : k2;
+}
+
+const defineOwn = (o, k, v) => Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+
+/**
  * Очистка значения целиком (строки и ключи объектов, рекурсивно): копия делается
  * только там, где есть что чистить. Глубже `maxDepth` — исключение `depth` (вызывающий
  * отвечает 400).
+ *
+ * Ключи (круг 27): опасный ключ (`__proto__`, `constructor`, `prototype` — до или после
+ * чистки) отбрасывается вместе со значением; копия собирается через defineProperty —
+ * присваиванием ключ `__proto__` менял бы прототип. Два ключа, совпавшие после чистки
+ * (`"a"` и `"a\u0000"`), не перетирают друг друга как придётся: ключ, который был чистым
+ * с самого начала, главнее очищенного (мусорный двойник не подменяет данные), а из
+ * нескольких очищенных — последний по порядку ключей (как JSON.parse с повтором).
  * @param {any} v
  * @param {number} [maxDepth]
+ * @param {(k: string) => string|null} [keyOf] очистка ключа (по умолчанию cleanKey)
  */
-export function cleanDeep(v, maxDepth = MAX_VALUE_DEPTH) {
+export function cleanDeep(v, maxDepth = MAX_VALUE_DEPTH, keyOf = cleanKey) {
   const walk = (x, depth) => {
     if (typeof x === 'string') return cleanText(x);
     if (!x || typeof x !== 'object') return x;
@@ -167,17 +232,38 @@ export function cleanDeep(v, maxDepth = MAX_VALUE_DEPTH) {
       }
       return out || x;
     }
-    let out = null;
-    for (const k of Object.keys(x)) {
-      const y = walk(x[k], depth + 1);
-      const k2 = isCleanText(k) ? k : cleanText(k);
-      if (y !== x[k] || k2 !== k) {
-        if (!out) out = { ...x };
-        if (k2 !== k) delete out[k];
-        out[k2] = y;
+    const keys = Object.keys(x);
+    let changed = false;
+    const ks = new Array(keys.length);
+    const vs = new Array(keys.length);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      // собственное свойство `__proto__` (JSON.parse создаёт именно его) читается как данные
+      const val = k === '__proto__' ? Object.getOwnPropertyDescriptor(x, k).value : x[k];
+      const k2 = isCleanText(k) && !UNSAFE_KEYS.has(k) ? k : keyOf(k);
+      ks[i] = k2;
+      if (k2 === null || k2 === undefined) {
+        // отброшенный ключ: значение не чистим и не проверяем — его не будет
+        changed = true;
+        continue;
       }
+      const y = walk(val, depth + 1);
+      vs[i] = y;
+      if (k2 !== k || y !== val) changed = true;
     }
-    return out || x;
+    if (!changed) return x;
+    const out = {};
+    let pure = null;   // исходные ключи — только если есть очищенные (иначе сравнивать не с чем)
+    for (let i = 0; i < ks.length; i++) {
+      const k2 = ks[i];
+      if (k2 === null || k2 === undefined) continue;
+      if (k2 !== keys[i]) {
+        if (!pure) pure = new Set(keys);
+        if (pure.has(k2)) continue;   // чистый двойник есть — он главнее
+      }
+      defineOwn(out, k2, vs[i]);
+    }
+    return out;
   };
   return walk(v, 0);
 }

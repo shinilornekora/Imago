@@ -31,6 +31,7 @@
  * переигрывание после отката (`replay_of_epoch`) не затирает более новое чужое (`stale`).
  */
 
+import * as core from '../../src/core.js';
 import { applyOps, applyBatches, rebase, collectTombstones, ENGINE_VERSION } from '../../src/core.js';
 import { DocError, badRequest, notFound, tooLarge, unavailable, viaStorage } from './errors.js';
 import { chainNext, compactDropped, jsonBytes } from './storage/committed.js';
@@ -39,13 +40,14 @@ import {
   SNAPSHOT_EVERY, SNAPSHOT_KEEP, VERIFY_MS, PAGE_TXS,
   QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES, BUSY_RETRY_S,
   REPLAY_MAX_AGE_MS, REPLAY_SCAN_TXS, MAX_VALUE_DEPTH, MAX_OP_ID, MAX_COMMAND_ID,
+  TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES,
   isCleanText, cleanText, cutText, cleanDeep
 } from './limits.js';
 
 /** Предел операций в транзакции (совместимость: прежде экспортировался отсюда). */
 export const MAX_OPS = MAX_OPS_PER_TX;
-/** Сколько последних транзакций голова помнит (быстрая идемпотентность). */
-export const RECENT_LIMIT = 500;
+/** Сколько последних транзакций голова помнит выжимкой (идемпотентность, окно `stale`); см. RECENT_BYTES. */
+export const RECENT_LIMIT = RECENT_TXS;
 /** Выгрузка головы по бездействию. */
 export const IDLE_MS = 10 * 60 * 1000;
 /**
@@ -335,15 +337,113 @@ export function mergeIntoHead(head, tx, lim = {}) {
   };
 }
 
-/** Надгробия снимка (объект id → родитель; у снимков до круга 25 — нет) → Map. */
-export function tombstonesOf(raw) {
-  const m = new Map();
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    for (const [id, parent] of Object.entries(raw)) m.set(id, typeof parent === 'string' ? parent : null);
-  } else if (Array.isArray(raw)) {
-    for (const pair of raw) if (Array.isArray(pair) && typeof pair[0] === 'string') m.set(pair[0], typeof pair[1] === 'string' ? pair[1] : null);
+const entriesOf = (x) => (x instanceof Map ? [...x] : x && typeof x === 'object' && !Array.isArray(x) ? Object.entries(x) : []);
+
+/**
+ * Надгробия снимка (I1, круг 27) → `{parents: Map id→родитель, seq: Map id→seq удаления}`
+ * или `null` — «неизвестно» (снимок записал экземпляр прежней версии: колонка NULL).
+ *   v2 — `{v:2, parents:{id: parent}, seq:{id: seq}}`;
+ *   v1 — плоский `{id: parent}` (круги 25–26) или массив пар: seq удаления неизвестен —
+ *        считается `atSeq` (номер снимка), то есть не раньше снимка: прореживание
+ *        с таким номером только позже, чем могло бы.
+ * Если движок даёт `normalizeTombstones` — разбор его (одно правило с репликой).
+ * @param {any} raw
+ * @param {number} [atSeq]
+ * @returns {{parents: Map<string, string|null>, seq: Map<string, number>}|null}
+ */
+export function readTombstones(raw, atSeq = 0) {
+  if (raw === null || raw === undefined) return null;
+  let parents = null;
+  let seqs = null;
+  if (typeof core.normalizeTombstones === 'function') {
+    let n;
+    try {
+      n = core.normalizeTombstones(raw, { seq: atSeq });
+    } catch (_) { n = undefined; }
+    // движок сказал «неизвестно» (формат, которого он не знает, негодный v2) — так и есть:
+    // голова восстановит надгробия журналом, а не прочтёт мусор как v1
+    if (n === null) return null;
+    if (n && typeof n === 'object') {
+      parents = entriesOf(n.parents);
+      seqs = entriesOf(n.seq);
+    }
   }
-  return m;
+  if (!parents) {
+    if (Array.isArray(raw)) {
+      parents = raw.filter((p) => Array.isArray(p)).map((p) => [p[0], p[1]]);
+      seqs = [];
+    } else if (typeof raw === 'object' && raw.v === 2) {
+      parents = entriesOf(raw.parents);
+      seqs = entriesOf(raw.seq);
+    } else {
+      parents = entriesOf(raw);
+      seqs = [];
+    }
+  }
+  const seqOf = new Map();
+  for (const [id, v] of seqs) if (Number.isInteger(v) && v >= 0) seqOf.set(id, v);
+  const list = [];
+  for (const [id, parent] of parents) {
+    if (typeof id !== 'string' || !id) continue;
+    list.push([id, typeof parent === 'string' ? parent : null, seqOf.has(id) ? seqOf.get(id) : atSeq]);
+  }
+  // порядок вставки = порядок удаления: прореживание и предел снимают с начала
+  list.sort((a, b) => a[2] - b[2]);
+  const out = { parents: new Map(), seq: new Map() };
+  for (const [id, parent, s] of list) {
+    out.parents.set(id, parent);
+    out.seq.set(id, s);
+  }
+  return out;
+}
+
+/** Надгробия снимка → Map id → родитель (совместимость; `null` и негодное — пусто). */
+export function tombstonesOf(raw) {
+  const t = readTombstones(raw);
+  return t ? t.parents : new Map();
+}
+
+/** Плоская форма v1 `{id: parent}` — клиенту в `snapshot.tombstones` (его прогнозу слияния нужен только родитель). */
+export function flatTombstones(raw) {
+  const t = readTombstones(raw);
+  return t ? Object.fromEntries(t.parents) : null;
+}
+
+/** Форма v2 для снимка: `{v:2, parents, seq}`. */
+export function tombstonesV2(parents, seqs) {
+  return { v: 2, parents: Object.fromEntries(parents), seq: Object.fromEntries(seqs) };
+}
+
+/** Сводка проекта из сообщения шины `{k:'project', p, n, d, s, u}` — или null, если форма не та. */
+function projectOfBus(m) {
+  if (typeof m.n !== 'string' || typeof m.d !== 'string') return null;
+  return { id: m.p, name: m.n, kind: m.d, head_seq: Number.isInteger(m.s) ? m.s : undefined, updated_at: typeof m.u === 'string' ? m.u : undefined };
+}
+
+/** Листья set/setToken транзакции — для выжимки в голове и для окна `stale`. */
+function leavesOf(c) {
+  if (c && Array.isArray(c.leaves)) return c.leaves;
+  const out = [];
+  for (const op of (c && c.ops) || []) {
+    const l = leafOf(op);
+    if (l) out.push(l);
+  }
+  return out;
+}
+
+/**
+ * Выжимка записанной транзакции для памяти головы (круг 27): всё, что нужно
+ * идемпотентности и окну `stale`, без операций — голова не держит 500 транзакций по
+ * 4 МБ. `bytes` — оценка памяти выжимки (строки по длине, поля — константой).
+ */
+function summaryOf(c, replayAt) {
+  const leaves = leavesOf(c);
+  let bytes = 160;
+  for (const k of ['tx_id', 'chain', 'client', 'created_at', 'author']) if (typeof c[k] === 'string') bytes += 2 * c[k].length;
+  for (const l of leaves) bytes += 48 + 2 * (l.scope.length + l.path.length);
+  const out = { tx_id: c.tx_id, seq: c.seq, chain: c.chain, client: c.client, created_at: c.created_at, author: c.author, author_kind: c.author_kind, leaves, bytes };
+  if (replayAt) out.replay_at = replayAt;
+  return out;
 }
 
 /**
@@ -357,6 +457,8 @@ export function tombstonesOf(raw) {
  *   mergeBudgetMs?: number,
  *   maxDocNodes?: number,
  *   maxDocBytes?: number,
+ *   tombKeepSeq?: number, tombPruneEvery?: number, tombMax?: number,
+ *   recentTxs?: number, recentBytes?: number,
  *   log?: {warn:Function, info:Function}
  * }} opts
  */
@@ -364,7 +466,9 @@ export function createSequencer({
   storage, instanceId = 'i', snapshotEvery = SNAPSHOT_EVERY, snapshotKeep = SNAPSHOT_KEEP,
   idleMs = IDLE_MS, verifyMs = VERIFY_MS, mergeBudgetMs, maxDocNodes, maxDocBytes, log = console,
   queueProjectBytes = QUEUE_PROJECT_BYTES, queueProjectTxs = QUEUE_PROJECT_TXS, queueTotalBytes = QUEUE_TOTAL_BYTES,
-  replayScanTxs = REPLAY_SCAN_TXS
+  replayScanTxs = REPLAY_SCAN_TXS,
+  tombKeepSeq = TOMB_KEEP_SEQ, tombPruneEvery = TOMB_PRUNE_EVERY, tombMax = TOMB_MAX,
+  recentTxs = RECENT_TXS, recentBytes = RECENT_BYTES
 }) {
   const lim = { mergeBudgetMs, maxDocNodes, maxDocBytes };
   /** Очередь записи (§9.10): projectId → {bytes, txs} транзакций в мьютексе (ждут и пишутся); всего — байт. */
@@ -375,7 +479,7 @@ export function createSequencer({
   const heads = new Map();
   /** @type {Map<string, Promise>} projectId → хвост очереди (мьютекс) */
   const locks = new Map();
-  /** @type {Set<Function>} слушатели событий (Hub): {kind:'tx'|'epoch', …} */
+  /** @type {Set<Function>} слушатели событий (Hub): {kind:'tx'|'epoch'|'missing'|'project', …} */
   const listeners = new Set();
   /** @type {Set<Promise>} снимки и сверки в полёте — close() их дожидается */
   const inflight = new Set();
@@ -420,13 +524,57 @@ export function createSequencer({
     }
   }
 
-  function remember(head, committed) {
-    head.recent.push(committed);
-    head.byTx.set(committed.tx_id, committed);
-    while (head.recent.length > RECENT_LIMIT) {
+  /**
+   * Запомнить записанную транзакцию выжимкой (круг 27): предел — числом и байтами
+   * выжимок; одна выжимка больше предела байт всё равно помнится (последняя).
+   */
+  function remember(head, committed, replayAt) {
+    const sum = summaryOf(committed, replayAt);
+    head.recent.push(sum);
+    head.recentBytes += sum.bytes;
+    head.byTx.set(sum.tx_id, sum);
+    while (head.recent.length > 1 && (head.recent.length > recentTxs || head.recentBytes > recentBytes)) {
       const old = head.recent.shift();
+      head.recentBytes -= old.bytes;
       if (head.byTx.get(old.tx_id) === old) head.byTx.delete(old.tx_id);
-      head.replayAt.delete(old.tx_id);
+    }
+  }
+
+  /**
+   * tx_id уже записан (память головы) → запись целиком из базы. Голова помнит только
+   * выжимку, поэтому повтор стоит запрос — повторы редки, а память головы — нет.
+   * Не нашлось (база ушла назад) — null: дальше решит UNIQUE в commitTx.
+   */
+  async function knownTx(projectId, head, txId) {
+    const sum = head.byTx.get(txId);
+    if (!sum || typeof storage.findTx !== 'function') return null;
+    const full = await viaStorage(storage.findTx(projectId, txId));
+    return full && full.seq === sum.seq ? full : null;
+  }
+
+  /* ------------------------------ надгробия ------------------------------ */
+
+  /** Надгробие с номером удаления; порядок вставки — порядок удаления (предел снимает самые старые). */
+  function addTomb(head, id, parent, seq) {
+    if (head.tombstones.has(id)) {
+      head.tombstones.delete(id);
+      head.tombSeq.delete(id);
+    }
+    head.tombstones.set(id, parent);
+    head.tombSeq.set(id, seq);
+  }
+
+  /**
+   * Прореживание (I1): граница — по номеру головы, кратному tombPruneEvery, минус
+   * tombKeepSeq; сверх tombMax — самые старые. Только по номерам, не по часам: голова
+   * в памяти и голова со снимка на одном seq знают одно и то же.
+   */
+  function pruneTombs(head) {
+    const bound = Math.floor(head.head_seq / tombPruneEvery) * tombPruneEvery - tombKeepSeq;
+    for (const [id, seq] of head.tombSeq) {
+      if (seq >= bound && head.tombSeq.size <= tombMax) break;
+      head.tombSeq.delete(id);
+      head.tombstones.delete(id);
     }
   }
 
@@ -440,7 +588,25 @@ export function createSequencer({
     if (!page.length) return;
     const before = head.doc;
     const res = applyBatches(before, page.map((tx) => tx.ops));
-    for (const [id, parent] of res.tombstones) head.tombstones.set(id, parent);
+    if (res.tombstones.length) {
+      // seq удаления: applyBatches отдаёт надгробия всей страницы подряд — корень каждого
+      // удаления (id операции remove) указывает на транзакцию, потомки идут за корнем
+      const roots = page.map((tx) => {
+        let set = null;
+        for (const op of tx.ops || []) if (op && op.op === 'remove' && typeof op.id === 'string') (set || (set = new Set())).add(op.id);
+        return set;
+      });
+      let k = 0;
+      for (const [id, parent] of res.tombstones) {
+        for (let j = k; j < page.length; j++) {
+          if (roots[j] && roots[j].has(id)) {
+            k = j;
+            break;
+          }
+        }
+        addTomb(head, id, parent, page[k].seq);
+      }
+    }
     for (let i = 0; i < page.length; i++) {
       const err = res.results[i] && res.results[i].error;
       // применённая форма обязана проходить строго; если нет — журнал и движок разошлись,
@@ -456,6 +622,7 @@ export function createSequencer({
       if (typeof committed.chain === 'string') head.chain = committed.chain;
       remember(head, committed);
     }
+    pruneTombs(head);
   }
 
   function dropHead(projectId) {
@@ -481,14 +648,51 @@ export function createSequencer({
     }
   }
 
+  /** Проекта в базе больше нет (I3): голова выгружается, Hub закрывает сокеты проекта (4404). */
+  function lost(projectId) {
+    dropHead(projectId);
+    emit({ kind: 'missing', projectId });
+  }
+
+  /**
+   * Снимок, с которого поднимается голова, и его надгробия (I1). Надгробия `null` —
+   * снимок записал экземпляр прежней версии, они неизвестны: голова поднимается с
+   * ближайшего более раннего снимка с известными надгробиями (STORE `snapshotBefore`;
+   * снимок seq 0 — затравка, до него удалять было нечего) и переигрывает журнал от
+   * него — remove в этом журнале и дают надгробия. Нет `snapshotBefore` (хранилище
+   * прежней версии) — пустые, как до круга 25, и предупреждение.
+   */
+  async function startingPoint(projectId, snap) {
+    const t = readTombstones(snap.tombstones, snap.seq);
+    if (t) return { snap, tomb: t, restored: false };
+    if (snap.seq === 0) return { snap, tomb: { parents: new Map(), seq: new Map() }, restored: false };
+    let cur = snap;
+    for (let guard = 0; guard < 1000; guard++) {
+      if (typeof storage.snapshotBefore !== 'function') break;
+      const prev = await viaStorage(storage.snapshotBefore(projectId, cur.seq));
+      if (!prev || !(prev.seq < cur.seq)) break;
+      const pt = readTombstones(prev.tombstones, prev.seq);
+      if (pt) return { snap: prev, tomb: pt, restored: true };
+      if (prev.seq === 0) return { snap: prev, tomb: { parents: new Map(), seq: new Map() }, restored: true };
+      cur = prev;   // хранилище отдало снимок без надгробий — ищем ещё раньше
+    }
+    log.warn(`[document/dslts] ${projectId}: у снимка seq ${snap.seq} надгробия неизвестны, а более раннего снимка хранилище не даёт — голова без надгробий до него`);
+    return { snap, tomb: { parents: new Map(), seq: new Map() }, restored: false };
+  }
+
   /** Голова проекта: ленивая загрузка снимка и хвоста. Звать под мьютексом. */
   async function ensureHead(projectId) {
     let head = heads.get(projectId);
     if (!head) {
       const project = await viaStorage(storage.getProject(projectId));
-      if (!project) throw notFound();
-      const snap = await viaStorage(storage.latestSnapshot(projectId));
-      if (!snap) throw unavailable('у проекта нет снимка — журнал не с чего переигрывать');
+      if (!project) {
+        // сокеты проекта могли остаться от прежней головы (база восстановлена без проекта)
+        emit({ kind: 'missing', projectId });
+        throw notFound();
+      }
+      const latest = await viaStorage(storage.latestSnapshot(projectId));
+      if (!latest) throw unavailable('у проекта нет снимка — журнал не с чего переигрывать');
+      const { snap, tomb, restored } = await startingPoint(projectId, latest);
       if (snap.engine !== ENGINE_VERSION) {
         // миграция формата — системная транзакция (§8.3), а не тихая правка; пока её нет — предупреждаем
         log.warn(`[document/dslts] ${projectId}: снимок seq ${snap.seq} записан движком ${snap.engine}, сервер работает с ${ENGINE_VERSION}`);
@@ -497,9 +701,11 @@ export function createSequencer({
         doc: snap.doc, head_seq: snap.seq, chain: snap.chain || '', epoch: project.epoch,
         // надгробия до снимка — из самого снимка (§9.10): без них та же офлайн-транзакция
         // давала бы в свежей голове `orphan`, а в долгоживущей — `reparented`
-        tombstones: tombstonesOf(snap.tombstones), recent: [], byTx: new Map(), replayAt: new Map(), lastUsed: 0, timer: null,
-        docBytes: jsonBytes(snap.doc)
+        tombstones: tomb.parents, tombSeq: tomb.seq,
+        recent: [], recentBytes: 0, byTx: new Map(), lastUsed: 0, timer: null,
+        docBytes: jsonBytes(snap.doc), epochSeq: undefined
       };
+      pruneTombs(head);
       // страница ограничена и числом, и байтами: конец — только пустая страница
       for (;;) {
         const page = await viaStorage(storage.txsAfter(projectId, head.head_seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES }));
@@ -507,6 +713,11 @@ export function createSequencer({
         absorbPage(head, projectId, page);
       }
       heads.set(projectId, head);
+      if (restored) {
+        log.warn(`[document/dslts] ${projectId}: надгробия снимка seq ${latest.seq} неизвестны (прежний экземпляр) — восстановлены журналом от снимка seq ${snap.seq}`);
+        // свежий снимок с надгробиями: следующей загрузке переигрывать не придётся
+        if (head.head_seq > 0) scheduleSnapshot(projectId, head.head_seq, head.doc, head.chain, head.tombstones, head.tombSeq);
+      }
     }
     touch(projectId, head);
     return head;
@@ -521,7 +732,7 @@ export function createSequencer({
     if (project.epoch === head.epoch) {
       const r = await viaStorage(storage.bumpEpoch(projectId, head.epoch, 'instance', instanceId));
       if (r.status === 'missing') {
-        dropHead(projectId);
+        lost(projectId);
         throw notFound();
       }
       epoch = r.epoch;
@@ -541,7 +752,7 @@ export function createSequencer({
     if (!head) return 'none';
     const p = await viaStorage(storage.getProject(projectId));
     if (!p) {
-      dropHead(projectId);
+      lost(projectId);
       return 'none';
     }
     if (p.epoch !== head.epoch) {
@@ -622,15 +833,19 @@ export function createSequencer({
       if (heads.has(msg.p)) scheduleSync(msg.p);
     } else if (msg.k === 'epoch') {
       onEpochNotice(msg.p, msg.e);
+    } else if (msg.k === 'project') {
+      // I4: проект переименовали на другом экземпляре — сокетам здесь
+      const project = projectOfBus(msg);
+      if (project) emit({ kind: 'project', projectId: msg.p, project });
     }
   }) : () => {};
 
   const verifier = verifyMs > 0 ? setInterval(verifyAll, verifyMs) : null;
   if (verifier && verifier.unref) verifier.unref();
 
-  function scheduleSnapshot(projectId, seq, doc, chain, tombstones) {
-    // надгробия — копией сейчас: к моменту записи голова уйдёт дальше
-    const tomb = Object.fromEntries(tombstones);
+  function scheduleSnapshot(projectId, seq, doc, chain, tombstones, tombSeq) {
+    // надгробия — копией сейчас (v2, с номерами удаления): к моменту записи голова уйдёт дальше
+    const tomb = tombstonesV2(tombstones, tombSeq);
     // после ответа: setImmediate отпускает текущий тик, запись идёт следующим
     track(new Promise((resolve) => setImmediate(resolve))
       .then(async () => {
@@ -641,11 +856,30 @@ export function createSequencer({
   }
 
   /**
+   * Seq начала нынешней эпохи (`project_epochs`): с него журнал этой эпохи расходится
+   * с журналом, в котором правку писали впервые. Помнится в голове (голова живёт в
+   * одной эпохе). Эпохи нет в учёте (проект создал экземпляр до круга 23) — null.
+   */
+  async function epochStartSeq(projectId, head) {
+    if (head.epochSeq !== undefined) return head.epochSeq;
+    let seq = null;
+    if (typeof storage.epochs === 'function') {
+      const list = await viaStorage(storage.epochs(projectId));
+      for (const e of list || []) if (e && e.epoch === head.epoch && Number.isInteger(e.seq)) seq = e.seq;
+    }
+    head.epochSeq = seq;
+    return seq;
+  }
+
+  /**
    * Какие `set`/`setToken` переигрываемой транзакции устарели (SPEC §9.10): тот же
    * лист (или путь, пересекающийся с ним) после исходной записи правки (`replay_at`)
-   * переписала чужая транзакция — среди записанных после `base_seq`. Своё (тот же
-   * `client`) не в счёт: свои переигранные правки идут по порядку. Правка старше
-   * REPLAY_MAX_AGE_MS или окно поиска длиннее replayScanTxs — устарели все её листья.
+   * переписала чужая транзакция. Окно поиска (I5, круг 27): переигрывание из другой
+   * эпохи — от seq начала нынешней эпохи (её `base_seq` — номер в журнале, которого
+   * больше нет: от него чужие правки сразу после отката не видны); из той же — от
+   * `base_seq`. Своё (тот же `client`) не в счёт: свои переигранные правки идут по
+   * порядку. Правка старше REPLAY_MAX_AGE_MS или окно длиннее replayScanTxs — устарели
+   * все её листья.
    * @returns {Promise<Set<number>>}
    */
   async function staleOps(projectId, head, tx) {
@@ -659,19 +893,21 @@ export function createSequencer({
     const all = () => { for (const x of leaves) out.add(x.i); return out; };
     const at = tx.replay_at ? Date.parse(tx.replay_at) : NaN;
     if (Number.isFinite(at) && Date.now() - at > REPLAY_MAX_AGE_MS) return all();
-    const from = Math.min(tx.base_seq, head.head_seq);
+    let from = Math.min(tx.base_seq, head.head_seq);
+    if (tx.replay_of_epoch !== head.epoch) {
+      const start = await epochStartSeq(projectId, head);
+      if (start !== null) from = Math.min(from, start);
+    }
     if (head.head_seq - from > replayScanTxs) return all();
     const consider = (c) => {
       if (c.seq <= from || c.tx_id === tx.tx_id) return;
       if (tx.client && c.client === tx.client) return;
       if (Number.isFinite(at)) {
         // переигранная раньше чужая правка считается по своему исходному времени
-        const t = Date.parse(head.replayAt.get(c.tx_id) || c.created_at);
+        const t = Date.parse(c.replay_at || c.created_at);
         if (Number.isFinite(t) && t <= at) return;
       }
-      for (const op of c.ops || []) {
-        const l = leafOf(op);
-        if (!l) continue;
+      for (const l of leavesOf(c)) {
         for (const x of leaves) if (!out.has(x.i) && x.scope === l.scope && pathsMeet(x.path, l.path)) out.add(x.i);
       }
     };
@@ -685,7 +921,9 @@ export function createSequencer({
       const was = seq;
       for (const c of page) {
         if (c.seq > head.head_seq) break;
-        consider(c);
+        // время переигранной раньше чужой правки знает только память головы
+        const sum = head.byTx.get(c.tx_id);
+        consider(sum && sum.seq === c.seq ? sum : c);
         seq = c.seq;
       }
       if (seq === was || out.size === leaves.length) break;
@@ -708,14 +946,10 @@ export function createSequencer({
       // очередь мьютекса могла дождаться остановки: голову после close() не загружаем
       if (closed) throw unavailable('сервис останавливается');
       let head = await ensureHead(projectId);
-      // tx_id известен → сохранённое (идемпотентность, §8.3). Здесь только память:
-      // всё старше RECENT_LIMIT ловит UNIQUE(project_id, tx_id) в commitTx, а лишний
-      // запрос к базе на каждую новую транзакцию — это круг ожидания на горячем пути
-      const known = head.byTx.get(tx.tx_id);
-      if (known) return { committed: known, existing: true };
       if (tx.base_seq > head.head_seq) {
         // клиент видел голову дальше нашей: возможно, писал другой экземпляр — сначала сверка
         const r = await syncHead(projectId);
+        if (r === 'none') throw notFound();
         if (r === 'epoch' || r === 'rollback') head = await ensureHead(projectId);
         if (tx.base_seq > head.head_seq) {
           // база позади клиента (откат или пересоздание): зажим, а не отказ — слияние не отказывает
@@ -724,7 +958,10 @@ export function createSequencer({
       }
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         head = await ensureHead(projectId);
-        const again = head.byTx.get(tx.tx_id);
+        // tx_id известен → сохранённое (идемпотентность, §8.3): память головы знает
+        // последние выжимкой, запись целиком — из базы; всё старше ловит
+        // UNIQUE(project_id, tx_id) в commitTx (но уже после слияния — дороже)
+        const again = await knownTx(projectId, head, tx.tx_id);
         if (again) return { committed: again, existing: true };
         // переигрывание после отката базы (§9.10): лист, который после правки переписал
         // кто-то другой, остаётся за более новым — `set` отбрасывается с `reason:'stale'`
@@ -734,7 +971,10 @@ export function createSequencer({
         const expectSeq = head.head_seq + 1;
         const expectChain = chainNext(head.chain, tx.tx_id, expectSeq);
         const res = await viaStorage(storage.commitTx(projectId, record, { expectSeq, expectChain, origin: instanceId }));
-        if (res.status === 'missing') throw notFound();
+        if (res.status === 'missing') {
+          lost(projectId);
+          throw notFound();
+        }
         if (res.status === 'existing') {
           // записал другой экземпляр (или гонка мимо памяти): голова могла отстать
           if (res.committed.seq > head.head_seq) await syncHead(projectId);
@@ -753,18 +993,19 @@ export function createSequencer({
           continue;
         }
         // надгробия пополняются ДО обновления документа — считались по прежней голове
-        for (const [id, parent] of merged.tombstones) head.tombstones.set(id, parent);
+        const seq = res.committed.seq;
+        for (const [id, parent] of merged.tombstones) addTomb(head, id, parent, seq);
         head.doc = merged.doc;
         head.docBytes = merged.docBytes;
-        head.head_seq = res.committed.seq;
+        head.head_seq = seq;
         head.chain = res.committed.chain;
-        if (tx.replay_at) head.replayAt.set(tx.tx_id, tx.replay_at);
-        remember(head, res.committed);
+        remember(head, res.committed, tx.replay_at);
+        pruneTombs(head);
         // бездействие считается от конца записи, а не от её начала: долгая запись
         // (медленная база, длинная очередь) не должна выгружать голову сразу после себя
         touch(projectId, head);
         emit({ kind: 'tx', projectId, committed: res.committed });
-        if (snapshotEvery > 0 && res.committed.seq % snapshotEvery === 0) scheduleSnapshot(projectId, res.committed.seq, head.doc, head.chain, head.tombstones);
+        if (snapshotEvery > 0 && seq % snapshotEvery === 0) scheduleSnapshot(projectId, seq, head.doc, head.chain, head.tombstones, head.tombSeq);
         return { committed: res.committed, existing: false };
       }
       exhausted += 1;
@@ -775,7 +1016,10 @@ export function createSequencer({
   const info = (head) => ({ head_seq: head.head_seq, chain: head.chain, epoch: head.epoch });
 
   return {
-    /** Подписка на события: `{kind:'tx', projectId, committed}` в порядке seq · `{kind:'epoch', projectId, epoch, token?}`. */
+    /**
+     * Подписка на события: `{kind:'tx', projectId, committed}` в порядке seq · `{kind:'epoch', projectId, epoch, token?}` ·
+     * `{kind:'missing', projectId}` — проекта нет в базе (I3) · `{kind:'project', projectId, project}` — сводка изменилась (I4).
+     */
     subscribe(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);
@@ -795,6 +1039,8 @@ export function createSequencer({
       return withLock(projectId, async () => {
         let head = await ensureHead(projectId);
         const r = await syncHead(projectId);
+        // проекта не стало между загрузкой головы и сверкой (I3): сокету — 404, а не hello
+        if (r === 'none') throw notFound();
         if (r === 'epoch' || r === 'rollback') head = await ensureHead(projectId);
         return info(head);
       });
@@ -824,7 +1070,7 @@ export function createSequencer({
           }
         }
         const head = await ensureHead(projectId);
-        await syncHead(projectId);
+        if ((await syncHead(projectId)) === 'none') throw notFound();
         return { bumped, ...info(heads.get(projectId) || head) };
       });
     },
@@ -881,8 +1127,30 @@ export function createSequencer({
         await ensureHead(projectId);
         await syncHead(projectId);
         const head = await ensureHead(projectId);
-        return { doc: head.doc, head_seq: head.head_seq, chain: head.chain, epoch: head.epoch, tombstones: new Map(head.tombstones), recent: head.recent.slice() };
+        return {
+          doc: head.doc, head_seq: head.head_seq, chain: head.chain, epoch: head.epoch,
+          tombstones: new Map(head.tombstones), tombSeq: new Map(head.tombSeq),
+          recent: head.recent.slice(), recentBytes: head.recentBytes
+        };
       });
+    },
+
+    /**
+     * Проект изменился вне журнала (I4: PATCH имени) — сокетам проекта здесь и на
+     * других экземплярах (эфемерная шина хранилища, канал присутствия): `{kind:'project'}`.
+     * @param {{id: string, name: string, kind: string, head_seq: number, updated_at: string}} project
+     */
+    projectChanged(project) {
+      if (!project || typeof project.id !== 'string') return;
+      const summary = { id: project.id, name: project.name, kind: project.kind, head_seq: project.head_seq, updated_at: project.updated_at };
+      emit({ kind: 'project', projectId: project.id, project: summary });
+      if (typeof storage.publish === 'function') {
+        try {
+          storage.publish({ k: 'project', p: project.id, i: instanceId, n: summary.name, d: summary.kind, s: summary.head_seq, u: summary.updated_at });
+        } catch (e) {
+          log.warn('[document/dslts] шина: имя проекта не разослано:', e && e.message);
+        }
+      }
     },
 
     /** Гонки с другими экземплярами: сколько кругов заново, сколько раз попытки кончились (503). */

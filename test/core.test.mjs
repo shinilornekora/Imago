@@ -38,6 +38,16 @@ function scene(build) {
   return doc;
 }
 
+/** Документ «до компонентов» (круг 27: пустой createDoc сразу с библиотекой — здесь её снимаем). */
+function withoutLibrary(doc) {
+  const lib = libraryId(doc);
+  if (!lib) return doc;
+  const nodes = { ...doc.nodes };
+  delete nodes[lib];
+  nodes[doc.root] = { ...nodes[doc.root], children: nodes[doc.root].children.filter((c) => c !== lib) };
+  return { ...doc, nodes };
+}
+
 const rectOf = (doc, id, opts = M) => solve(doc, opts).rects[id];
 const box = (id, parent, w, h, extra = {}) => ({
   type: 'rect', id, name: id, parent, radius: 0, fill: '#cccccc',
@@ -455,7 +465,9 @@ test('createDoc(): два артборда с настоящим русским 
 
 test('createDoc(seed) принимает готовый документ, createDoc("empty") — пустой', () => {
   const empty = createDoc('empty');
-  assert.equal(Object.keys(empty.nodes).length, 1);
+  // круг 27 (I7): корень и библиотека — документ в нынешнем формате, без досок
+  assert.equal(Object.keys(empty.nodes).length, 2);
+  assert.ok(libraryNode(empty));
   assert.equal(artboards(empty).length, 0);
   const round = createDoc(JSON.parse(JSON.stringify(createDoc())));
   assert.equal(artboards(round).length, 2);
@@ -4048,7 +4060,7 @@ test('круг19 п.1: библиотека — потомок корня, но 
 
 test('круг19 п.1: миграция старого документа — ensureLibrary одним вызовом', () => {
   // документ «до компонентов»: библиотеки нет вовсе
-  const old = createDoc(JSON.parse(JSON.stringify(scene(() => [ops.create(box('a', 'ab', 40, 40))]))));
+  const old = createDoc(JSON.parse(JSON.stringify(withoutLibrary(scene(() => [ops.create(box('a', 'ab', 40, 40))])))));
   assert.equal(libraryNode(old), null, 'у старого документа библиотеки нет');
   // и он при этом полностью рабочий: решатель, валидатор и словарь молчат
   const geoBefore = solve(old, M);
@@ -5050,7 +5062,9 @@ test('круг20 п.4: валидатор — dead-scale-ref (error) на мёр
   const geo = solve(short, M);
   assert.equal(geo.rects.a.y, 0, 'padding.t мёртв → 0');
   assert.equal(geo.rects.b.y, 20, 'gap мёртв → 0');
-  const dead = codes(short).filter((v) => v.code === 'dead-scale-ref');
+  // круг 27: у библиотеки пустого документа зазор — тоже ссылка (spacing.N), и она умирает
+  // вместе с укороченной шкалой; здесь речь о card и a
+  const dead = codes(short).filter((v) => v.code === 'dead-scale-ref' && v.nodeId !== libraryId(short));
   assert.equal(dead.length, 2, 'по строке на узел: card (gap, padding.t/b, radius) и a (radius)');
   for (const v of dead) assert.equal(v.severity, 'error');
   const card = dead.find((v) => v.nodeId === 'card');
@@ -5284,7 +5298,7 @@ test('круг20 п.8: цена разрешения ссылок — solve на
     ...build
   ]);
   const twin = numericTwin(doc);
-  assert.equal(Object.keys(doc.nodes).length, 2 + N * 5);
+  assert.equal(Object.keys(doc.nodes).length, 3 + N * 5);   // корень, библиотека, доска
   const time = (d) => {
     const t0 = performance.now();
     let h;

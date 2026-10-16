@@ -9,7 +9,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDoc, ENGINE_VERSION, uid, ops } from '../../src/core.js';
 import { createMemoryStorage } from '../../server/document/storage/memory.js';
-import { compactDropped } from '../../server/document/storage/committed.js';
+import { compactDropped, chainNext } from '../../server/document/storage/committed.js';
 import { viaStorage, DocError, setStorageLog } from '../../server/document/errors.js';
 import { backends, pgStorage } from './helpers.mjs';
 
@@ -106,9 +106,9 @@ for (const backend of list) {
       assert.equal((await storage.getProject(p.id)).kind, 'library');
     });
 
-    it('снимок несёт надгробия (объект id → родитель), старый — {}; запись журнала — command_id (круг 25)', async () => {
+    it('снимок несёт надгробия (объект id → родитель); запись журнала — command_id (круг 25)', async () => {
       const p = await storage.createProject({ name: 'Н', kind: 'design', doc: createDoc('empty'), engine: E });
-      assert.deepEqual((await storage.latestSnapshot(p.id)).tombstones, {}, 'затравка — без надгробий');
+      assert.deepEqual((await storage.latestSnapshot(p.id)).tombstones.parents, {}, 'затравка — без надгробий');
       const r1 = await storage.commitTx(p.id, record(0, [], { command_id: 'cmd_42' }));
       assert.equal(r1.committed.command_id, 'cmd_42');
       const r2 = await storage.commitTx(p.id, record(1, []));
@@ -124,6 +124,104 @@ for (const backend of list) {
       assert.equal(snap.seq, 2);
       assert.deepEqual(snap.tombstones, { n_3: 'b_2' });
       assert.equal(await storage.writeSnapshot(p.id, 2, doc, E, r2.committed.chain), false, 'повтор — DO NOTHING');
+    });
+
+    it('надгробия v2 (круг 27, I1): v2 — как есть, v1 — как есть, null — «неизвестно»; seq 0 — всегда известны (пусто)', async () => {
+      const p = await storage.createProject({ name: 'Н2', kind: 'design', doc: createDoc('empty'), engine: E });
+      assert.deepEqual((await storage.latestSnapshot(p.id)).tombstones, { v: 2, parents: {}, seq: {} }, 'затравка — v2, пусто');
+      const c = [];
+      for (let i = 0; i < 4; i++) c.push((await storage.commitTx(p.id, record(i, []))).committed.chain);
+      const doc = createDoc('empty');
+      const v2 = { v: 2, parents: { n_1: 'b_1', n_2: null }, seq: { n_1: 1, n_2: 2 } };
+      assert.equal(await storage.writeSnapshot(p.id, 1, doc, E, c[0], v2), true);
+      assert.deepEqual((await storage.latestSnapshot(p.id)).tombstones, v2, 'v2 — туда и обратно');
+      assert.equal(await storage.saveSnapshot(p.id, { seq: 2, doc, engine: E, chain: c[1], tombstones: { n_3: 'b_3' } }), true);
+      assert.deepEqual((await storage.latestSnapshot(p.id)).tombstones, { n_3: 'b_3' }, 'v1 — как есть (номеров нет)');
+      assert.equal(await storage.writeSnapshot(p.id, 3, doc, E, c[2], null), true);
+      const s3 = await storage.latestSnapshot(p.id);
+      assert.equal(s3.seq, 3);
+      assert.equal(s3.tombstones, null, 'null — неизвестно');
+      // та же цепочка, надгробия теперь известны — снимок дописывается (а не DO NOTHING)
+      assert.equal(await storage.writeSnapshot(p.id, 3, doc, E, c[2], { v: 2, parents: {}, seq: {} }), true);
+      assert.deepEqual((await storage.latestSnapshot(p.id)).tombstones, { v: 2, parents: {}, seq: {} });
+      assert.equal(await storage.writeSnapshot(p.id, 3, doc, E, c[2], { v: 2, parents: {}, seq: {} }), false, 'повтор — DO NOTHING');
+      assert.equal(await storage.writeSnapshot(p.id, 3, doc, E, c[2], null), false, 'null известное не затирает');
+    });
+
+    it('snapshotBefore (круг 27, I1): ближайший раньше seq с известными надгробиями и годный по журналу; seq 0 — всегда', async () => {
+      const p = await storage.createProject({ name: 'SB', kind: 'design', doc: createDoc('empty'), engine: E });
+      const c = [];
+      for (let i = 0; i < 6; i++) c.push((await storage.commitTx(p.id, record(i, [])).then((r) => r.committed.chain)));
+      const doc = createDoc('empty');
+      assert.equal(await storage.writeSnapshot(p.id, 2, doc, E, c[1], { v: 2, parents: { a: 'r' }, seq: { a: 2 } }), true);
+      assert.equal(await storage.writeSnapshot(p.id, 4, doc, E, c[3], null), true, 'неизвестные надгробия');
+      assert.equal(await storage.writeSnapshot(p.id, 5, doc, E, c[4], { b: 'r' }), true, 'v1');
+      const at = async (seq, o) => storage.snapshotBefore(p.id, seq, o);
+      assert.equal((await at(6)).seq, 5, 'v1 — известны');
+      assert.deepEqual((await at(6)).tombstones, { b: 'r' });
+      const b5 = await at(5);
+      assert.equal(b5.seq, 2, 'seq 4 — неизвестны, пропущен');
+      assert.deepEqual(b5.tombstones, { v: 2, parents: { a: 'r' }, seq: { a: 2 } });
+      assert.equal(b5.doc.root, doc.root);
+      assert.equal(b5.chain, c[1]);
+      const lean = await at(5, { doc: false });
+      assert.equal(lean.seq, 2);
+      assert.equal('doc' in lean, false, 'doc:false — без документа');
+      assert.equal((await at(2)).seq, 0, 'строго раньше seq');
+      assert.deepEqual((await at(2)).tombstones, { v: 2, parents: {}, seq: {} });
+      assert.equal(await at(0), null, 'раньше затравки — ничего');
+      assert.equal(await storage.snapshotBefore('00000000-0000-4000-8000-000000000000', 5), null);
+      assert.equal(await storage.snapshotBefore('мусор', 5), null);
+    });
+
+    it('latestSnapshotMeta (круг 27, I2): тот же снимок, что latestSnapshot, без doc и надгробий, с эпохой', async () => {
+      const p = await storage.createProject({ name: 'M', kind: 'design', doc: createDoc('empty'), engine: E });
+      const m0 = await storage.latestSnapshotMeta(p.id);
+      assert.deepEqual({ ...m0, created_at: undefined }, { seq: 0, chain: '', engine: E, epoch: p.epoch, created_at: undefined });
+      const r1 = await storage.commitTx(p.id, record(0, []));
+      await storage.commitTx(p.id, record(1, []));
+      await storage.writeSnapshot(p.id, 1, createDoc('empty'), E, r1.committed.chain, { v: 2, parents: {}, seq: {} });
+      await storage.writeSnapshot(p.id, 2, createDoc('empty'), E, 'чужая', { v: 2, parents: {}, seq: {} });   // не по журналу — не ляжет
+      const full = await storage.latestSnapshot(p.id);
+      const meta = await storage.latestSnapshotMeta(p.id);
+      assert.deepEqual(meta, { seq: full.seq, chain: full.chain, engine: full.engine, epoch: p.epoch, created_at: full.created_at });
+      assert.equal(meta.seq, 1);
+      assert.equal(await storage.latestSnapshotMeta('мусор'), null);
+      assert.equal(await storage.latestSnapshotMeta('00000000-0000-4000-8000-000000000000'), null);
+    });
+
+    it('commitTx: expectChain — номер тот же, цепочка другая → stale reason:chain, голова и журнал не сдвинуты (мутант круга 26)', async () => {
+      const p = await storage.createProject({ name: 'Ц', kind: 'design', doc: createDoc('empty'), engine: E });
+      const first = record(0, []);
+      const r1 = await storage.commitTx(p.id, first, { expectSeq: 1, expectChain: chainNext('', first.tx_id, 1) });
+      assert.equal(r1.status, 'committed', 'верная цепочка — запись');
+      const tx = record(1, []);
+      const bad = await storage.commitTx(p.id, tx, { expectSeq: 2, expectChain: chainNext('другой журнал', tx.tx_id, 2) });
+      assert.equal(bad.status, 'stale');
+      assert.equal(bad.reason, 'chain');
+      assert.equal(bad.head_seq, 1);
+      assert.equal(bad.epoch, p.epoch);
+      const after = await storage.getProject(p.id);
+      assert.equal(after.head_seq, 1, 'номер головы не ушёл вперёд');
+      assert.equal(after.head_chain, r1.committed.chain, 'цепочка головы та же');
+      assert.equal(await storage.findTx(p.id, tx.tx_id), null, 'записи нет');
+      assert.deepEqual((await storage.txsAfter(p.id, 0)).map((t) => t.tx_id), [first.tx_id]);
+      const ok = await storage.commitTx(p.id, tx, { expectSeq: 2, expectChain: chainNext(r1.committed.chain, tx.tx_id, 2) });
+      assert.equal(ok.status, 'committed', 'та же транзакция с верной цепочкой — ложится');
+      assert.equal(ok.committed.chain, chainNext(r1.committed.chain, tx.tx_id, 2));
+    });
+
+    it('pruneSnapshots: последние keep, seq 0 и старший снимок с известными надгробиями — остаются', async () => {
+      const p = await storage.createProject({ name: 'Пр', kind: 'design', doc: createDoc('empty'), engine: E });
+      const c = [];
+      for (let i = 0; i < 6; i++) c.push((await storage.commitTx(p.id, record(i, []))).committed.chain);
+      const doc = createDoc('empty');
+      await storage.writeSnapshot(p.id, 1, doc, E, c[0], { v: 2, parents: {}, seq: {} });
+      await storage.writeSnapshot(p.id, 2, doc, E, c[1], { v: 2, parents: {}, seq: {} });
+      for (const s of [3, 4, 5, 6]) await storage.writeSnapshot(p.id, s, doc, E, c[s - 1], null);
+      assert.equal(await storage.pruneSnapshots(p.id, 2), 3);
+      assert.deepEqual(await storage.snapshotSeqs(p.id), [0, 2, 5, 6]);
+      assert.equal((await storage.snapshotBefore(p.id, 7)).seq, 2);
     });
 
     it('данные, которых база не хранит (\\u0000 в jsonb — 22P05, половинка суррогата — 22P02, NUL в text — 22021): 400 retryable:false, голова не сдвинута', async () => {

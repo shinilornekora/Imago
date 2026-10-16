@@ -36,13 +36,15 @@ function bigTx(bytes, ops = 1) {
 }
 
 /** Стек Document service над памятью с замедленной записью и своими пределами. */
-async function stack({ seq = {}, hub = {}, writes = {}, delayMs = 0 } = {}) {
+async function stack({ seq = {}, hub = {}, writes = {}, delayMs = 0, gate = null } = {}) {
   const storage = createMemoryStorage();
   await storage.init();
-  // замедлить запись: очередь мьютекса успевает накопиться; заодно — сколько записей одновременно в очереди
+  // замедлить запись: очередь мьютекса успевает накопиться; заодно — сколько записей одновременно в очереди.
+  // `gate` — запись стоит, пока тест не откроет ворота (gate.open())
   const commitTx = storage.commitTx.bind(storage);
   storage.commitTx = async (...a) => {
     if (delayMs) await sleep(delayMs);
+    if (gate) await gate.promise;
     return commitTx(...a);
   };
   const dslr = createReader({ storage });
@@ -170,6 +172,34 @@ describe('предел входящих записей (§9.10)', () => {
       assert.deepEqual([...new Set(res.filter((r) => r !== 'ok'))], ['503:busy:queue_total:1']);
       assert.equal(s.dslts.queueStats().totalBytes, 0, 'очередь опустела');
     } finally {
+      await s.close();
+    }
+  });
+
+  it(`сокет на пределе в полёте перестаёт читать (пауза): большие транзакции ждут у клиента, а не получают busy`, async () => {
+    // крупные сообщения идут многими кусками TCP: пока сокет на паузе, следующее не
+    // дочитывается и не разбирается. Без паузы сервер читал бы всё и отвечал busy на
+    // каждое сверх предела (и держал бы их в памяти до разбора)
+    let open;
+    const gate = { promise: new Promise((r) => { open = r; }) };
+    const s = await stack({ gate });
+    try {
+      const id = await s.project();
+      const sock = s.ws(id, 'P');
+      await sock.until((m) => m.type === 'hello');
+      const txs = Array.from({ length: 12 }, () => bigTx(MB));
+      for (const t of txs) sock.send({ type: 'tx', tx: t });
+      await sleep(600);
+      assert.ok(s.hub.busyRefused() <= 1, `пока запись стоит, отказано ${s.hub.busyRefused()} — сокет должен был встать на паузу`);
+      assert.ok(sock.ws.bufferedAmount > 0 || s.hub.busyRefused() === 0, 'остальное ждёт у клиента');
+      open();
+      const res = await outcomes(sock, txs.map((t) => t.tx_id), 30000);
+      assert.equal(res.size, 12, 'ответ на каждую');
+      const ok = [...res.values()].filter((r) => r.ok).length;
+      assert.ok(ok >= 11, `записано ${ok} из 12 — пауза, а не отказ`);
+      await sock.close();
+    } finally {
+      open();
       await s.close();
     }
   });

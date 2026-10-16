@@ -13,10 +13,15 @@
  * эфемерные сообщения присутствия тем же путём.
  * `backup()`/`restore(b)` — копия всего хранилища и возврат к ней: так тесты
  * моделируют откат базы из бэкапа под работающим сервисом.
+ *
+ * Надгробия снимка хранятся так же, как в колонках pg (migrations/007): `parents`,
+ * `meta` (v2 без parents) и `metaChain` — и читаются тем же committed.joinTombstones;
+ * `forgetTombstones(projectId, seq)` — снимок «как от экземпляра прежней версии»
+ * (надгробия неизвестны) — тестам смешанных версий без базы.
  */
 
 import { randomUUID } from 'node:crypto';
-import { toCommitted, txColumns, chainNext, newEpoch, jsonBytes, tombstonesObject, pgRejects } from './committed.js';
+import { toCommitted, txColumns, chainNext, newEpoch, jsonBytes, splitTombstones, joinTombstones, pgRejects } from './committed.js';
 import { PAGE_BYTES } from '../limits.js';
 
 const clone = (v) => (v === undefined ? undefined : structuredClone(v));
@@ -64,6 +69,31 @@ export function createMemoryStorage() {
     return j.bySeq.find((r) => r.seq === seq) || null;
   };
 
+  /** Снимки проекта, годные по журналу (seq 0 или chain совпадает), старшие первыми. */
+  const validSnapshots = (projectId) => {
+    const list = snapshots.get(String(projectId)) || [];
+    const out = [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const s = list[i];
+      if (s.seq === 0) out.push(s);
+      else {
+        const row = rowAt(projectId, s.seq);
+        if (row && row.chain === s.chain) out.push(s);
+      }
+    }
+    return out;
+  };
+  /** Снимок наружу — копией; надгробия — v2, v1 или null, как у pg. */
+  const snapshotOut = (s, withDoc) => {
+    const out = {
+      seq: s.seq, engine: s.engine, chain: s.chain || '',
+      tombstones: clone(joinTombstones({ seq: s.seq, chain: s.chain || '', parents: s.parents, meta: s.meta, metaChain: s.metaChain })),
+      created_at: s.created_at
+    };
+    if (withDoc) out.doc = clone(s.doc);
+    return out;
+  };
+
   const self = {
     kind: 'memory',
 
@@ -91,7 +121,7 @@ export function createMemoryStorage() {
       const epoch = newEpoch();
       const project = { id: randomUUID(), name, kind, head_seq: 0, head_chain: '', epoch, epoch_cause: 'init', engine, created_at: now, updated_at: now };
       projects.set(project.id, project);
-      snapshots.set(project.id, [{ seq: 0, doc: clone(doc), engine, chain: '', tombstones: {}, created_at: now }]);
+      snapshots.set(project.id, [{ seq: 0, doc: clone(doc), engine, chain: '', parents: {}, meta: null, metaChain: null, created_at: now }]);
       epochs.set(project.id, [{ epoch, seq: 0, cause: 'init', created_at: now }]);
       journalOf(project.id);
       return clone(project);
@@ -138,16 +168,30 @@ export function createMemoryStorage() {
     },
 
     async latestSnapshot(projectId) {
-      const list = snapshots.get(String(projectId));
-      if (!list || !list.length) return null;
-      for (let i = list.length - 1; i >= 0; i--) {
-        const s = list[i];
-        const out = () => ({ ...clone(s), tombstones: clone(s.tombstones || {}) });
-        if (s.seq === 0) return out();
-        const row = rowAt(projectId, s.seq);
-        if (row && row.chain === s.chain) return out();
-      }
-      return null;
+      const s = validSnapshots(projectId)[0];
+      return s ? snapshotOut(s, true) : null;
+    },
+
+    /** Тот же снимок без документа и надгробий (круг 27, I2). */
+    async latestSnapshotMeta(projectId) {
+      const s = validSnapshots(projectId)[0];
+      if (!s) return null;
+      return { seq: s.seq, chain: s.chain || '', engine: s.engine, epoch: projects.get(String(projectId)).epoch, created_at: s.created_at };
+    },
+
+    /** Ближайший снимок раньше `seq`, годный по журналу и с известными надгробиями (круг 27, I1). */
+    async snapshotBefore(projectId, seq, { doc = true } = {}) {
+      const s = validSnapshots(projectId).find((x) => x.seq < seq && (x.seq === 0 || x.metaChain === x.chain));
+      return s ? snapshotOut(s, doc) : null;
+    },
+
+    /** Снимок «записан экземпляром прежней версии»: надгробия неизвестны (тестам). */
+    forgetTombstones(projectId, seq) {
+      const s = (snapshots.get(String(projectId)) || []).find((x) => x.seq === seq);
+      if (!s) return false;
+      s.metaChain = null;
+      s.meta = null;
+      return true;
     },
 
     async snapshotSeqs(projectId) {
@@ -208,17 +252,20 @@ export function createMemoryStorage() {
       return self.writeSnapshot(projectId, seq, doc, engine, chain, tombstones);
     },
 
-    async writeSnapshot(projectId, seq, doc, engine, chain = '', tombstones = {}) {
+    async writeSnapshot(projectId, seq, doc, engine, chain = '', tombstones = null) {
       const list = snapshots.get(String(projectId));
       if (!list) return false;
       const row = rowAt(projectId, seq);
       if (!row || row.chain !== chain) return false;   // журнал на этом seq уже другой
+      const { parents, meta } = splitTombstones(tombstones);
+      const metaChain = parents === null ? null : chain;
       const at = list.findIndex((s) => s.seq === seq);
       if (at >= 0) {
-        if (list[at].chain === chain) return false;    // ON CONFLICT DO NOTHING
+        // как ON CONFLICT … WHERE в pg: та же цепочка и надгробия не прибавились — DO NOTHING
+        if (list[at].chain === chain && (metaChain === null || list[at].metaChain === metaChain)) return false;
         list.splice(at, 1);
       }
-      list.push({ seq, doc: clone(doc), engine, chain, tombstones: tombstonesObject(tombstones), created_at: new Date().toISOString() });
+      list.push({ seq, doc: clone(doc), engine, chain, parents: clone(parents), meta: clone(meta), metaChain, created_at: new Date().toISOString() });
       list.sort((a, b) => a.seq - b.seq);
       return true;
     },
@@ -227,7 +274,9 @@ export function createMemoryStorage() {
       const list = snapshots.get(String(projectId));
       if (!list || !(keep > 0)) return 0;
       const rest = list.filter((s) => s.seq !== 0);
-      const drop = rest.slice(0, Math.max(0, rest.length - keep));
+      // старший снимок с известными надгробиями не удаляется (как в pg)
+      const known = rest.filter((s) => s.metaChain === s.chain).pop();
+      const drop = rest.slice(0, Math.max(0, rest.length - keep)).filter((s) => s !== known);
       if (!drop.length) return 0;
       const gone = new Set(drop.map((s) => s.seq));
       snapshots.set(String(projectId), list.filter((s) => !gone.has(s.seq)));

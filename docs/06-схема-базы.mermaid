@@ -23,7 +23,7 @@ erDiagram
         int engine "версия формата движка"
         uuid workspace_id FK "фаза 2"
         timestamptz created_at
-        timestamptz updated_at
+        timestamptz updated_at "индекс (updated_at DESC, id DESC) — страницы списка (008)"
     }
     OPERATIONS {
         uuid project_id PK, FK
@@ -49,7 +49,9 @@ erDiagram
         jsonb doc "root · nodes · tokens · meta — целиком"
         int engine
         text chain "chain записи seq; снимок без совпадения с журналом не отдаётся"
-        jsonb tombstones "id удалённого → родитель; '{}' у снимков до круга 25"
+        jsonb tombstones "parents v1: id удалённого → родитель; NULL по умолчанию (007)"
+        jsonb tombstones_meta "v2 без parents: {v:2, seq: id → seq удаления}; NULL — номеров нет (007)"
+        text tombstones_chain "chain, для которой надгробия известны; NULL или ≠ chain — неизвестны (007)"
         timestamptz created_at
     }
     PROJECT_EPOCHS {

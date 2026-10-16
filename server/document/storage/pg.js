@@ -8,12 +8,19 @@
  *   listProjectsPage({kind?, limit?, after?: {at, id}}) → {projects, more, next: {at, id}|null}   (круг 26)
  *     Project = {id, name, kind, head_seq, head_chain, epoch, epoch_cause, engine, created_at, updated_at}
  *   latestSnapshot(projectId) → {seq, doc, engine, chain, tombstones, created_at}|null   (только снимок, чей chain совпадает с журналом)
+ *   latestSnapshotMeta(projectId) → {seq, chain, engine, epoch, created_at}|null   (круг 27: тот же снимок, без doc и надгробий —
+ *     jsonb документа не читается)
+ *   snapshotBefore(projectId, seq, {doc?}) → снимок как у latestSnapshot|null   (круг 27: ближайший с seq < данного,
+ *     годный по журналу и с известными надгробиями; seq 0 — всегда такой)
+ *     `tombstones` снимка (круг 27, I1): v2 `{v:2, parents:{id → родитель}, seq:{id → seq удаления}, …}` или
+ *     null — «неизвестно» (снимок записал экземпляр прежней версии); у seq 0 — всегда v2 (пусто)
  *   txsAfter(projectId, seq, limit, {maxBytes}?) → Committed[]   (первая — всегда, дальше — пока влезает в maxBytes)
  *   chainAt(projectId, seq) → string|null   (seq 0 → '')
  *   commitTx(projectId, tx, {expectSeq, expectChain, origin}) → {status:'committed'|'existing'|'stale'|'missing', …}
  *   writeSnapshot(projectId, seq, doc, engine, chain, tombstones?) → boolean · pruneSnapshots(projectId, keep)
  *   saveSnapshot(projectId, {seq, doc, engine, chain, tombstones}) → boolean   (то же, объектом)
- *     снимок несёт `tombstones` — объект id → родитель (у снимков до круга 25 — `{}`)
+ *     `tombstones` на входе — v2 (номера удаления известны), v1 (объект id → родитель, Map, пары —
+ *     номеров нет: прочтётся как null) или null; раскладка по колонкам — migrations/007
  *   Committed несёт `command_id`, если транзакция его прислала (SPEC §9.11)
  *   findTx(projectId, txId) → Committed|null
  *   knownEpoch(projectId, epoch) → boolean · bumpEpoch(projectId, fromEpoch, cause, origin) → {status:'bumped'|'moved', epoch, cause}
@@ -36,6 +43,17 @@
  * (следующее сердцебиение его заменит). Полезная нагрузка NOTIFY — меньше 8000 байт;
  * больше — не отправляется (Hub режет выделение заранее).
  *
+ * Соединение слушателя — одно на экземпляр, и запросы на нём (эфемерные `pg_notify`, пинг)
+ * идут строго по одному, своей очередью (`serial`): node-pg с 8.x предупреждает о запросе
+ * поверх выполняющегося и в pg@9 перестанет их копить. Живость слушателя — по движению
+ * очереди: запрос, выполняющийся дольше LISTEN_PING_TIMEOUT_MS, — соединение мертво.
+ *
+ * Чтение снимков (документ — до десятков МБ jsonb, секунды на соединении) — не больше
+ * `snapshotReads` одновременно (по умолчанию min(4, max − 4)), остальные ждут места без
+ * соединения: шторм открытий большого проекта не выедает пул, запись транзакций и лёгкие
+ * чтения получают соединение. Не дождались за `snapshotReadWaitMs` (DB_TIMEOUT_MS) или
+ * очередь длиннее `snapshotReadQueue` (64) — 503 `busy` (`detail.cause: 'snapshot_reads'`).
+ *
  * Дедлайны: обычные запросы — statement_timeout и query_timeout = DB_TIMEOUT_MS;
  * соединение, на котором истёк query_timeout или которое оборвалось, в пул не
  * возвращается (release(err)) — ROLLBACK на нём встал бы в очередь за зависшим запросом.
@@ -45,7 +63,7 @@
  * слушатель ещё и пингуется (SELECT 1 раз в 10 с) — молча умерший LISTEN переподключается.
  *
  * Миграции — отдельным соединением без дедлайна (`SET LOCAL statement_timeout = 0`),
- * под advisory-lock, каждая в своей транзакции; `.mjs`-миграции сами режут работу
+ * под advisory-lock (берётся опросом — см. migrate), каждая в своей транзакции; `.mjs`-миграции сами режут работу
  * на пачки-транзакции и сообщают прогресс (`migrationState` — для 503 migrating).
  * DDL ждёт замок не дольше `lock_timeout` (1 с) и повторяется: ALTER, вставший в
  * очередь за долгой транзакцией, иначе держал бы за собой все запросы к таблице.
@@ -61,8 +79,9 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import pg from 'pg';
-import { toCommitted, txColumns, newEpoch, tombstonesObject } from './committed.js';
+import { toCommitted, txColumns, newEpoch, splitTombstones, joinTombstones } from './committed.js';
 import { DB_TIMEOUT_MS, PAGE_BYTES } from '../limits.js';
+import { busy } from '../errors.js';
 
 export const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -100,6 +119,86 @@ const LISTEN_PING_TIMEOUT_MS = 5000;
 /** DDL миграции ждёт замок не дольше стольких мс и повторяется (до MIGRATION_LOCK_TRIES раз). */
 const MIGRATION_LOCK_TIMEOUT_MS = 1000;
 const MIGRATION_LOCK_TRIES = 60;
+/** Пул соединений по умолчанию. */
+export const POOL_MAX = 10;
+/** Чтений снимка одновременно — не больше стольких (и не больше max − 4: запись должна получать соединение). */
+export const SNAPSHOT_READS = 4;
+/** Ждущих места чтений снимка — не больше; сверх — 503 busy сразу. */
+export const SNAPSHOT_READ_QUEUE = 64;
+
+/**
+ * Предел одновременных задач с очередью ожидания (чтение снимков). Место освобождается —
+ * передаётся первому ждущему; ждущий дольше waitMs или сверх queue — `busy`.
+ */
+function createLimiter({ max, queue, waitMs, what }) {
+  let active = 0;
+  const waiting = [];
+  const full = (why) => busy(`${what}: ${why} — повторите чуть позже`, { detail: { cause: 'snapshot_reads', active, waiting: waiting.length } });
+  const release = () => {
+    const next = waiting.shift();
+    if (next) {
+      clearTimeout(next.timer);
+      next.resolve();
+    } else {
+      active--;
+    }
+  };
+  return {
+    get active() { return active; },
+    get waiting() { return waiting.length; },
+    max,
+    async run(fn) {
+      if (active < max) {
+        active++;
+      } else {
+        if (waiting.length >= queue) throw full('очередь полна');
+        await new Promise((resolve, reject) => {
+          const w = { resolve, timer: null };
+          w.timer = setTimeout(() => {
+            const i = waiting.indexOf(w);
+            if (i >= 0) waiting.splice(i, 1);
+            reject(full(`не дождались места за ${waitMs} мс`));
+          }, waitMs);
+          if (w.timer.unref) w.timer.unref();
+          waiting.push(w);
+        });
+      }
+      try {
+        return await fn();
+      } finally {
+        release();
+      }
+    }
+  };
+}
+
+/**
+ * Очередь запросов одного соединения: следующий — только после ответа на предыдущий
+ * (node-pg предупреждает о запросе поверх выполняющегося, pg@9 их не примет).
+ * `busyFor()` — сколько мс выполняется текущий запрос (0 — простаивает): мерило живости.
+ */
+function createSerial(client) {
+  let tail = Promise.resolve();
+  let pending = 0;
+  let startedAt = 0;
+  return {
+    get pending() { return pending; },
+    busyFor() { return startedAt ? Date.now() - startedAt : 0; },
+    query(text, params) {
+      pending++;
+      const run = tail.then(() => {
+        startedAt = Date.now();
+        return client.query(text, params);
+      });
+      const done = run.finally(() => {
+        startedAt = 0;
+        pending--;
+      });
+      tail = done.catch(() => {});
+      return done;
+    }
+  };
+}
 
 /**
  * Ошибка, после которой соединение больше не годится: истёк query_timeout (запрос
@@ -120,6 +219,18 @@ function destroyClient(client) {
 }
 
 const isoOf = (v) => (v instanceof Date ? v.toISOString() : v);
+
+/** Снимок из строки таблицы; надгробия — v2 или null «неизвестно» (committed.joinTombstones). */
+function snapshotOf(row) {
+  if (!row) return null;
+  const out = {
+    seq: Number(row.seq), engine: row.engine, chain: row.chain || '',
+    tombstones: joinTombstones({ seq: row.seq, chain: row.chain || '', parents: row.tombstones, meta: row.tombstones_meta, metaChain: row.tombstones_chain }),
+    created_at: isoOf(row.created_at)
+  };
+  if ('doc' in row) out.doc = row.doc;
+  return out;
+}
 
 /** Проект из строки таблицы: даты — ISO-строками, как всё остальное в контракте. */
 function projectOf(row) {
@@ -148,6 +259,9 @@ function projectOf(row) {
  *   listenPingMs?: number,         // пинг слушателя (10 с; 0 — без пинга)
  *   idleInTxMs?: number,           // idle_in_transaction_session_timeout (15 с)
  *   migrationLockTimeoutMs?: number, // lock_timeout DDL миграций (1 с; дальше — повтор)
+ *   snapshotReads?: number,        // чтений снимка одновременно (min(SNAPSHOT_READS, max − 4), не меньше 1)
+ *   snapshotReadQueue?: number,    // ждущих места чтений снимка (64); сверх — 503 busy
+ *   snapshotReadWaitMs?: number,   // ждать места не дольше (DB_TIMEOUT_MS; 0 — 10 с)
  *   log?: {warn:Function, info:Function}
  * }} opts
  */
@@ -174,13 +288,20 @@ export function createPgStorage(opts = {}) {
     // сервер без базы должен отвечать 503, а не висеть: ждём подключения не дольше 5 с
     connectionTimeoutMillis: opts.connectionTimeoutMillis || 5000
   };
+  const poolMax = opts.max > 0 ? opts.max : POOL_MAX;
   const pool = opts.pool || new pg.Pool({
     ...base,
-    max: opts.max || 10,
+    max: poolMax,
     ...(dbTimeoutMs > 0 ? { statement_timeout: dbTimeoutMs, query_timeout: dbTimeoutMs + 1000 } : {})
   });
   // ошибка простаивающего соединения (база перезапустилась) без обработчика роняет процесс
   pool.on('error', (err) => log.warn('[document/pg] соединение потеряно:', err.message));
+  const snapshotReads = createLimiter({
+    max: opts.snapshotReads > 0 ? Math.floor(opts.snapshotReads) : Math.max(1, Math.min(SNAPSHOT_READS, poolMax - 4)),
+    queue: opts.snapshotReadQueue >= 0 ? Math.floor(opts.snapshotReadQueue) : SNAPSHOT_READ_QUEUE,
+    waitMs: opts.snapshotReadWaitMs > 0 ? opts.snapshotReadWaitMs : (dbTimeoutMs > 0 ? dbTimeoutMs : 10000),
+    what: 'чтение снимков занято'
+  });
 
   /* ------------------------------ уведомления ------------------------------ */
 
@@ -247,10 +368,13 @@ export function createPgStorage(opts = {}) {
     let pingTimer = null;
     const stopPing = () => { if (pingTimer) clearInterval(pingTimer); pingTimer = null; };
     client.once('end', stopPing);
+    // все запросы этого соединения — по одному (эфемерные pg_notify, пинг)
+    const serial = createSerial(client);
+    client.serial = serial;
     try {
       await client.connect();
-      await client.query(`LISTEN ${channel}`);
-      await client.query(`LISTEN ${presenceChannel}`);
+      await serial.query(`LISTEN ${channel}`);
+      await serial.query(`LISTEN ${presenceChannel}`);
     } catch (e) {
       client.end().catch(() => {});
       if (!isRetry) throw e;
@@ -264,20 +388,27 @@ export function createPgStorage(opts = {}) {
     if (retried) return;   // соединение умерло, пока мы подписывались: переподключение уже назначено
     if (listenPingMs > 0) {
       let pinging = false;
+      const dead = (why) => {
+        if (closing || listener !== client) return;
+        log.warn('[document/pg] слушатель NOTIFY не отвечает, переподключаюсь:', why);
+        stopPing();
+        destroyClient(client);
+        retry();
+      };
       pingTimer = setInterval(() => {
-        if (pinging || listener !== client) return;
+        if (listener !== client) return;
+        // очередь движется — соединение живо; запрос висит дольше предела — мёртво
+        if (serial.busyFor() > LISTEN_PING_TIMEOUT_MS) {
+          dead(`запрос без ответа ${serial.busyFor()} мс`);
+          return;
+        }
+        if (pinging || serial.pending) return;
         pinging = true;
         let timer;
         Promise.race([
-          client.query('SELECT 1'),
+          serial.query('SELECT 1'),
           new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('пинг слушателя без ответа')), LISTEN_PING_TIMEOUT_MS); })
-        ]).catch((e) => {
-          if (closing || listener !== client) return;
-          log.warn('[document/pg] слушатель NOTIFY не отвечает, переподключаюсь:', e && e.message);
-          stopPing();
-          destroyClient(client);
-          retry();
-        }).finally(() => {
+        ]).catch((e) => dead(e && e.message)).finally(() => {
           clearTimeout(timer);
           pinging = false;
         });
@@ -301,7 +432,7 @@ export function createPgStorage(opts = {}) {
     if (!l || closing || publishing.size >= PUBLISH_QUEUE) return false;
     const text = JSON.stringify(msg);
     if (Buffer.byteLength(text, 'utf8') > NOTIFY_MAX_BYTES) return false;
-    const p = l.query('SELECT pg_notify($1, $2)', [presenceChannel, text])
+    const p = l.serial.query('SELECT pg_notify($1, $2)', [presenceChannel, text])
       .catch(() => { /* эфемерное: следующее сердцебиение заменит */ })
       .finally(() => publishing.delete(p));
     publishing.add(p);
@@ -341,7 +472,14 @@ export function createPgStorage(opts = {}) {
       await client.connect();
       await client.query('SET statement_timeout = 0');
       migrationState = { phase: 'lock', migration: null, progress: null };
-      await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK]);
+      // замок — опросом (pg_try_advisory_lock), а не ожиданием в pg_advisory_lock: ждущий
+      // в нём держит снимок, а CREATE INDEX CONCURRENTLY (008) ждёт все старые снимки —
+      // взаимная блокировка «ждущий ↔ мигрирующий» (40P01)
+      for (let attempt = 0; ; attempt++) {
+        if ((await client.query('SELECT pg_try_advisory_lock($1) AS ok', [MIGRATION_LOCK])).rows[0].ok) break;
+        if (closing) throw new Error('хранилище закрывается');
+        await sleep(Math.min(500, 50 + 25 * attempt));
+      }
       locked = true;
       await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
       const applied = new Set((await client.query('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
@@ -382,6 +520,8 @@ export function createPgStorage(opts = {}) {
             log,
             lockTimeoutMs: migrationLockTimeoutMs,
             lockTries: MIGRATION_LOCK_TRIES,
+            /** Ключ advisory-lock миграций (008: кто его ждёт). */
+            migrationLock: MIGRATION_LOCK,
             isLockTimeout,
             /** Прогресс для 503 migrating: {done, total} или что-то своё. */
             progress(p) {
@@ -545,7 +685,7 @@ export function createPgStorage(opts = {}) {
         const project = projectOf(ins.rows[0]);
         // документ = снимок при seq 0: открытие проекта всегда начинается со снимка; его не удаляет прореживание
         await client.query(
-          'INSERT INTO snapshots (project_id, seq, doc, engine, chain) VALUES ($1, 0, $2::jsonb, $3, \'\')',
+          'INSERT INTO snapshots (project_id, seq, doc, engine, chain, tombstones) VALUES ($1, 0, $2::jsonb, $3, \'\', \'{}\'::jsonb)',
           [project.id, JSON.stringify(doc), engine]
         );
         await client.query('INSERT INTO project_epochs (project_id, epoch, seq, cause) VALUES ($1, $2, 0, \'init\') ON CONFLICT DO NOTHING', [project.id, epoch]);
@@ -601,11 +741,32 @@ export function createPgStorage(opts = {}) {
      * Последний снимок, которому можно верить: seq 0 (затравка) или снимок, чей
      * chain совпадает с журналом на его seq. Снимок, записанный по журналу, которого
      * после отката базы уже нет, не годится — с него клиент тихо разошёлся бы.
+     * Под пределом чтений снимков (шапка): документ — тяжёлое чтение.
      */
     async latestSnapshot(projectId) {
       if (!okId(projectId)) return null;
+      return snapshotReads.run(async () => {
+        const res = await pool.query(
+          `SELECT s.seq, s.doc, s.engine, s.chain, s.tombstones, s.tombstones_meta, s.tombstones_chain, s.created_at FROM snapshots s
+            WHERE s.project_id = $1
+              AND (s.seq = 0 OR EXISTS (SELECT 1 FROM operations o WHERE o.project_id = s.project_id AND o.seq = s.seq AND o.chain = s.chain))
+            ORDER BY s.seq DESC LIMIT 1`,
+          [projectId]
+        );
+        return snapshotOf(res.rows[0]);
+      });
+    },
+
+    /**
+     * Тот же снимок, что у latestSnapshot, — без документа и надгробий (круг 27, I2):
+     * `?lean=1`, `?head=1`. Колонки doc и tombstones не названы — их TOAST не
+     * читается (замер — в заметках круга); предел чтений снимков не нужен.
+     * @returns {Promise<{seq: number, chain: string, engine: number, epoch: string, created_at: string}|null>}
+     */
+    async latestSnapshotMeta(projectId) {
+      if (!okId(projectId)) return null;
       const res = await pool.query(
-        `SELECT s.seq, s.doc, s.engine, s.chain, s.tombstones, s.created_at FROM snapshots s
+        `SELECT s.seq, s.engine, s.chain, s.created_at, p.epoch FROM snapshots s JOIN projects p ON p.id = s.project_id
           WHERE s.project_id = $1
             AND (s.seq = 0 OR EXISTS (SELECT 1 FROM operations o WHERE o.project_id = s.project_id AND o.seq = s.seq AND o.chain = s.chain))
           ORDER BY s.seq DESC LIMIT 1`,
@@ -613,12 +774,36 @@ export function createPgStorage(opts = {}) {
       );
       const row = res.rows[0];
       if (!row) return null;
-      return {
-        seq: Number(row.seq), doc: row.doc, engine: row.engine, chain: row.chain || '',
-        tombstones: row.tombstones && typeof row.tombstones === 'object' && !Array.isArray(row.tombstones) ? row.tombstones : {},
-        created_at: isoOf(row.created_at)
-      };
+      return { seq: Number(row.seq), chain: row.chain || '', engine: row.engine, epoch: row.epoch, created_at: isoOf(row.created_at) };
     },
+
+    /**
+     * Ближайший снимок раньше `seq` с известными надгробиями (круг 27, I1): годный по
+     * журналу (как latestSnapshot) и с `tombstones` ≠ null; seq 0 — всегда такой (его не
+     * удаляет прореживание). От него и `remove` журнала после него восстанавливаются
+     * надгробия снимка, записанного экземпляром прежней версии.
+     * @param {string} projectId
+     * @param {number} seq
+     * @param {{doc?: boolean}} [o] doc:false — без документа (тогда без предела чтений)
+     */
+    async snapshotBefore(projectId, seq, { doc = true } = {}) {
+      if (!okId(projectId) || !Number.isFinite(Number(seq))) return null;
+      const read = async () => {
+        const res = await pool.query(
+          `SELECT s.seq, ${doc ? 's.doc, ' : ''}s.engine, s.chain, s.tombstones, s.tombstones_meta, s.tombstones_chain, s.created_at FROM snapshots s
+            WHERE s.project_id = $1 AND s.seq < $2
+              AND (s.seq = 0 OR (s.tombstones_chain = s.chain
+                   AND EXISTS (SELECT 1 FROM operations o WHERE o.project_id = s.project_id AND o.seq = s.seq AND o.chain = s.chain)))
+            ORDER BY s.seq DESC LIMIT 1`,
+          [projectId, Number(seq)]
+        );
+        return snapshotOf(res.rows[0]);
+      };
+      return doc ? snapshotReads.run(read) : read();
+    },
+
+    /** Предел чтений снимков (тестам и отладке): {max, active, waiting}. */
+    get snapshotReads() { return { max: snapshotReads.max, active: snapshotReads.active, waiting: snapshotReads.waiting }; },
 
     /** Номера снимков проекта (тестам и отладке). */
     async snapshotSeqs(projectId) {
@@ -715,18 +900,26 @@ export function createPgStorage(opts = {}) {
     /**
      * Снимок пишется, только если журнал на его seq — тот же (chain совпадает):
      * снимок, посчитанный до отката базы и дописанный после, иначе отравил бы
-     * открытие проекта. Снимок с тем же seq, но другой цепочкой, заменяется.
+     * открытие проекта. Снимок с тем же seq, но другой цепочкой, заменяется; с той же
+     * цепочкой, но без известных надгробий (записал экземпляр прежней версии), — тоже, если
+     * они известны теперь (круг 27).
      * @returns {Promise<boolean>} записан ли
      */
-    async writeSnapshot(projectId, seq, doc, engine, chain = '', tombstones = {}) {
+    async writeSnapshot(projectId, seq, doc, engine, chain = '', tombstones = null) {
+      if (!okId(projectId)) return false;
+      const { parents, meta } = splitTombstones(tombstones);
+      // tombstones_chain = chain снимка: надгробия известны для этой цепочки (migrations/007);
+      // null на входе («неизвестно») — NULL
       const res = await pool.query(
-        `INSERT INTO snapshots (project_id, seq, doc, engine, chain, tombstones)
-         SELECT $1, $2, $3::jsonb, $4, $5, $6::jsonb
+        `INSERT INTO snapshots (project_id, seq, doc, engine, chain, tombstones, tombstones_meta, tombstones_chain)
+         SELECT $1, $2, $3::jsonb, $4, $5, $6::jsonb, $7::jsonb, CASE WHEN $6::jsonb IS NULL THEN NULL ELSE $5 END
           WHERE EXISTS (SELECT 1 FROM operations WHERE project_id = $1 AND seq = $2 AND chain = $5)
          ON CONFLICT (project_id, seq) DO UPDATE SET doc = EXCLUDED.doc, engine = EXCLUDED.engine, chain = EXCLUDED.chain,
-                tombstones = EXCLUDED.tombstones, created_at = now()
-          WHERE snapshots.chain IS DISTINCT FROM EXCLUDED.chain`,
-        [projectId, seq, JSON.stringify(doc), engine, chain, JSON.stringify(tombstonesObject(tombstones))]
+                tombstones = EXCLUDED.tombstones, tombstones_meta = EXCLUDED.tombstones_meta,
+                tombstones_chain = EXCLUDED.tombstones_chain, created_at = now()
+          WHERE snapshots.chain IS DISTINCT FROM EXCLUDED.chain
+             OR (EXCLUDED.tombstones_chain IS NOT NULL AND snapshots.tombstones_chain IS DISTINCT FROM EXCLUDED.tombstones_chain)`,
+        [projectId, seq, JSON.stringify(doc), engine, chain, parents === null ? null : JSON.stringify(parents), meta === null ? null : JSON.stringify(meta)]
       );
       return res.rowCount > 0;
     },
@@ -736,12 +929,17 @@ export function createPgStorage(opts = {}) {
       return self.writeSnapshot(projectId, seq, doc, engine, chain, tombstones);
     },
 
-    /** Прореживание: последние `keep` снимков; seq 0 (затравка) не удаляется никогда. */
+    /**
+     * Прореживание: последние `keep` снимков; seq 0 (затравка) не удаляется никогда; старший
+     * снимок с известными надгробиями — тоже (круг 27: иначе после череды снимков прежней
+     * версии восстанавливать надгробия пришлось бы от seq 0 — всем журналом).
+     */
     async pruneSnapshots(projectId, keep) {
       if (!okId(projectId) || !(keep > 0)) return 0;
       const res = await pool.query(
         `DELETE FROM snapshots WHERE project_id = $1 AND seq <> 0
-            AND seq NOT IN (SELECT seq FROM snapshots WHERE project_id = $1 AND seq <> 0 ORDER BY seq DESC LIMIT $2)`,
+            AND seq NOT IN (SELECT seq FROM snapshots WHERE project_id = $1 AND seq <> 0 ORDER BY seq DESC LIMIT $2)
+            AND seq IS DISTINCT FROM (SELECT max(seq) FROM snapshots WHERE project_id = $1 AND seq <> 0 AND tombstones_chain = chain)`,
         [projectId, keep]
       );
       return res.rowCount;

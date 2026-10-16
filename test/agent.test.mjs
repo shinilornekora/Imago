@@ -603,3 +603,43 @@ test('ошибки сервера агента словами', () => {
   assert.ok(!isModelError({ code: 'busy' }));
   assert.equal(agentErrorWords({ code: 'странное', message: 'своё сообщение' }).title, 'своё сообщение');
 });
+
+/* ------------------------------ круг 27 ------------------------------ */
+
+test('круг 27, I6: selection_by уходит серверу, мусор — нет', async (t) => {
+  const srv = await fakeServer({
+    'POST /agent/command': async (req, body, res) => {
+      streamHead(res);
+      res.write(sse('result', { tx_id: 'tx_s', seq: 1, applied: 1, dropped: [], summary: 'ок' }));
+      res.write(sse('done', {}));
+      res.end();
+    },
+  });
+  t.after(() => srv.close());
+  await runServerCommand({ baseUrl: srv.baseUrl, project: 'p1', text: 'а теперь синее', selection: ['n1'], selection_by: 'agent' });
+  await runServerCommand({ baseUrl: srv.baseUrl, project: 'p1', text: 'а теперь синее', selection: ['n1'], selectionBy: 'human' });
+  await runServerCommand({ baseUrl: srv.baseUrl, project: 'p1', text: 'а теперь синее', selection: ['n1'], selection_by: 'robot' });
+  assert.equal(srv.log[0].body.selection_by, 'agent');
+  assert.equal(srv.log[1].body.selection_by, 'human');
+  assert.equal('selection_by' in srv.log[2].body, false);
+});
+
+test('круг 27, I6: shutting_down в потоке — «перезапускается — команда не выполнена», повторяемо', async (t) => {
+  const srv = await fakeServer({
+    'POST /agent/command': async (req, body, res) => {
+      streamHead(res);
+      res.write(sse('queued', { position: 2 }));
+      res.write(sse('error', { code: 'shutting_down', message: 'Сервер агента перезапускается', retryable: true, retry_after: 5 }));
+      res.write(sse('done', {}));
+      res.end();
+    },
+  });
+  t.after(() => srv.close());
+  const out = await runServerCommand({ baseUrl: srv.baseUrl, project: 'p1', text: 'собери экран' });
+  assert.equal(out.error.code, 'shutting_down');
+  assert.equal(out.error.retryable, true);
+  assert.equal(out.error.retryAfterMs, 5000);
+  const w = agentErrorWords(out.error);
+  assert.equal(w.title, 'Сервер агента перезапускается — команда не выполнена');
+  assert.doesNotMatch(w.title + w.note, /остановлен/i);
+});

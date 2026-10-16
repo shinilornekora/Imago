@@ -174,7 +174,9 @@ test('compose: сервисы, healthcheck у document, orchestrator, web; за�
   assert.match(dep('document'), /db:\s*\n\s+condition:\s*service_healthy/);
   assert.match(dep('orchestrator'), /document:\s*\n\s+condition:\s*service_healthy/);
   assert.match(dep('web'), /document:\s*\n\s+condition:\s*service_healthy/);
-  assert.match(dep('web'), /orchestrator:\s*\n\s+condition:\s*service_healthy/);
+  // круг 27, п.9: редактор поднимается и без агента — web ждёт только запуска orchestrator
+  assert.match(dep('web'), /orchestrator:\s*\n\s+condition:\s*service_started/);
+  assert.doesNotMatch(dep('web'), /orchestrator:\s*\n\s+condition:\s*service_healthy/);
   assert.match(s.web, /\$\{IMAGO_PORT:-8123\}:80/);
   // круг 25: останов — с запасом на дописывание начатого; миграции на большой базе — не смерть
   for (const name of ['document', 'orchestrator']) {
@@ -516,4 +518,24 @@ test('nginx -t на настоящем конфиге и живые маршру
     { error: body.error, upstream: body.upstream, retryable: body.retryable, code: body.code },
     { error: true, upstream: 'orchestrator', retryable: true, code: 'upstream_down' },
   );
+});
+
+test('ЗАПУСК.md говорит то же, что код (круг 27, п.9)', async () => {
+  const doc = read('ЗАПУСК.md');
+  // пачка миграции 003 — как в коде
+  const mig = read('server/document/storage/migrations/003_chain_backfill.mjs');
+  const batch = Number(/const BATCH = (\d+)/.exec(mig)[1]);
+  assert.match(doc, new RegExp(`пачками по ${batch} записей`));
+  // без Docker агента на сервере нет: «агент недоступен», пока не включена модель браузера
+  const solo = doc.slice(doc.indexOf('## Без Docker'));
+  assert.doesNotMatch(solo, /агент тогда работает в браузере/);
+  assert.match(solo, /агент недоступен/);
+  assert.match(solo, /пока вы не включите модель/);
+  // слова llm_down и shutting_down — те, что показывает оболочка
+  const { agentErrorWords } = await import('../src/shell.js');
+  const down = agentErrorWords({ code: 'llm_down' });
+  assert.ok(doc.includes(`«${down.title}»`), 'llm_down: заголовок не тот, что в коде');
+  assert.ok(doc.includes(`«${down.note}.»`) || doc.includes(`«${down.note}»`), 'llm_down: подпись не та, что в коде');
+  const restart = agentErrorWords({ code: 'shutting_down' });
+  assert.ok(doc.includes(`«${restart.title}»`), 'shutting_down: заголовок не тот, что в коде');
 });

@@ -5,7 +5,10 @@
  * отвечает `200` с уже записанным `Committed` (§8.3) — поэтому любой повтор идёт с ТЕМ ЖЕ
  * `tx_id`, двойной записи не бывает:
  *
- *   сеть / 5xx      → повтор (ограниченно, `WRITE_ATTEMPTS`); у 503 с `Retry-After` ждём
+ *   отказ связи     → повтор с паузой от 300 мс до 2 с, пока не исчерпан бюджет ожидания
+ *   (502/504 прокси)  `WRITE_WAIT_BUDGET_MS` (15 с): так переживается перезапуск сервиса
+ *                     (~3 с), и работа модели не теряется (круг 27; было 3 попытки за 0,9 с);
+ *   5xx, дедлайн    → повтор (ограниченно, `WRITE_ATTEMPTS`); у 503 с `Retry-After` ждём
  *                     указанный срок (не дольше `DOC_RETRY_AFTER_MAX_S`, всего —
  *                     `WRITE_WAIT_BUDGET_MS`), иначе — короткая пауза с ростом;
  *   413             → `too_large`, без повтора: правка больше предела сервиса;
@@ -19,7 +22,9 @@
  */
 
 import { OrchError, notFound, documentDown } from '../errors.js';
-import { WRITE_ATTEMPTS, DOC_RETRY_AFTER_MAX_S, WRITE_WAIT_BUDGET_MS, DOC_MAX_OPS_PER_TX, DOC_MAX_BODY_BYTES } from '../limits.js';
+import {
+  WRITE_ATTEMPTS, DOC_RETRY_AFTER_MAX_S, WRITE_WAIT_BUDGET_MS, WRITE_BACKOFF_MAX_MS, DOC_MAX_OPS_PER_TX, DOC_MAX_BODY_BYTES,
+} from '../limits.js';
 import { cutText } from '../../../src/core.js';
 
 const plural = (n, one, few, many) => {
@@ -53,36 +58,56 @@ export function checkTx(tx, { maxOps = DOC_MAX_OPS_PER_TX, maxBytes = DOC_MAX_BO
 }
 
 /**
+ * Отказ, при котором сервис документов, скорее всего, перезапускается (круг 27): соединение
+ * не установилось, или прокси перед ним ответил 502/504 без своего срока. Такие повторы идут
+ * до бюджета ожидания записи, а не по счётчику попыток: рестарт идёт ~3 с, и терять из-за
+ * него работу модели (десятки секунд) нельзя.
+ */
+function looksRestarting(e) {
+  if (!e) return false;
+  if (e.network && e.detail && e.detail.cause === 'нет связи') return true;
+  return (e.docStatus === 502 || e.docStatus === 504) && (e.docRetryAfter === null || e.docRetryAfter === undefined);
+}
+
+/**
  * @param {{doc: ReturnType<import('../docclient.js').createDocClient>, attempts?: number, backoffMs?: number,
- *   retryAfterMaxS?: number, waitBudgetMs?: number, log?: object}} o
+ *   backoffMaxMs?: number, retryAfterMaxS?: number, waitBudgetMs?: number, log?: object}} o
  */
 export function createDsltsClient({
-  doc: net, attempts = WRITE_ATTEMPTS, backoffMs = 300, retryAfterMaxS = DOC_RETRY_AFTER_MAX_S,
-  waitBudgetMs = WRITE_WAIT_BUDGET_MS, log = console,
+  doc: net, attempts = WRITE_ATTEMPTS, backoffMs = 300, backoffMaxMs = WRITE_BACKOFF_MAX_MS,
+  retryAfterMaxS = DOC_RETRY_AFTER_MAX_S, waitBudgetMs = WRITE_WAIT_BUDGET_MS, log = console,
 }) {
   const stats = { commits: 0, retries: 0, waitedMs: 0 };
 
   /**
    * @param {string} projectId
    * @param {object} tx Tx (§9.1)
+   * @param {{onWait?: (info: {ms: number, restarting: boolean}) => void}} [hooks] — ждём перед повтором
    * @returns {Promise<object>} Committed
    */
-  async function commit(projectId, tx) {
+  async function commit(projectId, tx, hooks = {}) {
     const big = checkTx(tx);
     if (big) throw big;
     let last = null;
     let waited = 0;
-    for (let i = 0; i < attempts; i++) {
+    let counted = 0;           // попытки, которые идут в счёт `attempts` (5xx, дедлайн)
+    let restarts = 0;          // подряд отказов соединения — для паузы с ростом
+    for (let i = 0; ; i++) {
       if (i > 0) {
-        // 503 с Retry-After — ждём, сколько просили (с потолком); иначе — короткая пауза с ростом
+        // 503 с Retry-After — ждём, сколько просили (с потолком); отказ соединения — пауза
+        // с ростом до backoffMaxMs; иначе — короткая пауза с ростом
+        const restarting = looksRestarting(last);
         const asked = last && last.docStatus === 503 && last.docRetryAfter !== null && last.docRetryAfter !== undefined
           ? Math.min(last.docRetryAfter, retryAfterMaxS) * 1000
-          : backoffMs * i;
+          : restarting
+            ? Math.min(backoffMaxMs, backoffMs * 2 ** Math.max(0, restarts - 1))
+            : backoffMs * counted;
         const ms = Math.max(0, Math.min(asked, waitBudgetMs - waited));
         if (asked > 0 && ms <= 0) break;   // бюджет ожидания исчерпан
         waited += ms;
         stats.retries++;
         stats.waitedMs += ms;
+        if (typeof hooks.onWait === 'function') { try { hooks.onWait({ ms, restarting }); } catch { /* ignore */ } }
         await new Promise((r) => setTimeout(r, ms));
       }
       let r;
@@ -90,8 +115,12 @@ export function createDsltsClient({
         r = await net.post(`/api/projects/${encodeURIComponent(projectId)}/tx`, tx);
       } catch (e) {
         last = e;
+        const restarting = looksRestarting(e);
+        if (restarting) restarts++; else { restarts = 0; counted++; }
         const why = e.docStatus ? `ответ ${e.docStatus}${e.docRetryAfter != null ? `, Retry-After ${e.docRetryAfter} с` : ''}` : (e.detail && e.detail.cause) || e.message;
-        log.warn(`[orchestrator/dslts] запись ${tx.tx_id} не дошла (попытка ${i + 1} из ${attempts}): ${why}`);
+        log.warn(`[orchestrator/dslts] запись ${tx.tx_id} не дошла (попытка ${i + 1}${restarting ? `, ждём сервис ещё до ${Math.round((waitBudgetMs - waited) / 1000)} с` : ` из ${attempts}`}): ${why}`);
+        if (!restarting && counted >= attempts) break;
+        if (restarting && waited >= waitBudgetMs) break;
         continue;
       }
       if (r.status === 201 || r.status === 200) { stats.commits++; return r.body; }
@@ -108,7 +137,9 @@ export function createDsltsClient({
       throw new OrchError(502, 'document_failed', `Сервис документов не принял правку агента (${r.status})${r.body && r.body.message ? ': ' + cutText(r.body.message, 300) : ''}`, { retryable: false });
     }
     if (last && last.code === 'document_down') {
-      last.message = 'Сервис документов не подтвердил правку агента — он перегружен или недоступен. Повторите команду через несколько секунд.';
+      last.message = looksRestarting(last)
+        ? `Сервис документов не отвечал ${Math.round(waited / 1000)} с — правка агента не записана. Повторите команду, когда он поднимется.`
+        : 'Сервис документов не подтвердил правку агента — он перегружен или недоступен. Повторите команду через несколько секунд.';
       throw last;
     }
     throw last || documentDown();

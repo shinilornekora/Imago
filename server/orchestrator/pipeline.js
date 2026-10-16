@@ -12,7 +12,7 @@
  */
 
 import * as core from '../../src/core.js';
-import { OrchError, toOrchError, notFound, badRequest, llmDown, llmUnconfigured, cancelled as cancelledErr } from './errors.js';
+import { OrchError, toOrchError, notFound, badRequest, llmDown, llmUnconfigured, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
 import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS, SHUTDOWN_GRACE_MS, SHUTDOWN_ABORT_WAIT_MS } from './limits.js';
 
 const { ENGINE_VERSION, uid, cutText, cleanText } = core;
@@ -128,7 +128,7 @@ export function createPipeline(deps) {
    * @returns {{position: number, finished: Promise<void>}}
    */
   function admit(task) {
-    if (closing) throw new OrchError(503, 'shutting_down', 'Агент останавливается — повторите через несколько секунд', { retryAfter: 5 });
+    if (closing) throw shuttingDownErr();
     let q = queues.get(task.project);
     if (!q) { q = { running: null, waiting: [] }; queues.set(task.project, q); }
     if (q.running && q.waiting.length >= maxQueue) {
@@ -236,8 +236,8 @@ export function createPipeline(deps) {
     const { position, finished } = admit(task);
     active.set(cmd.command_id, task);
     task.sink = openSink();
-    task.onPosition = (p) => task.sink.send('queued', { position: p });
-    if (position > 0) task.sink.send('queued', { position });
+    task.onPosition = (p) => task.sink.send('queued', { position: p, scope: 'project' });
+    if (position > 0) task.sink.send('queued', { position, scope: 'project' });
     finished.then(() => { if (active.get(cmd.command_id) === task) active.delete(cmd.command_id); });
     return { finished };
   }
@@ -302,6 +302,8 @@ export function createPipeline(deps) {
         mode: verdict.kind === 'variants' ? 'variants' : 'run',
         doc: st.doc,
         selection: cmd.selection,
+        // круг 27 (I6): выделение, поставленное агентом, — не граница, назначенная человеком
+        selectionBy: cmd.selection_by === 'agent' ? 'agent' : 'human',
         // «покажи варианты» без команды — к предыдущей команде из истории диалога
         utterance: verdict.kind === 'variants' && !verdict.of && cmd.mode !== 'variants' && cmd.history.length
           ? cmd.history[cmd.history.length - 1].utterance
@@ -317,6 +319,8 @@ export function createPipeline(deps) {
       const res = await dslv.run(payload, {
         signal,
         onLlm,
+        // круг 27: все воркеры считают — команда ждёт расчёта (не очереди проекта)
+        onQueued: ({ position }) => sink.send('queued', { position, scope: 'workers' }),
         onStage: (rec) => {
           const key = BRAIN_STAGE[rec.stage];
           if (key) step(key, rec.label, rec.detail);
@@ -334,6 +338,8 @@ export function createPipeline(deps) {
       let err = toOrchError(e);
       // сеть, оборванная «стопом», — это остановка, а не авария сервиса
       if (signal.aborted && (err.code === 'internal' || (e && e.network))) err = cancelledErr();
+      // круг 27 (I6): прервал не человек, а останов процесса — команда не выполнена, её можно повторить
+      if (task.shutdown && (err.code === 'cancelled' || signal.aborted)) err = shuttingDownErr();
       if (!(e instanceof OrchError)) log.warn(`[orchestrator] команда ${cmd.command_id}: ${llm.redact(e && e.stack ? e.stack : e)}`);
       // retry_after (с) — когда срок повтора известен: клиент считает его на кнопке «Повторить»
       sink.send('error', {
@@ -341,6 +347,7 @@ export function createPipeline(deps) {
         ...(Number.isFinite(err.retryAfter) && err.retryAfter > 0 ? { retry_after: err.retryAfter } : {}),
       });
       trace.status = err.code === 'cancelled' ? 'cancelled' : 'error';
+      if (task.shutdown) trace.shutdown = true;
       trace.code = err.code;
     } finally {
       if (curStep) steps.push({ key: curStep.key, ms: Date.now() - curStep.at });
@@ -404,9 +411,9 @@ export function createPipeline(deps) {
     }
     const out = await write(task, {
       project: cmd.project, base_seq: st.seq, ops: globalizeIds(res.ops), client: cmd.client,
-      title: (res.plan && res.plan.title) || cmd.text, command_id: cmd.command_id,
+      title: historyTitle(res, cmd.text), command_id: cmd.command_id,
     }, step);
-    const result = resultOf(out, res);
+    const result = resultOf(out, res, historyTitle(res, cmd.text));
     Object.assign(trace, { tx_id: out.tx_id, seq: out.seq, ops: result.applied, dropped: result.dropped.length });
     sink.send('result', result);
   }
@@ -430,7 +437,7 @@ export function createPipeline(deps) {
       label: v.label || `Вариант ${i + 1}`,
       description: v.description || (v.plan && v.plan.summary) || '',
       ops: globalizeIds(v.ops),
-      title: (v.plan && v.plan.title) || cmd.text,
+      title: historyTitle(v, cmd.text, v.label || `Вариант ${i + 1}`),
       libraryAdded: Array.isArray(v.libraryAdded) ? v.libraryAdded : [],
       summary: (v.plan && (v.plan.summary || v.plan.title)) || '',
       warnings: (v.warnings || []).map((w) => llm.redact(w)),
@@ -448,6 +455,17 @@ export function createPipeline(deps) {
         preview: { ops: v.ops, summary: v.summary, warnings: v.warnings },
       })),
     });
+  }
+
+  /**
+   * Круг 27: подпись записи агента в истории — что сделано, словами по операциям (brain:
+   * `changeSummary`), а не пересказ модели («Ставлю стиль h1.»). Вариант — «Вариант «…»: …».
+   * Нет описания — заголовок плана, затем сама команда.
+   */
+  function historyTitle(res, text, variantLabel = null) {
+    const done = res && typeof res.changeSummary === 'string' ? res.changeSummary.trim() : '';
+    const base = done || (res && res.plan && res.plan.title) || text || '';
+    return variantLabel ? `Вариант «${cutText(String(variantLabel), 60)}»: ${base}` : base;
   }
 
   function remember(id, entry) {
@@ -478,11 +496,16 @@ export function createPipeline(deps) {
       engine: ENGINE_VERSION,
     };
     // с этого места «стоп» запись не отменяет: она уже ушла, повтор идёт по тому же tx_id
-    return dslts.commit(project, tx);
+    return dslts.commit(project, tx, {
+      // круг 27: сервис документов перезапускается — говорим, что ждём его, а не висим молча
+      onWait: ({ restarting }) => {
+        if (step && restarting) step('write', 'Жду сервис документов, чтобы записать правку');
+      },
+    });
   }
 
   /** Committed → событие result. */
-  function resultOf(committed, res) {
+  function resultOf(committed, res, title = '') {
     const plan = (res && res.plan) || {};
     const created = new Set();
     const select = [];
@@ -500,6 +523,8 @@ export function createPipeline(deps) {
       applied: (committed.ops || []).length,
       dropped: committed.dropped || [],
       summary: llm.redact((res && res.summary) || plan.summary || plan.title || ''),
+      // круг 27: подпись записи в истории (то же, что tx.title) — что сделано, словами по операциям
+      ...(committed.title || title ? { title: llm.redact(cleanText(cutText(String(committed.title || title), 200))) } : {}),
       warnings: ((res && res.warnings) || []).map((w) => llm.redact(w)),
       ...(res && res.cannot ? { cannot: res.cannot } : {}),
       // компоненты внешней библиотеки, перенесённые этой правкой в библиотеку документа (§10.6)
@@ -510,23 +535,35 @@ export function createPipeline(deps) {
 
   /* ── стоп и выбор варианта ──────────────────────────────────────────── */
 
-  function stop(commandId) {
+  /**
+   * @param {string} commandId
+   * @param {{shutdown?: boolean}} [o] shutdown — снимает останов процесса, а не человек (круг 27, I6)
+   */
+  function stop(commandId, o = {}) {
     const task = active.get(commandId);
     if (!task || task.ctrl.signal.aborted) return false;
+    if (o.shutdown) task.shutdown = true;
     task.ctrl.abort();
     if (unqueue(task)) {
       // не начиналась: событие и done пишем сами
-      task.sink.send('error', { code: 'cancelled', message: 'Команда остановлена', retryable: false });
+      const err = task.shutdown ? shuttingDownErr() : cancelledErr();
+      task.sink.send('error', err.body ? stripErr(err.body()) : { code: 'cancelled', message: 'Команда остановлена', retryable: false });
       task.sink.send('done', {});
       task.sink.end();
       active.delete(commandId);
       traces.record({
         command_id: task.cmd.command_id, project: task.project, mode: task.cmd.mode, kind: task.verdict.kind,
-        status: 'cancelled', code: 'cancelled', started_at: new Date(task.t0).toISOString(), ms: Date.now() - task.t0,
+        status: task.shutdown ? 'error' : 'cancelled', code: err.code, started_at: new Date(task.t0).toISOString(), ms: Date.now() - task.t0,
         steps: [], engine: ENGINE_VERSION,
       });
     }
     return true;
+  }
+
+  /** Тело ошибки для события `error` потока (без служебного `error: true`). */
+  function stripErr(body) {
+    const { error: _e, detail: _d, ...rest } = body;
+    return rest;
   }
 
   /**
@@ -570,7 +607,7 @@ export function createPipeline(deps) {
             project: entry.project, base_seq: entry.base_seq, ops: item.ops, client: entry.client, title: item.title,
             command_id: commandId,
           });
-          const result = resultOf(out, { summary: item.summary, warnings: item.warnings, libraryAdded: item.libraryAdded });
+          const result = resultOf(out, { summary: item.summary, warnings: item.warnings, libraryAdded: item.libraryAdded }, item.title);
           entry.applied = { key: item.key, label: item.label, result };
           Object.assign(trace, { status: 'ok', tx_id: out.tx_id, seq: out.seq, ops: result.applied, dropped: result.dropped.length });
           resolve(result);
@@ -623,7 +660,8 @@ export function createPipeline(deps) {
     closing = true;
     for (const t of [...active.values()]) {
       if (t.ctrl && !t.ctrl.signal.aborted && queues.get(t.project) && queues.get(t.project).waiting.includes(t)) {
-        stop(t.cmd.command_id);
+        // круг 27 (I6): ждущим — shutting_down (повторяемо), а не «остановлена»
+        stop(t.cmd.command_id, { shutdown: true });
       }
     }
     const all = () => [...active.values()].map((t) => t.finished).filter(Boolean);
@@ -634,6 +672,7 @@ export function createPipeline(deps) {
       if (t.ctrl && !t.ctrl.signal.aborted) {
         aborted++;
         log.warn(`[orchestrator] останов: команда ${t.id} не уложилась в ${graceMs} мс — прерываю`);
+        t.shutdown = true;
         t.ctrl.abort();
       }
     }

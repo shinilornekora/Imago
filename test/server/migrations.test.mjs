@@ -392,7 +392,9 @@ describe('миграции · pg', { skip: available ? false : 'нет базы 
     });
     const old = storageIn(name, { migrationsDir: oldDir });
     await old.init();
-    const p = await old.createProject({ name: 'Круг 24', kind: 'design', doc: createDoc('empty'), engine: E });
+    // проект — как его создавал экземпляр круга 24 (колонки tombstones ещё нет)
+    const p = (await old.pool.query("INSERT INTO projects (name, kind, engine) VALUES ('Круг 24', 'design', $1) RETURNING id", [E])).rows[0];
+    await old.pool.query("INSERT INTO snapshots (project_id, seq, doc, engine, chain) VALUES ($1, 0, $2::jsonb, $3, '')", [p.id, JSON.stringify(createDoc('empty')), E]);
     await old.close();
     const s = storageIn(name);
     try {
@@ -401,8 +403,202 @@ describe('миграции · pg', { skip: available ? false : 'нет базы 
       assert.ok(rows.includes('005_tombstones_command.sql') && rows.includes('006_chain_check.mjs'));
       assert.equal((await s.pool.query("SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'operations_chain_present' AND conrelid = 'operations'::regclass")).rows[0].n, 0, 'NOT NULL уже есть — CHECK не нужен');
       const snap = await s.latestSnapshot(p.id);
-      assert.deepEqual(snap.tombstones, {}, 'старый снимок — с пустыми надгробиями');
+      assert.deepEqual(snap.tombstones, { v: 2, parents: {}, seq: {} }, 'затравка старого — надгробий нет (известно)');
     } finally {
+      await s.close();
+    }
+  });
+
+  /**
+   * Снимки так, как их пишет и читает экземпляр круга 26 (коммит 18c7e4f, storage/pg.js) —
+   * дословно его SQL: колонок 007 он не знает.
+   */
+  function round26(pool) {
+    return {
+      async writeSnapshot(projectId, seq, chain, tombstones) {
+        const res = await pool.query(
+          `INSERT INTO snapshots (project_id, seq, doc, engine, chain, tombstones)
+           SELECT $1, $2, $3::jsonb, $4, $5, $6::jsonb
+            WHERE EXISTS (SELECT 1 FROM operations WHERE project_id = $1 AND seq = $2 AND chain = $5)
+           ON CONFLICT (project_id, seq) DO UPDATE SET doc = EXCLUDED.doc, engine = EXCLUDED.engine, chain = EXCLUDED.chain,
+                  tombstones = EXCLUDED.tombstones, created_at = now()
+            WHERE snapshots.chain IS DISTINCT FROM EXCLUDED.chain`,
+          [projectId, seq, JSON.stringify(createDoc('empty')), E, chain, JSON.stringify(tombstones)]
+        );
+        return res.rowCount > 0;
+      },
+      async latestSnapshot(projectId) {
+        const row = (await pool.query(
+          `SELECT s.seq, s.doc, s.engine, s.chain, s.tombstones, s.created_at FROM snapshots s
+            WHERE s.project_id = $1
+              AND (s.seq = 0 OR EXISTS (SELECT 1 FROM operations o WHERE o.project_id = s.project_id AND o.seq = s.seq AND o.chain = s.chain))
+            ORDER BY s.seq DESC LIMIT 1`,
+          [projectId]
+        )).rows[0];
+        // как у круга 26: не объект — {}
+        return { seq: Number(row.seq), tombstones: row.tombstones && typeof row.tombstones === 'object' && !Array.isArray(row.tombstones) ? row.tombstones : {} };
+      },
+      async createProject() {
+        const c = await pool.connect();
+        try {
+          await c.query('BEGIN');
+          const id = (await c.query("INSERT INTO projects (name, kind, engine, epoch, epoch_cause) VALUES ('Круг 26', 'design', $1, 'e26', 'init') RETURNING id", [E])).rows[0].id;
+          await c.query("INSERT INTO snapshots (project_id, seq, doc, engine, chain) VALUES ($1, 0, $2::jsonb, $3, '')", [id, JSON.stringify(createDoc('empty')), E]);
+          await c.query("INSERT INTO project_epochs (project_id, epoch, seq, cause) VALUES ($1, 'e26', 0, 'init')", [id]);
+          await c.query('COMMIT');
+          return id;
+        } catch (e) {
+          await c.query('ROLLBACK').catch(() => {});
+          throw e;
+        } finally {
+          c.release();
+        }
+      }
+    };
+  }
+
+  it('007 при работающем экземпляре круга 26: его снимки (до, во время и после) — надгробия null «неизвестно», снимки нового — v2; он читает у нового v1 (parents)', async () => {
+    const name = await schema();
+    const upTo006 = storageIn(name, { migrationsDir: await migrationsDir((f) => /^00[1-6]_/.test(f)) });
+    await upTo006.init();
+    const old = round26(upTo006.pool);
+    const id = await old.createProject();
+    const chains = [];
+    for (let i = 0; i < 8; i++) chains.push((await upTo006.commitTx(id, { tx_id: 't' + i, base_seq: i, ops: [], engine: E })).committed.chain);
+    assert.equal(await old.writeSnapshot(id, 1, chains[0], { a: 'r' }), true, 'до миграции');
+    // экземпляр круга 26 пишет снимки всё время, пока идут 007/008
+    let stop = false;
+    const errors = [];
+    let writes = 0;
+    const writer = (async () => {
+      while (!stop) {
+        try {
+          await old.writeSnapshot(id, 2, chains[1], { b: 'r' });
+          await old.latestSnapshot(id);
+          writes++;
+        } catch (e) {
+          errors.push(e.message);
+        }
+        await new Promise((r) => setTimeout(r, 2));
+      }
+    })();
+    const s = storageIn(name);
+    try {
+      await s.init();
+      await new Promise((r) => setTimeout(r, 50));
+      stop = true;
+      await writer;
+      assert.deepEqual(errors, [], 'экземпляр круга 26 пишет и читает снимки без ошибок');
+      assert.ok(writes > 0);
+      assert.equal(await old.writeSnapshot(id, 3, chains[2], { c: 'r' }), true, 'после миграции — тоже пишет');
+      const col = (await s.pool.query('SELECT seq, tombstones, tombstones_meta, tombstones_chain FROM snapshots WHERE project_id = $1 AND seq = 3', [id])).rows[0];
+      assert.deepEqual(col.tombstones, { c: 'r' });
+      assert.equal(col.tombstones_chain, null, 'колонки 007 он не знает: NULL');
+      assert.equal((await s.latestSnapshot(id)).tombstones, null, 'новый читает «неизвестно»');
+      assert.equal((await s.snapshotBefore(id, 4)).seq, 0, 'известные — только у затравки');
+
+      // снимок нового: v2; круг 26 читает из него v1 — надгробия не теряются
+      const v2 = { v: 2, parents: { d: 'r', e: null }, seq: { d: 4, e: 3 } };
+      assert.equal(await s.writeSnapshot(id, 4, createDoc('empty'), E, chains[3], v2), true);
+      assert.deepEqual((await s.latestSnapshot(id)).tombstones, v2, 'новый читает своё значение');
+      assert.deepEqual(await old.latestSnapshot(id), { seq: 4, tombstones: { d: 'r', e: null } }, 'круг 26 видит parents (v1)');
+
+      // круг 26 переписывает снимок нового на другой цепочке (журнал под seq 5 сменился после отката)
+      assert.equal(await s.writeSnapshot(id, 5, createDoc('empty'), E, chains[4], v2), true);
+      await s.pool.query("UPDATE operations SET chain = 'после отката' WHERE project_id = $1 AND seq = 5", [id]);
+      assert.equal(await old.writeSnapshot(id, 5, 'после отката', { f: 'r' }), true);
+      const s5 = await s.latestSnapshot(id);
+      assert.equal(s5.seq, 5);
+      assert.equal(s5.tombstones, null, 'надгробия нового от прежней цепочки не приписываются чужому снимку');
+
+      // экземпляр до круга 25 колонку tombstones не пишет: умолчание теперь NULL — «неизвестно», не «пусто»
+      await s.pool.query('INSERT INTO snapshots (project_id, seq, doc, engine, chain) VALUES ($1, 6, $2::jsonb, $3, $4)', [id, JSON.stringify(createDoc('empty')), E, chains[5]]);
+      assert.equal((await s.pool.query('SELECT tombstones FROM snapshots WHERE project_id = $1 AND seq = 6', [id])).rows[0].tombstones, null);
+      assert.equal((await s.latestSnapshot(id)).tombstones, null);
+      assert.deepEqual(await old.latestSnapshot(id), { seq: 6, tombstones: {} }, 'круг 26 читает NULL как {} — как прежде');
+
+      const before = await s.snapshotBefore(id, 7);
+      assert.equal(before.seq, 4, 'ближайший раньше с известными надгробиями');
+      assert.deepEqual(before.tombstones, v2);
+    } finally {
+      stop = true;
+      await writer;
+      await s.close();
+      await upTo006.close();
+    }
+  });
+
+  it('008: индекс (updated_at DESC, id DESC) — страница списка идёт по нему; недостроенный (INVALID) строится заново', async () => {
+    const name = await schema();
+    const upTo007 = storageIn(name, { migrationsDir: await migrationsDir((f) => /^00[1-7]_/.test(f)) });
+    await upTo007.init();
+    for (let i = 0; i < 3; i++) await upTo007.createProject({ name: 'p' + i, kind: 'design', doc: createDoc('empty'), engine: E });
+    // прерванный CONCURRENTLY: UNIQUE на повторяющихся значениях падает и оставляет индекс INVALID
+    await assert.rejects(upTo007.pool.query('CREATE UNIQUE INDEX CONCURRENTLY projects_updated_id ON projects (kind)'), /could not create unique index|duplicate/);
+    const valid = async (q) => (await q.query(
+      `SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = 'projects'::regclass AND c.relname = 'projects_updated_id'`)).rows[0];
+    assert.equal((await valid(upTo007.pool)).indisvalid, false);
+    await upTo007.close();
+    const lines = [];
+    const s = storageIn(name, { log: { info: (m) => lines.push(String(m)), warn: (m) => lines.push(String(m)) } });
+    try {
+      await s.init();
+      const idx = await valid(s.pool);
+      assert.equal(idx.indisvalid, true);
+      assert.match(idx.def, /\(updated_at DESC, id DESC\)/);
+      assert.ok(lines.some((l) => /008.*INVALID/.test(l)), lines.join('\n'));
+      // план страницы с курсором: индекс, без сортировки всей таблицы
+      for (let i = 0; i < 300; i++) await s.createProject({ name: 'q' + i, kind: i % 2 ? 'design' : 'library', doc: {}, engine: E });
+      await s.pool.query('ANALYZE projects');
+      const page = await s.listProjectsPage({ limit: 50 });
+      const c = await s.pool.connect();
+      try {
+        await c.query('SET enable_seqscan = off');
+        const plan = (await c.query(
+          `EXPLAIN SELECT * FROM projects WHERE (updated_at, id) < ($1::timestamptz, $2::uuid) ORDER BY updated_at DESC, id DESC LIMIT 51`,
+          [page.next.at, page.next.id]
+        )).rows.map((r) => r['QUERY PLAN']).join('\n');
+        assert.match(plan, /Index Scan using projects_updated_id/, plan);
+        assert.doesNotMatch(plan, /Sort/, plan);
+      } finally {
+        c.release();
+      }
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('008, когда замок миграций ждёт экземпляр прежней версии (pg_advisory_lock со снимком): не CONCURRENTLY — без взаимной блокировки', async () => {
+    const name = await schema();
+    let waiter = null;
+    let waiting = null;
+    globalThis.__imagoStartWaiter = async () => {
+      waiter = new pg.Client({ connectionString: DB_URL });
+      await waiter.connect();
+      waiting = waiter.query('SELECT pg_advisory_lock(728208)');   // как экземпляр круга 26 на старте
+      for (let i = 0; i < 200; i++) {
+        const n = (await admin.query(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid = 728208`)).rows[0].n;
+        if (n) return;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error('ждущий замок не появился');
+    };
+    const dir = await migrationsDir(() => true, {
+      '007_zz_waiter.mjs': 'export async function up() { await globalThis.__imagoStartWaiter(); }'
+    });
+    const lines = [];
+    const s = storageIn(name, { migrationsDir: dir, log: { info: (m) => lines.push(String(m)), warn: (m) => lines.push(String(m)) } });
+    try {
+      const t0 = Date.now();
+      await s.init();
+      assert.ok(Date.now() - t0 < 20000);
+      assert.ok(lines.some((l) => /008: индекс .* построен .*обычный: замок миграций ждут 1/.test(l)), lines.join('\n'));
+      await waiting;   // ждущий получил замок после миграций, а не упал на 40P01
+      await waiter.query('SELECT pg_advisory_unlock(728208)');
+    } finally {
+      delete globalThis.__imagoStartWaiter;
+      if (waiter) await waiter.end().catch(() => {});
       await s.close();
     }
   });

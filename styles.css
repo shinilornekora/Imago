@@ -262,7 +262,9 @@ button, input, textarea { font: inherit; color: inherit; }
 /* Круг 25, п.6 и п.8. Соавторы — кружки с инициалами цвета их рамки выделения, внахлёст,
    сверх трёх — «+N». Имена жили в строке статуса и на 1024 px с одним соавтором сжимали
    ряд досок до 28 px. Пульс у кружка — агент работает над командой этого человека. */
-.people { display: inline-flex; align-items: center; flex: none; margin-right: 6px; min-width: 0; }
+.people { display: inline-flex; align-items: center; flex: none; margin: 0 6px 0 8px; min-width: 0; }
+/* круг 27: кружок с числом соавторов — только на телефоне, где отдельных кружков нет */
+.person.count { display: none; }
 .person {
   width: 24px; height: 24px; border-radius: 999px; flex: none;
   display: inline-flex; align-items: center; justify-content: center;
@@ -323,17 +325,23 @@ button, input, textarea { font: inherit; color: inherit; }
 
 .topbar-center {
   /* круг 25, п.6: ряд досок не сжимается до одной кнопки «+» — минимум под вкладку и «+» */
-  flex: 1; display: flex; gap: 4px; justify-content: flex-start; min-width: 132px;
+  /* круг 27: ширина ряда — всё свободное место, а не по содержимому: по ней считается,
+     сколько вкладок показать (остальные — «ещё N») */
+  flex: 1 1 0; display: flex; gap: 4px; justify-content: flex-start; min-width: 132px;
   overflow-x: auto; overflow-y: hidden; scrollbar-width: none; padding: 0 2px;
 }
 .topbar-center::-webkit-scrollbar { display: none; }
+/* Круг 27, п.7. Вкладки сжимаются (многоточие), прежде чем ряд начнёт прокручиваться:
+   раньше они стояли по полной ширине, последняя обрезалась краем ряда посреди слова,
+   а «+» уезжал за край и пропадал. «+» и «ещё N» не сжимаются и прилипают к правому
+   краю ряда — новая доска есть всегда. */
 .tab {
   border: 1px solid transparent; background: transparent; color: var(--muted);
   padding: 4px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
-  font-size: var(--t-sm); min-width: 72px; max-width: 160px; flex: 0 0 auto;
+  font-size: var(--t-sm); min-width: 72px; max-width: 160px; flex: 0 1 auto;
   overflow: hidden; text-overflow: ellipsis;
 }
-.tab.more { color: var(--text); border-color: var(--line-strong); min-width: 0; }
+.tab.more { color: var(--text); border-color: var(--line-strong); min-width: 0; flex: none; }
 /* узкий экран: вместо ряда вкладок — один выбор экрана (п.6) */
 .tab.pick {
   display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%;
@@ -356,6 +364,14 @@ button, input, textarea { font: inherit; color: inherit; }
   border-color: var(--line-soft);
 }
 .tab.add:hover { color: var(--accent); border-color: var(--accent); background: var(--panel-2); }
+.topbar-center .tab.add, .topbar-center .tab.more {
+  position: sticky; right: 0; z-index: 1;
+  /* под «+» не просвечивают прокрученные вкладки */
+  background: var(--panel); box-shadow: -8px 0 8px -2px var(--panel);
+}
+.topbar-center .tab.more + .tab.add { right: 0; }
+.topbar-center .tab.more:has(+ .tab.add) { right: 32px; }
+.topbar-center .tab.add:hover, .topbar-center .tab.more:hover { background: var(--panel-2); }
 .tab:hover { color: var(--text); background: var(--panel-2); }
 .tab[aria-current="true"] { color: var(--text); border-color: var(--line); background: var(--panel-2); }
 
@@ -1316,7 +1332,9 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
    настроек справа вверху или поле инспектора справа внизу (круг 13, п.10). Теперь
    положение считает оболочка: тост встаёт у той панели, в которой человек действовал. */
 .toasts {
-  position: fixed; left: 50%; transform: translateX(-50%); top: 104px; z-index: 40;
+  /* круг 27: ниже панели масштаба (её низ — 102 px) с запасом на въезд тоста: при 104 px
+     тост налезал на неё краем, когда окно уже 1280 px или открыт инспектор */
+  position: fixed; left: 50%; transform: translateX(-50%); top: 112px; z-index: 40;
   display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none;
   max-width: min(560px, 92vw);
 }
@@ -1525,7 +1543,10 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   .proj-wrap .sync-dot { width: 7px; height: 7px; box-shadow: 0 0 0 1.5px var(--panel); }
   .topbar-center { min-width: 124px; flex: 1 1 0; }
   .tab.pick { min-width: 0; }
-  #people { display: none !important; }
+  /* круг 27: кружков нет, но видно, что соавторы есть — один кружок с их числом */
+  .people { margin: 0; }
+  .people .person:not(.count), .people .people-note { display: none; }
+  .people .person.count { display: inline-flex; background: var(--panel-2); color: var(--text); box-shadow: 0 0 0 2px var(--panel), inset 0 0 0 1px var(--line-strong); }
   #btn-theme { display: none; }
 }
 @media (max-width: 420px) {

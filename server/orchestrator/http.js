@@ -99,6 +99,11 @@ export function parseCommand(body, { testHooks = false } = {}) {
     throw badRequest('base_seq: целое ≥ 0');
   }
   if (!optStr(body.client, MAX_ID)) throw badRequest('client: строка до 128 символов');
+  // круг 27 (I6): кто поставил текущее выделение — человек или агент (оболочка после правки
+  // сама выделяет задетое); brain не считает выделение агента границей, назначенной человеком
+  if (body.selection_by !== undefined && body.selection_by !== null && body.selection_by !== 'human' && body.selection_by !== 'agent') {
+    throw badRequest("selection_by: 'human' | 'agent'");
+  }
   if (!optStr(body.author, MAX_AUTHOR)) throw badRequest('author: строка до 200 символов');
   const mode = body.mode === undefined || body.mode === null ? 'run' : body.mode;
   if (mode !== 'run' && mode !== 'variants') throw badRequest("mode: 'run' | 'variants'");
@@ -118,6 +123,7 @@ export function parseCommand(body, { testHooks = false } = {}) {
     project: body.project,
     text: body.text,
     selection: body.selection ? [...new Set(body.selection)] : [],
+    selection_by: body.selection_by === 'agent' ? 'agent' : 'human',
     board: body.board || null,
     base_seq: body.base_seq == null ? null : body.base_seq,
     client: body.client || null,

@@ -52,6 +52,47 @@ export function tombstonesObject(t) {
 }
 
 /**
+ * Надгробия снимка на входе хранилища (круг 27, I1) → то, что ложится в колонки:
+ *   `parents` — объект id → родитель (колонка `snapshots.tombstones`, формат v1: его
+ *     читают экземпляры кругов 25–26, смешанные версии не теряют надгробий);
+ *   `meta` — всё остальное из v2 (`{v:2, seq:{id → seq удаления}, …}`) без `parents`
+ *     (колонка `tombstones_meta`); null — номеров удаления нет (v1, Map, массив пар).
+ * `null`/`undefined` на входе — «неизвестно»: обе колонки NULL.
+ * Само содержимое v2 хранилище не толкует — кладёт и отдаёт как есть.
+ * @param {any} t
+ * @returns {{parents: Record<string, string|null>|null, meta: object|null}}
+ */
+export function splitTombstones(t) {
+  if (t === null || t === undefined) return { parents: null, meta: null };
+  if (t && typeof t === 'object' && !Array.isArray(t) && !(t instanceof Map) && t.v === 2) {
+    const { parents, ...meta } = t;
+    return { parents: tombstonesObject(parents), meta };
+  }
+  return { parents: tombstonesObject(t), meta: null };
+}
+
+/**
+ * Надгробия снимка на выходе (круг 27, I1). Известны, если записаны этим кругом или
+ * новее для той же цепочки, что у снимка (`metaChain` = `chain`):
+ *   есть номера удаления (`meta`) — v2 `{…meta, parents}`;
+ *   нет (записали v1 — объект id → родитель) — v1 как есть.
+ * Иначе null — «неизвестно»: снимок записал экземпляр прежней версии (его INSERT
+ * колонку tombstones_chain не знает), или он переписал снимок нового поверх (цепочка
+ * снимка сменилась, tombstones_chain осталась прежней). Снимок seq 0 — затравка:
+ * надгробий у него нет никогда, известно всегда.
+ * @param {{seq: number, chain: string, parents: any, meta: any, metaChain: any}} row
+ * @returns {object|null}
+ */
+export function joinTombstones({ seq, chain, parents, meta, metaChain }) {
+  const p = parents && typeof parents === 'object' && !Array.isArray(parents) ? parents : {};
+  const known = typeof metaChain === 'string' && metaChain === (chain || '');
+  if (known && meta && typeof meta === 'object' && !Array.isArray(meta)) return { ...meta, v: 2, parents: p };
+  if (known) return p;
+  if (Number(seq) === 0) return { v: 2, parents: p, seq: {} };
+  return null;
+}
+
+/**
  * Что Postgres не примет в записи (SPEC §9.11): `\u0000` в jsonb — 22P05, одинокий
  * суррогат в jsonb — 22P02, NUL в text — 22021. Адаптер в памяти проверяет то же, чтобы
  * не быть мягче базы: одна и та же транзакция — один и тот же ответ (400).

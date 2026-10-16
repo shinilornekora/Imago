@@ -265,3 +265,86 @@ test('серверная сборка: модель браузера по умо
   assert.match(m[2], /server: false/);
   assert.match(m[2], /enabled: true/);
 });
+
+/* ------------------------------ круг 27 ------------------------------ */
+import {
+  arrivedTxOf, detachedVerdict, stoppedRunVerdict, userNodeCount, shuttingDownWords,
+  OFFLINE_WORDS, PROJECT_GONE_WORDS, DETACHED_TIMES,
+} from '../src/shell.js';
+
+test('круг 27, п.1: транзакция команды, пришедшая до обрыва потока, находится по command_id', () => {
+  const arrived = new Map([
+    ['tx_other', { tx: { tx_id: 'tx_other', command_id: 'cmd_b' }, mine: true, at: 5 }],
+    ['tx_mine', { tx: { tx_id: 'tx_mine', command_id: 'cmd_a' }, mine: true, at: 6 }],
+  ]);
+  assert.equal(arrivedTxOf(arrived, { commandId: 'cmd_a', startedAt: 0 }), 'tx_mine');
+  assert.equal(arrivedTxOf(arrived, { commandId: 'cmd_z', startedAt: 0 }), null);
+  // Orchestrator без command_id: своя транзакция агента после начала команды
+  const old = new Map([
+    ['tx_before', { tx: { tx_id: 'tx_before' }, mine: true, at: 10 }],
+    ['tx_alien', { tx: { tx_id: 'tx_alien' }, mine: false, at: 30 }],
+    ['tx_after', { tx: { tx_id: 'tx_after' }, mine: true, at: 30 }],
+  ]);
+  assert.equal(arrivedTxOf(old, { commandId: 'cmd_a', startedAt: 20 }), 'tx_after');
+  assert.equal(arrivedTxOf(null, { commandId: 'cmd_a' }), null);
+});
+
+test('круг 27, п.1: пришедшая транзакция главнее нового instance — «не выполнена» не говорим', () => {
+  const T = DETACHED_TIMES;
+  // вход: транзакция уже пришла — health не спрашиваем
+  const d0 = { at: 0, instance: 'orch_1', wasDown: false, downSince: 0 };
+  assert.deepEqual(detachedVerdict(d0, { health: undefined, arrivedId: 'tx_1' }), { verdict: 'arrived', txId: 'tx_1' });
+  assert.deepEqual(detachedVerdict(d0, { health: undefined, arrivedId: null }), { verdict: 'wait' });
+  // шаг: ответил другой процесс, но транзакция среди пришедших — это успех, а не потеря
+  const d1 = { at: 0, instance: 'orch_1', wasDown: false, downSince: 0 };
+  const h2 = { ok: true, instance: 'orch_2' };
+  assert.deepEqual(detachedVerdict(d1, { health: h2, now: 1000, arrivedId: 'tx_1' }), { verdict: 'arrived', txId: 'tx_1' });
+  assert.deepEqual(detachedVerdict(d1, { health: h2, now: 1000, arrivedId: null }), { verdict: 'lost', why: 'restarted' });
+  // тот же процесс — ждём полный срок
+  const d2 = { at: 0, instance: 'orch_1', wasDown: false, downSince: 0 };
+  assert.deepEqual(detachedVerdict(d2, { health: { ok: true, instance: 'orch_1' }, now: 1000 }), { verdict: 'wait' });
+  assert.deepEqual(detachedVerdict(d2, { health: { ok: true, instance: 'orch_1' }, now: T.waitMs }), { verdict: 'lost', why: 'silent' });
+  // instance неизвестен: был недоступен и вернулся — перезапуск; лежит дольше grace — down
+  const d3 = { at: 0, instance: '', wasDown: false, downSince: 0 };
+  assert.deepEqual(detachedVerdict(d3, { health: { ok: false }, now: 100 }), { verdict: 'wait' });
+  assert.deepEqual(detachedVerdict(d3, { health: { ok: true }, now: 200 }), { verdict: 'lost', why: 'restarted' });
+  const d4 = { at: 0, instance: '', wasDown: false, downSince: 0 };
+  detachedVerdict(d4, { health: { ok: false }, now: 100 });
+  assert.deepEqual(detachedVerdict(d4, { health: { ok: false }, now: 100 + T.downGraceMs }), { verdict: 'lost', why: 'down' });
+  // сеть пропала у всей вкладки — ждём полный срок, даже если health молчит
+  const d5 = { at: 0, instance: '', wasDown: false, downSince: 0 };
+  assert.deepEqual(detachedVerdict(d5, { health: { ok: false }, netDown: true, now: 100 + T.downGraceMs }), { verdict: 'wait' });
+  assert.deepEqual(detachedVerdict(d5, { health: { ok: false }, netDown: true, now: T.waitMs }), { verdict: 'lost', why: 'down' });
+});
+
+test('круг 27, п.2: «стоп» после записи — «успел записать» не затирается «остановлена»', () => {
+  assert.equal(stoppedRunVerdict({ settled: true }), 'settled');
+  assert.equal(stoppedRunVerdict({ settled: true, replacing: true }), 'settled');
+  assert.equal(stoppedRunVerdict({ replacing: true }), 'replaced');
+  assert.equal(stoppedRunVerdict({}), 'cancelled');
+  // оболочка проводит признак: noteStoppedCommand → e.settled → catch runUtterance
+  const app = readFileSync(join(root, 'app.js'), 'utf8');
+  assert.match(app, /if \(noteStoppedCommand\(commandId, utterance, \{ startedAt \}\)\) e\.settled = true;/);
+  assert.match(app, /stoppedRunVerdict\(\{ settled: !!e\.settled, replacing: replacingRun \}\)/);
+});
+
+test('круг 27, I7: пустой проект — без пользовательских узлов', () => {
+  assert.equal(userNodeCount(core.createDoc('empty')), 0);
+  const lib = core.ensureLibrary ? core.ensureLibrary(core.createDoc('empty')) : null;
+  if (lib && lib.nodes) assert.equal(userNodeCount(lib), 0);
+  assert.ok(userNodeCount(core.createDoc()) > 5);
+  assert.equal(userNodeCount(null), 0);
+});
+
+test('круг 27: слова — перезапуск агента с очередью, офлайн, пропавший проект', () => {
+  const one = shuttingDownWords();
+  assert.equal(one.title, 'Сервер агента перезапускается — команда не выполнена');
+  assert.doesNotMatch(one.note, /очеред/);
+  const more = shuttingDownWords(['собери экран оплаты', 'сделай заголовок крупнее']);
+  assert.match(more.note, /«собери экран оплаты», «сделай заголовок крупнее»/);
+  assert.match(more.note, /Повторить/);
+  assert.match(OFFLINE_WORDS.title, /^Нет сети/);
+  assert.doesNotMatch(OFFLINE_WORDS.title + OFFLINE_WORDS.note, /сервер агента/i);
+  assert.equal(PROJECT_GONE_WORDS.action, 'Сохранить как новый проект');
+  assert.match(PROJECT_GONE_WORDS.note, /сохранена в этой вкладке/);
+});

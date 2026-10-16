@@ -32,8 +32,14 @@ export const WRITE_ATTEMPTS = 3;
  * указанный срок, но не дольше этого — команда не должна висеть минутами.
  */
 export const DOC_RETRY_AFTER_MAX_S = 5;
-/** Запись: суммарное ожидание по Retry-After на одну транзакцию. */
-export const WRITE_WAIT_BUDGET_MS = 12000;
+/**
+ * Запись: суммарное ожидание повторов на одну транзакцию — и по Retry-After, и (круг 27) при
+ * отказе соединения: Document service перезапускается ~3 с, и работа модели за это время
+ * не должна теряться. Повторы идут с тем же tx_id — двойной записи не бывает.
+ */
+export const WRITE_WAIT_BUDGET_MS = 15000;
+/** Круг 27: пауза между повторами записи при отказе сети — растёт до этого потолка. */
+export const WRITE_BACKOFF_MAX_MS = 2000;
 /**
  * Пределы транзакции Document service (SPEC §9.8, `server/document/limits.js` —
  * MAX_OPS_PER_TX, MAX_BODY_BYTES). Образ агента server/document не содержит, поэтому
@@ -57,6 +63,15 @@ export const LLM_HEALTH_CACHE_MS = 10000;
 export const WORKER_MAX_OLD_MB = 512;
 /** Счётное время одного прогона (ожидание модели не считается). */
 export const WORKER_TIMEOUT_MS = 60000;
+/**
+ * Круг 27: заданий на один воркер одновременно. Воркер не простаивает, пока задание ждёт
+ * модель: он берёт следующее (считает всегда одно — поток один, — а ждущие модель стоят).
+ * Новое задание воркер получает, только когда ни одно из его заданий не считает.
+ */
+export const WORKER_JOBS_MAX = 4;
+/** Круг 27: очередь пула (все воркеры заняты счётом или полны) — не длиннее и не дольше. */
+export const POOL_QUEUE_MAX = 32;
+export const POOL_QUEUE_WAIT_MS = 30000;
 
 /** Кеш стейтов DSLR: проектов в памяти. */
 export const DSLR_CACHE_PROJECTS = 64;

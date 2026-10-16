@@ -51,6 +51,9 @@ export const llmDown = (message = LLM_DOWN_MESSAGE) =>
 export const llmUnconfigured = () => new OrchError(503, 'llm_down', LLM_UNCONFIGURED_MESSAGE,
   { retryAfter: 60, detail: { cause: 'unconfigured' } });
 export const cancelled = () => new OrchError(499, 'cancelled', 'Команда остановлена', { retryable: false });
+/** Круг 27 (I6): команду прервал останов процесса агента — не человек; её можно повторить. */
+export const SHUTTING_DOWN_MESSAGE = 'Сервер агента перезапускается — команда не выполнена. Повторите через несколько секунд.';
+export const shuttingDown = () => new OrchError(503, 'shutting_down', SHUTTING_DOWN_MESSAGE, { retryable: true, retryAfter: 5 });
 
 /** Всё, что не OrchError, — внутренний сбой: наружу общая фраза, подробности — в лог. */
 export function toOrchError(e) {

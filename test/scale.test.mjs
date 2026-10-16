@@ -308,6 +308,108 @@ test('rebase, collectTombstones, invertOps, applyBatches = прежние реа
   assert.equal(JSON.stringify(start), startJSON, 'вход не изменён (вплоть до порядка ключей)');
 });
 
+/**
+ * Круг 27: пачка, бьющая по длинным спискам детей: переезды внутри списка и
+ * между списками (after/index), вставки, вырезание листьев, токены; часть
+ * операций не ложится (негодный размер, родитель-текст, цикл, мёртвый after).
+ */
+function genListBatch(doc, rnd, n, gone, tag) {
+  const pick = (a) => a[Math.floor(rnd() * a.length) % a.length];
+  const chance = (p) => rnd() < p;
+  const ids = Object.keys(doc.nodes);
+  // длинные списки — фреймы bigDoc (f0, f1…); фреймы демо-досок короткие
+  const frames = ids.filter((id) => /^f\d+$/.test(id) && doc.nodes[id].type === 'frame');
+  const texts = ids.filter((id) => doc.nodes[id].type === 'text');
+  const sib = (f) => {
+    const kids = doc.nodes[f] && doc.nodes[f].children;
+    return kids && kids.length ? pick(kids) : pick(texts);
+  };
+  const place = (f) => {
+    const out = {};
+    const r = rnd();
+    if (r < 0.45) out.after = chance(0.1) ? null : chance(0.1) && gone.length ? pick(gone) : sib(f);
+    else if (r < 0.8) out.index = chance(0.5) ? 0 : Math.floor(rnd() * 90) - 2;
+    return out;
+  };
+  const list = [];
+  for (let i = 0; i < n; i++) {
+    const roll = rnd();
+    const f = pick(frames);
+    if (roll < 0.4) {
+      list.push({ op: 'move', id: chance(0.9) ? pick(texts) : pick(frames), parent: chance(0.95) ? f : pick(texts), ...place(f) });
+    } else if (roll < 0.65) {
+      const node = text(`${tag}_${i}`, f);
+      if (chance(0.05)) node.size = { w: { mode: 'zzz' } };
+      list.push({ op: 'create', node, ...place(f) });
+    } else if (roll < 0.85) {
+      list.push({ op: 'remove', id: chance(0.9) ? pick(texts) : chance(0.5) && gone.length ? pick(gone) : 'нет' });
+    } else if (roll < 0.92) {
+      list.push({ op: 'set', id: pick(texts), path: chance(0.8) ? 'name' : 'size.w', value: chance(0.8) ? 'n' + i : { mode: 'qq' } });
+    } else {
+      const k = Math.floor(rnd() * 6);
+      list.push(k === 0 ? { op: 'setToken', path: 'colors.c' + Math.floor(rnd() * 30), value: '#0' + i }
+        : k === 1 ? { op: 'setToken', path: 'colors.c' + Math.floor(rnd() * 30) }
+        : k === 2 ? { op: 'setToken', path: 'spacing.' + Math.floor(rnd() * 12), value: i }
+        : k === 3 ? { op: 'setToken', path: 'spacing', value: 'не массив' }
+        : k === 4 ? { op: 'setToken', path: 'extra.deep.k' + i, value: { v: i } }
+        : { op: 'setToken', path: 'colors', value: null });
+    }
+  }
+  return list;
+}
+
+test('круг 27: то же сравнение с эталоном на длинных списках (индекс позиций, правка children на месте)', () => {
+  // bigDoc(6, 5) выше не доходит до индекса позиций (он строится со списков от 48
+  // детей): здесь фреймы по 60–90 детей, и пачки длиннее — вставки, вырезания и
+  // переезды внутри одного списка идут десятками подряд, часть операций не ложится
+  // и откатывается по журналу посреди пачки
+  const rnd = lcg(271027);
+  let doc = bigDoc(4, 90);
+  const tomb = new Map();
+  const gone = [];
+  const start = doc;
+  const startJSON = JSON.stringify(start);
+  const txs = [];
+  let total = 0;
+  for (let round = 0; round < 120; round++) {
+    const list = genListBatch(doc, rnd, 20 + Math.floor(rnd() * 60), gone, 'q' + round);
+    const a = rebase(doc, clone(list), { tombstones: tomb });
+    const b = refRebase(doc, clone(list), tomb);
+    assert.deepEqual(a, b, 'rebase, раунд ' + round);
+    const tA = collectTombstones(doc, a.ops);
+    assert.deepEqual(tA, refCollect(doc, a.ops), 'collectTombstones, раунд ' + round);
+    assert.deepEqual(collectTombstones(doc, list), refCollect(doc, list), 'collectTombstones сырых, раунд ' + round);
+    assert.deepEqual(invertOps(doc, a.ops), refInvert(doc, a.ops), 'invertOps, раунд ' + round);
+    const res = applyOps(doc, a.ops);
+    assert.equal(res.error, undefined);
+    // порядок детей — ровно как у поштучного применения
+    let step = doc;
+    for (const op of a.ops) step = applyOps(step, [op]).doc;
+    assert.equal(JSON.stringify(res.doc.nodes), JSON.stringify(step.nodes), 'пачка = поштучно, раунд ' + round);
+    const back = applyOps(res.doc, invertOps(doc, a.ops));
+    assert.equal(hashDoc(back.doc), hashDoc(doc), 'отмена, раунд ' + round);
+    for (const [id, p] of tA) { tomb.set(id, p); gone.push(id); }
+    doc = res.doc;
+    total += a.ops.length;
+    txs.push(a.ops);
+    if (round % 5 === 0) txs.push(list);
+  }
+  assert.ok(total > 3000, 'операций легло: ' + total);
+  let d = start;
+  const tb = [];
+  for (const ops of txs) {
+    for (const x of collectTombstones(d, ops)) tb.push(x);
+    const r = applyOps(d, ops);
+    if (!r.error) d = r.doc;
+  }
+  const got = applyBatches(start, txs);
+  assert.equal(hashDoc(got.doc), hashDoc(d));
+  // откат отказавшей пачки возвращает и порядок ключей палитры (снятый ключ — не в конец)
+  assert.equal(JSON.stringify(got.doc.tokens), JSON.stringify(d.tokens));
+  assert.deepEqual(got.tombstones, tb);
+  assert.equal(JSON.stringify(start), startJSON, 'вход не изменён');
+});
+
 test('откат черновика: операция, бросившая на полпути, не оставляет следа — как у прежнего applyOps', () => {
   // фрейм с битым children (null): move сначала снимает узел со старого родителя,
   // потом падает на целевом списке — прежде это ловил applyOps и возвращал исходный doc

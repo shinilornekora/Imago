@@ -38,6 +38,10 @@
  * ему повтор уже полученной вместо `ack` — `error {code:'duplicate', retryable:false}`,
  * по которому он снимает транзакцию с очереди (иначе очередь вставала навсегда).
  *
+ * Круг 27: `{type:'project', project:{id,name,kind,head_seq,updated_at}}` — проект
+ * переименован (здесь или на другом экземпляре, I4); проекта не стало в базе (I3) —
+ * `error {code:'not_found', retryable:false}` всем сокетам проекта и закрытие 4404.
+ *
  * Медленный читатель: больше MAX_BUFFERED байт неотправленного — сокет закрывается
  * (4503), клиент переподключится с since и догонит из базы, а память экземпляра не
  * копит кадры для вкладки, которая не читает.
@@ -47,6 +51,7 @@ import { WebSocketServer } from 'ws';
 import { ENGINE_VERSION } from '../../src/core.js';
 import { DocError, badRequest, internalBody } from './errors.js';
 import { projectSummary } from './storage/committed.js';
+import { applyServerTimeouts } from './http.js';
 import {
   MAX_BODY_BYTES, WS_ENVELOPE_BYTES, PRESENCE_PER_SECOND as PRESENCE_RATE, PRESENCE_SELECTION, PRESENCE_ID_CHARS,
   PRESENCE_PAYLOAD_BYTES, PRESENCE_TTL_MS, FRAME_CACHE_FRAMES, FRAME_CACHE_ROOM_BYTES, FRAME_CACHE_TOTAL_BYTES,
@@ -87,6 +92,9 @@ export function createHub({
   presenceTtlMs = PRESENCE_TTL_MS, maxBuffered = MAX_BUFFERED, maxInflight = WS_INFLIGHT, frameCache = {}, log = console
 }) {
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE });
+  // таймауты приёма запроса (круг 27, медленное тело): Hub — единственный модуль, которому
+  // вход отдаёт сам http.Server; index.js может поставить их и сам — то же значение
+  applyServerTimeouts(server);
   const cacheFrames = frameCache.frames > 0 ? frameCache.frames : FRAME_CACHE_FRAMES;
   const cacheRoomBytes = frameCache.roomBytes > 0 ? frameCache.roomBytes : FRAME_CACHE_ROOM_BYTES;
   const cacheTotalBytes = frameCache.totalBytes > 0 ? frameCache.totalBytes : FRAME_CACHE_TOTAL_BYTES;
@@ -198,6 +206,27 @@ export function createHub({
     if (!room) return;
     if (ev.kind === 'tx') {
       for (const ws of room.sockets) deliverTx(ws, ev.committed);
+      return;
+    }
+    if (ev.kind === 'missing') {
+      // I3: проекта в базе больше нет (например, базу восстановили из копии без него) —
+      // всем сокетам проекта not_found и 4404: переподключаться к нему бесполезно
+      clearFrames(room);
+      const text = JSON.stringify({ type: 'error', error: true, code: 'not_found', message: 'проекта больше нет на сервере', retryable: false });
+      for (const ws of [...room.sockets]) {
+        send(ws, text);
+        ws.close(CLOSE.notFound, 'not_found');
+      }
+      return;
+    }
+    if (ev.kind === 'project') {
+      // I4: имя (и сводка) проекта изменились — здесь или на другом экземпляре
+      const text = JSON.stringify({ type: 'project', project: ev.project });
+      // сокет ещё решает (его hello, возможно, несёт прежнее имя) — дошлём сразу за hello
+      for (const ws of room.sockets) {
+        if (ws.ready) send(ws, text);
+        else ws.pendingProject = text;
+      }
       return;
     }
     if (ev.kind === 'epoch') {
@@ -588,6 +617,10 @@ export function createHub({
         head_seq, engine: ENGINE_VERSION, epoch: head.epoch, tip: head.chain || '',
         gone: decision !== 'live' && decision !== 'tail'
       });
+      if (ws.pendingProject) {
+        send(ws, ws.pendingProject);
+        ws.pendingProject = null;
+      }
       if (decision === 'live') {
         // без since — только живой поток: клиент открыл проект по HTTP и знает голову
         ws.lastSeq = head.head_seq;

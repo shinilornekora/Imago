@@ -17,6 +17,9 @@
  *   WORKER_MAX_MB     потолок кучи воркера (512)
  *   WORKER_TIMEOUT_MS счётное время одного прогона, без ожидания модели (60000)
  *   QUEUE_MAX         ждущих команд на проект (4)
+ *   WORKER_JOBS       заданий на воркер одновременно, пока они ждут модель (4)
+ *   POOL_QUEUE_MAX    ждущих свободного воркера заданий (32); больше — 429 busy
+ *   POOL_QUEUE_WAIT_MS сколько задание ждёт воркер (30000); дольше — busy
  *
  * Останов по SIGTERM/SIGINT: новые команды — 503, выполняемые доводятся (до 10 с),
  * остальное прерывается, потоки закрываются, воркеры снимаются, трассы дописываются.
@@ -49,6 +52,7 @@ const num = (v) => (v === undefined || v === null || v === '' ? undefined : Numb
  *   port?: number, host?: string, documentUrl?: string, internalToken?: string,
  *   llm?: {kind?: string, baseUrl?: string, model?: string, apiKey?: string, timeout?: number},
  *   workers?: number, workerMaxMb?: number, workerTimeoutMs?: number, queueMax?: number,
+ *   workerJobs?: number, poolQueueMax?: number, poolQueueWaitMs?: number,
  *   variantsTtlMs?: number, tracePath?: string, testHooks?: boolean, fetch?: typeof fetch,
  *   log?: {info: Function, warn: Function}
  * }} [opts] всё необязательно — умолчания из окружения
@@ -80,6 +84,9 @@ export async function start(opts = {}) {
     size: opts.workers || num(env.WORKERS),
     maxOldMb: opts.workerMaxMb || num(env.WORKER_MAX_MB),
     timeoutMs: opts.workerTimeoutMs || num(env.WORKER_TIMEOUT_MS),
+    jobsPerWorker: opts.workerJobs || num(env.WORKER_JOBS),
+    queueMax: opts.poolQueueMax !== undefined ? opts.poolQueueMax : num(env.POOL_QUEUE_MAX),
+    queueWaitMs: opts.poolQueueWaitMs || num(env.POOL_QUEUE_WAIT_MS),
     testHooks: !!opts.testHooks,
     log,
   });

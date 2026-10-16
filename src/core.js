@@ -214,6 +214,23 @@ function cleanText(s) {
   return out;
 }
 
+/**
+ * Круг 27: ключ объекта после чистки (как cleanText) — или `null`, если ключ
+ * опасен: `__proto__`, `prototype`, `constructor`. Проверяется ПОСЛЕ чистки:
+ * `"__proto__\u0000"` безобиден, пока в нём U+0000, а очищенный становится
+ * `__proto__`, и запись `out[k2] = v` в обычный объект подменила бы прототип
+ * (вместо данных — чужие свойства «из ниоткуда»). Такой ключ отбрасывается
+ * вместе со значением — как deepClone отбрасывает ключи прототипа. Не строка
+ * приводится к строке. Одна функция на всех, кто чистит ключи рекурсивно
+ * (сервер — limits.cleanDeep, реплика — sync.cleanDeep).
+ * @param {any} k
+ * @returns {string|null}
+ */
+function cleanKey(k) {
+  const s = cleanText(typeof k === 'string' ? k : String(k));
+  return UNSAFE_KEYS.has(s) ? null : s;
+}
+
 let loggedOnce = new Set();
 /** Предел памяти логгера: ключи включают id узлов, за долгую сессию их набегает сколько угодно. */
 const LOG_KEY_LIMIT = 400;
@@ -1511,20 +1528,27 @@ function artboards(doc) {
   return kidsOf(root).map((id) => nodeById(doc, id)).filter((n) => n && n.type === 'frame');
 }
 
-/** Все id поддерева, родитель раньше детей. Цикл и глубже MAX_DEPTH обходятся стороной. @returns {string[]} */
+/**
+ * Все id поддерева, родитель раньше детей (прямой порядок обхода). Цикл обходится
+ * стороной. Круг 27: без предела глубины и без рекурсии — поддерево глубже
+ * MAX_DEPTH (документ прежней версии) раньше обрывалось, и надгробия remove
+ * теряли низ цепочки, а applyOps удалял его целиком.
+ * @returns {string[]}
+ */
 function subtreeIds(doc, id) {
   const out = [];
   const seen = new Set();
-  const walk = (nid, depth) => {
+  const stack = [id];
+  while (stack.length) {
+    const nid = stack.pop();
     const n = nodeById(doc, nid);
-    if (!n) return;
-    if (seen.has(nid)) { logOnce('subtree:cycle:' + nid, `subtreeIds: узел «${nid}» встречен дважды — ребро пропущено`); return; }
-    if (depth > MAX_DEPTH) { logOnce('subtree:deep:' + nid, `subtreeIds: глубже ${MAX_DEPTH} — обход остановлен на «${nid}»`); return; }
+    if (!n) continue;
+    if (seen.has(nid)) { logOnce('subtree:cycle:' + nid, `subtreeIds: узел «${nid}» встречен дважды — ребро пропущено`); continue; }
     seen.add(nid);
     out.push(nid);
-    for (const c of kidsOf(n)) walk(c, depth + 1);
-  };
-  walk(id, 0);
+    const kids = kidsOf(n);
+    for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
+  }
   return out;
 }
 
@@ -1654,46 +1678,207 @@ const ops = Object.freeze({
 
 /** Коды ошибок операций — публичный контракт applyOps, оболочка разбирает их по code. */
 const OP_ERRORS = new Set(['not-found', 'protected-path', 'bad-node', 'bad-parent', 'cycle', 'bad-op']);
-/** @param {string} code @param {string} message @returns {{code:string, message:string}} */
-function opErr(code, message) {
+/**
+ * @param {string} code @param {string} message
+ * @param {{limit?:string}} [extra] круг 27: `limit` — какой предел нарушен (`'depth'`); rebase
+ *   кладёт его в `dropped[].limit`, как `merge_budget`
+ * @returns {{code:string, message:string, limit?:string}}
+ */
+function opErr(code, message, extra) {
   if (!OP_ERRORS.has(code)) logOnce('opErr:' + code, `код ошибки «${code}» вне контракта`);
-  return { code, message };
+  return extra && extra.limit ? { code, message, limit: extra.limit } : { code, message };
 }
 
 /* Круг 25: черновик пачки. Словарь узлов копируется ОДИН раз на пачку (openDraft),
    операции пишут в него через putNode/delNode. Раньше rebase, collectTombstones и
    invertOps звали applyOps(cur, [op]) на каждую операцию, а он каждый раз копировал
    `{...doc.nodes}` — O(операций × узлов): 4900 set на документе в 19 500 узлов
-   сливались 90 с под мьютексом проекта. Журнал `j` (необязательный) — пары
-   [ключ, прежнее значение] для отката ОДНОЙ операции, не принятой applyOne:
-   слиянию нужно «операция не легла — черновик как до неё», не копируя словарь. */
+   сливались 90 с под мьютексом проекта. Журнал `j` (необязательный) — записи для
+   отката ОДНОЙ операции, не принятой applyOne: слиянию нужно «операция не легла —
+   черновик как до неё», не копируя словарь.
+
+   Круг 27: то же для СПИСКА ДЕТЕЙ и токенов. Раньше каждая операция над ребёнком
+   плоского родителя копировала его children (`filter`/`slice`) и искала место
+   indexOf — O(детей) на операцию: на рамке с 19 000 детей 5000 remove сливались
+   5 с и упирались в бюджет слияния, 5000 setToken копировали растущую палитру
+   (квадрат). Теперь:
+   • children копируется один раз на черновик (ownKids — копия-при-записи), дальше
+     правится на месте (вставка/вырезание через arrInsert/arrRemoveAt — только они);
+   • место ребёнка — по ленивому индексу позиций (posOf): словарь id → позиция,
+     строится при первом поиске в длинном списке, а сдвиги после вставок и
+     вырезаний догоняются по журналу сдвигов, без indexOf по всему списку;
+   • токены: контейнеры по пути setToken копируются один раз на черновик.
+   Объекты, созданные ЭТИМ черновиком, помнит DRAFT_STATE (по самому черновику, а
+   не полем в нём: черновик applyOps — это и есть выходной документ, и поле
+   уехало бы в следующий `{...doc}` и разрешило бы править чужие массивы на месте).
+   Документ на входе не меняется никогда: на месте правится только то, что
+   черновик сам и скопировал. */
 const ABSENT = Symbol('absent');
-const TOKENS_SLOT = Symbol('tokens');
+/** Виды записей журнала (по 4 ячейки: вид, цель, ключ, прежнее). */
+const J_NODE = 0;     // draft.nodes[ключ] был «прежним» (ABSENT — ключа не было)
+const J_TOKENS = 1;   // draft.tokens был «прежним»
+const J_INS = 2;      // в массив-цель вставлен элемент на место «ключ»
+const J_DEL = 3;      // из массива-цели вырезан «прежний» с места «ключ»
+const J_PROP = 4;     // цель[ключ] был «прежним» (контейнер токенов)
+
+/** Черновик → {own: что он скопировал сам, pos: индексы позиций списков}. */
+const DRAFT_STATE = new WeakMap();
+/** Список короче — indexOf дешевле индекса позиций. */
+const POS_MIN = 48;
+/** Журнал сдвигов индекса длиннее (пар) — индекс строится заново (баланс догона сдвигов и перестройки). */
+const POS_LOG_MAX = 4096;
+/** Запись индекса позиций — одно число: позиция + отметка журнала × POS_SPAN (без объекта на ребёнка). */
+const POS_SPAN = 2097152;   // 2^21 детей у одного родителя — с запасом выше любых пределов документа
 
 /** Изменяемая копия документа для пачки операций (узлы-объекты общие: applyOne их не мутирует). */
 function openDraft(doc) {
-  return { ...doc, nodes: { ...doc.nodes }, tokens: doc.tokens };
+  const draft = { ...doc, nodes: { ...doc.nodes }, tokens: doc.tokens };
+  DRAFT_STATE.set(draft, { own: new WeakSet(), pos: new WeakMap() });
+  return draft;
+}
+
+/** Черновик уходит наружу документом — больше ничего в нём на месте не правим. */
+function sealDraft(draft) {
+  DRAFT_STATE.delete(draft);
+  return draft;
 }
 
 function putNode(draft, id, node, j) {
-  if (j) j.push(id, hasOwnProp.call(draft.nodes, id) ? draft.nodes[id] : ABSENT);
+  if (j) j.push(J_NODE, null, id, hasOwnProp.call(draft.nodes, id) ? draft.nodes[id] : ABSENT);
   draft.nodes[id] = node;
 }
 
 function delNode(draft, id, j) {
   if (!hasOwnProp.call(draft.nodes, id)) return;
-  if (j) j.push(id, draft.nodes[id]);
+  if (j) j.push(J_NODE, null, id, draft.nodes[id]);
   delete draft.nodes[id];
+}
+
+/** Запись свойства контейнера токенов с отметкой в журнале. */
+function putProp(target, key, value, j) {
+  if (j) j.push(J_PROP, target, key, hasOwnProp.call(target, key) ? target[key] : ABSENT);
+  target[key] = value;
+}
+
+/** Индекс позиций списка: строится заново, если его нет или журнал сдвигов разросся. */
+function posIndex(st, arr) {
+  let ix = st.pos.get(arr);
+  if (ix && ix.log.length <= POS_LOG_MAX * 2) return ix;
+  const map = new Map();
+  let dup = false;
+  for (let i = 0; i < arr.length; i++) {
+    const c = arr[i];
+    if (map.has(c)) { dup = true; break; }
+    map.set(c, i);
+  }
+  // с повторами (битый документ) индекс не нужен: там нужен ПЕРВЫЙ из повторов
+  // и «вычеркнуть все», как делали filter/indexOf, — этим и занимается запасной путь
+  ix = { map, log: [], dup };
+  st.pos.set(arr, ix);
+  return ix;
+}
+
+/**
+ * Место `id` в списке `arr` — как `arr.indexOf(id)` (первое вхождение, −1 — нет),
+ * но в длинном списке черновика — по индексу позиций: запись хранит позицию на
+ * момент своей отметки в журнале сдвигов, и до текущей её догоняют только сдвиги,
+ * сделанные позже (каждый — «всё, что ≥ p, сдвинулось на d»).
+ */
+function posOf(draft, arr, id) {
+  const st = DRAFT_STATE.get(draft);
+  if (!st || arr.length < POS_MIN || arr.length >= POS_SPAN) return arr.indexOf(id);
+  const ix = posIndex(st, arr);
+  if (ix.dup) return arr.indexOf(id);
+  const e = ix.map.get(id);
+  if (e === undefined) return -1;
+  let p = e % POS_SPAN;
+  const log = ix.log;
+  for (let k = (e - p) / POS_SPAN; k < log.length; k += 2) if (p >= log[k]) p += log[k + 1];
+  if (arr[p] !== id) {
+    // не должно случаться (список правят только arrInsert/arrRemoveAt) — но если
+    // случилось, честный поиск дешевле неверного места
+    logOnce('posOf:stale', 'posOf: индекс позиций разошёлся со списком — перестраиваю');
+    st.pos.delete(arr);
+    return arr.indexOf(id);
+  }
+  if (arr.length < POS_SPAN) ix.map.set(id, log.length * POS_SPAN + p);
+  return p;
+}
+
+/** Вставка в список черновика (только в его собственный, см. ownKids). */
+function arrInsert(draft, arr, i, id, j) {
+  arr.splice(i, 0, id);
+  if (j) j.push(J_INS, arr, i, ABSENT);
+  const st = DRAFT_STATE.get(draft);
+  const ix = st && st.pos.get(arr);
+  if (ix && !ix.dup) {
+    if (ix.map.has(id)) ix.dup = true;
+    else {
+      ix.log.push(i, 1);
+      ix.map.set(id, ix.log.length * POS_SPAN + i);
+    }
+  }
+}
+
+/** Вырезание из списка черновика по месту. */
+function arrRemoveAt(draft, arr, i, j) {
+  const x = arr.splice(i, 1)[0];
+  if (j) j.push(J_DEL, arr, i, x);
+  const st = DRAFT_STATE.get(draft);
+  const ix = st && st.pos.get(arr);
+  if (ix && !ix.dup) {
+    ix.map.delete(x);
+    ix.log.push(i + 1, -1);
+  }
+  return x;
+}
+
+/** Как `arr = arr.filter((c) => c !== id)`, но на месте. */
+function arrRemoveAll(draft, arr, id, j) {
+  const st = DRAFT_STATE.get(draft);
+  if (st && arr.length >= POS_MIN && !posIndex(st, arr).dup) {
+    const at = posOf(draft, arr, id);
+    if (at >= 0) arrRemoveAt(draft, arr, at, j);
+    return;
+  }
+  for (let i = arr.length - 1; i >= 0; i--) if (arr[i] === id) arrRemoveAt(draft, arr, i, j);
+}
+
+/**
+ * Список детей узла `id`, который черновик вправе править на месте: при первом
+ * касании — копия (и новый объект узла с ней), дальше — тот же массив.
+ * children не массив — исключение, как прежде у `children.filter`/`slice`
+ * (applyStep/applyOps превращают его в bad-op).
+ */
+function ownKids(draft, id, j) {
+  const node = draft.nodes[id];
+  const kids = node.children;
+  if (!Array.isArray(kids)) throw new TypeError(`children узла «${id}» — не массив`);
+  const st = DRAFT_STATE.get(draft);
+  if (st && st.own.has(kids)) return kids;
+  const copy = kids.slice();
+  if (st) st.own.add(copy);
+  putNode(draft, id, { ...node, children: copy }, j);
+  return copy;
 }
 
 /** Откат черновика к отметке журнала (с конца: одна операция пишет ключ не раз). */
 function rollbackDraft(draft, j, mark) {
-  for (let i = j.length - 2; i >= mark; i -= 2) {
-    const k = j[i];
-    const v = j[i + 1];
-    if (k === TOKENS_SLOT) draft.tokens = v;
-    else if (v === ABSENT) delete draft.nodes[k];
-    else draft.nodes[k] = v;
+  for (let i = j.length - 4; i >= mark; i -= 4) {
+    const kind = j[i];
+    const target = j[i + 1];
+    const key = j[i + 2];
+    const v = j[i + 3];
+    if (kind === J_NODE) {
+      if (v === ABSENT) delete draft.nodes[key];
+      else draft.nodes[key] = v;
+    } else if (kind === J_TOKENS) draft.tokens = v;
+    else if (kind === J_INS) arrRemoveAt(draft, target, key, null);
+    else if (kind === J_DEL) arrInsert(draft, target, key, v, null);
+    else if (kind === J_PROP) {
+      if (v === ABSENT) delete target[key];
+      else target[key] = v;
+    }
   }
   j.length = mark;
 }
@@ -1701,7 +1886,7 @@ function rollbackDraft(draft, j, mark) {
 /**
  * Одна операция в черновик «всё или ничего»: не легла (ошибка или исключение) —
  * черновик откатывается к состоянию до неё. Ошибка — как у applyOne.
- * @returns {{code:string,message:string}|null}
+ * @returns {{code:string,message:string,limit?:string}|null}
  */
 function applyStep(draft, op, j) {
   j.length = 0;
@@ -1717,16 +1902,112 @@ function applyStep(draft, op, j) {
   return err;
 }
 
-/** Цепочка предков узла в черновике — для проверки циклов. */
+/**
+ * Цепочка предков узла в черновике (с ним самим) — для проверки циклов.
+ * Круг 27: без предела глубины (раньше обрывалась на MAX_DEPTH, и узел глубже
+ * 256 уровней можно было повесить под собственного потомка); от цикла, уже
+ * лежащего в документе, — по множеству пройденных.
+ */
 function ancestorIds(draft, id) {
   const out = new Set();
   let cur = id ? ownNode(draft.nodes, id) : null;
-  let guard = 0;
-  while (cur && guard++ < MAX_DEPTH) {
+  while (cur && !out.has(cur.id)) {
     out.add(cur.id);
     cur = cur.parent ? ownNode(draft.nodes, cur.parent) : null;
   }
   return out;
+}
+
+/** Лежит ли `id` на пути от `fromId` вверх (включая сам `fromId`). Без предела глубины. */
+function onPathUp(draft, fromId, id) {
+  const seen = new Set();
+  let cur = fromId ? ownNode(draft.nodes, fromId) : null;
+  while (cur && !seen.has(cur.id)) {
+    if (cur.id === id) return true;
+    seen.add(cur.id);
+    cur = cur.parent ? ownNode(draft.nodes, cur.parent) : null;
+  }
+  return false;
+}
+
+/**
+ * Глубина узла (у корня 0). Точная и в документе глубже предела (прежняя версия:
+ * там move «вглубь» сравнивает две глубины за пределом); цикл в битом документе —
+ * Infinity (множество пройденных заводим только за MAX_DEPTH, обычный путь без него).
+ */
+function depthOf(draft, id) {
+  let d = 0;
+  let seen = null;
+  let cur = id ? ownNode(draft.nodes, id) : null;
+  while (cur && cur.parent) {
+    if (d > MAX_DEPTH) {
+      if (!seen) seen = new Set();
+      if (seen.has(cur.id)) return Infinity;
+      seen.add(cur.id);
+    }
+    cur = ownNode(draft.nodes, cur.parent);
+    if (!cur) break;
+    d++;
+  }
+  return d;
+}
+
+/** Не глубже ли поддерево узла `limit` уровней под ним (лист — 0). Обход с выходом при первом превышении. */
+function heightWithin(draft, id, limit) {
+  if (limit < 0) return false;
+  const seen = new Set();
+  const stack = [id, 0];
+  while (stack.length) {
+    const d = stack.pop();
+    const nid = stack.pop();
+    if (seen.has(nid)) continue;
+    const n = ownNode(draft.nodes, nid);
+    if (!n) continue;
+    seen.add(nid);
+    if (d > limit) return false;
+    if (Array.isArray(n.children)) for (const c of n.children) stack.push(c, d + 1);
+  }
+  return true;
+}
+
+const depthErr = (what) => opErr('bad-parent', `${what}: вложенность глубже ${MAX_DEPTH} уровней`, { limit: 'depth' });
+
+/** Токены после setToken — той формы, без которой документ не открыть. */
+const tokensShapeOk = (t) => !!(t && t.colors && t.type && Array.isArray(t.spacing) && Array.isArray(t.radii));
+
+/**
+ * setToken на месте (круг 27): контейнеры по пути копируются один раз на
+ * черновик, дальше пишутся на месте — 5000 setToken в палитру больше не копируют
+ * её 5000 раз. Результат — тот же, что у `setPath(tokens, path, value)`:
+ * • копия контейнера — как у setPath (массив — slice, объект — spread, не объект — {});
+ * • массивы не правим на месте никогда (запись по индексу за длиной меняла бы
+ *   length, а откат — нет): они маленькие (шкалы), копия на операцию дешева;
+ * • снятие ключа (value undefined) — в свежей копии контейнера: откат вернёт
+ *   прежний объект целиком, и порядок ключей палитры не съедет.
+ */
+function setTokenInPlace(draft, st, parts, value, j) {
+  const del = value === undefined;
+  const last = parts.length - 1;
+  const reuse = (obj, level) => !!obj && typeof obj === 'object' && !Array.isArray(obj) && st.own.has(obj) && !(del && level === last);
+  let cur = draft.tokens;
+  if (!reuse(cur, 0)) {
+    const copy = Array.isArray(cur) ? cur.slice() : { ...cur };
+    st.own.add(copy);
+    if (j) j.push(J_TOKENS, null, null, draft.tokens);
+    draft.tokens = copy;
+    cur = copy;
+  }
+  for (let i = 0; i < last; i++) {
+    const p = parts[i];
+    const next = cur[p];
+    if (reuse(next, i + 1)) { cur = next; continue; }
+    const copy = next && typeof next === 'object' ? (Array.isArray(next) ? next.slice() : { ...next }) : {};
+    st.own.add(copy);
+    putProp(cur, p, copy, j);
+    cur = copy;
+  }
+  if (del) delete cur[parts[last]];
+  else putProp(cur, parts[last], deepClone(value), j);
 }
 
 /**
@@ -1742,6 +2023,10 @@ function applyOne(draft, op, j) {
       if (!node.id) node.id = uid();
       if (ownNode(draft.nodes, node.id)) return opErr('bad-node', `create: id «${node.id}» уже занят`);
       if (node.type === 'frame' || node.type === 'page') node.children = Array.isArray(node.children) ? node.children.slice() : [];
+      if (Array.isArray(node.children)) {
+        const st = DRAFT_STATE.get(draft);
+        if (st) st.own.add(node.children);   // свой массив нового узла — правится на месте
+      }
       // круг 19: у экземпляра размер НЕ достраиваем — незаданная ось берётся у
       // мастера (см. instanceSize). Достроенный hug сделал бы экземпляр кнопки
       // 200×48 размером «по содержимому» и увёл бы его вид от компонента.
@@ -1786,12 +2071,20 @@ function applyOne(draft, op, j) {
         if (chain.has(c)) return opErr('cycle', `create: «${c}» — предок нового узла, перевешивать нельзя`);
         if (draft.nodes[c].type === 'page') return opErr('bad-node', `create: «${c}» — страница, её нельзя вложить`);
       }
+      /* Круг 27: предел вложенности. Раньше create глубже MAX_DEPTH проходил, а
+         обходы (предки, удаление поддерева) на MAX_DEPTH обрывались: move вешал
+         верх цепочки под её низ (цикл), remove оставлял сирот. Узел глубже
+         предела операцией не появляется — ни сам, ни усыновлённое поддерево. */
+      const depth = needsParent ? depthOf(draft, parent.id) + 1 : 0;
+      if (depth > MAX_DEPTH) return depthErr('create');
+      for (const c of kids) {
+        if (depth + 1 > depthOf(draft, c) && !heightWithin(draft, c, MAX_DEPTH - depth - 1)) return depthErr('create');
+      }
 
       if (needsParent) {
-        const list = draft.nodes[parent.id].children.slice();
+        const list = ownKids(draft, parent.id, j);
         const idx = isNum(op.index) ? clamp(Math.round(op.index), 0, list.length) : list.length;
-        list.splice(idx, 0, node.id);
-        putNode(draft, parent.id, { ...parent, children: list }, j);
+        arrInsert(draft, list, idx, node.id, j);
       }
       putNode(draft, node.id, node, j);
       // переезд детей: снимаем их с прежних родителей, иначе узел окажется в двух местах
@@ -1799,7 +2092,7 @@ function applyOne(draft, op, j) {
         const child = draft.nodes[c];
         const oldParent = child.parent ? ownNode(draft.nodes, child.parent) : null;
         if (oldParent && Array.isArray(oldParent.children)) {
-          putNode(draft, oldParent.id, { ...oldParent, children: oldParent.children.filter((x) => x !== c) }, j);
+          arrRemoveAll(draft, ownKids(draft, oldParent.id, j), c, j);
         }
         putNode(draft, c, { ...draft.nodes[c], parent: node.id }, j);
       }
@@ -1809,20 +2102,23 @@ function applyOne(draft, op, j) {
       const node = ownNode(draft.nodes, op.id);
       if (!node) return opErr('not-found', `remove: узел «${op.id}» не найден`);
       if (node.id === draft.root) return opErr('protected-path', 'remove: нельзя удалить корень');
+      // круг 27: поддерево целиком, без предела глубины (раньше глубже MAX_DEPTH
+      // оставались сироты) и без рекурсии (стек); порядок — прежний, сверху вниз
       const ids = [];
       const seen = new Set();
-      const walk = (nid, depth) => {
+      const stack = [op.id];
+      while (stack.length) {
+        const nid = stack.pop();
         const n = ownNode(draft.nodes, nid);
-        if (!n || seen.has(nid) || depth > MAX_DEPTH) return;
+        if (!n || seen.has(nid)) continue;
         seen.add(nid);
         ids.push(nid);
-        (n.children || []).forEach((c) => walk(c, depth + 1));
-      };
-      walk(op.id, 0);
-      const parent = ownNode(draft.nodes, node.parent);
-      if (parent) {
-        putNode(draft, parent.id, { ...parent, children: parent.children.filter((c) => c !== op.id) }, j);
+        const kids = n.children || [];
+        if (!Array.isArray(kids)) throw new TypeError(`children узла «${nid}» — не массив`);
+        for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
       }
+      const parent = ownNode(draft.nodes, node.parent);
+      if (parent) arrRemoveAll(draft, ownKids(draft, parent.id, j), op.id, j);
       for (const nid of ids) delNode(draft, nid, j);
       return null;
     }
@@ -1879,19 +2175,18 @@ function applyOne(draft, op, j) {
         if (op.parent !== draft.root) return opErr('bad-parent', 'move: страница живёт только в корне');
         if (draft.nodes[op.id].role !== LIBRARY_ROLE) return opErr('bad-parent', 'move: эту страницу перевешивать нельзя');
       }
-      let p = parent;
-      let guard = 0;
-      while (p && guard++ < MAX_DEPTH) {
-        if (p.id === op.id) return opErr('cycle', 'move: нельзя переместить узел внутрь себя');
-        p = p.parent ? ownNode(draft.nodes, p.parent) : null;
-      }
+      // круг 27: цикл ищем по всей цепочке (раньше — на MAX_DEPTH шагов, и низ
+      // цепочки в 300 узлов «не видел» её верх)
+      if (onPathUp(draft, parent.id, op.id)) return opErr('cycle', 'move: нельзя переместить узел внутрь себя');
+      // предел вложенности: проверяем, только если узел опускается глубже, чем был
+      const depth = depthOf(draft, parent.id) + 1;
+      if (depth > depthOf(draft, op.id) && !heightWithin(draft, op.id, MAX_DEPTH - depth)) return depthErr('move');
       const old = ownNode(draft.nodes, node.parent);
-      if (old) putNode(draft, old.id, { ...old, children: old.children.filter((c) => c !== op.id) }, j);
-      const target = draft.nodes[op.parent];
-      const list = target.children.filter((c) => c !== op.id);
+      if (old) arrRemoveAll(draft, ownKids(draft, old.id, j), op.id, j);
+      const list = ownKids(draft, op.parent, j);
+      arrRemoveAll(draft, list, op.id, j);
       const idx = isNum(op.index) ? clamp(Math.round(op.index), 0, list.length) : list.length;
-      list.splice(idx, 0, op.id);
-      putNode(draft, target.id, { ...target, children: list }, j);
+      arrInsert(draft, list, idx, op.id, j);
       putNode(draft, op.id, { ...node, parent: op.parent }, j);
       return null;
     }
@@ -1900,12 +2195,17 @@ function applyOne(draft, op, j) {
       if (!path) return opErr('bad-op', 'setToken: пустой путь');
       const badKey = path.split('.').find((p) => UNSAFE_KEYS.has(p));
       if (badKey) return opErr('protected-path', `setToken: путь «${badKey}» защищён`);
-      const next = setPath(draft.tokens, path, op.value);
-      if (!next.colors || !next.type || !Array.isArray(next.spacing) || !Array.isArray(next.radii)) {
-        return opErr('bad-op', 'setToken: нарушена структура токенов');
+      const st = DRAFT_STATE.get(draft);
+      if (!st) {
+        const next = setPath(draft.tokens, path, op.value);
+        if (!tokensShapeOk(next)) return opErr('bad-op', 'setToken: нарушена структура токенов');
+        if (j) j.push(J_TOKENS, null, null, draft.tokens);
+        draft.tokens = next;
+        return null;
       }
-      if (j) j.push(TOKENS_SLOT, draft.tokens);
-      draft.tokens = next;
+      setTokenInPlace(draft, st, path.split('.'), op.value, j);
+      // не легла — откат по журналу (applyStep) или черновик целиком в мусор (applyOps)
+      if (!tokensShapeOk(draft.tokens)) return opErr('bad-op', 'setToken: нарушена структура токенов');
       return null;
     }
     default:
@@ -1951,7 +2251,7 @@ function applyOps(doc, opList) {
       const err = applyOne(draft, list[i]);
       if (err) {
         logOnce('apply:' + err.message, `операция ${i} отклонена: ${err.message}`);
-        return { doc, error: opErr(err.code, `операция ${i} (${list[i] && list[i].op}): ${err.message}`) };
+        return { doc, error: opErr(err.code, `операция ${i} (${list[i] && list[i].op}): ${err.message}`, err) };
       }
     }
   } catch (e) {
@@ -1963,7 +2263,7 @@ function applyOps(doc, opList) {
     return { doc, error: opErr('bad-op', 'правку не удалось применить: в операции негодное значение') };
   }
   draft.version = (doc.version || 0) + 1;
-  return { doc: draft };
+  return { doc: sealDraft(draft) };
 }
 
 /**
@@ -2014,7 +2314,7 @@ function applyBatches(doc, batches) {
         logOnce('apply:throw', 'исключение при применении операций', e);
         err = opErr('bad-op', 'правку не удалось применить: в операции негодное значение');
       }
-      if (err) error = opErr(err.code, `операция ${i} (${op && typeof op.op === 'string' ? op.op : '?'}): ${err.message}`);
+      if (err) error = opErr(err.code, `операция ${i} (${op && typeof op.op === 'string' ? op.op : '?'}): ${err.message}`, err);
     }
     if (error) {
       rollbackDraft(draft, j, 0);
@@ -2026,6 +2326,7 @@ function applyBatches(doc, batches) {
     j.length = 0;
   }
   if (applied) draft.version = (doc.version || 0) + applied;
+  sealDraft(draft);
   return { doc: applied ? draft : doc, tombstones, results };
 }
 
@@ -2134,7 +2435,11 @@ function invertOne(doc, op) {
       for (const nid of ids) {
         const n = deepClone(nodeById(doc, nid));
         const parent = nodeById(doc, n.parent);
-        const index = parent ? slotOf(parent, nid) : undefined;
+        // круг 27: место самого удаляемого — по индексу позиций черновика (родитель
+        // бывает плоским на 19 000 детей, а remove в пачке — тысячи); места потомков —
+        // по словарю на родителя внутри поддерева, как раньше
+        const index = !parent ? undefined
+          : nid === op.id && Array.isArray(parent.children) ? posOf(doc, parent.children, nid) : slotOf(parent, nid);
         // дети будут воссозданы своими операциями — создаём узел пустым
         const node2 = { ...n, children: n.children ? [] : undefined };
         if (node2.children === undefined) delete node2.children;
@@ -2166,7 +2471,7 @@ function invertOne(doc, op) {
       const node = nodeById(doc, op.id);
       if (!node) return [];
       const parent = nodeById(doc, node.parent);
-      const index = parent ? parent.children.indexOf(op.id) : 0;
+      const index = parent ? (Array.isArray(parent.children) ? posOf(doc, parent.children, op.id) : parent.children.indexOf(op.id)) : 0;
       return [ops.move(op.id, node.parent, index < 0 ? 0 : index)];
     }
     case 'setToken': {
@@ -2274,23 +2579,168 @@ function hashDoc(doc) {
   return fnv64(stableJSON({ root: doc.root, nodes: doc.nodes, tokens: doc.tokens }));
 }
 
-/** Надгробия как Map: id удалённого узла → его последний родитель (или null). */
+/* Надгробия (круг 27, I1). Внутри core — словарь id удалённого узла → его
+   последний родитель (Map или объект). В снимке — один из форматов:
+   • v1 — плоский объект `{<id>: <parentId|null>}` (круги 25–26);
+   • v2 — `{v:2, parents:{<id>:<parent>}, seq:{<id>:<seq удаления>}}`;
+   • null/undefined — «неизвестно» (снимок записан экземпляром прежней версии):
+     надгробия восстанавливает сервер (ближайший снимок с надгробиями + remove журнала).
+   Номер удаления нужен прореживанию (pruneTombstones): надгробие старше окна
+   переигрывания больше никому не понадобится, а словарь иначе растёт вечно. */
+
+/** Объект `parents` из v2/нормализованной формы: признак — поле-объект (у v1 значения — строки/null). */
+function tombParentsOf(src) {
+  if (!src || typeof src !== 'object' || src instanceof Map || Array.isArray(src)) return null;
+  if (src.v === 2 || (src.parents && typeof src.parents === 'object')) return src.parents && typeof src.parents === 'object' ? src.parents : {};
+  return null;
+}
+
+/** Надгробия как Map: id удалённого узла → его последний родитель (или null). Принимает Map, v1, v2 и {parents, seq}. */
 function toTombMap(src) {
   if (src instanceof Map) return src;
+  const v2 = tombParentsOf(src);
+  if (v2) return v2 instanceof Map ? v2 : toTombMap(v2);
   const m = new Map();
-  if (src && typeof src === 'object') for (const k of Object.keys(src)) m.set(k, src[k] === undefined ? null : src[k]);
+  if (src && typeof src === 'object') {
+    for (const k of Object.keys(src)) if (isNodeId(k)) m.set(k, src[k] === undefined ? null : src[k]);
+  }
   return m;
+}
+
+/** Номер журнала: целое ≥ 0 (из jsonb — число; строка цифр — тоже). Иначе undefined. */
+function tombSeq(v) {
+  const n = typeof v === 'string' && /^\d{1,15}$/.test(v) ? Number(v) : v;
+  return Number.isSafeInteger(n) && n >= 0 ? n : undefined;
+}
+
+/** Пары [id, parent] из Map или объекта (только годные id; родитель — id или null). */
+function tombEntries(src) {
+  const out = [];
+  if (src instanceof Map) {
+    for (const [id, p] of src) if (isNodeId(id)) out.push([id, isNodeId(p) ? p : null]);
+  } else if (src && typeof src === 'object' && !Array.isArray(src)) {
+    for (const id of Object.keys(src)) if (isNodeId(id)) out.push([id, isNodeId(src[id]) ? src[id] : null]);
+  }
+  return out;
+}
+
+/** Номер из Map или объекта номеров. */
+function tombSeqOf(seqs, id) {
+  if (seqs instanceof Map) return tombSeq(seqs.get(id));
+  if (seqs && typeof seqs === 'object' && hasOwnProp.call(seqs, id)) return tombSeq(seqs[id]);
+  return undefined;
+}
+
+/**
+ * Надгробия снимка в любом формате → `{parents, seq}` (простые объекты) или
+ * `null` — «неизвестно» (null/undefined на входе, неизвестная версия `v`,
+ * негодный v2). Принимает v1, v2, уже нормализованную форму, Map и массив пар
+ * `[id, parent, seq?]` (выход collectTombstones). Годятся только id-строки, не
+ * ключи прототипа; родитель не-id → null; номер — целое ≥ 0.
+ * @param {any} x
+ * @param {{seq?: number}} [opts] `seq` — номер для записей без номера (v1, Map, пары)
+ * @returns {{parents: Record<string, string|null>, seq: Record<string, number>}|null}
+ */
+function normalizeTombstones(x, opts) {
+  if (x === null || x === undefined) return null;
+  const fallback = tombSeq(opts && opts.seq);
+  const parents = {};
+  const seq = {};
+  const put = (id, p, s) => {
+    parents[id] = p;
+    const n = s !== undefined ? s : fallback;
+    if (n !== undefined) seq[id] = n;
+    else delete seq[id];
+  };
+  if (Array.isArray(x)) {
+    for (const e of x) {
+      if (!Array.isArray(e) || !isNodeId(e[0])) continue;
+      put(e[0], isNodeId(e[1]) ? e[1] : null, tombSeq(e[2]));
+    }
+    return { parents, seq };
+  }
+  if (x instanceof Map) {
+    for (const [id, p] of tombEntries(x)) put(id, p, undefined);
+    return { parents, seq };
+  }
+  if (typeof x !== 'object') return null;
+  if (typeof x.v === 'number' && x.v !== 2) return null;   // формат, которого этот экземпляр не знает
+  if (x.v === 2 || (x.parents && typeof x.parents === 'object')) {
+    const ps = x.parents;
+    if (!ps || typeof ps !== 'object' || Array.isArray(ps)) return null;
+    const ss = x.seq && typeof x.seq === 'object' && !Array.isArray(x.seq) ? x.seq : null;
+    for (const [id, p] of tombEntries(ps)) put(id, p, tombSeqOf(ss, id));
+    return { parents, seq };
+  }
+  for (const [id, p] of tombEntries(x)) put(id, p, undefined);
+  return { parents, seq };
+}
+
+/**
+ * Прореживание надгробий: остаются те, чей номер удаления ≥ `minSeq`, и не больше
+ * `max` самых свежих (при равных номерах — позже записанные). Запись без номера
+ * считается самой старой (номер 0): она из снимка прежней версии. Порядок
+ * оставшихся — как на входе. Вход не меняется.
+ * Последствие (SPEC, круг 27): `create` в давно удалённого родителя после
+ * прореживания даёт `dropped: orphan` вместо `reparented`.
+ * @param {Map<string,string|null>|Record<string,string|null>} parents
+ * @param {Map<string,number>|Record<string,number>} [seqs]
+ * @param {{minSeq?: number, max?: number}} [opts]
+ * @returns {{parents: Record<string, string|null>, seq: Record<string, number>}}
+ */
+function pruneTombstones(parents, seqs, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const minSeq = isNum(o.minSeq) ? o.minSeq : -Infinity;
+  const max = isNum(o.max) ? Math.max(0, Math.floor(o.max)) : Infinity;
+  const src = tombParentsOf(parents) || parents;
+  let rows = tombEntries(src).map(([id, p], order) => {
+    const s = tombSeqOf(seqs, id);
+    return { id, p, s, key: s === undefined ? 0 : s, order };
+  }).filter((r) => r.key >= minSeq);
+  if (rows.length > max) {
+    rows = rows.slice().sort((a, b) => b.key - a.key || b.order - a.order).slice(0, max).sort((a, b) => a.order - b.order);
+  }
+  const out = { parents: {}, seq: {} };
+  for (const r of rows) {
+    out.parents[r.id] = r.p;
+    if (r.s !== undefined) out.seq[r.id] = r.s;
+  }
+  return out;
 }
 
 /**
  * Надгробия, которые оставит транзакция: для каждого `remove` — все узлы
  * поддерева с их родителями НА МОМЕНТ ДО применения. Сервер и клиент ведут
  * этим общий словарь, по которому rebase ищет живого предка потерянному узлу.
+ * Круг 27: `into` — куда ещё дописать (Map, объект parents или `{parents, seq}`
+ * из normalizeTombstones; в последнем случае `seq` — номер удаления).
  * @param {object} doc документ до применения
  * @param {object[]} opList применённая форма операций
+ * @param {Map<string,string|null>|Record<string,string|null>|{parents:object, seq:object}} [into]
+ * @param {number} [seq] номер транзакции (для `{parents, seq}`)
  * @returns {[string, string|null][]}
  */
-function collectTombstones(doc, opList) {
+function collectTombstones(doc, opList, into, seq) {
+  const out = collectTombstonesList(doc, opList);
+  if (into && typeof into === 'object') {
+    const v2 = tombParentsOf(into);
+    const target = v2 || into;
+    const n = tombSeq(seq);
+    for (const [id, p] of out) {
+      if (!isNodeId(id)) continue;
+      if (target instanceof Map) target.set(id, p);
+      else target[id] = p;
+      if (v2 && n !== undefined) {
+        if (!into.seq || typeof into.seq !== 'object') into.seq = {};
+        if (into.seq instanceof Map) into.seq.set(id, n);
+        else into.seq[id] = n;
+      }
+    }
+  }
+  return out;
+}
+
+function collectTombstonesList(doc, opList) {
   const out = [];
   const list = Array.isArray(opList) ? opList : opList ? [opList] : [];
   // круг 25: без remove надгробий нет — и незачем ничего применять (раньше каждая
@@ -2320,15 +2770,30 @@ function collectTombstones(doc, opList) {
  * applyOps); соседа уже нет — берётся `index`, иначе конец. `after` из
  * применённой формы убирается: в журнале лежит ровно то, что съел applyOps.
  */
-function withIndex(op, parent, selfId) {
-  const kids = (parent && Array.isArray(parent.children) ? parent.children : []).filter((c) => c !== selfId);
+function withIndex(draft, op, parent, selfId) {
+  const arr = parent && Array.isArray(parent.children) ? parent.children : [];
+  const st = DRAFT_STATE.get(draft);
+  let len;
+  let at = -1;
+  if (st && arr.length >= POS_MIN && !posIndex(st, arr).dup) {
+    // круг 27: без копии списка и indexOf — по индексу позиций (см. posOf)
+    const self = posOf(draft, arr, selfId);
+    len = arr.length - (self >= 0 ? 1 : 0);
+    if (typeof op.after === 'string' && op.after !== selfId) {
+      const a = posOf(draft, arr, op.after);
+      at = a < 0 ? -1 : self >= 0 && self < a ? a - 1 : a;
+    }
+  } else {
+    const kids = arr.filter((c) => c !== selfId);
+    len = kids.length;
+    if (typeof op.after === 'string') at = kids.indexOf(op.after);
+  }
   let index;
   if (op.after === null) index = 0;
   else if (typeof op.after === 'string') {
-    const at = kids.indexOf(op.after);
-    index = at >= 0 ? at + 1 : (isNum(op.index) ? op.index : kids.length);
-  } else index = isNum(op.index) ? op.index : kids.length;
-  const next = { ...op, index: clamp(Math.round(index), 0, kids.length) };
+    index = at >= 0 ? at + 1 : (isNum(op.index) ? op.index : len);
+  } else index = isNum(op.index) ? op.index : len;
+  const next = { ...op, index: clamp(Math.round(index), 0, len) };
   delete next.after;
   return next;
 }
@@ -2384,8 +2849,9 @@ function rebase(doc, opList, opts) {
   const liveAncestor = (id) => {
     let p = id;
     const seen = new Set();
-    let guard = 0;
-    while (isNodeId(p) && guard++ < MAX_DEPTH && !seen.has(p)) {
+    // круг 27: без предела глубины — цепочка надгробий удалённого глубокого поддерева
+    // длиннее MAX_DEPTH; от цикла в надгробиях бережёт seen
+    while (isNodeId(p) && !seen.has(p)) {
       if (alive(p)) return p;
       seen.add(p);
       p = tomb.has(p) ? tomb.get(p) : null;
@@ -2444,7 +2910,7 @@ function rebase(doc, opList, opts) {
             const kids = op.node.children.filter((c) => alive(c) && !chain.has(c));
             if (kids.length !== op.node.children.length) op = { ...op, node: { ...op.node, children: kids } };
           }
-          op = withIndex(op, alive(parentId), null);
+          op = withIndex(cur, op, alive(parentId), null);
         } else if (op.after !== undefined) {
           op = { ...op };
           delete op.after;
@@ -2466,15 +2932,21 @@ function rebase(doc, opList, opts) {
           out.notes.push({ index: i, note: 'reparented' });
           parentId = alt;
         }
-        if (parentId === op.id || ancestorIds(cur, parentId).has(op.id)) { drop('cycle'); continue; }
-        op = withIndex(op, alive(parentId), op.id);
+        if (parentId === op.id || onPathUp(cur, parentId, op.id)) { drop('cycle'); continue; }
+        op = withIndex(cur, op, alive(parentId), op.id);
         break;
       }
       default:
         drop('invalid');
         continue;
     }
-    if (applyStep(cur, op, j)) { drop('invalid'); continue; }
+    const err = applyStep(cur, op, j);
+    if (err) {
+      // круг 27: нарушенный предел (глубина) — в dropped с limit, как merge_budget
+      if (err.limit) out.dropped.push({ index: i, op: raw, reason: 'invalid', limit: err.limit });
+      else drop('invalid');
+      continue;
+    }
     out.ops.push(op);
   }
   return out;
@@ -4129,6 +4601,21 @@ function mergeTokens(raw) {
   return { ...got, colors: group('colors'), type: group('type'), spacing: scale('spacing'), radii: scale('radii') };
 }
 
+/**
+ * Круг 27 (I7): пустой документ — сразу в нынешнем формате. Миграция оболочки
+ * (app.js, maybeMigrate) ищет две вещи: страницу-библиотеку (ensureLibraryOps) и
+ * числа отступов/скруглений, равные шагу шкалы (ensureScaleRefsOps). У пустой
+ * страницы чисел нет, библиотеку кладём здесь — новому проекту мигрировать нечего,
+ * и тоста «Документ из прежней версии» нет. Узел библиотеки — тот же, что
+ * заводит ensureLibraryOps (libraryTemplate): страница-ребёнок корня с ролью library.
+ */
+function withLibrary(doc) {
+  const lib = libraryTemplate(doc);
+  doc.nodes[lib.id] = lib;
+  doc.nodes[doc.root].children.push(lib.id);
+  return doc;
+}
+
 function createDoc(seed) {
   if (seed && typeof seed === 'object' && seed.nodes && seed.root && seed.nodes[seed.root]) {
     const doc = deepClone(seed);
@@ -4189,7 +4676,7 @@ function createDoc(seed) {
   }
   const empty = seed === 'empty' || (seed && typeof seed === 'object' && seed.empty);
   const doc = emptyDoc(empty ? 'Пустая страница' : 'Черновик');
-  if (empty) return doc;
+  if (empty) return withLibrary(doc);
   doc.meta.name = 'Рабочая неделя';
   return buildDemo(doc);
 }
@@ -7576,6 +8063,9 @@ export {
   cutText, cleanText, isNodeId,
   /* хвост журнала одним черновиком: applyOps + collectTombstones на каждую пачку — */
   applyBatches,
+  /* Круг 27: надгробия v1/v2/«неизвестно» → {parents, seq}, прореживание по номеру
+     удаления; чистка ключа (общая для сервера и реплики); предел вложенности — */
+  normalizeTombstones, pruneTombstones, cleanKey, MAX_DEPTH,
   resetMeasureCache, measureEpoch, onMeasureEpoch,
   hashGeometry, nodeById, ancestors, isArtboard, artboards, subtreeIds, cloneSubtree,
   resolveTarget, resolveColor, resolveTextStyle, contrastRatio, sizeSpec, normalizeLayout,

@@ -15,6 +15,7 @@
 
 import { DocError, notFound, unavailable, viaStorage } from './errors.js';
 import { headSummary } from './storage/committed.js';
+import { flatTombstones } from './dslts.js';
 import { PAGE_TXS, MAX_LIMIT as LIMIT_MAX, PAGE_BYTES, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S } from './limits.js';
 
 /** Верхняя граница `limit` в `ops?since=` (совместимость: прежде экспортировалась отсюда). */
@@ -80,12 +81,30 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
     });
   }
 
-  // надгробия снимка (§9.10) — клиенту для прогноза слияния; пустые не отдаём
+  // надгробия снимка (§9.10) — клиенту для прогноза слияния, плоско `{id: parent}` (v1:
+  // реплика любой версии читает её; номера удаления клиенту не нужны); пустые и
+  // неизвестные (`null`, снимок прежнего экземпляра) не отдаём
   const snapOut = (s) => {
     const out = { seq: s.seq, doc: s.doc, engine: s.engine, chain: s.chain || '' };
-    if (s.tombstones && typeof s.tombstones === 'object' && Object.keys(s.tombstones).length) out.tombstones = s.tombstones;
+    const flat = flatTombstones(s.tombstones);
+    if (flat && Object.keys(flat).length) out.tombstones = flat;
     return out;
   };
+
+  /**
+   * Мета последнего снимка без документа (I2): `latestSnapshotMeta` хранилища не читает
+   * jsonb документа. Хранилище прежней версии его не знает — полный снимок, но под
+   * семафором тяжёлых чтений: шторм `?lean=1` по большому проекту иначе занимал все
+   * соединения пула и останавливал запись в другие проекты.
+   */
+  async function snapshotMeta(projectId) {
+    if (typeof storage.latestSnapshotMeta === 'function') {
+      const m = await viaStorage(storage.latestSnapshotMeta(projectId));
+      if (m) return m;
+      throw unavailable('у проекта нет снимка');
+    }
+    return snapshotOf(projectId);
+  }
 
   return {
     heavy,
@@ -107,8 +126,7 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
     async open(projectId, opts = {}) {
       const p = await project(projectId);
       if (opts.lean) {
-        const snap = await viaStorage(storage.latestSnapshot(projectId));
-        if (!snap) throw unavailable('у проекта нет снимка');
+        const snap = await snapshotMeta(projectId);
         const from = Number.isInteger(opts.since) ? opts.since : snap.seq;
         const tail = await page(projectId, from);
         const last = tail.length ? tail[tail.length - 1].seq : from;

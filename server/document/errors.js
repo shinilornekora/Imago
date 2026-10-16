@@ -43,6 +43,8 @@ export const badRequest = (message, opts) => new DocError(400, 'bad_request', me
 export const notFound = (message = 'проект не найден') => new DocError(404, 'not_found', message, { retryable: false });
 export const tooLarge = (message, opts) => new DocError(413, 'too_large', message, { retryable: false, ...opts });
 export const unavailable = (message, opts) => new DocError(503, 'unavailable', message, { retryable: true, retryAfter: 1, ...opts });
+/** Сервис занят (очередь полна или не дождались места) — повторить чуть позже. */
+export const busy = (message, opts) => new DocError(503, 'busy', message, { retryable: true, retryAfter: 1, ...opts });
 
 /** Тело для не-DocError: внутренняя ошибка. */
 export function internalBody() {
