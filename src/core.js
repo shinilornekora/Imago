@@ -989,6 +989,13 @@ function checkNode(node, doc, loose) {
   } else if (node.type === 'instance' && node.children !== undefined) {
     // SPEC §5.5: детей у экземпляра нет — его содержимое это мастер
     if (Array.isArray(node.children) ? node.children.length > 0 : true) return 'у экземпляра не бывает детей';
+  } else if (node.children !== undefined) {
+    /* Круг 31: у не-контейнера children — либо нет, либо пустой массив. Раньше
+       `create {type:'text', children:{0:'a',length:1}}` ложился в документ, а
+       потом remove бросал TypeError на обходе поддерева — узел (и всё над ним)
+       становился неудаляемым. */
+    if (!Array.isArray(node.children)) return 'children должен быть массивом';
+    if (node.children.length) return 'дети бывают только у контейнера';
   }
   if (node.type === 'instance') {
     const instErr = checkInstance(node, doc);
@@ -2089,7 +2096,8 @@ function arrRemoveAll(draft, arr, id, j) {
  * Список детей узла `id`, который черновик вправе править на месте: при первом
  * касании — копия (и новый объект узла с ней), дальше — тот же массив.
  * children не массив — исключение, как прежде у `children.filter`/`slice`
- * (applyStep/applyOps превращают его в bad-op).
+ * (applyStep/applyOps превращают его в bad-op). Удаление такого списка не
+ * трогает (круг 31, см. applyOne/remove): из нечитаемого списка снимать нечего.
  */
 function ownKids(draft, id, j) {
   const node = draft.nodes[id];
@@ -2292,6 +2300,40 @@ function tokenWriteProblem(parts, value, tokens) {
   return plain ? `${parts.join('.')}: ${plain}` : null;
 }
 
+/** Номер элемента массива в пути: каноническая запись неотрицательного целого. */
+const INDEX_RE = /^(0|[1-9]\d*)$/;
+
+/**
+ * Круг 31: путь записи (set / setToken) через массивы. Запись, которую нельзя
+ * точно отменить, не принимается:
+ *   • элемент массива адресуется только номером (`list.foo` у массива в JSON
+ *     пропадает, а hashDoc его не видит);
+ *   • номер — не дальше длины: запись в конец (номер = длина) удлиняет массив
+ *     на один, дальше — оставила бы дыры (в JSON — null);
+ *   • снятие элемента (value undefined) оставило бы дыру той же длины — массив
+ *     пишут целиком.
+ * Проверяется только существующее: за первым не-объектом по пути setPath
+ * заводит свежие объекты, массивов там нет.
+ * @param {object} root узел или tokens ДО записи
+ * @param {string[]} parts путь, разобранный по точкам
+ * @param {boolean} del снятие ключа
+ * @returns {string|null}
+ */
+function arrayPathProblem(root, parts, del) {
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    if (!cur || typeof cur !== 'object') return null;
+    if (Array.isArray(cur)) {
+      const where = parts.slice(0, i).join('.');
+      if (!INDEX_RE.test(parts[i])) return `${where}: элемент массива адресуется номером`;
+      if (Number(parts[i]) > cur.length) return `${where}: элемента ${parts[i]} нет — длина ${cur.length}`;
+      if (del && i === parts.length - 1) return `${where}: элемент массива не снимают — массив пишут целиком`;
+    }
+    cur = cur[parts[i]];
+  }
+  return null;
+}
+
 /**
  * setToken на месте (круг 27): контейнеры по пути копируются один раз на
  * черновик, дальше пишутся на месте — 5000 setToken в палитру больше не копируют
@@ -2434,12 +2476,15 @@ function applyOne(draft, op, j) {
         if (!n || seen.has(nid)) continue;
         seen.add(nid);
         ids.push(nid);
-        const kids = n.children || [];
-        if (!Array.isArray(kids)) throw new TypeError(`children узла «${nid}» — не массив`);
+        // круг 31: children нечитаемой формы (документ прежней версии) — детей нет;
+        // раньше здесь было исключение, и узел с мусором в children не удалялся никогда
+        const kids = kidsOf(n);
         for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
       }
       const parent = ownNode(draft.nodes, node.parent);
-      if (parent) arrRemoveAll(draft, ownKids(draft, parent.id, j), op.id, j);
+      // круг 31: у родителя нечитаемый список детей (документ прежней версии) —
+      // снимать из него нечего, а исключение запирало удаление ребёнка навсегда
+      if (parent && Array.isArray(parent.children)) arrRemoveAll(draft, ownKids(draft, parent.id, j), op.id, j);
       for (const nid of ids) delNode(draft, nid, j);
       return null;
     }
@@ -2459,7 +2504,7 @@ function applyOne(draft, op, j) {
       // там же число, равное значению текущей ссылки на шаг шкалы, оставляет ссылку
       // круг 29: записываемое — простые данные, ДО приведения формы: keepFieldForm
       // раскрывает краткие записи и молча выбросил бы из `{toString:1}` всё лишнее
-      const plainErr = plainProblem(op.value, parts.length);
+      const plainErr = plainProblem(op.value, parts.length) || arrayPathProblem(node, parts, op.value === undefined);
       if (plainErr) return opErr('bad-node', `set ${path}: ${plainErr}`);
       const value = !op.exact ? keepFieldForm(node, path, op.value, draft) : op.value;
       let next = setPath(node, path, value);
@@ -2537,7 +2582,8 @@ function applyOne(draft, op, j) {
       if (!path) return opErr('bad-op', 'setToken: пустой путь');
       const badKey = path.split('.').find((p) => PROTO_KEYS.has(p));
       if (badKey) return opErr('protected-path', `setToken: путь «${badKey}» защищён`);
-      const tokErr = tokenWriteProblem(path.split('.'), op.value, draft.tokens);
+      const tokErr = tokenWriteProblem(path.split('.'), op.value, draft.tokens)
+        || arrayPathProblem(draft.tokens, path.split('.'), op.value === undefined);
       if (tokErr) return opErr('bad-op', `setToken ${path}: ${tokErr}`);
       const st = DRAFT_STATE.get(draft);
       if (!st) {
@@ -2701,7 +2747,15 @@ function applyBatches(doc, batches) {
 function inversePoint(container, path, opValue) {
   const parts = textOf(path).split('.');
   let cur = container && typeof container === 'object' ? container : {};
-  for (let i = 0; i < parts.length - 1; i++) {
+  for (let i = 0; i < parts.length; i++) {
+    /* Круг 31: элемента массива, которого до правки не было (запись в конец
+       шкалы `spacing.13`), листовая отмена не вернёт: снятие ключа оставило бы
+       массив той же длины с дырой (в JSON — null), а снятие шага шкалы и вовсе
+       запрещено. Возвращаем массив целиком — длина и порядок те же, что до правки. */
+    if (i > 0 && Array.isArray(cur) && !(INDEX_RE.test(parts[i]) && Number(parts[i]) < cur.length)) {
+      return { path: parts.slice(0, i).join('.'), value: cur };
+    }
+    if (i === parts.length - 1) break;
     const next = cur[parts[i]];
     if (!next || typeof next !== 'object') return { path: parts.slice(0, i + 1).join('.'), value: next };
     cur = next;
@@ -2785,7 +2839,9 @@ function invertOne(doc, op) {
         const index = !parent ? undefined
           : nid === op.id && Array.isArray(parent.children) ? posOf(doc, parent.children, nid) : slotOf(parent, nid);
         // дети будут воссозданы своими операциями — создаём узел пустым
-        const node2 = { ...n, children: n.children ? [] : undefined };
+        // круг 31: мусор в children у не-контейнера (документ прежней версии)
+        // отмена не возвращает — create его не примет; узел встаёт без поля
+        const node2 = { ...n, children: n.children !== undefined && (Array.isArray(n.children) || CONTAINER_TYPES.has(n.type)) ? [] : undefined };
         if (node2.children === undefined) delete node2.children;
         const back = ops.create(node2, index);
         // круг 20: отмена возвращает узел ровно таким, каким он был, — и с
@@ -2872,6 +2928,71 @@ function invertOps(doc, opList) {
     const chunk = chunks[i];
     for (let j = 0; j < chunk.length; j++) out.push(chunk[j]);
   }
+  return out;
+}
+
+/** Пределы одной транзакции по умолчанию для splitOps — те же, что у Document service (5000 операций, тело 4 МБ минус конверт). */
+const SPLIT_MAX_OPS = 5000;
+const SPLIT_MAX_BYTES = 3.5 * 1024 * 1024;
+
+/** Длина строки в UTF-8 без выделения буфера (в браузере и в Node одинаково). */
+function utf8Length(str) {
+  let n = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
+}
+
+/**
+ * Круг 31 (K1): большая правка — несколькими транзакциями. Делит список операций
+ * на ПОДРЯД идущие пачки не больше `maxOps` операций и `maxBytes` байт JSON
+ * массива (UTF-8) каждая. Порядок операций не меняется: если весь список
+ * применим (applyOps), то пачки, применённые одна за другой, применимы каждая
+ * и дают тот же документ — операции и так ложатся по одной на состояние после
+ * предыдущей. Инверсия удаления поддерева (invertOps) уже идёт сверху вниз —
+ * create родителя раньше create детей, — и это свойство пачки сохраняют.
+ * Перед делением create без id получают id (как в applyOps/invertOps): иначе
+ * пачки и их инверсия выдали бы разные id.
+ *
+ * Операция, которая одна больше `maxBytes`, уходит отдельной пачкой — делить
+ * её нечем; такую транзакцию сервис отклонит как too_large, а не молча.
+ * @param {object[]} opList
+ * @param {{maxOps?:number, maxBytes?:number}} [opts]
+ * @returns {object[][]} пачки; пустой вход — пустой массив
+ */
+function splitOps(opList, opts) {
+  const list = Array.isArray(opList) ? opList : opList ? [opList] : [];
+  if (!list.length) return [];
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const maxOps = isNum(o.maxOps) && o.maxOps >= 1 ? Math.floor(o.maxOps) : SPLIT_MAX_OPS;
+  const maxBytes = isNum(o.maxBytes) && o.maxBytes > 2 ? o.maxBytes : SPLIT_MAX_BYTES;
+  stampIds(list);
+  const out = [];
+  let cur = [];
+  let bytes = 2;   // «[» и «]»
+  for (const op of list) {
+    let size;
+    try {
+      const json = JSON.stringify(op);
+      size = json === undefined ? 4 : utf8Length(json);   // undefined в массиве JSON — null
+    } catch (_) {
+      size = Infinity;   // не сериализуется (цикл) — отдельной пачкой, сервис скажет сам
+    }
+    const extra = cur.length ? size + 1 : size;   // запятая между элементами
+    if (cur.length && (cur.length >= maxOps || bytes + extra > maxBytes)) {
+      out.push(cur);
+      cur = [];
+      bytes = 2;
+    }
+    bytes += cur.length ? size + 1 : size;
+    cur.push(op);
+  }
+  if (cur.length) out.push(cur);
   return out;
 }
 
@@ -4222,7 +4343,7 @@ function contrastRatio(hexA, hexB) {
 /* Круг 20 (SPEC §6.1): dead-scale-ref — ссылка на шаг, которого в шкале нет;
    блокирующая: решатель считает такой шаг нулём, и макет уже не тот, что задуман.
    off-scale для чисел остаётся как был — мягкое замечание. */
-const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'dead-scale-ref': 'error', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info' };
+const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'dead-scale-ref': 'error', 'bad-children': 'warn', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info' };
 const SEV_RANK = { error: 0, warn: 1, info: 2 };
 
 function nearestFill(doc, node) {
@@ -4356,6 +4477,14 @@ function validate(doc, geo, opts) {
        свойство документа, а не геометрии: шкалу укоротили или файл принёс
        ссылку в никуда — решатель считает такой шаг нулём, человек видит
        сжатый макет и должен прочесть, почему. Одна строка на узел. */
+    /* Круг 31: children у не-контейнера — не массив или непустой (документ
+       прежней версии: create такого больше не пропускает). Удаление и отмена
+       такой узел переживают (детей считают пустыми), но человеку и агенту
+       стоит знать, что поле негодно. */
+    if (node && !CONTAINER_TYPES.has(node.type) && node.children !== undefined
+      && (!Array.isArray(node.children) || node.children.length)) {
+      add('bad-children', id, `«${displayName(doc, node)}»: children ${Array.isArray(node.children) ? 'непустой, а дети бывают только у контейнера' : 'не массив'} — поле не читается`);
+    }
     const dead = deadScaleRefs(doc, node);
     if (dead.length) {
       add('dead-scale-ref', id, `«${displayName(doc, node)}»: ${dead.map((d) => `${d.path} → ${d.reason}`).join('; ')}`);
@@ -4803,6 +4932,10 @@ function repairNode(n, doc) {
       n.children = n.children.filter((c) => typeof c === 'string');
       mark('children');
     }
+  } else if (n.type !== 'instance' && n.children !== undefined
+    && (!Array.isArray(n.children) || n.children.length)) {
+    // круг 31: детей у не-контейнера нет — поле прочь (дети, если были, станут сиротами)
+    delete n.children; mark('children');
   }
   /* Круг 19: компонент и экземпляр из чужого файла чиним, а не выбрасываем.
      Узел, не прошедший checkNode, createDoc удаляет вместе с поддеревом — терять
@@ -8603,6 +8736,8 @@ class Stage {
 
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
+  /* Круг 31 (K1): большая отмена/правка — пачками в пределах транзакции — */
+  splitOps, SPLIT_MAX_OPS, SPLIT_MAX_BYTES,
   /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */
   ENGINE_VERSION, rebase, collectTombstones, hashDoc, uid,
   /* Круг 25: строки для документа и журнала — обрезка по кодовым точкам, санитайзер;

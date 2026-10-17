@@ -3,8 +3,14 @@
  * `error`. Тело — `{error: true, code, message, retryable, detail?}`.
  *
  * Коды: bad_request 400 · not_found 404 · method_not_allowed 405 · too_large 413 ·
- * busy 429 · not_applied 422 (правка модели к документу не приложилась, круг 29) · llm_failed 502 · document_failed 502 · llm_down 503 · document_down 503 ·
- * shutting_down 503 · worker_failed 500 · timeout 504 · engine 426 · cancelled (только SSE).
+ * busy 429 · not_applied 422 (правка модели к документу не приложилась, круг 29) · llm_failed 502 ·
+ * llm_bad_response 502 (ответ модели слишком большой, глубокий или не JSON — круг 31) · document_failed 502 ·
+ * llm_down 503 · document_down 503 · shutting_down 503 · worker_failed 500 ·
+ * internal 500 (исключение кода агента, не модели; повтор не поможет — круг 31) · timeout 504 · engine 426 ·
+ * cancelled (только SSE).
+ *
+ * Круг 31: `detail.hint` — подсказка оболочке, какой совет дать (`name_layer` у not_applied:
+ * причина в выборе слоя). Без неё совета нет.
  */
 
 export class OrchError extends Error {
@@ -55,8 +61,14 @@ export const cancelled = () => new OrchError(499, 'cancelled', 'Команда �
 export const SHUTTING_DOWN_MESSAGE = 'Сервер агента перезапускается — команда не выполнена. Повторите через несколько секунд.';
 export const shuttingDown = () => new OrchError(503, 'shutting_down', SHUTTING_DOWN_MESSAGE, { retryable: true, retryAfter: 5 });
 
-/** Всё, что не OrchError, — внутренний сбой: наружу общая фраза, подробности — в лог. */
+/** Круг 31 (K3): человеку о внутренней ошибке агента — общая фраза (оболочка добавит свои слова). */
+export const INTERNAL_MESSAGE = 'Внутренняя ошибка агента';
+
+/**
+ * Всё, что не OrchError, — внутренний сбой: наружу общая фраза, подробности — в лог.
+ * Круг 31 (K3): `retryable: false` — исключение кода повтором не лечится.
+ */
 export function toOrchError(e) {
   if (e instanceof OrchError) return e;
-  return new OrchError(500, 'internal', 'Внутренняя ошибка агента', { retryable: true });
+  return new OrchError(500, 'internal', INTERNAL_MESSAGE, { retryable: false });
 }

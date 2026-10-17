@@ -61,7 +61,7 @@ import { applyServerTimeouts } from './http.js';
 import {
   MAX_BODY_BYTES, WS_ENVELOPE_BYTES, PRESENCE_PER_SECOND as PRESENCE_RATE, PRESENCE_SELECTION, PRESENCE_ID_CHARS,
   PRESENCE_PAYLOAD_BYTES, PRESENCE_TTL_MS, FRAME_CACHE_FRAMES, FRAME_CACHE_ROOM_BYTES, FRAME_CACHE_TOTAL_BYTES,
-  WS_INFLIGHT, WS_CONNECTING, BUSY_RETRY_S, isCleanText, cleanText, cutText, showValue
+  WS_INFLIGHT, WS_CONNECTING, BUSY_RETRY_S, isCleanText, cleanText, cleanMeta, cutText, showValue
 } from './limits.js';
 
 /** Предел сообщения — тело транзакции (4 МБ) плюс конверт; больше — ws закрывает сокет кодом 1009. */
@@ -71,8 +71,11 @@ export const PRESENCE_PER_SECOND = PRESENCE_RATE;
 /** Неотправленного в сокет больше этого — читатель не успевает: закрыть, пусть догоняет из базы. */
 export const MAX_BUFFERED = 32 * 1024 * 1024;
 const MAX_AUTHOR = 200;
-/** Имя для показа: без U+0000 и одиночных суррогатов (уходит в NOTIFY и в jsonb), не длиннее MAX_AUTHOR кодовых точек. */
-const nameOf = (v) => (typeof v === 'string' && v ? cutText(cleanText(v), MAX_AUTHOR) : undefined);
+/**
+ * Имя для показа: без U+0000 и одиночных суррогатов (уходит в NOTIFY и в jsonb), без управляющих
+ * и bidi-символов (круг 31, метаданные), не длиннее MAX_AUTHOR кодовых точек.
+ */
+const nameOf = (v) => (typeof v === 'string' && v ? cutText(cleanMeta(v), MAX_AUTHOR) : undefined);
 const isFlag = (v) => typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v));
 const utf8 = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
 /** Коды закрытия: 4400 форма запроса, 4404 нет проекта, 4410 эпоха сменилась, 4503 хранилище/занято. */
@@ -310,7 +313,8 @@ export function createHub({
 
   /** Сообщение сокету из выжимки шины — одна форма для своих и чужих. */
   function presenceMessage(b) {
-    const msg = { type: 'presence', client: b.c, author: b.a, selection: b.s, at: b.at };
+    // имя от экземпляра прежней версии могло прийти нечищеным (шина) — чистится и здесь
+    const msg = { type: 'presence', client: b.c, author: nameOf(b.a), selection: b.s, at: b.at };
     if (typeof b.b === 'string') msg.board = b.b;
     if (b.t) msg.truncated = true;
     if (isFlag(b.busy)) msg.busy = b.busy;
@@ -672,7 +676,7 @@ export function createHub({
       return;
     }
     if (!projectId || !isCleanText(projectId)) return refuse('нужен параметр project', 'project');
-    if (since !== undefined && (!Number.isInteger(since) || since < -1)) return refuse('since: целое ≥ 0 (или -1 — «ничего не знаю»)', 'since');
+    if (since !== undefined && (!Number.isSafeInteger(since) || since < -1 || !/^-?\d{1,17}$/.test(sinceRaw))) return refuse(`since: целое от 0 до ${Number.MAX_SAFE_INTEGER} (или -1 — «ничего не знаю»)`, 'since');
     if ((tip && tip.length > 128) || (epoch && epoch.length > 64)) return refuse('tip/epoch: слишком длинные', 'tip');
 
     let joined = false;

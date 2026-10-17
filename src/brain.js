@@ -111,6 +111,145 @@ const ERR = (kind, message, extra) => new BrainError(kind, message, extra);
 /** Сервер модели отверг запрос (4xx): что сказать человеку (подробности — в `detail`). */
 export const MODEL_REJECTED = 'Модель не приняла запрос — попробуйте ещё раз или скажите команду иначе';
 
+/* ── Круг 31 (K3): ответ модели — с потолком размера и глубины ─────────────────────────────
+ * Тело ответа читалось целиком (`res.json()`): 400 МБ от сломанного сервера модели — 2 ГБ
+ * памяти процесса. Невалидное или слишком глубокое тело бросало SyntaxError/RangeError,
+ * а те классифицировались как «нет связи» — и включали глобальное «модель недоступна» для
+ * всех команд. Теперь: тело — потоком до потолка, сверх — `llm_bad_response`; не JSON и не
+ * той формы — тоже `llm_bad_response` (модель жива, повтор может помочь). */
+
+/** Потолок тела ответа модели, байт (настраивается: cfg.maxBodyBytes / LLM_MAX_BODY_BYTES). */
+export const MODEL_BODY_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * Потолок вложенности данных модели. Дерево макета — не глубже MAX_TREE_DEPTH узлов (каждый
+ * узел — два уровня JSON: объект и массив детей), так что 100 — с большим запасом; глубже —
+ * мусор, который к тому же роняет стек у structuredClone и рекурсивных обходов.
+ */
+export const MODEL_DATA_MAX_DEPTH = 100;
+/** Потолок числа значений в данных модели (объекты, массивы, примитивы). */
+export const MODEL_DATA_MAX_VALUES = 500000;
+
+/** Ошибка «ответ модели негоден» (круг 31): код llm_bad_response, повторяемо. */
+export function badResponse(message) {
+  return new BrainError('model', message || 'Ответ модели не удалось разобрать', { code: 'llm_bad_response', retryable: true });
+}
+
+/**
+ * Проверка формы данных модели без рекурсии: глубина и число значений. null — годится,
+ * иначе — что не так (для журнала).
+ * @param {any} v
+ * @param {{maxDepth?: number, maxValues?: number}} [o]
+ * @returns {string|null}
+ */
+export function modelDataProblem(v, o = {}) {
+  const maxDepth = o.maxDepth || MODEL_DATA_MAX_DEPTH;
+  const maxValues = o.maxValues || MODEL_DATA_MAX_VALUES;
+  if (!v || typeof v !== 'object') return null;
+  const stack = [[v, 1]];
+  let count = 0;
+  while (stack.length) {
+    const [x, d] = stack.pop();
+    if (++count > maxValues) return `больше ${maxValues} значений`;
+    if (d > maxDepth) return `вложенность глубже ${maxDepth}`;
+    if (Array.isArray(x)) {
+      for (let i = 0; i < x.length; i++) {
+        const c = x[i];
+        if (c && typeof c === 'object') stack.push([c, d + 1]);
+        else if (++count > maxValues) return `больше ${maxValues} значений`;
+      }
+    } else {
+      for (const k in x) {
+        if (!Object.prototype.hasOwnProperty.call(x, k)) continue;
+        const c = x[k];
+        if (c && typeof c === 'object') stack.push([c, d + 1]);
+        else if (++count > maxValues) return `больше ${maxValues} значений`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Тело ответа текстом, но не больше `maxBytes`: читается потоком, сверх потолка чтение
+ * обрывается (соединение закрывается) и бросается `llm_bad_response`.
+ * @param {Response} res
+ * @param {number} [maxBytes]
+ * @returns {Promise<string>}
+ */
+export async function readBodyCapped(res, maxBytes = MODEL_BODY_MAX_BYTES) {
+  const tooBig = () => badResponse(`Ответ модели больше ${Math.round(maxBytes / (1024 * 1024) * 10) / 10} МБ — команда не выполнена, попробуйте ещё раз`);
+  const declared = res && res.headers && typeof res.headers.get === 'function' ? Number(res.headers.get('content-length')) : NaN;
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    try { if (res.body && typeof res.body.cancel === 'function') await res.body.cancel(); } catch { /* ignore */ }
+    throw tooBig();
+  }
+  const body = res && res.body;
+  if (!body || typeof body.getReader !== 'function') {
+    // подделки fetch без потока: размер — после чтения (настоящий fetch всегда с потоком);
+    // у совсем простых подделок есть только json()
+    const text = res && typeof res.text === 'function' ? await res.text()
+      : res && typeof res.json === 'function' ? JSON.stringify(await res.json()) : '';
+    if (utf8Length(text) > maxBytes) throw tooBig();
+    return text;
+  }
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let got = 0;
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    got += value ? value.byteLength : 0;
+    if (got > maxBytes) {
+      try { await reader.cancel(); } catch { /* ignore */ }
+      throw tooBig();
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+/** Байты строки в UTF-8 (без Buffer: brain живёт и в браузере). */
+function utf8Length(s) {
+  return new TextEncoder().encode(String(s)).length;
+}
+
+/**
+ * JSON тела ответа модели: не разобрался — `llm_bad_response` (а не «нет связи»).
+ * @param {string} text
+ */
+export function parseBodyJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw badResponse('Ответ сервера модели не разобрался как JSON — попробуйте ещё раз');
+  }
+}
+
+/**
+ * Текст ответа из choices[0]: строка — как есть; массив частей (`[{type:'text', text}]`) —
+ * склейка их строк; иное — `llm_bad_response`.
+ * @param {any} json
+ * @returns {string}
+ */
+export function completionText(json) {
+  const c = json && Array.isArray(json.choices) ? json.choices[0] : null;
+  if (!c || typeof c !== 'object') return '';
+  const v = c.message && typeof c.message === 'object' ? c.message.content : c.text;
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) {
+    let out = '';
+    for (const part of v) {
+      if (typeof part === 'string') out += part;
+      else if (part && typeof part === 'object' && typeof part.text === 'string') out += part.text;
+      else throw badResponse('Ответ модели не той формы — попробуйте ещё раз');
+    }
+    return out;
+  }
+  throw badResponse('Ответ модели не той формы — попробуйте ещё раз');
+}
+
 /** Ошибка → всегда понятный человеку объект {kind, message}. */
 export function toErrorInfo(e) {
   if (e instanceof BrainError) {
@@ -121,7 +260,18 @@ export function toErrorInfo(e) {
     if (e.detail) info.detail = String(e.detail);
     // круг 16, п.8: «повторять нечего» — признак для оболочки, чтобы не звать «Повторить»
     if (e.retryable === false) info.retryable = false;
+    // круг 31: какой совет дать к not_applied (оболочке)
+    if (e.hint) info.hint = e.hint;
     return info;
+  }
+  if (isInternalError(e)) {
+    /* Круг 31 (K3): исключение самого кода (TypeError на документе, переполнение стека…) —
+     * не «сбой модели»: повтор даст то же, а человеку нужен не совет «скажите иначе», а
+     * администратор. Наружу — общая фраза; стек — полем `stack` для журнала сервера. */
+    return {
+      kind: 'internal', code: 'internal', message: INTERNAL_MESSAGE, retryable: false,
+      stack: cutText(String((e && (e.stack || e.message)) || e), 4000),
+    };
   }
   if (e && typeof e === 'object' && typeof e.code === 'string') {
     const mapped = fromClaudeError(e);
@@ -130,6 +280,24 @@ export function toErrorInfo(e) {
   const msg = e && e.message ? e.message : String(e);
   if (/abort/i.test(msg)) return { kind: 'cancelled', message: 'Команда отменена' };
   return { kind: 'model', message: msg };
+}
+
+/** Круг 31 (K3): что сказать человеку о внутренней ошибке агента. */
+export const INTERNAL_MESSAGE = 'Внутренняя ошибка агента';
+
+/**
+ * Круг 31 (K3): исключение кода, а не ответ модели или сети. Встроенные виды ошибок JS и
+ * системные коды Node (`ERR_…`) у модели не рождаются: модель и сеть приходят к brain
+ * BrainError-ом (провайдеры) или объектом с кодом способности sample.
+ * @param {any} e
+ * @returns {boolean}
+ */
+export function isInternalError(e) {
+  if (!e || typeof e !== 'object' || e instanceof BrainError) return false;
+  if (e.name === 'AbortError') return false;
+  if (typeof e.code === 'string' && /^ERR_/.test(e.code)) return true;
+  return e instanceof TypeError || e instanceof RangeError || e instanceof ReferenceError
+    || e instanceof EvalError || e instanceof URIError;
 }
 
 /** Коды sample-способности → наши виды ошибок (см. sample.d.ts, SampleErrorCode). */
@@ -1043,6 +1211,9 @@ function makeClaudeProvider(cfg) {
         // sample.json может не слушать signal — гоним промис с отменой и дедлайном сами.
         const data = await raceAbort(call, opts.signal, timeout, `Модель не ответила за ${fmtDuration(timeout)}`);
         if (!data || typeof data !== 'object') throw ERR('schema', 'Модель вернула не объект');
+        // круг 31: глубина и размер — до JSON.stringify ниже и до обходов brain
+        const bad = modelDataProblem(data);
+        if (bad) throw badResponse(`Ответ модели не той формы (${bad}) — попробуйте ещё раз`);
         if (opts.onUsage) {
           opts.onUsage({
             calls: 1, ms: now() - t0,
@@ -1150,6 +1321,8 @@ function makeOpenAiProvider(cfg) {
   const jsonRetries = cfg.jsonRetries == null ? 1 : cfg.jsonRetries;        // до 1 повтора по JSON
   const maxRequests = cfg.maxRequests == null ? 3 : cfg.maxRequests;        // всего запросов на команду
   const backoff = cfg.retryDelay == null ? 500 : cfg.retryDelay;
+  // круг 31: потолок тела ответа модели
+  const maxBodyBytes = cfg.maxBodyBytes > 0 ? cfg.maxBodyBytes : MODEL_BODY_MAX_BYTES;
   let model = cfg.model || null;
 
   const headers = () => ({
@@ -1163,7 +1336,7 @@ function makeOpenAiProvider(cfg) {
     try {
       const res = await fetchImpl(`${baseUrl}/models`, { method: 'GET', headers: headers(), signal: guard.signal });
       if (!res || !res.ok) return false;
-      const body = await res.json().catch(() => null);
+      const body = await readBodyCapped(res, maxBodyBytes).then((t) => JSON.parse(t)).catch(() => null);
       const first = body && Array.isArray(body.data) && body.data[0] && body.data[0].id;
       if (!model && first) model = first;
       return true;
@@ -1228,17 +1401,22 @@ function makeOpenAiProvider(cfg) {
         opts.onUsage({ calls: 1, ms: raw.ms, promptChars: convo.reduce((s, m) => s + m.content.length, 0), completionChars: (raw.text || '').length });
       }
 
+      let data;
       try {
-        const data = parseModelJson(raw.text);
+        data = parseModelJson(raw.text);
         if (!data || typeof data !== 'object') throw ERR('schema', 'Модель вернула не объект');
-        return data;
       } catch (e) {
         lastErr = e;
         convo = convo.concat([
           { role: 'assistant', content: cutText(raw.text || '', 2000) },
           { role: 'user', content: 'Ответ не разобрался как JSON. Верни ТОЛЬКО валидный JSON-объект по схеме: без пояснений, без ограждений ```, без <think>.' },
         ]);
+        continue;
       }
+      // круг 31: глубина и размер — до того, как данные пойдут в обходы brain и в воркер
+      const bad = modelDataProblem(data);
+      if (bad) throw badResponse(`Ответ модели не той формы (${bad}) — попробуйте ещё раз`);
+      return data;
     }
     throw lastErr || ERR('schema', 'Модель не вернула валидный JSON');
   }
@@ -1265,22 +1443,25 @@ function makeOpenAiProvider(cfg) {
           signal: guard.signal,
         });
         if (!res.ok) {
-          const text = await (res.text ? res.text().catch(() => '') : Promise.resolve(''));
+          // круг 31: тело отказа — тоже с потолком (нужны первые 300 знаков)
+          const text = await readBodyCapped(res, 64 * 1024).catch(() => '');
           if (res.status === 429 || res.status >= 500) throw ERR('network', `Сервер модели ответил ${res.status}`, { retryable: true });
           /* Круг 29 (J5): тело отказа («{"error":…}») — служебное: человеку нейтральные слова,
            * а само тело и статус — полями `status`/`detail` (Orchestrator пишет их в лог). */
           throw ERR('model', MODEL_REJECTED, { status: res.status, detail: cutText(text, 300) });
         }
-        if (body.stream) {
-          const out = await readSseStream(res, opts.onText);
+        // круг 31: сервер, который не умеет поток, отвечает обычным JSON — читаем его как JSON
+        const ctype = res.headers && typeof res.headers.get === 'function' ? String(res.headers.get('content-type') || '') : '';
+        if (body.stream && !/application\/json/i.test(ctype)) {
+          const out = await readSseStream(res, opts.onText, maxBodyBytes);
           return { text: out.text, usage: out.usage, ms: now() - t0 };
         }
-        const json = await res.json();
-        const text = json && json.choices && json.choices[0]
-          ? (json.choices[0].message ? json.choices[0].message.content : json.choices[0].text)
-          : '';
-        if (opts.onText && text) { try { opts.onText(String(text), String(text)); } catch { /* ignore */ } }
-        return { text: String(text == null ? '' : text), usage: json && json.usage, ms: now() - t0 };
+        // круг 31: тело — потоком с потолком; не JSON и не той формы — llm_bad_response, не «сеть»
+        const json = parseBodyJson(await readBodyCapped(res, maxBodyBytes));
+        const text = completionText(json);
+        if (opts.onText && text) { try { opts.onText(text, text); } catch { /* ignore */ } }
+        const usage = json && json.usage && typeof json.usage === 'object' && !Array.isArray(json.usage) ? json.usage : null;
+        return { text, usage, ms: now() - t0 };
       } catch (e) {
         guard.done();
         if (opts.signal && opts.signal.aborted) throw ERR('cancelled', 'Команда отменена');
@@ -1312,19 +1493,25 @@ function makeOpenAiProvider(cfg) {
   };
 }
 
-async function readSseStream(res, onText) {
+async function readSseStream(res, onText, maxBytes = MODEL_BODY_MAX_BYTES) {
   const body = res.body;
   if (!body || typeof body.getReader !== 'function') {
-    const text = await res.text();
+    const text = await readBodyCapped(res, maxBytes);
     if (onText && text) { try { onText(text, text); } catch { /* ignore */ } }
     return { text, usage: null };
   }
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let buf = '', text = '', usage = null;
+  let buf = '', text = '', usage = null, got = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    // круг 31: поток — с тем же потолком, что тело целиком
+    got += value ? value.byteLength : 0;
+    if (got > maxBytes) {
+      try { await reader.cancel(); } catch { /* ignore */ }
+      throw badResponse(`Ответ модели больше ${Math.round(maxBytes / (1024 * 1024) * 10) / 10} МБ — команда не выполнена, попробуйте ещё раз`);
+    }
     buf += decoder.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf('\n')) >= 0) {
@@ -1337,7 +1524,7 @@ async function readSseStream(res, onText) {
       if (!chunk) continue;
       if (chunk.usage) usage = chunk.usage;
       const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta && chunk.choices[0].delta.content;
-      if (delta) {
+      if (typeof delta === 'string' && delta) {
         text += delta;
         if (onText) { try { onText(text, delta); } catch { /* ignore */ } }
       }
@@ -2401,7 +2588,7 @@ const wordOf = (v) => (typeof v === 'string' ? v
   : (typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean' ? String(v) : '?');
 /** Число из поля: число — как есть, строка — разбором, прочее — NaN (без valueOf чужого объекта). */
 const numOf = (v) => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN);
-/** Дети узла: только массив. */
+/** Дети узла: только массив (круг 31 — во всех обходах brain, не только в описаниях). */
 const kidsOf = (n) => (n && Array.isArray(n.children) ? n.children : []);
 
 /**
@@ -2436,7 +2623,7 @@ function namedChildren(doc, rootId, limit = 24) {
 function scopeRoot(engine, doc, activeArtboardId) {
   if (activeArtboardId && nodeOf(doc, activeArtboardId)) return activeArtboardId;
   const root = doc && doc.root;
-  const kids = (nodeOf(doc, root) || {}).children || [];
+  const kids = kidsOf(nodeOf(doc, root));
   for (const id of kids) if (isArtboardLocal(engine, doc, id)) return id;
   return root;
 }
@@ -4622,7 +4809,7 @@ function defaultName(spec) {
 function nextArtboardPos(doc) {
   const root = nodeOf(doc, doc.root);
   let right = null, top = 0;
-  for (const id of (root && root.children) || []) {
+  for (const id of kidsOf(root)) {
     const n = nodeOf(doc, id);
     if (!n) continue;
     const x = (n.pos && Number(n.pos.x)) || 0;
@@ -4838,7 +5025,7 @@ function siblingRepeats(doc, id) {
   const node = nodeOf(doc, id);
   const parent = node && node.parent ? nodeOf(doc, node.parent) : null;
   if (!node || !parent) return [];
-  const kids = (parent.children || []).filter((k) => nodeOf(doc, k));
+  const kids = kidsOf(parent).filter((k) => nodeOf(doc, k));
   if (kids.length < 2 || kids.length > MAX_AUTO_GROUP) return [];
   const headWord = (nid) => {
     const n = nodeOf(doc, nid);
@@ -4847,8 +5034,8 @@ function siblingRepeats(doc, id) {
   };
   const shape = (nid) => {
     const n = nodeOf(doc, nid);
-    return [n.type, (n.layout && n.layout.mode) || '', (n.children || []).length, headWord(nid),
-      (n.children || []).map((k) => repeatSignature(doc, k, 1)).join('~')].join('|');
+    return [n.type, (n.layout && n.layout.mode) || '', kidsOf(n).length, headWord(nid),
+      kidsOf(n).map((k) => repeatSignature(doc, k, 1)).join('~')].join('|');
   };
   const mine = shape(id);
   const same = kids.filter((k) => shape(k) === mine);
@@ -5237,7 +5424,7 @@ function collectSubtree(doc, roots) {
     if (!n) return;
     seen.add(id);
     out.push(id);
-    for (const k of n.children || []) walk(k);
+    for (const k of kidsOf(n)) walk(k);
   };
   for (const r of asArray(roots)) walk(r);
   return out;
@@ -5339,10 +5526,10 @@ export function textDescendants(doc, id) {
     const n = nodeOf(doc, nid);
     if (!n) return;
     if (n.type === 'text') out.push(nid);
-    for (const k of n.children || []) walk(k);
+    for (const k of kidsOf(n)) walk(k);
   };
   const root = nodeOf(doc, id);
-  for (const k of (root && root.children) || []) walk(k);
+  for (const k of kidsOf(root)) walk(k);
   return out;
 }
 
@@ -6604,7 +6791,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
   const moveAt = (parentId, explicit) => {
     if (!moveCursor.has(parentId)) {
       const node = nodeOf(doc, parentId);
-      moveCursor.set(parentId, node ? ((node.children || []).length) : 0);
+      moveCursor.set(parentId, node ? (kidsOf(node).length) : 0);
     }
     const at = explicit == null ? moveCursor.get(parentId) : explicit;
     moveCursor.set(parentId, Math.max(moveCursor.get(parentId), at) + 1);
@@ -6871,7 +7058,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
           continue;
         }
         budget.left -= copy.nodes.length;
-        const siblings = (nodeOf(doc, parentId) && nodeOf(doc, parentId).children) || [];
+        const siblings = kidsOf(nodeOf(doc, parentId));
         const at = edit.index != null ? Number(edit.index) : (siblings.indexOf(id) >= 0 ? siblings.indexOf(id) + 1 : siblings.length);
         copy.nodes.forEach((node, i) => {
           if (i === 0) {
@@ -7035,6 +7222,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
    * читает голое «ни одну правку не удалось применить», а модель на починке не знает, что чинить. */
   if (!ops.length) {
     const why = failureReasons(said).join(' ');
+    const hint = failureHint(said);
     /**
      * Круг 16, п.8: «отмени скидку» → «Слой «Скидка» не найден», и оболочка предлагала
      * «Повторить». Повтор тут заведомо даст то же: цель не нашлась не потому, что модель
@@ -7055,7 +7243,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
      * документу не приложился. Текст — сама причина (оболочка говорит «Не получилось применить
      * правку: …»), а служебная шапка — только когда причины нет. */
     throw ERR('schema', why || 'Ни одну правку не удалось применить к документу',
-      { code: 'not_applied', ...(allMissing ? { retryable: false } : {}) });
+      { code: 'not_applied', ...(allMissing ? { retryable: false } : {}), ...(hint ? { hint } : {}) });
   }
   return ops;
 }
@@ -7069,7 +7257,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
  * @param {string[]} said
  * @returns {string[]}
  */
-export function failureReasons(said) {
+function orderedReasons(said) {
   const all = [];
   for (const raw of Array.isArray(said) ? said : []) {
     let m = String(raw == null ? '' : raw).trim();
@@ -7089,7 +7277,49 @@ export function failureReasons(said) {
   // показывает начало текста, и причина не должна уйти за обрез
   const cause = all.filter((m) => warningRank(m) === 0);
   const rest = all.filter((m) => warningRank(m) !== 0);
-  return cause.concat(rest).slice(0, 2).map((m) => (/[.!?]$/u.test(m) ? m : `${m}.`));
+  return cause.concat(rest).slice(0, 2);
+}
+
+/**
+ * Круг 29 (J5), круг 31: причины отказа, когда не применилось НИЧЕГО, — коротко. Оболочка
+ * пишет «Не получилось применить правку: <причина>» и на 390 px обрезает длинное, поэтому:
+ *   • «— правка пропущена» не повторяем: заголовок уже говорит, что правка не легла;
+ *   • совет «назовите слой по имени» — не здесь: его даёт оболочка (по `hint: 'name_layer'`,
+ *     см. failureHint), иначе человек читал совет дважды;
+ *   • «подходит узлов — N» — без перечня имён и без «пробовал X», если X уже назван в причине.
+ * @param {string[]} said
+ * @returns {string[]}
+ */
+export function failureReasons(said) {
+  const list = orderedReasons(said);
+  const out = [];
+  for (const raw of list) {
+    let m = raw
+      .replace(/\s+—\s+правка «([^»]*)» пропущена:\s*назовите слой, который надо поменять$/u, ' — «$1» задать некому')
+      .replace(/\s*[:—,]\s*правка пропущена(?:,\s*назовите слой по имени)?(?=\.|$)/u, '')
+      .replace(/^(Под «[^»]*» подходит узлов — \d+)\s*\((?:«[^»]*»|[^()«])*\)/u, '$1');
+    if (out.length) {
+      // «пробовал «X»» — лишнее, если X уже назван в причине
+      m = m.replace(/;\s*пробовал (?:только )?(.+?)(?: — его назвали в команде)?$/u,
+        (all, pick) => (out.some((c) => c.includes(pick)) ? '' : all));
+    }
+    m = m.trim();
+    if (m && !out.includes(m)) out.push(m);
+  }
+  return out.map((m) => (/[.!?]$/u.test(m) ? m : `${m}.`));
+}
+
+/**
+ * Круг 31: совет оболочке к `not_applied` — 'name_layer' («назовите слой так, как он подписан…»),
+ * только когда причина в ВЫБОРЕ слоя: слой не найден, подошло несколько, непонятно, какому
+ * тексту внутри. Причина в поле или значении («у текста нет раскладки») — совета нет: имя
+ * слоя тут ни при чём.
+ * @param {string[]} said
+ * @returns {'name_layer'|null}
+ */
+export function failureHint(said) {
+  const first = orderedReasons(said)[0] || '';
+  return /не найден|непонятно, какому|подходит узлов|назовите слой|нет текста/u.test(first) ? 'name_layer' : null;
 }
 
 /**
@@ -7199,7 +7429,7 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
 
   /* Круг 11, п.3: сказать вслух, что правка легла на ВЕСЬ документ. Говорим только когда
    * артбордов больше одного: на единственном экране это не новость, а шум. */
-  const boards = ((nodeOf(doc, doc.root) || {}).children || []).filter((id) => nodeOf(doc, id));
+  const boards = kidsOf(nodeOf(doc, doc.root)).filter((id) => nodeOf(doc, id));
   if (boards.length > 1) {
     const here = scope ? artboardOf(doc, (scope.ids && scope.ids[0]) || scope.containerId) : null;
     const others = boards.filter((id) => id !== here).map((id) => nameOrId(doc, id));
@@ -7298,7 +7528,8 @@ const STAGE_LABELS = {
   classify: 'Разбираю запрос',
   plan: 'Планирую',
   generate: 'Генерирую',
-  materialize: 'Собираю операции',
+  // круг 31: «Собираю операции — Перевожу ответ в операции» человеку ничего не говорило
+  materialize: 'Прикладываю к макету',
   validate: 'Проверяю',
   repair: 'Чиню',
   retry: 'Повторяю запрос',
@@ -7564,7 +7795,7 @@ function componentIntent({ engine, doc, scope, utterance, ask, geo, emit }) {
       try { return !!engine.canMakeComponent(doc, id).ok; } catch { return false; }
     };
     const out = [];
-    for (const kid of (nodeOf(doc, root) || {}).children || []) {
+    for (const kid of kidsOf(nodeOf(doc, root))) {
       const n = nodeOf(doc, kid);
       if (!n || !n.name || n.type !== 'frame' || !can(kid)) continue;
       out.push(`сделай из «${n.name}» компонент`);
@@ -7734,7 +7965,7 @@ export function externalLibraryPlan(doc, library, engine) {
       const n = c.lib.nodes[id];
       if (!n || order.length > EXT_MASTER_NODES || depth > MAX_TREE_DEPTH * 4 || order.includes(id)) return;
       order.push(id);
-      for (const k of n.children || []) walk(k, depth + 1);
+      for (const k of kidsOf(n)) walk(k, depth + 1);
     };
     walk(c.rootId, 0);
     if (order.length > EXT_MASTER_NODES || total + order.length > EXT_TOTAL_NODES) { c.skip = true; continue; }
@@ -8320,9 +8551,22 @@ async function runCommandCore(options = {}) {
       return { ops: [], preview: { doc, geo: geoNow }, plan, cannot: refusal, warnings: sortWarnings(warnings), usage, stages };
     }
 
+    /* Круг 31 (K3): модель вернула пустой список правок (или пустую палитру) — она не нашла, что
+     * менять. Это ответ, а не сбой: без записи, без «Повторить» и без починки, которая спросила
+     * бы модель ещё раз о том же. Пустое ДЕРЕВО на «собери» — по-прежнему ошибка: просили создать. */
+    if ((intent === 'edit' || intent === 'theme') && !hasEdits(data, intent)) {
+      warn('Модель не предложила ни одной правки — скажите точнее, что и где поменять');
+      emit('validate', 'Модель не предложила ни одной правки');
+      emit('done', 'Менять нечего');
+      return {
+        ops: [], preview: { doc, geo: geoNow }, plan, nothingChanged: true, emptyPatch: true,
+        warnings: sortWarnings(warnings), usage, stages,
+      };
+    }
+
     // Нарушения, которые уже были в документе (ручные правки пользователя), агенту не вменяем.
     const baseline = baselineViolations(baseList);
-    emit('materialize', intent === 'theme' ? 'Перевожу токены в операции' : 'Перевожу ответ в операции');
+    emit('materialize', intent === 'theme' ? 'Меняю оформление документа' : intent === 'create' ? 'Ставлю новые слои на место' : 'Нахожу слои, которые надо поменять');
     let attempt = materialize({ engine, doc, data, intent, scope, placement, persona, baseline, geo: geoNow, group, said: utterance });
     let repaired = false;
     let keptFirst = false;                         // круг 11, п.9: починка не помогла, но прогон выжил
@@ -8364,7 +8608,7 @@ async function runCommandCore(options = {}) {
           emit('done', 'Так нельзя');
           return { ops: [], preview: { doc, geo: geoNow }, plan, cannot: late, warnings: sortWarnings(warnings), usage, stages };
         }
-        emit('materialize', 'Пересобираю операции');
+        emit('materialize', 'Прикладываю исправленный ответ');
         const second = materialize({ engine, doc, data: fixed, intent, scope, placement, persona, baseline, geo: geoNow, group, said: utterance });
         repaired = true;
         retryPointless = retryPointless && !!(second.fatal && second.fatal.retryable === false);
@@ -8802,7 +9046,7 @@ function widerLevel(doc, parent, anchorId, at, shift, geo) {
     if (!(narrow(cur) || rowish(cur))) break;
     const up = nodeOf(doc, cur.parent);
     if (!up || up.type === 'page') break;
-    const pos = (up.children || []).indexOf(cur.id);
+    const pos = kidsOf(up).indexOf(cur.id);
     if (pos < 0) break;
     passed.push(`«${cur.name || cur.id}»`);
     index = pos + shift;
@@ -8838,7 +9082,7 @@ export function findInsertTarget(doc, utterance, scope, engine, geo = null) {
   const posOf = (id) => {
     const n = nodeOf(doc, id);
     const parent = n && n.parent ? nodeOf(doc, n.parent) : null;
-    const kids = (parent && parent.children) || [];
+    const kids = kidsOf(parent);
     return { parent, at: kids.indexOf(id) };
   };
   const byRole = (phrase) => {
@@ -9139,7 +9383,7 @@ function pointlessEdit(doc, node, path, geo) {
 function layoutIgnores(doc, node, path, geo = null) {
   if (!node) return null;
   const l = node.layout || null;
-  const kids = (node.children || []).length;
+  const kids = kidsOf(node).length;
   const parent = nodeOf(doc, node.parent);
   const pl = (parent && parent.layout) || null;
   if (path === 'align') return textAlignIdle(doc, node, geo);
@@ -9164,7 +9408,7 @@ function layoutIgnores(doc, node, path, geo = null) {
      * такое значение не использует», то есть неправда: mode раскладка использует, мешают дети.
      */
     if (path === 'layout.mode' && l.mode === 'row' && l.wrap) {
-      const fills = (node.children || []).filter((k) => {
+      const fills = kidsOf(node).filter((k) => {
         const kid = nodeOf(doc, k);
         const w = kid && kid.size && kid.size.w;
         return !!w && w.mode === 'fill';

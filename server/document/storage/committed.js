@@ -10,7 +10,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { DROPPED_KEEP, DROPPED_OP_BYTES, DROPPED_PREVIEW_CHARS } from '../limits.js';
+import { DROPPED_KEEP, DROPPED_OP_BYTES, DROPPED_PREVIEW_CHARS, cleanMeta } from '../limits.js';
 
 /** Необязательные поля транзакции: в записи есть, только если заданы. */
 const OPTIONAL = ['undo_of', 'redo_of', 'author', 'client', 'title', 'command_id', 'command_author'];
@@ -271,7 +271,8 @@ export function txColumns(tx) {
 
 /** Сводка проекта для списка и `hello` (SPEC §9.2, §9.3). */
 export function projectSummary(p) {
-  return { id: p.id, name: p.name, kind: p.kind, head_seq: p.head_seq, updated_at: p.updated_at };
+  // имя — метаданные: без управляющих и bidi-символов и у проектов, названных до круга 31
+  return { id: p.id, name: typeof p.name === 'string' ? cleanMeta(p.name) : p.name, kind: p.kind, head_seq: p.head_seq, updated_at: p.updated_at };
 }
 
 /** Сводка головы: сводка + эпоха и tip (SPEC §9.8, `?head=1`). */

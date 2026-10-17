@@ -267,6 +267,8 @@ button, input, textarea { font: inherit; color: inherit; }
 @media (max-width: 1280px) {
   .sync-status[data-gone="on"] .sync-text { display: none; }
 }
+/* Круг 31: состояние словами на телефоне (см. @media 560) — на широком его говорит шапка */
+.net-pill { display: none; }
 /* Круг 23 (SPEC §10). Где работает агент — тем же языком, что синхронизация, через тонкий
    разделитель: «агент: сервер» — сплошная точка цвета агента, «в браузере» — приглушённая,
    «недоступен» — красная. Текст не краснеет: агент без сервера — не авария, документ живёт. */
@@ -1572,6 +1574,18 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   /* круг 29: на телефоне от состояния — точка; путь к «Сохранить как новый» — карточка и
      строка пропавшего проекта в шторке «Проекты» (кнопка рядом с точкой) */
   .proj-wrap .sync-act { display: none; }
+  /* круг 31: офлайн и «не сохраняется» — не только точкой: короткая плашка слева сверху,
+     напротив панели вида, тем же языком (фон панели, тонкая рамка) */
+  .net-pill:not([hidden]) {
+    display: inline-flex; align-items: center; gap: 6px;
+    position: absolute; top: 8px; left: 8px; z-index: 5; max-width: calc(100% - 160px);
+    padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--panel); box-shadow: var(--shadow-soft);
+    font-size: var(--t-xs); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .net-pill[data-state="error"] { color: var(--danger); }
+  .net-pill .sync-dot { flex: none; }
+  .app[data-insp="on"] .net-pill, .app[data-variants="on"] .net-pill { display: none; }
   .topbar-center { min-width: 124px; flex: 1 1 0; }
   .tab.pick { min-width: 0; }
   /* круг 27: кружков нет, но видно, что соавторы есть — один кружок с их числом */

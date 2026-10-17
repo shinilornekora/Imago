@@ -255,8 +255,9 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 function storageFailure(body) {
   if (!body || typeof body !== 'object') return false;
   const d = body.detail && typeof body.detail === 'object' ? body.detail : null;
-  if (d && d.storage === 'down') return true;
-  return String(body.code || '') === 'unavailable' && !!d && (d.cause === 'storage' || d.cause === 'timeout');
+  // круг 31 (DOC): 'schema' — схема базы догоняется после восстановления из копии: писать тоже нельзя
+  if (d && (d.storage === 'down' || d.storage === 'schema')) return true;
+  return String(body.code || '') === 'unavailable' && !!d && (d.cause === 'storage' || d.cause === 'timeout' || d.cause === 'schema');
 }
 /** busy/queued присутствия (§9.9): булево или число. */
 const isFlag = (v) => typeof v === 'boolean' || isNum(v);
@@ -1175,7 +1176,7 @@ export function createSync(o) {
   async function loadFromServer() {
     const r = await http(`/api/projects/${encodeURIComponent(projectId)}`);
     if (r.status === 404) { markNotFound(); return false; }
-    if (!r.ok || !r.body || !r.body.snapshot || !r.body.snapshot.doc) throw new Error(`GET /api/projects: ${r.status}`);
+    if (!r.ok || !r.body || !r.body.snapshot || !r.body.snapshot.doc) throw Object.assign(new Error(`GET /api/projects: ${r.status}`), { status: r.status });
     const moved = !!(epoch && typeof r.body.epoch === 'string' && r.body.epoch !== epoch);
     if (notFound) { notFound = false; if (error === 'not_found') error = null; }
     projectSummary(r.body);
@@ -1354,7 +1355,9 @@ export function createSync(o) {
     }
     if (!opts.silent) replayAll();
     scheduleWrite();
-    if (!opts.silent) call(o.onChange, view, { reason: 'remote', tx: c, mine: !!c.client && c.client === clientId });
+    /* круг 31: `before` — подтверждённый документ до этой транзакции (без своих неподтверждённых
+       правок): подписи «Аня удалила «Ярлыки»» — по имени на сервере, а не по своему черновику */
+    if (!opts.silent) call(o.onChange, view, { reason: 'remote', tx: c, mine: !!c.client && c.client === clientId, before });
   }
 
   /** Транзакция агента из рассылки — в форме Tx для переигрывания (применённые операции). */
@@ -1492,6 +1495,16 @@ export function createSync(o) {
       if (e.pub.tx_id !== exceptTx && pred(e)) return e;
     }
     return null;
+  }
+  /**
+   * Круг 31: кто чужой переписал лист (`set` узла или `setToken`) позже seq — для отмены,
+   * которая вернёт своё значение поверх чужой правки. {author, author_kind, seq, title} или null.
+   */
+  function whoChanged(op, afterSeq = -1) {
+    if (!op || typeof op.path !== 'string') return null;
+    const scope = op.op === 'setToken' ? 't:' : 'n:' + op.id;
+    const since = isNum(afterSeq) ? afterSeq : -1;
+    return whoOf(newest((e) => !e.pub.mine && e.pub.seq > since && e.leaves.some((l) => l.scope === scope && pathsMeet(l.path, op.path))));
   }
   /** Кто помешал операции из dropped: удалил узел или родителя, создал тот же id, переписал лист. */
   function whoFor(d, exceptTx) {
@@ -2050,6 +2063,10 @@ export function createSync(o) {
     if (typeof meta.command_id === 'string' && meta.command_id && meta.command_id.length <= COMMAND_ID_CHARS && isCleanText(meta.command_id)) tx.command_id = meta.command_id;
     if (meta.undo_of) tx.undo_of = String(meta.undo_of);
     if (meta.redo_of) tx.redo_of = String(meta.redo_of);
+    /* Круг 31 (K1): часть большой отмены/повтора — {i, n}. Метаданные: сервер их не хранит,
+       оболочка по ним сводит части одного шага истории. */
+    const part = meta.undo_part;
+    if (part && Number.isInteger(part.i) && Number.isInteger(part.n) && part.n > 1 && part.i >= 0 && part.i < part.n) tx.undo_part = { i: part.i, n: part.n };
     let bytes = 0;
     try { bytes = new TextEncoder().encode(JSON.stringify(tx)).length; } catch { bytes = 0; }
     if (bytes > LIMITS.txBytes) return refuse('tx_bytes', 'правка больше 4 МБ — сервер её не примет');
@@ -2100,7 +2117,11 @@ export function createSync(o) {
         error = null;
         break;
       } catch (e) {
-        report('open', e);
+        /* круг 31: сервер недоступен или его база лежит — это состояние (о нём говорит статус),
+           а не сбой кода: в консоль предупреждением, один раз за серию повторов */
+        if (e && (Number.isFinite(e.status) || e instanceof TypeError)) {
+          if (!guard) { try { console.warn(`[sync:open] сервер не отдал проект (${e.status || 'нет связи'}) — пробую снова`); } catch { /* консоли нет */ } }
+        } else report('open', e);
         error = 'unreachable';
         emitStatus();
         const delay = Math.max(jitter(Math.min(reconnectMax, reconnectMin * Math.pow(2, Math.min(guard++, 12)))), serverWait);
@@ -2184,6 +2205,14 @@ export function createSync(o) {
     journal,
     /** Кто удалил узел: {author, author_kind, seq, title} или null. */
     whoRemoved,
+    /** Кто чужой переписал лист операции позже seq (круг 31): {author, author_kind, seq, title} или null. */
+    whoChanged,
+    /**
+     * Круг 31: оболочка получила от сервера 503 «хранилище недоступно» на своём HTTP-запросе
+     * (переименование, список проектов) — статус тот же, что от отказа записи: «сервер не может
+     * сохранить», пока health или запись не скажут иное.
+     */
+    storageFailed: () => markStorageDown(),
     /** Надгробия подтверждённых: [id, seq удаления] в порядке удаления (тесты, отладка; круг 29). */
     tombstoneIds: () => [...tombSeq],
     get extra() { return extraLoaded; },

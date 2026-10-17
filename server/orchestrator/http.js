@@ -1,7 +1,7 @@
 /**
  * HTTP-транспорт Orchestrator (SPEC §10.2) на node:http, без фреймворков.
  *
- *   GET  /agent/health    {ok, engine, llm, document, model?}
+ *   GET  /agent/health    {ok, engine, llm, document, document_reason?, model?} (document_reason — круг 31: storage|unreachable)
  *   POST /agent/command   SSE §10.3 (ошибки до старта потока — JSON с кодом)
  *   POST /agent/stop      {stopped}
  *   POST /agent/apply     событие result одним JSON
@@ -131,7 +131,7 @@ export function parseCommand(body, { testHooks = false } = {}) {
     mode,
     n: body.n == null ? null : body.n,
     history,
-    ...(testHooks && (body.__test === 'oom' || body.__test === 'spin' || body.__test === 'env') ? { test: body.__test } : {}),
+    ...(testHooks && (body.__test === 'oom' || body.__test === 'spin' || body.__test === 'env' || body.__test === 'throw') ? { test: body.__test } : {}),
   };
 }
 

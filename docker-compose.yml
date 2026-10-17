@@ -96,6 +96,8 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       # пределы Orchestrator (server/orchestrator/README.md) — тоже из .env (круг 29)
       LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-120000}
+      # потолок тела ответа модели, байт; больше — «ответ модели не удалось разобрать» (круг 31)
+      LLM_MAX_BODY_BYTES: ${LLM_MAX_BODY_BYTES:-8388608}
       # размер пула воркеров DSLV; пусто — min(2, число ядер)
       WORKERS: ${WORKERS:-}
       WORKER_MAX_MB: ${WORKER_MAX_MB:-512}

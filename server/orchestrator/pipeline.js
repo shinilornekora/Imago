@@ -12,8 +12,9 @@
  */
 
 import * as core from '../../src/core.js';
-import { OrchError, toOrchError, notFound, badRequest, llmDown, llmUnconfigured, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
+import { OrchError, toOrchError, INTERNAL_MESSAGE, notFound, badRequest, llmDown, llmUnconfigured, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
 import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS, SHUTDOWN_GRACE_MS, SHUTDOWN_ABORT_WAIT_MS } from './limits.js';
+import { isInternalError } from '../../src/brain.js';
 
 const { ENGINE_VERSION, uid, cutText, cleanText } = core;
 /** Длина `command_id` транзакции, которую хранит Document service (круг 25). */
@@ -94,6 +95,12 @@ export function globalizeIds(ops) {
  */
 export function createPipeline(deps) {
   const { dslr, dslts, duil, dslv, llm, traces, docHealth, jev } = deps;
+  /* Круг 31 (K2): здоровье документа с причиной; без docHealthDetail — из docHealth, причина
+     тогда неизвестна (unreachable). */
+  const docHealthDetail = deps.docHealthDetail || (async () => {
+    const d = await docHealth();
+    return d === 'up' ? { document: 'up' } : { document: 'down', reason: 'unreachable' };
+  });
   const log = deps.log || console;
   const maxQueue = deps.maxQueue == null ? MAX_QUEUE_PER_PROJECT : deps.maxQueue;
   const variantsTtl = deps.variantsTtlMs || VARIANTS_TTL_MS;
@@ -188,10 +195,13 @@ export function createPipeline(deps) {
   /** Document service и (если нужна) модель живы — иначе 503 до открытия потока. */
   async function preflight({ needsModel }) {
     const [doc, model] = await Promise.all([
-      docHealth(),
+      docHealthDetail(),
       needsModel ? llm.health() : Promise.resolve(null),
     ]);
-    if (doc !== 'up') throw Object.assign(new OrchError(503, 'document_down', 'Сервис документов недоступен — команда не выполнена. Правки не потеряны; попробуйте через несколько секунд.', { retryAfter: 5 }));
+    if (doc.document !== 'up') {
+      throw new OrchError(503, 'document_down', 'Сервис документов недоступен — команда не выполнена. Правки не потеряны; попробуйте через несколько секунд.',
+        { retryAfter: 5, detail: { document_reason: doc.reason || 'unreachable' } });
+    }
     if (model && model.llm === 'unconfigured') { hintUnconfigured(); throw llmUnconfigured(); }
     if (model && model.llm === 'down') { hintDown(''); throw llmDown(); }
   }
@@ -290,6 +300,11 @@ export function createPipeline(deps) {
             },
           });
         } catch (e) {
+          // круг 31 (K3): исключение нашего кода в главном потоке — не модель: стек в лог, internal
+          if (isInternalError(e)) {
+            log.warn(`[orchestrator] команда ${cmd.command_id}: внутренняя ошибка при вызове модели: ${llm.redact(e.stack || e.message)}`);
+            throw Object.assign(new Error(INTERNAL_MESSAGE), { kind: 'internal', code: 'internal' });
+          }
           if (e && e.kind === 'network' && !signal.aborted) llm.markDown();
           // круг 29 (J5): тело отказа модели («{"error":…}») — администратору в лог, не человеку
           if (e && e.detail) {
@@ -348,6 +363,8 @@ export function createPipeline(deps) {
       // retry_after (с) — когда срок повтора известен: клиент считает его на кнопке «Повторить»
       sink.send('error', {
         code: err.code, message: llm.redact(err.message), retryable: err.retryable,
+        // круг 31: подсказка оболочке (какой совет дать) — единственное, что из detail идёт в поток
+        ...(err.detail && typeof err.detail.hint === 'string' ? { detail: { hint: err.detail.hint } } : {}),
         ...(Number.isFinite(err.retryAfter) && err.retryAfter > 0 ? { retry_after: err.retryAfter } : {}),
       });
       trace.status = err.code === 'cancelled' ? 'cancelled' : 'error';
@@ -380,18 +397,36 @@ export function createPipeline(deps) {
       hintDown(msg);
       return llmDown();
     }
+    /* Круг 31 (K3): исключение кода агента — не сбой модели: `internal`, повтор не поможет;
+       стек — администратору в лог (человеку — общая фраза). */
+    if (error.kind === 'internal' || error.code === 'internal') {
+      log.warn(`[orchestrator] внутренняя ошибка агента: ${llm.redact(String(error.stack || error.message || ''))}`);
+      return new OrchError(500, 'internal', INTERNAL_MESSAGE, { retryable: false });
+    }
+    // круг 31 (K3): ответ модели слишком большой, глубокий или не JSON — модель жива, повтор может помочь
+    if (error.code === 'llm_bad_response') return new OrchError(502, 'llm_bad_response', msg, { retryable: true });
     // круг 29 (J5): ответ модели разобран, но к документу не приложился — это не сбой модели
-    if (error.code === 'not_applied') return new OrchError(422, 'not_applied', msg, { retryable: error.retryable !== false });
+    if (error.code === 'not_applied') {
+      return new OrchError(422, 'not_applied', msg, {
+        retryable: error.retryable !== false,
+        // круг 31: совет «назовите слой» — только когда причина в выборе слоя (оболочке)
+        ...(error.hint ? { detail: { hint: error.hint } } : {}),
+      });
+    }
     if (error.detail) log.warn(`[orchestrator] ошибка модели: ${llm.redact(String(error.detail))}`);
     return new OrchError(502, 'llm_failed', msg, { retryable: error.retryable !== false });
   }
+
+  /** Круг 31 (K3): итог команды, на которую модель не предложила ни одной правки. */
+  const NOTHING_FOUND = 'Агент не нашёл, что поменять';
 
   /** То, что агент сказал, не трогая документ: переспрос, ответ, отказ, «нечего менять». */
   function replyOf(res, fallback) {
     const plan = res.plan || {};
     return {
       tx_id: null, seq: null, applied: 0, dropped: [],
-      summary: llm.redact(res.clarify || res.answer || res.cannot || plan.summary || plan.title || fallback || ''),
+      // круг 31 (K3): пустой патч — «не нашёл, что поменять», а не план, которого не было
+      summary: llm.redact(res.emptyPatch ? NOTHING_FOUND : res.clarify || res.answer || res.cannot || plan.summary || plan.title || fallback || ''),
       warnings: (res.warnings || []).map((w) => llm.redact(w)),
       ...(res.clarify ? { clarify: res.clarify, clarifyOptions: res.clarifyOptions || [] } : {}),
       ...(res.answer ? { answer: res.answer } : {}),
@@ -650,7 +685,8 @@ export function createPipeline(deps) {
   /* ── здоровье и останов ─────────────────────────────────────────────── */
 
   async function health() {
-    const [document, model] = await Promise.all([docHealth(), llm.health()]);
+    const [doc, model] = await Promise.all([docHealthDetail(), llm.health()]);
+    const document = doc.document;
     return {
       // ok — сам агент отвечает; что с документами и моделью — в полях document и llm
       ok: true,
@@ -660,6 +696,8 @@ export function createPipeline(deps) {
       started_at: startedAt,
       llm: model.llm,
       document,
+      // круг 31 (K2): почему документ недоступен — 'storage' (база сервиса) | 'unreachable'
+      ...(document !== 'up' ? { document_reason: doc.reason || 'unreachable' } : {}),
       ...(model.model ? { model: model.model } : {}),
     };
   }

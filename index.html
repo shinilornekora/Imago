@@ -64,6 +64,9 @@
     <!-- Круг 22. Чужие выделения — цветная рамка с именем участника поверх сцены. Свой слой,
          а не сцена: она рисует только своё выделение, а координаты даёт её toScreen. -->
     <div class="presence-layer" id="presence" hidden aria-hidden="true"></div>
+    <!-- Круг 31. На телефоне от строки состояния в шапке остаётся точка: «нет сети», «не
+         сохраняется» — словами здесь, пока это так. На широком экране не показывается. -->
+    <div class="net-pill" id="net-pill" hidden></div>
 
     <div class="empty-state" id="empty-state" hidden>
       <div class="empty-card" id="empty-card">

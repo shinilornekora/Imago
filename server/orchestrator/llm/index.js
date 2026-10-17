@@ -18,7 +18,10 @@
  * провайдер вида `claude` с самописной способностью `sample.json` поверх Messages API.
  */
 
-import { makeProvider, parseModelJson, BrainError, MODEL_REJECTED, cutText } from '../../../src/brain.js';
+import {
+  makeProvider, parseModelJson, BrainError, MODEL_REJECTED, cutText,
+  MODEL_BODY_MAX_BYTES, readBodyCapped, parseBodyJson, badResponse, modelDataProblem,
+} from '../../../src/brain.js';
 import { LLM_HEALTH_CACHE_MS, LLM_HEALTH_TIMEOUT_MS } from '../limits.js';
 
 /** Разобрать адрес модели: публичная часть, query, заголовок авторизации, секреты для redact. */
@@ -178,6 +181,8 @@ export function createLlm(cfg = {}) {
 
   let model = cfg.model || '';
   let provider = null;
+  // круг 31: потолок тела ответа модели (LLM_MAX_BODY_BYTES), сверх — llm_bad_response
+  const maxBodyBytes = cfg.maxBodyBytes > 0 ? cfg.maxBodyBytes : MODEL_BODY_MAX_BYTES;
   if (configured && kind === 'anthropic') {
     provider = makeProvider({
       kind: 'claude', name: 'Anthropic', timeout: cfg.timeout,
@@ -186,7 +191,7 @@ export function createLlm(cfg = {}) {
   } else if (configured) {
     provider = makeProvider({
       kind: 'openai', name: 'OpenAI-совместимая модель', baseUrl: parsed.publicBase,
-      model: model || undefined, fetch: providerFetch, timeout: cfg.timeout,
+      model: model || undefined, fetch: providerFetch, timeout: cfg.timeout, maxBodyBytes,
     });
   }
 
@@ -208,14 +213,18 @@ export function createLlm(cfg = {}) {
     if (!res.ok) {
       if (res.status === 429 || res.status >= 500) throw new BrainError('network', `Сервер модели ответил ${res.status}`, { retryable: true });
       // круг 29 (J5): человеку — нейтральные слова, тело отказа — полем detail (в лог)
-      const text = await res.text().catch(() => '');
+      const text = await readBodyCapped(res, 64 * 1024).catch(() => '');
       throw new BrainError('model', MODEL_REJECTED, { status: res.status, detail: cutText(text, 300) });
     }
-    const body = await res.json().catch(() => null);
+    // круг 31: тело — потоком с потолком; не JSON — llm_bad_response (не «нет связи»)
+    const body = parseBodyJson(await readBodyCapped(res, maxBodyBytes));
     const text = body && Array.isArray(body.content)
-      ? body.content.filter((c) => c && c.type === 'text').map((c) => c.text).join('')
+      ? body.content.filter((c) => c && c.type === 'text' && typeof c.text === 'string').map((c) => c.text).join('')
       : '';
-    return parseModelJson(text);
+    const data = parseModelJson(text);
+    const bad = modelDataProblem(data);
+    if (bad) throw badResponse(`Ответ модели не той формы (${bad}) — попробуйте ещё раз`);
+    return data;
   }
 
   /** Проверка здоровья с кешем: GET {base}/models. */
@@ -233,7 +242,7 @@ export function createLlm(cfg = {}) {
       const res = await fetchImpl(endpoint(parsed.publicBase, parsed.query, suffix), {
         method: 'GET', headers: authHeaders(), signal: ctl.signal,
       });
-      const body = await res.json().catch(() => null);
+      const body = await readBodyCapped(res, 1024 * 1024).then((t) => JSON.parse(t)).catch(() => null);
       if (res.ok) {
         const first = body && Array.isArray(body.data) && body.data[0] && body.data[0].id;
         if (!model && first) {

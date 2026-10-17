@@ -151,6 +151,16 @@ curl -N -X POST localhost:8090/agent/command -H 'content-type: application/json'
 * **Круг 29 (J1).** `document` в `/agent/health` — `'up'` только при `200 {ok:true}` от
   `GET /api/health`; `503` (хранилище Document service лежит: `detail.storage:'down'`), сеть и
   дедлайн — `'down'`.
+* **Круг 31.** `/agent/health` при `document:'down'` несёт `document_reason`: `'storage'` —
+  сервис отвечает, но его база лежит (`503 detail.storage:'down'`), `'unreachable'` — сервис не
+  ответил или ответил не тем; так же — `detail.document_reason` у `503 document_down` до потока.
+  Ошибки команды: исключение кода агента (не модели) — `internal` (500, `retryable:false`, стек —
+  в лог); пустой патч модели — `result` с `nothingChanged:true` без записи («Агент не нашёл, что
+  поменять»); ответ модели больше потолка (`LLM_MAX_BODY_BYTES`, 8 МБ; тело читается потоком),
+  глубже 100 уровней или не JSON — `llm_bad_response` (502, повторяемо), без глобального
+  `llm_down`. Ответ модели, который не передаётся воркеру, — тот же `llm_bad_response` сразу, а
+  не 60 с ожидания и замена воркера. `not_applied` — короче (без «правка пропущена» и без совета);
+  совет «назовите слой» — полем `detail.hint:'name_layer'`, только когда причина в выборе слоя.
 * **Транзакция агента** несёт `command_id` (если он не длиннее 64 знаков; Document service
   хранит до 128), `client` вкладки автора команды и (круг 30) `command_author` — имя из `author`
   тела `/agent/command` (без пробелов по краям, чистый текст, ≤ 200 знаков; у варианта — имя

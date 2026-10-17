@@ -95,6 +95,7 @@ export function decideAgentMode({ inProject = false, health = null, hasProvider 
 export function agentModeTitle(mode, health, providerWords = '') {
   const h = health && health.ok === true ? health : null;
   if (mode === 'server') {
+    if (h && h.document !== 'up' && storageReason(h)) return 'Команды агента выполняет сервер, но база данных сервера сейчас недоступна — команды не выполняются, правки руками ждут в очереди';
     if (h && h.document !== 'up') return 'Команды агента выполняет сервер, но сейчас он не видит документ — правки руками сохраняются';
     if (h && h.llm === 'unconfigured') return 'Команды агента выполняет сервер, но модель на нём не настроена — это забота администратора';
     if (h && h.llm !== 'up') return 'Команды агента выполняет сервер, но модель на нём сейчас не отвечает — попробуйте позже';
@@ -127,7 +128,11 @@ export function agentHealthNotice(prev, next, { hasProvider = false } = {}) {
     return { text, kind: 'plain', back: true };
   }
   if (now === 'down') return { text: `Сервер агента не отвечает.${local || ' Правки руками сохраняются.'}`, kind: 'plain' };
-  if (now === 'nodoc') return { text: `Сервер агента не видит документ — сервер документа не отвечает.${local}`, kind: 'plain' };
+  if (now === 'nodoc') {
+    // K2: причина — база данных, а не сервис документа
+    const why = storageReason(next) ? 'база данных сервера недоступна' : 'сервер документа не отвечает';
+    return { text: `Сервер агента не видит документ — ${why}.${local}`, kind: 'plain' };
+  }
   if (was === 'up') return { text: `Модель на сервере не отвечает — попробуйте позже.${local}`, kind: 'plain' };
   return null;
 }
@@ -215,8 +220,10 @@ export function presenceAgentWords(p) {
 }
 
 /** Повтор по Retry-After словами. */
-export function retryLabel(waitMs, code = '') {
+export function retryLabel(waitMs, code = '', extra = null) {
   const s = Math.max(1, Math.round((Number(waitMs) || 0) / 1000));
+  // K2 (круг 31): документ не виден из-за базы данных
+  if (code === 'document_down' && storageReason(extra)) return `База данных сервера недоступна — повторю через ${s} с`;
   // круг 27, п.7: 503 бывает не только от занятости — называем то, что случилось
   const why = {
     document_down: 'Сервер агента не видит документ',
@@ -330,14 +337,43 @@ const ERROR_WORDS = {
   // круг 27, I6: и идущая команда, и ждавшие в очереди — не выполнены, а не «остановлены»
   shutting_down: ['Сервер агента перезапускается — команда не выполнена', 'Текст команды остался в строке — повторите через несколько секунд.'],
   worker_failed: ['Агент на сервере сбился на этой команде', 'Повторите или скажите иначе.'],
-  internal: ['Агент на сервере сбился на этой команде', 'Повторите или скажите иначе.'],
+  /* K3 (круг 31): исключение в коде агента, а не ответ модели — повтор не поможет. */
+  internal: ['Внутренняя ошибка агента — сообщите администратору', 'Команда не выполнена, текст остался в строке.'],
+  /* K3: модель ответила слишком большим, слишком глубоким или не-JSON ответом — разово. */
+  llm_bad_response: ['Ответ модели не удалось разобрать — попробуйте ещё раз', 'Текст команды остался в строке.'],
   engine: ['Версия редактора устарела', 'Обновите страницу.'],
 };
 
 /* Коды, у которых текст сервера человеку не добавляет ничего, кроме совета администратору
    («проверьте, что сервер модели запущен»): своих слов достаточно. */
 const OWN_SILENT = new Set(['llm_down', 'upstream_down', 'network', 'document_down', 'document_failed',
-  'shutting_down', 'busy', 'timeout', 'upstream_timeout', 'worker_failed', 'internal', 'engine', 'bad_response', 'not_found']);
+  'shutting_down', 'busy', 'timeout', 'upstream_timeout', 'worker_failed', 'internal', 'engine', 'bad_response', 'not_found',
+  'llm_bad_response']);
+
+/** K2 (круг 31): Orchestrator не видит документ, потому что лежит база данных Document service. */
+export const STORAGE_DOWN_AGENT_WORDS = Object.freeze({
+  title: 'База данных сервера недоступна — команда не выполнена',
+  note: 'Текст команды остался в строке — повторите, когда она вернётся. Правки руками ждут в очереди.',
+});
+
+/**
+ * Причина «документ недоступен» — хранилище (K2): `document_reason: 'storage'` у ответа
+ * health или у ошибки команды (в самой ошибке или в её detail), либо detail.storage 'down'.
+ */
+export function storageReason(x) {
+  if (!x || typeof x !== 'object') return false;
+  if (x.document_reason === 'storage' || x.reason === 'storage' || schemaReason(x)) return true;
+  const d = x.detail && typeof x.detail === 'object' ? x.detail : null;
+  return !!(d && (d.document_reason === 'storage' || d.reason === 'storage' || d.storage === 'down' || d.cause === 'storage'));
+}
+
+/** Причина — схема базы догоняется после восстановления из копии (DOC круг 31): обычно секунды. */
+export function schemaReason(x) {
+  if (!x || typeof x !== 'object') return false;
+  if (x.document_reason === 'schema' || x.reason === 'schema') return true;
+  const d = x.detail && typeof x.detail === 'object' ? x.detail : null;
+  return !!(d && (d.document_reason === 'schema' || d.reason === 'schema' || d.storage === 'schema' || d.cause === 'schema'));
+}
 
 /**
  * Код ошибки агента словами — для «Подробностей» (круг 29, п.7): «код: llm_failed» человеку
@@ -380,7 +416,17 @@ export function agentErrorWords(err) {
       if (low.startsWith(lead)) { why = why.slice(lead.length).replace(/^\s*[:—–-]\s*/, ''); break; }
     }
     why = cutText(why, 140, { ellipsis: true });
-    return { title: why ? `${title}: ${why.charAt(0).toLowerCase()}${why.slice(1)}` : title, note: hint.replace(/\s*[.]\s*$/, ''), waitMs: 0 };
+    /* Круг 31 (ORCH): совет «назовите слой» — только когда причина в выборе слоя (brain
+       кладёт `hint: 'name_layer'` в ошибку, Orchestrator — в detail). «У текста нет
+       раскладки» — не про имя слоя, совет там сбивал с толку. */
+    const nameIt = e.hint === 'name_layer' || !!(e.detail && typeof e.detail === 'object' && e.detail.hint === 'name_layer');
+    return { title: why ? `${title}: ${why.charAt(0).toLowerCase()}${why.slice(1)}` : title, note: nameIt ? hint.replace(/\s*[.]\s*$/, '') : '', waitMs: 0 };
+  }
+  // K2: документ недоступен агенту из-за базы данных — так и говорим, а не «сервер документа не отвечает»
+  if ((e.code === 'document_down' || e.code === 'document_failed') && storageReason(e)) {
+    const waitMs = Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0 ? e.retryAfterMs : 0;
+    if (schemaReason(e)) return { title: 'Сервер обновляет базу данных — команда не выполнена', note: 'Обычно это секунды — повторите. Правки руками ждут в очереди', waitMs };
+    return { title: STORAGE_DOWN_AGENT_WORDS.title, note: STORAGE_DOWN_AGENT_WORDS.note.replace(/\s*[.]\s*$/, ''), waitMs };
   }
   const [title, hint] = known || [ownOk ? own : 'Агент на сервере не справился с командой', 'Повторите или скажите иначе.'];
   const bits = [];
@@ -403,6 +449,36 @@ const MALE_A = new Set(['никита', 'илья', 'кузьма', 'фома', 
   'алёша', 'алеша', 'стёпа', 'степа', 'боря', 'гена', 'жора', 'сёма', 'сема', 'тёма', 'тема', 'вася', 'лёва', 'лева',
   'добрыня', 'савва', 'данила', 'фока', 'ерёма', 'кирюша', 'андрюша', 'миха']);
 const ANY_A = new Set(['саша', 'женя', 'валя', 'шура', 'слава', 'стася', 'сима', 'тоша', 'мира']);
+
+/**
+ * Имя в родительном падеже — «правки Бориса», «правки Ани» (круг 31). Склоняем только
+ * одиночное кириллическое имя по окончанию; несклоняемое и составное — как есть, в кавычках
+ * подписи не нуждается: «правки (Анна Ковалёва)».
+ * @param {string} name
+ * @returns {string|null} null — склонить не взялись
+ */
+export function nameGenitive(name) {
+  const n = cleanText(name);
+  if (!n || /\s/.test(n) || !/^[А-ЯЁа-яё-]+$/.test(n)) return null;
+  const low = n.toLowerCase();
+  const last = low.slice(-1);
+  const prev = low.slice(-2, -1);
+  if (/[бвгджзклмнпрстфхцчшщ]/.test(last)) return n + 'а';
+  if (last === 'й' || last === 'ь') return MALE_A.has(low) || /[ая]$/.test(low) ? null : n.slice(0, -1) + 'я';
+  if (last === 'я') return n.slice(0, -1) + 'и';
+  if (last === 'а') return n.slice(0, -1) + (/[гкхжчшщ]/.test(prev) ? 'и' : 'ы');
+  return null;
+}
+
+/** «правки Бориса» / «правки агента» / «правки (Анна Ковалёва)» — чья правка. */
+export function editOf(who) {
+  if (!who) return 'чужой правки';
+  if (who.author_kind === 'agent') return 'правки агента';
+  const name = cutText(cleanText(who.author), 40, { ellipsis: true });
+  if (!name) return 'чужой правки';
+  const g = nameGenitive(name);
+  return g ? `правки ${g}` : `правки (${name})`;
+}
 
 /**
  * Глагол прошедшего времени в роде автора: «Аня удалила», «Борис удалил», «Агент удалил».
@@ -734,6 +810,122 @@ export const PROJECT_GONE_WORDS = Object.freeze({
   note: 'Например, базу восстановили из резервной копии. Ваша работа цела в этом браузере — и после перезагрузки страницы: сохраните её новым проектом.',
   action: 'Сохранить как новый проект',
 });
+
+/* ------------------- круг 31 (K1): большая правка — несколькими транзакциями ------------------- */
+
+/** Предел части: операций — как у сервера (SPEC §9.8), байт — с запасом под 4 МБ тела. */
+export const PART_MAX_OPS = 5000;
+export const PART_MAX_BYTES = Math.floor(3.5 * 1024 * 1024);
+
+const utf8Len = (() => {
+  const enc = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+  return (str) => (enc ? enc.encode(str).length : unescape(encodeURIComponent(str)).length);
+})();
+
+/**
+ * Разрезать список операций на части, каждая из которых сервер примет одной транзакцией
+ * (K1). Части идут подряд в исходном порядке: применённые по очереди, они дают то же, что
+ * весь список (родители создаются раньше детей — так уже упорядочены и инверсия удаления,
+ * и импорт). `splitOps` ядра (если есть) — первым; его ответ берётся, только если он
+ * сохраняет все операции. Одна операция больше предела байт — своей частью: сервер откажет
+ * ей честно (too_large), а не всей правке.
+ * @param {object[]} ops
+ * @param {{maxOps?: number, maxBytes?: number, splitOps?: Function|null}} [o]
+ * @returns {object[][]}
+ */
+export function splitOpsForServer(ops, { maxOps = PART_MAX_OPS, maxBytes = PART_MAX_BYTES, splitOps = null } = {}) {
+  const list = Array.isArray(ops) ? ops : [];
+  if (!list.length) return [];
+  if (typeof splitOps === 'function') {
+    try {
+      const got = splitOps(list, { maxOps, maxBytes });
+      if (Array.isArray(got) && got.length && got.every((b) => Array.isArray(b) && b.length && b.length <= maxOps)
+        && got.reduce((n, b) => n + b.length, 0) === list.length) return got;
+    } catch { /* ядро не смогло — режем сами */ }
+  }
+  const out = [];
+  let cur = [];
+  let bytes = 0;
+  for (const op of list) {
+    let b = 0;
+    try { b = utf8Len(JSON.stringify(op)) + 1; } catch { b = 1; }
+    if (cur.length && (cur.length >= maxOps || bytes + b > maxBytes)) { out.push(cur); cur = []; bytes = 0; }
+    cur.push(op);
+    bytes += b;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+/** Нужно ли резать правку на части (K1). */
+export function needsParts(ops, { maxOps = PART_MAX_OPS, maxBytes = PART_MAX_BYTES } = {}) {
+  const list = Array.isArray(ops) ? ops : [];
+  if (list.length > maxOps) return true;
+  if (list.length < 200) return false;   // мелкая правка 3,5 МБ не наберёт без огромных строк — проверим ниже
+  let bytes = 0;
+  for (const op of list) {
+    try { bytes += utf8Len(JSON.stringify(op)) + 1; } catch { bytes += 1; }
+    if (bytes > maxBytes) return true;
+  }
+  return false;
+}
+
+/** Подпись части большой правки: «Загрузил «X» · часть 2 из 3». */
+export function partTitle(title, i, n) {
+  const base = cleanText(title || '');
+  return n > 1 ? `${base} · часть ${i + 1} из ${n}` : base;
+}
+
+/** Подпись без хвоста части — части одной правки сводятся в «Истории» в одну строку. */
+export function partBase(title) {
+  const t = cleanText(title || '');
+  const m = /^(.*) · часть (\d+) из (\d+)$/.exec(t);
+  return m ? { base: m[1], i: Number(m[2]) - 1, n: Number(m[3]) } : null;
+}
+
+/**
+ * Замена документа целиком (импорт JSON в серверном режиме) — операциями (SPEC §8.3):
+ * токены группами, снять всех детей корня, создать узлы нового документа сверху вниз
+ * (родитель раньше детей, порядок братьев тот же, `exact` — узлы ложатся ровно такими, какие
+ * в файле). Корень остаётся свой: удалить его нельзя, а дети нового корня приписываются к
+ * нему. Список может быть больше предела транзакции — его режет splitOpsForServer (K1).
+ * @param {object} cur  текущий документ
+ * @param {object} nextDoc  документ из файла (уже проверенный adoptDoc)
+ * @returns {object[]}
+ */
+export function replaceDocOps(cur, nextDoc) {
+  const list = [];
+  const tokens = nextDoc.tokens && typeof nextDoc.tokens === 'object' ? nextDoc.tokens : {};
+  for (const group of Object.keys(tokens)) list.push({ op: 'setToken', path: group, value: tokens[group] });
+  const rootNode = cur.nodes[cur.root];
+  for (const id of ((rootNode && rootNode.children) || [])) list.push({ op: 'remove', id });
+  const nextRoot = nextDoc.nodes[nextDoc.root];
+  const stack = [];
+  const kidsOf = (n) => (n && Array.isArray(n.children) ? n.children : []);
+  for (let i = kidsOf(nextRoot).length - 1; i >= 0; i--) stack.push(kidsOf(nextRoot)[i]);
+  const seen = new Set();
+  while (stack.length) {
+    const id = stack.pop();
+    const n = nextDoc.nodes[id];
+    if (!n || typeof n !== 'object' || seen.has(id)) continue;
+    seen.add(id);
+    const node = { ...n, parent: n.parent === nextDoc.root ? cur.root : n.parent };
+    // дети придут своими операциями — узел создаём пустым, порядок даст порядок обхода
+    if (Array.isArray(n.children)) node.children = []; else delete node.children;
+    list.push({ op: 'create', node, exact: true });
+    const kids = kidsOf(n);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+  }
+  return list;
+}
+
+/* ------------------------- круг 31: предел числа узлов у импорта ------------------------- */
+
+/** Файл больше предела документа — словами, с числом узлов. */
+export function importTooBigWords(count, max = 20000) {
+  const num = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
+  return `Файл слишком большой: ${num(count)} ${plural(count, 'узел', 'узла', 'узлов')}, предел ${num(max)}`;
+}
 
 /* -------------- круг 29: «Сохранить как новый проект» для большого документа -------------- */
 

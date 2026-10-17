@@ -68,6 +68,8 @@ export function createDocClient(o) {
         const err = Object.assign(documentDown(), { detail: { status: res.status, cause: `Document service ответил ${res.status}${why}` } });
         err.docStatus = res.status;
         err.docCode = json && typeof json.code === 'string' ? json.code : null;
+        // круг 31 (K2): подробности сервиса (`detail.storage: 'down'` у /api/health) — для причины
+        err.docDetail = json && json.detail && typeof json.detail === 'object' ? json.detail : null;
         err.docRetryAfter = after;
         if (after !== null && after > (err.retryAfter || 0)) err.retryAfter = Math.min(after, 60);
         throw err;
@@ -86,14 +88,25 @@ export function createDocClient(o) {
     }
   }
 
-  /** 'up' | 'down' — GET /api/health с коротким дедлайном. */
-  async function health() {
+  /**
+   * Круг 31 (K2): здоровье с причиной. `reason` — только у 'down': 'storage' — сервис отвечает,
+   * но его база недоступна (503 с `detail.storage: 'down'`); 'unreachable' — сервис не ответил,
+   * ответил не тем или ещё не готов.
+   * @returns {Promise<{document: 'up'|'down', reason?: 'storage'|'unreachable'}>}
+   */
+  async function healthDetail() {
     try {
       const r = await call('GET', '/api/health', undefined, { timeout: DOC_HEALTH_TIMEOUT_MS });
-      return r.status === 200 && r.body && r.body.ok ? 'up' : 'down';
-    } catch {
-      return 'down';
+      return r.status === 200 && r.body && r.body.ok ? { document: 'up' } : { document: 'down', reason: 'unreachable' };
+    } catch (e) {
+      const storage = e && e.docDetail && e.docDetail.storage === 'down';
+      return { document: 'down', reason: storage ? 'storage' : 'unreachable' };
     }
+  }
+
+  /** 'up' | 'down' — GET /api/health с коротким дедлайном. */
+  async function health() {
+    return (await healthDetail()).document;
   }
 
   return {
@@ -101,5 +114,6 @@ export function createDocClient(o) {
     get: (path, opts) => call('GET', path, undefined, opts),
     post: (path, body, opts) => call('POST', path, body, opts),
     health,
+    healthDetail,
   };
 }

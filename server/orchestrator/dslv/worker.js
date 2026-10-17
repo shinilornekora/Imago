@@ -13,8 +13,9 @@
  */
 
 import { parentPort, workerData } from 'node:worker_threads';
+import { getHeapStatistics } from 'node:v8';
 import * as core from '../../../src/core.js';
-import { runCommand, runVariants, BrainError, SCHEMAS, raceAbort } from '../../../src/brain.js';
+import { runCommand, runVariants, BrainError, SCHEMAS, raceAbort, INTERNAL_MESSAGE } from '../../../src/brain.js';
 
 const testHooks = !!(workerData && workerData.testHooks);
 // проверка: медленный старт воркера (загрузка модулей под нагрузкой) — круг 29
@@ -76,7 +77,19 @@ async function run(id, job) {
     }
     if (testHooks && job.test === 'env') {
       // круг 25: что воркер видит в окружении (только имена) — проверка, что секретов нет
-      throw new Error('env ' + Object.keys(process.env).sort().join(','));
+      // (BrainError: текст доходит до клиента как есть; исключение кода стало бы internal — круг 31)
+      throw new BrainError('model', 'env ' + Object.keys(process.env).sort().join(','));
+    }
+    if (testHooks && job.test === 'throw') {
+      // круг 31 (K3): исключение кода (не модели) — проверка, что это internal, а не llm_failed
+      const n = null;
+      return n.children.length;
+    }
+    if (testHooks && job.test === 'heap') {
+      // круг 31: потолок кучи, с которым воркер на самом деле запущен (resourceLimits)
+      const limit = getHeapStatistics().heap_size_limit;
+      parentPort.postMessage({ type: 'done', id, result: { ops: [], warnings: [], test: { heapLimitMb: limit / (1024 * 1024) } } });
+      return;
     }
     if (testHooks && job.test === 'spin') {
       for (;;) { /* бесконечный счёт: проверка таймаута */ }
@@ -117,8 +130,18 @@ async function run(id, job) {
     }
     parentPort.postMessage({ type: 'done', id, result });
   } catch (e) {
-    const info = e instanceof BrainError ? { kind: e.kind, message: e.message } : { kind: 'model', message: e && e.message ? e.message : String(e) };
-    parentPort.postMessage({ type: 'done', id, result: { ops: [], error: info, warnings: [] } });
+    /* Круг 31 (K3): исключение кода (не BrainError) — не «сбой модели»: kind 'internal',
+       стек — полем для журнала главного потока (наружу не уходит). Раньше любое исключение
+       выдавалось за ответ модели — llm_failed, «повторите», и без стека в логе. */
+    const info = e instanceof BrainError
+      ? { kind: e.kind, message: e.message, ...(e.code ? { code: e.code } : {}), ...(e.retryable === false ? { retryable: false } : {}) }
+      : { kind: 'internal', code: 'internal', message: INTERNAL_MESSAGE, retryable: false, stack: core.cutText(String((e && (e.stack || e.message)) || e), 4000) };
+    try {
+      parentPort.postMessage({ type: 'done', id, result: { ops: [], error: info, warnings: [] } });
+    } catch {
+      // результат не передался (структура не клонируется) — хотя бы честная ошибка, а не 60 с ожидания
+      parentPort.postMessage({ type: 'done', id, result: { ops: [], error: { kind: 'internal', code: 'internal', message: INTERNAL_MESSAGE, retryable: false }, warnings: [] } });
+    }
   } finally {
     jobs.delete(id);
   }

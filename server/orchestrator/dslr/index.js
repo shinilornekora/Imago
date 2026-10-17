@@ -102,17 +102,20 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
    * строгим applyOps. Иначе — Reset.
    * @param {{seq:number, doc:object, chain:string|null}} st
    */
-  function replay(st, txs) {
+  function replay(st, txs, id = '') {
     let { seq, chain } = st;
     const batches = [];
+    const verified = [];   // круг 31: запись сверена с нашим якорем — журнал под нами не переписан
     for (const tx of txs) {
       if (!tx || tx.seq !== seq + 1) throw new Reset(`дыра в номерах журнала: ждали ${seq + 1}, пришла ${tx && tx.seq}`);
       if (typeof tx.chain === 'string' && tx.chain) {
         if (chain !== null && chainNext(chain, tx.tx_id, tx.seq) !== tx.chain) {
           throw new Reset(`запись ${tx.seq} не продолжает якорь кеша (журнал переписан)`);
         }
+        verified.push(chain !== null);
         chain = tx.chain;
       } else {
+        verified.push(false);
         chain = null;   // сверять дальше нечем
       }
       batches.push(Array.isArray(tx.ops) ? tx.ops : []);
@@ -121,10 +124,18 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
     // круг 25: вся страница — одним черновиком (applyBatches), а не копией словаря узлов
     // на каждую транзакцию; каждая транзакция по-прежнему строгая и атомарная
     const res = applyBatches(st.doc, batches);
-    const bad = res.results.findIndex(Boolean);
-    if (bad >= 0) {
-      const e = res.results[bad].error;
-      throw new Reset(`журнал не лёг на кеш (seq ${txs[bad].seq}): ${e.message || e}`);
+    for (let i = 0; i < res.results.length; i++) {
+      const r = res.results[i];
+      if (!r || !r.error) continue;
+      const e = r.error;
+      /* Круг 31: запись сверена якорем — журнал цел, а не лёг она потому, что движок строже
+         того, что её когда-то принял (документ прежней версии, §9.14). Секвенсор в этом
+         случае пропускает её с предупреждением и идёт дальше (dslts, «не применяется»);
+         так же и здесь — иначе перечитывание целиком упиралось бы в ту же запись, и проект
+         навсегда оставался без агента («Стейт проекта не собрался»). Не сверена — как
+         прежде: журнал мог быть переписан, читаем заново. */
+      if (!verified[i]) throw new Reset(`журнал не лёг на кеш (seq ${txs[i].seq}): ${e.message || e}`);
+      log.warn(`[orchestrator/dslr] ${id}: seq ${txs[i].seq} не применяется текущим движком — пропущена, как у секвенсора: ${e.message || e}`);
     }
     // размер — прибавкой операций (remove его не уменьшает); набежало больше половины
     // от последнего обхода — обходим документ заново, чтобы оценка не уплывала вверх
@@ -178,7 +189,7 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
         if (cur.chain && typeof b.tip === 'string' && b.tip && b.tip !== cur.chain) throw new Reset('якорь головы не совпал с кешем');
         return { ...cur, epoch: cur.epoch || b.epoch || null };
       }
-      const got = replay(cur, txs);
+      const got = replay(cur, txs, id);
       cur = { ...got, epoch: cur.epoch || b.epoch || null };
       // конец — по флагу `more` (страница режется и по байтам); сервис до §9.8 флага не знал
       const more = typeof b.more === 'boolean' ? b.more : head !== null && cur.seq < head;
@@ -200,7 +211,7 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
       chain: typeof snapshot.chain === 'string' ? snapshot.chain : null,
       epoch: typeof project.epoch === 'string' && project.epoch ? project.epoch : null,
     };
-    let st = { ...replay(base, Array.isArray(tail) ? tail : []), epoch: base.epoch };
+    let st = { ...replay(base, Array.isArray(tail) ? tail : [], id), epoch: base.epoch };
     const head = Number.isInteger(project.head_seq) ? project.head_seq : st.seq;
     if (more === true || (more === undefined && st.seq < head)) st = await catchUp(id, st, opts);
     stats.full++;

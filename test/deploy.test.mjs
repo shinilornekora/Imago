@@ -279,6 +279,8 @@ test('compose: все пределы сервисов — из окружени�
     WORKER_MAX_MB: ol.WORKER_MAX_OLD_MB, WORKER_TIMEOUT_MS: ol.WORKER_TIMEOUT_MS, WORKER_JOBS: ol.WORKER_JOBS_MAX,
     POOL_QUEUE_MAX: ol.POOL_QUEUE_MAX, POOL_QUEUE_WAIT_MS: ol.POOL_QUEUE_WAIT_MS, QUEUE_MAX: ol.MAX_QUEUE_PER_PROJECT,
     LLM_TIMEOUT_MS: 120000, WORKERS: '',
+    // круг 31: потолок тела ответа модели — то же умолчание, что у brain
+    LLM_MAX_BODY_BYTES: (await import('../src/brain.js')).MODEL_BODY_MAX_BYTES,
   };
   // Orchestrator читает из окружения ровно эти (index.js) — compose передаёт каждый
   const orchSrc = read('server/orchestrator/index.js');

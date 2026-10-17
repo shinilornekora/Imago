@@ -13,6 +13,7 @@
  *   LLM_MODEL         имя модели
  *   LLM_API_KEY       ключ модели (никогда не выводится)
  *   LLM_TIMEOUT_MS    дедлайн одного запроса к модели (120000)
+ *   LLM_MAX_BODY_BYTES потолок тела ответа модели, байт (8 МБ); больше — llm_bad_response (круг 31)
  *   WORKERS           воркеров DSLV (min(2, CPU))
  *   WORKER_MAX_MB     потолок кучи воркера (512)
  *   WORKER_TIMEOUT_MS счётное время одного прогона, без ожидания модели (60000)
@@ -66,6 +67,8 @@ export async function start(opts = {}) {
   const llmCfg = opts.llm || {
     kind: env.LLM_KIND, baseUrl: env.LLM_BASE_URL, model: env.LLM_MODEL, apiKey: env.LLM_API_KEY,
     timeout: num(env.LLM_TIMEOUT_MS),
+    // круг 31: потолок тела ответа модели, байт (умолчание — 8 МБ)
+    maxBodyBytes: num(env.LLM_MAX_BODY_BYTES),
   };
 
   const llm = createLlm({ ...llmCfg, fetch: opts.fetch });
@@ -98,6 +101,7 @@ export async function start(opts = {}) {
   const pipeline = createPipeline({
     dslr, dslts, duil, dslv, llm, traces, jev, log, instance, startedAt,
     docHealth: () => doc.health(),
+    docHealthDetail: () => doc.healthDetail(),
     maxQueue: opts.queueMax !== undefined ? opts.queueMax : num(env.QUEUE_MAX),
     variantsTtlMs: opts.variantsTtlMs,
   });

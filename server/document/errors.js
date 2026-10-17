@@ -89,7 +89,7 @@ function logOnce(text) {
 const DATA_ERRORS = {
   '22P05': 'строка содержит символ, который база не хранит (\\u0000)',
   '22021': 'строка содержит недопустимый символ (NUL или битый UTF-8)',
-  '22P02': 'значение в неверном формате (например, половинка суррогатной пары в строке)',
+  '22P02': 'значение в неверном для базы формате (битая строка или число не того вида)',
   '22003': 'число вне допустимого диапазона',
   '22001': 'строка длиннее допустимого'
 };
@@ -121,9 +121,12 @@ export async function viaStorage(p) {
       throw badRequest('данные не принимаются: ' + (DATA_ERRORS[code] || 'значение не подходит базе'), { detail: { cause: 'data', sqlstate: code } });
     }
     const timeout = code === '57014' || /timeout/i.test(msg);
-    const cause = timeout ? 'timeout' : 'storage';
+    // круг 31: схема базы не та, что ждёт код (восстановили из копии до миграций) — хранилище
+    // уже сверяет миграции; повтор запроса не помог — 503 с причиной `schema`
+    const schema = code === '42703' || code === '42P01';
+    const cause = timeout ? 'timeout' : schema ? 'schema' : 'storage';
     logOnce(`[document] хранилище → 503 (${cause}${code ? ' ' + code : ''}): ${oneLine(msg)}`);
-    throw unavailable('хранилище недоступно' + (timeout ? ': запрос не уложился в дедлайн' : ''), { detail: { cause } });
+    throw unavailable('хранилище недоступно' + (timeout ? ': запрос не уложился в дедлайн' : schema ? ': схема базы не согласована с кодом, идёт сверка миграций' : ''), { detail: { cause } });
   }
 }
 

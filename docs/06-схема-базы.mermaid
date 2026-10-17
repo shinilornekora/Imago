@@ -1,4 +1,8 @@
 erDiagram
+    %% Круг 31: базу восстановили из копии, снятой до миграций (например, до 009/010), под
+    %% работающим экземпляром — Document service сверяет schema_migrations с каталогом при
+    %% переподключении LISTEN и на ошибке 42703/42P01, догоняет миграции под тем же advisory-lock;
+    %% пока не догнал — /api/health 503 detail.storage = schema.
     PROJECTS ||--o{ OPERATIONS : "журнал — источник истины"
     PROJECTS ||--o{ SNAPSHOTS : "снимки для открытия"
     PROJECTS ||--o{ LIBRARY_VERSIONS : "проект вида library: помеченные снимки"

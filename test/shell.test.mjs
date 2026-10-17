@@ -415,9 +415,12 @@ test('круг 29, Д2: «Сохранить как новый» для доку
 
 test('круг 29, J5/J6/п.7: слова not_applied, пропавшего проекта, подписей и кодов', async () => {
   const { agentErrorWords, txTitleWords, errorCodeWords, isModelError } = await import('../src/shell.js');
-  const na = agentErrorWords({ code: 'not_applied', message: 'Ни одну правку не удалось применить: слой «Шапка» не найден' });
+  const na = agentErrorWords({ code: 'not_applied', message: 'Ни одну правку не удалось применить: слой «Шапка» не найден', detail: { hint: 'name_layer' } });
   assert.equal(na.title, 'Не получилось применить правку: слой «Шапка» не найден');
   assert.match(na.note, /Назовите слой/);
+  // круг 31: совет — только по hint (сервер — detail.hint, brain — hint); «нет раскладки» — без совета
+  assert.match(agentErrorWords({ code: 'not_applied', message: 'слой «Шапка» не найден', hint: 'name_layer' }).note, /Назовите слой/);
+  assert.equal(agentErrorWords({ code: 'not_applied', message: 'у текста «Заголовок» нет раскладки' }).note, '');
   assert.equal(agentErrorWords({ code: 'not_applied', message: 'invalid_ops: bad' }).title, 'Не получилось применить правку');
   assert.equal(isModelError({ code: 'not_applied' }), false);
   const nf = agentErrorWords({ code: 'not_found', message: 'проект не найден' });
@@ -433,4 +436,58 @@ test('круг 29, J5/J6/п.7: слова not_applied, пропавшего пр
   assert.equal(errorCodeWords('llm_failed'), 'модель ответила ошибкой');
   assert.doesNotMatch(errorCodeWords('whatever_code'), /[a-z]/);
   assert.doesNotMatch(stoppedWriteWords({ title: 'x' }).note, /ниже/);
+});
+
+/* ------------------------------ круг 31 ------------------------------ */
+
+test('shell r31 (K2): база данных лежит — «База данных сервера недоступна — команда не выполнена»', async () => {
+  const S = await import('../src/shell.js');
+  const w = S.agentErrorWords({ code: 'document_down', document_reason: 'storage', retryAfterMs: 5000 });
+  assert.equal(w.title, 'База данных сервера недоступна — команда не выполнена');
+  assert.equal(w.waitMs, 5000);
+  assert.doesNotMatch(w.note, /сервер документа не отвечает/);
+  // причина в detail (как её может прислать Orchestrator) — те же слова
+  assert.equal(S.agentErrorWords({ code: 'document_down', detail: { document_reason: 'storage' } }).title, w.title);
+  // без причины — прежние слова
+  assert.equal(S.agentErrorWords({ code: 'document_down' }).title, 'Сервер агента не видит документ');
+  const n = S.agentHealthNotice({ ok: true, document: 'up', llm: 'up' }, { ok: true, document: 'down', document_reason: 'storage', llm: 'up' });
+  assert.match(n.text, /база данных сервера недоступна/);
+  assert.doesNotMatch(n.text, /сервер документа не отвечает/);
+  assert.match(S.retryLabel(5000, 'document_down', { document_reason: 'storage' }), /^База данных сервера недоступна — повторю через 5 с$/);
+  assert.match(S.agentModeTitle('server', { ok: true, document: 'down', document_reason: 'storage', llm: 'up' }), /база данных/);
+});
+
+test('shell r31 (K3): внутренняя ошибка, непонятный ответ модели — свои слова', async () => {
+  const S = await import('../src/shell.js');
+  assert.equal(S.agentErrorWords({ code: 'internal', message: 'TypeError: x is undefined' }).title, 'Внутренняя ошибка агента — сообщите администратору');
+  assert.doesNotMatch(S.agentErrorWords({ code: 'internal', message: 'TypeError: x is undefined' }).note, /TypeError/);
+  assert.equal(S.agentErrorWords({ code: 'llm_bad_response', message: 'ответ модели не JSON' }).title, 'Ответ модели не удалось разобрать — попробуйте ещё раз');
+});
+
+test('shell r31 (m7): чья правка — в родительном падеже; несклоняемое — в скобках', async () => {
+  const S = await import('../src/shell.js');
+  assert.equal(S.editOf({ author: 'Борис' }), 'правки Бориса');
+  assert.equal(S.editOf({ author: 'Аня' }), 'правки Ани');
+  assert.equal(S.editOf({ author: 'Ольга' }), 'правки Ольги');
+  assert.equal(S.editOf({ author: 'Андрей' }), 'правки Андрея');
+  assert.equal(S.editOf({ author: 'Вера' }), 'правки Веры');
+  assert.equal(S.editOf({ author: 'Анна Ковалёва' }), 'правки (Анна Ковалёва)');
+  assert.equal(S.editOf({ author: 'Bob' }), 'правки (Bob)');
+  assert.equal(S.editOf({ author_kind: 'agent' }), 'правки агента');
+  assert.equal(S.editOf(null), 'чужой правки');
+});
+
+test('shell r31: оболочка — слова круга 31 на месте (корень без базы, «Проекты», вторая вкладка, импорт)', () => {
+  const app = readFileSync(join(root, 'app.js'), 'utf8');
+  for (const s of ['База данных сервера недоступна', 'Попробовать снова', 'эта правка сделана в другой вкладке — отменить её можно там',
+    'Список не пришёл — база данных сервера недоступна', 'Агент не нашёл, что поменять', 'importTooBigWords']) {
+    assert.ok(app.includes(s), `в app.js нет «${s}»`);
+  }
+  // r.tx.id после commitDoc — только после проверки r.ok (круг 31, UX Д1)
+  const imp = app.slice(app.indexOf('function importJson()'), app.indexOf('function docName('));
+  assert.ok(imp.indexOf('!r.ok') > 0 && imp.indexOf('!r.ok') < imp.indexOf('undoTx(r.tx.id)'), 'импорт проверяет r.ok до r.tx.id');
+  // демо-макет в серверной сборке не показывается, пока сервер не ответил
+  assert.match(app, /function serverBuild\(\)/);
+  const html = readFileSync(join(root, 'index.html'), 'utf8');
+  assert.match(html, /id="net-pill"/);
 });

@@ -20,6 +20,8 @@
  *   recentTxMeta(projectId, {limit?, beforeSeq?}) → [{seq, tx_id, author, author_kind, title, created_at, client,
  *     command_id, command_author, ops_count, dropped_count}]   (круг 29, J2: от новых к старым, seq < beforeSeq; без чтения ops)
  *   ping({timeoutMs = 1000}?) → boolean   (круг 29, J1: SELECT 1, ответ помнится 1 с; не бросает)
+ *   schemaState → null | {reason, since, phase, error?, migration?}   (круг 31: схема отстала от кода — база
+ *     восстановлена из копии до миграций; идёт сверка — /api/health 503 `storage:'schema'`)
  *   chainAt(projectId, seq) → string|null   (seq 0 → '')
  *   commitTx(projectId, tx, {expectSeq, expectChain, origin}) → {status:'committed'|'existing'|'stale'|'missing', …}
  *   writeSnapshot(projectId, seq, doc, engine, chain, tombstones?) → boolean · pruneSnapshots(projectId, keep)
@@ -489,8 +491,12 @@ export function createPgStorage(opts = {}) {
     listener = client;
     listenerPid = client.processID || null;
     listenAttempt = 0;
-    // пока соединения не было, уведомления терялись: головы сверяются с базой
-    if (isRetry) dispatch({ k: 'resync' });
+    // пока соединения не было, уведомления терялись: головы сверяются с базой; и схема —
+    // базу могли восстановить из копии, снятой до миграций (круг 31)
+    if (isRetry) {
+      checkSchema('слушатель переподключился').catch(() => {});
+      dispatch({ k: 'resync' });
+    }
   }
 
   async function notify(client, msg) {
@@ -718,6 +724,121 @@ export function createPgStorage(opts = {}) {
     );
     return r.rowCount > 0;
   }
+  /** Флаги колонок — по тому, что в схеме сейчас. */
+  async function refreshFlags() {
+    hasOpsSize = await columnExists('operations', 'ops_bytes');
+    hasCommandAuthor = await columnExists('operations', 'command_author');
+  }
+
+  /* -------------------- сверка схемы под работающим экземпляром -------------------- */
+
+  /**
+   * Круг 31: базу восстановили из копии, снятой до миграций (009/010), — под работающим
+   * экземпляром. Флаги колонок, посчитанные на старте, врут, и каждый запрос журнала падал
+   * 42703 (нет колонки) — все проекты навсегда 503, а /api/health 200. Теперь: ошибка схемы
+   * (42703 нет колонки, 42P01 нет таблицы) или переподключение слушателя (восстановление
+   * рвёт соединения) — сверка: флаги по факту (запросы снова идут, пусть без новых колонок),
+   * миграции заново под тем же advisory-замком, флаги ещё раз. Упавший запрос повторяется
+   * один раз. Пока схема не согласована — `schemaState` (для /api/health: 503,
+   * `detail.storage: 'schema'`).
+   */
+  const SCHEMA_CODES = new Set(['42703', '42P01']);
+  const isSchemaError = (e) => !!(e && typeof e.code === 'string' && SCHEMA_CODES.has(e.code));
+  /** null — схема согласована; иначе `{reason, since, phase, error?}`. */
+  let schemaState = null;
+  /** Сверка в полёте: `{flags, done}` — флаги по факту и сверка целиком. */
+  let reschemaFlight = null;
+  let reschemaFailedAt = 0;
+  /**
+   * Ждать сверки упавшему запросу — не дольше (дальше — повтор по фактическим флагам): DDL-миграции
+   * (010) успевают, и повтор уже пишет новые колонки; долгое дозаполнение (009 на большом журнале)
+   * запрос не ждёт — идёт без новых колонок (их посчитает триггер).
+   */
+  const schemaWaitMs = Math.min(1000, dbTimeoutMs > 0 ? dbTimeoutMs : 1000);
+  /** Неудачную сверку /api/health повторяет не чаще. */
+  const RESCHEMA_RETRY_MS = 2000;
+
+  function reschema(reason) {
+    if (reschemaFlight) return reschemaFlight;
+    const since = new Date().toISOString();
+    schemaState = { reason, since, phase: 'check' };
+    let flagsDone;
+    const flags = new Promise((r) => { flagsDone = r; });
+    const done = (async () => {
+      try {
+        // сразу — флаги по факту: запросы снова идут (без новых колонок), пока мигрируем
+        await refreshFlags().catch(() => {});
+        flagsDone();
+        if (closing) throw new Error('хранилище закрывается');
+        schemaState = { reason, since, phase: 'migrate' };
+        await migrate();
+        await refreshFlags();
+        schemaState = null;
+        reschemaFailedAt = 0;
+        log.warn(`[document/pg] схема базы сверена (${reason}): миграции догнаны, колонки журнала — ops_bytes ${hasOpsSize ? 'есть' : 'нет'}, command_author ${hasCommandAuthor ? 'есть' : 'нет'}`);
+      } catch (e) {
+        flagsDone();
+        reschemaFailedAt = Date.now();
+        schemaState = { reason, since, phase: 'failed', error: String((e && e.message) || e).slice(0, 200) };
+        if (!closing) log.warn(`[document/pg] сверка схемы базы не удалась (${reason}): ${e && e.message} — повторю`);
+        throw e;
+      } finally {
+        reschemaFlight = null;
+      }
+    })();
+    done.catch(() => {});
+    reschemaFlight = { flags, done };
+    return reschemaFlight;
+  }
+
+  /**
+   * Схема на месте? Дёшево (учёт миграций против каталога): после переподключения слушателя —
+   * базу могли подменить. Не хватает миграций или таблицы учёта — сверка; иначе только флаги.
+   */
+  let migrationFiles = null;
+  async function checkSchema(reason) {
+    if (closing || reschemaFlight) return;
+    try {
+      if (!migrationFiles) migrationFiles = (await readdir(migrationsDir)).filter((f) => MIGRATION_RE.test(f)).sort();
+      const r = await pool.query('SELECT name FROM schema_migrations');
+      const applied = new Set(r.rows.map((x) => x.name));
+      const missing = migrationFiles.filter((f) => !applied.has(f));
+      if (missing.length) {
+        log.warn(`[document/pg] ${reason}: в базе не учтены миграции ${missing.join(', ')} — базу восстановили из старой копии? Догоняю`);
+        reschema(`${reason}: нет ${missing.join(', ')}`);
+        return;
+      }
+      await refreshFlags();
+    } catch (e) {
+      if (isSchemaError(e)) reschema(`${reason}: ${e.code}`);
+      // база недоступна — скажет ping; сверим при следующем переподключении или ошибке
+    }
+  }
+
+  /**
+   * Запрос с одной попыткой после сверки схемы: ошибка схемы → сверка (флаги, миграции,
+   * флаги) — ждём её не дольше schemaWaitMs и повторяем по флагам, какие есть.
+   * @template T
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  async function withSchema(fn) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!isSchemaError(e) || closing) throw e;
+      log.warn(`[document/pg] схема базы не та, что ждёт код (${e.code}: ${e.message}) — сверяю миграции и повторяю запрос`);
+      const flight = reschema(e.code);
+      await flight.flags;
+      let timer;
+      await Promise.race([flight.done.catch(() => {}), new Promise((r) => {
+        timer = setTimeout(r, schemaWaitMs);
+        if (timer.unref) timer.unref();
+      })]);
+      clearTimeout(timer);
+      return await fn();
+    }
+  }
 
   /* --------------------------------- здоровье --------------------------------- */
 
@@ -743,6 +864,8 @@ export function createPgStorage(opts = {}) {
    */
   function ping({ timeoutMs = 1000 } = {}) {
     if (closing) return Promise.resolve(false);
+    // сверка схемы не удалась (база была недоступна посреди неё) — /api/health её повторяет
+    if (schemaState && !reschemaFlight && Date.now() - reschemaFailedAt > RESCHEMA_RETRY_MS) reschema(schemaState.reason);
     if (pingCache && Date.now() - pingCache.at < PING_CACHE_MS) return Promise.resolve(pingCache.value);
     if (pingFlight) return pingFlight;
     pingFlight = (async () => {
@@ -779,14 +902,27 @@ export function createPgStorage(opts = {}) {
     get listening() { return !!listener; },
     /** pid серверного процесса слушателя (тестам: pg_terminate_backend). */
     get listenerPid() { return listenerPid; },
+    /**
+     * Схема базы не согласована с кодом (круг 31: базу восстановили из копии до миграций) —
+     * `{reason, since, phase: 'check'|'migrate'|'failed', error?, migration?}`; null — согласована.
+     */
+    get schemaState() {
+      if (!schemaState) return null;
+      const out = { ...schemaState };
+      if (migrationState && migrationState.migration) out.migration = migrationState.migration;
+      return out;
+    },
+    /** Сверить схему сейчас (тестам и отладке): промис сверки. */
+    recheckSchema(reason = 'по запросу') { return reschema(reason).done; },
+    /** Колонки журнала, которые адаптер сейчас пишет и читает (тестам). */
+    get schemaFlags() { return { opsSize: hasOpsSize, commandAuthor: hasCommandAuthor }; },
 
     /** Миграции и слушатель уведомлений; повторный вызов (второй экземпляр на том же адаптере) — тот же промис. */
     init() {
       if (!initing) {
         initing = (async () => {
           await migrate();
-          hasOpsSize = await columnExists('operations', 'ops_bytes');
-          hasCommandAuthor = await columnExists('operations', 'command_author');
+          await refreshFlags();
           if (canListen) await connectListener(false);
         })();
         initing.catch(() => { initing = null; });
@@ -1212,5 +1348,12 @@ export function createPgStorage(opts = {}) {
       return res.rows.map((r) => ({ id: String(r.id), command_id: r.command_id, created_at: isoOf(r.created_at), body: r.body }));
     }
   };
+  // круг 31: запросы к базе — с одной попыткой после сверки схемы (ошибка 42703/42P01)
+  for (const name of ['createProject', 'listProjects', 'listProjectsPage', 'getProject', 'renameProject', 'latestSnapshot',
+    'latestSnapshotMeta', 'snapshotBefore', 'snapshotSeqs', 'txsAfter', 'recentTxMeta', 'chainAt', 'commitTx', 'writeSnapshot',
+    'pruneSnapshots', 'findTx', 'knownEpoch', 'bumpEpoch', 'epochs', 'addTrace', 'listTraces']) {
+    const fn = self[name];
+    self[name] = (...args) => withSchema(() => fn.apply(self, args));
+  }
   return self;
 }

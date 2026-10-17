@@ -41,7 +41,7 @@ import {
   QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES, BUSY_RETRY_S,
   REPLAY_MAX_AGE_MS, REPLAY_SCAN_TXS, MAX_VALUE_DEPTH, MAX_OP_ID, MAX_COMMAND_ID,
   TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES,
-  isCleanText, cleanText, cutText, cleanDeep, showValue
+  isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue
 } from './limits.js';
 
 /** Предел операций в транзакции (совместимость: прежде экспортировался отсюда). */
@@ -115,7 +115,7 @@ export function validateTx(raw, ctx = {}) {
   const bad = (msg) => badRequest(msg, { compat: txId });
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw bad('транзакция должна быть объектом');
   if (!isId(raw.tx_id, MAX_ID)) throw bad('tx_id: непустая строка до 128 символов без U+0000 и одиночных суррогатов');
-  if (!Number.isInteger(raw.base_seq) || raw.base_seq < 0) throw bad('base_seq: целое ≥ 0');
+  if (!Number.isSafeInteger(raw.base_seq) || raw.base_seq < 0) throw bad(`base_seq: целое от 0 до ${Number.MAX_SAFE_INTEGER}`);
   if (!Array.isArray(raw.ops)) throw bad('ops: массив операций');
   if (raw.ops.length > MAX_OPS_PER_TX) {
     throw tooLarge(`ops: не больше ${MAX_OPS_PER_TX} операций в транзакции — разбейте правку`, { compat: txId, detail: { limit: 'ops_per_tx', max: MAX_OPS_PER_TX, got: raw.ops.length } });
@@ -152,17 +152,21 @@ export function validateTx(raw, ctx = {}) {
   const tx = { tx_id: raw.tx_id, base_seq: raw.base_seq, ops, engine: ENGINE_VERSION };
   if (raw.undo_of) tx.undo_of = raw.undo_of;
   if (raw.redo_of) tx.redo_of = raw.redo_of;
-  const author = cleanText(typeof raw.author === 'string' && raw.author ? raw.author : ctx.author);
+  // метаданные (author, title, command_author) — без управляющих и bidi-символов (круг 31)
+  const author = cleanMeta(typeof raw.author === 'string' && raw.author ? raw.author : ctx.author);
   if (author) tx.author = cutText(String(author), MAX_NAME);
   tx.author_kind = raw.author_kind || 'human';
   if (raw.client) tx.client = raw.client;
-  if (raw.title) tx.title = cleanText(raw.title);
+  if (raw.title) {
+    const title = cleanMeta(raw.title);
+    if (title) tx.title = title;
+  }
   // связь с командой агента (трасса): метаданные — негодное значение не губит правку, его просто нет
   if (isId(raw.command_id, MAX_COMMAND_ID)) tx.command_id = raw.command_id;
   // круг 30: имя автора команды агента — тоже метаданные: не строка или пустая — поля нет,
   // длиннее предела — обрезается (Orchestrator уже присылает ≤ 200 и чистым)
   if (typeof raw.command_author === 'string') {
-    const who = cutText(cleanText(raw.command_author).trim(), MAX_NAME);
+    const who = cutText(cleanMeta(raw.command_author).trim(), MAX_NAME);
     if (who) tx.command_author = who;
   }
   if (raw.replay_of_epoch) {

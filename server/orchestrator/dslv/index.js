@@ -36,7 +36,7 @@ import { createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { OrchError, shuttingDown } from '../errors.js';
 import { WORKER_MAX_OLD_MB, WORKER_TIMEOUT_MS, WORKER_JOBS_MAX, POOL_QUEUE_MAX, POOL_QUEUE_WAIT_MS } from '../limits.js';
-import { SCHEMAS } from '../../../src/brain.js';
+import { SCHEMAS, modelDataProblem } from '../../../src/brain.js';
 
 const WORKER_URL = new URL('./worker.js', import.meta.url);
 /**
@@ -52,6 +52,11 @@ const QUEUED_NOTICE_MS = 400;
 const COLD_GRACE_MS = 3000;
 /** Сколько раз задание, чей воркер упал не по его вине, идёт заново. */
 const RESTARTS_MAX = 1;
+
+/** Круг 31: ответ модели не той формы (глубже/больше предела) — до передачи в воркер. */
+const BAD_SHAPE = Object.freeze({ kind: 'model', code: 'llm_bad_response', message: 'Ответ модели не той формы (слишком глубокий или большой) — попробуйте ещё раз' });
+/** Круг 31: ответ модели не удалось передать воркеру. */
+const BAD_TRANSFER = Object.freeze({ kind: 'model', code: 'llm_bad_response', message: 'Ответ модели не удалось передать расчёту — попробуйте ещё раз' });
 
 /** Что из окружения процесса видит воркер: язык, часовой пояс, пути — и больше ничего. */
 const WORKER_ENV_KEYS = new Set(['PATH', 'HOME', 'LANG', 'LANGUAGE', 'TZ', 'NODE_ENV', 'TMPDIR', 'TEMP', 'TMP']);
@@ -292,7 +297,21 @@ export function createDslv(o = {}) {
       const reply = { type: 'llm-reply', callId: msg.callId, ...answer };
       if (job.settled || slot.dead) return;
       if (!job.llmPending) arm(job);
-      try { slot.worker.postMessage(reply); } catch { /* воркер уже ушёл */ }
+      try {
+        slot.worker.postMessage(reply);
+      } catch (e) {
+        /* Круг 31: ответ не передался воркеру (structuredClone: переполнение стека на глубоком
+           JSON, неклонируемое значение). Раньше ошибка глоталась, воркер ждал ответа до таймаута
+           счёта (60 с) и заменялся. Теперь — сразу ответ-ошибка `llm_bad_response`: воркер
+           цел, задание быстро кончается. */
+        log.warn(`[orchestrator/dslv] ответ модели не передался воркеру: ${e && e.message ? e.message : e}`);
+        const bad = { type: 'llm-reply', callId: msg.callId, ok: false, usage: [], error: { ...BAD_TRANSFER } };
+        try {
+          slot.worker.postMessage(bad);
+        } catch {
+          finish(job, null, new OrchError(502, 'llm_bad_response', BAD_TRANSFER.message, { retryable: true }));
+        }
+      }
     }
   }
 
@@ -314,6 +333,13 @@ export function createDslv(o = {}) {
       try {
         const schema = msg.schema && msg.schema.ref ? SCHEMAS[msg.schema.ref] : msg.schema;
         const data = await job.onLlm(msg.messages, schema, { ...msg.opts, onUsage: (u) => usage.push(u) });
+        /* Круг 31: глубина и размер данных модели — до передачи в воркер (structuredClone
+           рекурсивен: глубокий JSON роняет стек главного потока). */
+        const bad = modelDataProblem(data);
+        if (bad) {
+          log.warn(`[orchestrator/dslv] ответ модели не той формы: ${bad}`);
+          return { ok: false, usage, error: { ...BAD_SHAPE } };
+        }
         return { ok: true, data, usage };
       } catch (e) {
         return {

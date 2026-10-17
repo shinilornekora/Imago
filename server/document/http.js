@@ -24,7 +24,7 @@ import {
   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, PROJECTS_PAGE, PROJECTS_PAGE_MAX,
   WRITE_BODY_BYTES, BODY_TIMEOUT_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
   HISTORY_PAGE, HISTORY_PAGE_MAX, HEALTH_PING_MS, HEALTH_CACHE_MS,
-  isCleanText, cleanText, cutText, cleanDeep, showValue
+  isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue
 } from './limits.js';
 
 /** Предел тела запроса (совместимость: прежде экспортировался отсюда). */
@@ -160,18 +160,23 @@ function authorOf(req) {
   if (!h) return undefined;
   try {
     // заголовок — latin1; имя по-русски клиент шлёт как UTF-8 в percent-encoding
-    return cutText(cleanText(decodeURIComponent(String(h))), 200);
+    return cutText(cleanMeta(decodeURIComponent(String(h))), 200);
   } catch (_) {
-    return cutText(cleanText(String(h)), 200);
+    return cutText(cleanMeta(String(h)), 200);
   }
 }
 
-/** Целое из query или undefined; не целое → 400. */
-function intParam(url, name, { min = -Infinity, max = Infinity } = {}) {
+/**
+ * Целое из query или undefined; не целое или вне [min, max] → 400 до всякого SQL (круг 31:
+ * `before=9999999999999999999999` доходил до базы как 1e+22 и возвращался 400 с SQLSTATE
+ * 22P02 про «половинку суррогатной пары»). Только десятичные цифры (без `1e3`, `0x10`,
+ * пробелов); верхняя граница по умолчанию — Number.MAX_SAFE_INTEGER (bigint seq до неё точен).
+ */
+function intParam(url, name, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   const raw = url.searchParams.get(name);
   if (raw === null || raw === '') return undefined;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < min || n > max) throw badRequest(`${name}: целое${Number.isFinite(min) ? ` от ${min}` : ''}${Number.isFinite(max) ? ` до ${max}` : ''}`);
+  const n = /^-?\d{1,17}$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < min || n > max) throw badRequest(`${name}: целое от ${min} до ${max}`, { detail: { param: name, min, max } });
   return n;
 }
 
@@ -249,7 +254,8 @@ function cleanBody(v, what) {
 }
 
 /** Имя проекта: чистая строка не длиннее MAX_PROJECT_NAME кодовых точек (звать только со строкой). */
-const projectName = (v) => cutText(cleanText(String(v)), MAX_PROJECT_NAME);
+/** Имя проекта — метаданные (круг 31): без управляющих и bidi-символов. */
+const projectName = (v) => cutText(cleanMeta(String(v)), MAX_PROJECT_NAME);
 
 /** Предел глубины дерева: из движка, если он его даёт, иначе — тот же, что в core (256). */
 const MAX_TREE_DEPTH = Number.isInteger(core.MAX_DEPTH) && core.MAX_DEPTH > 0 ? core.MAX_DEPTH : 256;
@@ -326,13 +332,15 @@ function droppedCount(list) {
  * которой все операции выпали при слиянии: она получает seq ради идемпотентности).
  */
 function historyItem(m) {
+  // круг 31: подписи — без управляющих и bidi-символов и у записей, сделанных до чистки
+  const meta = (v) => (typeof v === 'string' && v ? cleanMeta(v) || null : null);
   const out = {
     seq: Number(m.seq), tx_id: m.tx_id,
-    author: m.author ?? null, author_kind: m.author_kind || 'human', title: m.title ?? null,
+    author: meta(m.author), author_kind: m.author_kind || 'human', title: meta(m.title),
     created_at: m.created_at instanceof Date ? m.created_at.toISOString() : m.created_at,
     client: m.client ?? null, command_id: m.command_id ?? null,
     // круг 30: кто дал команду агенту (подпись «Агент · Аня»); у человеческой и старой записи — null
-    command_author: typeof m.command_author === 'string' && m.command_author ? m.command_author : null,
+    command_author: meta(m.command_author),
     ops_count: Number(m.ops_count) || 0, dropped_count: Number(m.dropped_count) || 0
   };
   if (out.ops_count === 0) out.empty = true;
@@ -453,6 +461,15 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       if (!(await storageUp())) {
         throw new DocError(503, 'unavailable', 'хранилище недоступно', { retryable: true, retryAfter: 1, detail: { storage: 'down' } });
       }
+      // круг 31: база жива, но её схема отстала от кода (восстановили из копии, снятой до
+      // миграций) — хранилище догоняет миграции; пока не догнало — не здоров
+      const schema = storage.schemaState || null;
+      if (schema) {
+        throw new DocError(503, 'unavailable', 'схема базы не согласована с кодом (базу восстановили из старой копии?) — сервис догоняет миграции', {
+          retryable: true, retryAfter: 5,
+          detail: { storage: 'schema', phase: schema.phase, ...(schema.migration ? { migration: schema.migration } : {}), since: schema.since }
+        });
+      }
       sendJSON(res, 200, { ok: true, engine: ENGINE_VERSION, storage: 'up' });
       return;
     }
@@ -490,7 +507,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         const limit = intParam(url, 'limit', { min: 1, max: PROJECTS_PAGE_MAX }) || PROJECTS_PAGE;
         const after = cursorParam(url.searchParams.get('after'));
         const page = await viaStorage(storage.listProjectsPage({ kind, limit, after }));
-        const body = { projects: page.projects.map((p) => ({ id: p.id, name: p.name, kind: p.kind, head_seq: p.head_seq, updated_at: p.updated_at })), more: page.more };
+        const body = { projects: page.projects.map((p) => projectSummary(p)), more: page.more };
         if (page.more && page.next) body.next = encodeCursor(page.next);
         sendJSON(res, 200, body);
         return;

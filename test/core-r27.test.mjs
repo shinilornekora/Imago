@@ -48,7 +48,17 @@ function refChildren(doc, list) {
   return kids;
 }
 
-test('плоский родитель на 19 000 детей: 5000 remove / move / create / setToken — без отказов по бюджету, каждый проход < 1 с', () => {
+/**
+ * Круг 31: эталонный проход в том же процессе — копия документа через JSON (линейна
+ * по числу узлов, как и проверяемые проходы). Медиана трёх замеров, взятых прямо
+ * перед случаем: нагрузка соседних тестов замедляет и его, и проверяемое одинаково.
+ */
+function refPassMs(doc) {
+  const t = [0, 1, 2].map(() => time(() => JSON.parse(JSON.stringify(doc)))[1]).sort((a, b) => a - b);
+  return t[1];
+}
+
+test('плоский родитель на 19 000 детей: 5000 remove / move / create / setToken — без отказов по бюджету, каждый проход в пределах десятков эталонных', () => {
   const { doc, kids } = flatDoc(19000);
   const before = JSON.stringify(doc);
   let r = 12345;
@@ -64,15 +74,22 @@ test('плоский родитель на 19 000 детей: 5000 remove / move
   };
   const report = {};
   for (const [name, list] of Object.entries(cases)) {
+    const ref = refPassMs(doc);
     const [m, tRebase] = time(() => rebase(doc, list, { tombstones: new Map(), budgetMs: 2000 }));
     assert.deepEqual(m.dropped, [], name + ': отброшено ' + m.dropped.length);
     assert.equal(m.ops.length, 5000, name);
     const [res, tApply] = time(() => applyOps(doc, m.ops));
     assert.equal(res.error, undefined, name);
     const [tomb, tCollect] = time(() => collectTombstones(doc, m.ops));
-    report[name] = [tRebase, tApply, tCollect].map(Math.round);
-    // абсолютный порог — с запасом в разы (замер: 30–300 мс на проход; было до 6 с)
-    for (const t of [tRebase, tApply, tCollect]) assert.ok(t < 1000, name + ': ' + JSON.stringify(report));
+    report[name] = [tRebase, tApply, tCollect, ref].map(Math.round);
+    /* Круг 31: порог относительный — к эталонному проходу (копия документа через
+       JSON) в том же процессе: абсолютная секунда флапала под нагрузкой полного
+       прогона. Замер: проход 0,5–8 эталонных (30–450 мс при эталоне ~60 мс);
+       квадратичный путь, от которого тест сторожит, — сотня эталонных (до 6 с).
+       Нижняя граница в 1,5 с — чтобы быстрая машина с эталоном в 10 мс не
+       превращала шум сборщика мусора в падение. */
+    const limit = Math.max(1500, 40 * ref);
+    for (const t of [tRebase, tApply, tCollect]) assert.ok(t < limit, name + ': ' + JSON.stringify(report) + ' предел ' + Math.round(limit));
     if (name !== 'setToken') {
       // порядок детей — как у прежнего «filter + splice» поштучно
       assert.deepEqual(res.doc.nodes.F.children, refChildren(doc, m.ops), name + ': порядок детей');
