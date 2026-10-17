@@ -1169,6 +1169,12 @@ function checkComponent(node, doc, loose) {
   for (const p of (Array.isArray(c.props) ? c.props : [])) {
     if (!p || typeof p !== 'object') return 'component.props: пропс должен быть объектом';
     if (typeof p.name !== 'string' || !p.name.trim()) return 'component.props: нужно непустое имя пропса';
+    /* Круг 34: имя пропса — один сегмент пути `props.<имя>` у экземпляра. С точкой
+       (`a.b`, `a.`) путь дробился: пустой сегмент (отказ set) или лишний уровень
+       (`props.a = {b}` — пропс, которого мастер не объявлял). Ключ прототипа —
+       тот же отказ, что у set (`protected-path`). */
+    if (p.name.includes('.')) return `component.props: в имени пропса «${p.name}» не бывает точки`;
+    if (PROTO_KEYS.has(p.name)) return `component.props: имя пропса «${p.name}» зарезервировано`;
     if (seen.has(p.name)) return `component.props: имя «${p.name}» встречается дважды`;
     seen.add(p.name);
     if (!PROP_KINDS.has(p.kind)) return `component.props «${p.name}»: kind «${shown(p.kind)}» неизвестен`;

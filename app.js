@@ -2043,8 +2043,8 @@ const agentClient = AGENT.createAgentClient({
   client: () => (server && server.sync ? server.sync.clientId : ''),
 });
 const AGENT_PROBE_MS = 30000;
-const AGENT_PROBE_MIN_MS = 10000;
-const AGENT_RESTART_PROBE_MS = 1500;   // круг 33: пока сервер агента перезапускается   // чаще не спрашиваем: статус реплики меняется на каждой правке
+const AGENT_PROBE_MIN_MS = 10000;   // чаще не спрашиваем: статус реплики меняется на каждой правке
+const AGENT_RESTART_PROBE_MS = 1500;   // круг 33: пока сервер агента перезапускается
 const serverAgent = {
   health: null,        // последний ответ /agent/health (или {ok:false})
   probing: null,
@@ -2159,6 +2159,16 @@ function agentModeChanged() {
  * проекта, переподключение Hub). Красная карточка «модель не отвечает» уходит сама, когда
  * модель вернулась: висящая ошибка о том, чего уже нет, — неправда.
  */
+/* Круг 34: тост здоровья агента («Сервер агента не видит документ — …») держался свои 6 с
+   и после того, как карточка сменилась на «Документ снова доступен агенту»: на экране разом
+   «не видит» и «снова доступен». Тост здоровья один: новый снимает прежний, а возвращение
+   сервиса (карточка «снова …») снимает и его. */
+let healthToast = null;
+function dropHealthToast() {
+  if (healthToast) healthToast.remove();
+  healthToast = null;
+}
+
 function onAgentHealthChanged(prev, next) {
   if (!server) return;
   const words = agentHealthNotice(prev, next, { hasProvider: !!state.provider });
@@ -2179,6 +2189,7 @@ function onAgentHealthChanged(prev, next) {
   if (back && role === 'doc-down' && !syncHealthy()) return;
   if (back && (role === 'model-down' || role === 'agent-down' || role === 'doc-down' || restarted)) {
     retryHold = null;   // сервис вернулся раньше срока — повтор можно сразу
+    dropHealthToast();  // «не видит документ» рядом с «снова доступен» — неправда (круг 34)
     const again = serverAgent.lastFailed;
     const rest = again && Array.isArray(again.rest) ? again.rest : [];
     const head = role === 'model-down' ? 'Модель на сервере снова отвечает'
@@ -2198,7 +2209,10 @@ function onAgentHealthChanged(prev, next) {
   if (role === 'agent-restart') return;
   if (!words) return;
   // о возвращении тостом не говорим, если и о пропаже не говорили бы: смена проекта, первый ответ
-  toast(words.text, words.kind, 6000);
+  dropHealthToast();
+  const t = toast(words.text, words.kind, 6000);
+  healthToast = t;
+  setTimeout(() => { if (healthToast === t) healthToast = null; }, 6000);
 }
 
 /** Ошибка «документ недоступен агенту» с причиной: база данных (K2) — из ошибки, health или реплики. */
@@ -6898,6 +6912,8 @@ function addProp(masterId, p) {
   if (!master || !master.component) return;
   const why = (t) => showMsg('warn', 'Свойство не объявлено', { note: t });
   if (!p.name) { why('У свойства должно быть имя.'); return; }
+  // круг 34: имя — один сегмент пути `props.<имя>`, ядро точку не примет (checkComponent)
+  if (p.name.includes('.')) { why('В имени свойства не бывает точки — назовите его без неё.'); return; }
   const had = (master.component.props || []).slice();
   if (had.some((x) => x && x.name === p.name)) {
     why(`Свойство «${p.name}» у компонента «${componentName(master)}» уже есть.`);

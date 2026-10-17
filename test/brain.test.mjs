@@ -1390,7 +1390,7 @@ test('п.19: общий счётчик узлов ограничивает ра�
   const res = await runCommand({ doc, selection: [], utterance: 'собери новый экран каталога', provider, engine, activeArtboardId: 'ab1' });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.ok(res.ops.length <= 400, `узлов не больше 400, а было ${res.ops.length}`);
-  assert.ok(res.warnings.some((w) => /узл/i.test(w) && /400|предел|ограничен/i.test(w)), 'внятное предупреждение: ' + res.warnings.join(' | '));
+  assert.ok(res.warnings.some((w) => /сло[ёе]в/i.test(w) && /400|предел|ограничен/i.test(w)), 'внятное предупреждение: ' + res.warnings.join(' | '));
   assert.ok(res.warnings.length < 200, 'без потока одинаковых предупреждений');
 });
 
@@ -2043,7 +2043,7 @@ test('круг3 п.4: «во всех карточках показателей�
   const res = await runCommand({ doc, selection: [], utterance: 'во всех карточках показателей скругление 20', provider, engine, activeArtboardId: 'summary' });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.deepEqual(res.ops.map((o) => o.id), ['m0', 'm1', 'm2']);
-  assert.ok(res.warnings.some((w) => /подходит узлов — 3/.test(w)), res.warnings.join(' | '));
+  assert.ok(res.warnings.some((w) => /подходит слоёв — 3/.test(w)), res.warnings.join(' | '));
 });
 
 test('круг3 п.4: одиночная формулировка правит один узел, но говорит о кандидатах', async () => {
@@ -2057,7 +2057,7 @@ test('круг3 п.4: одиночная формулировка правит �
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.deepEqual(res.ops.map((o) => o.id), ['m0'], 'первый в порядке документа, а не самый короткий по имени');
   const w = res.warnings.join(' | ');
-  assert.match(w, /подходит узлов — 3/);
+  assert.match(w, /подходит слоёв — 3/);
   assert.match(w, /во всех/, 'человеку сказано, как поправить все: ' + w);
   assert.equal(looksGroupWide('сделай у карточки показателя скругление 20'), false);
 });
@@ -2383,7 +2383,7 @@ test('круг5 п.1: «выровняй время по правому краю
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.deepEqual(res.ops.map((o) => o.id), ['time0', 'time1', 'time2'], 'колонка поправлена целиком');
   const w = res.warnings.join(' | ');
-  assert.match(w, /подходит узлов — 3/, w);
+  assert.match(w, /подходит слоёв — 3/, w);
   assert.match(w, /все/, w);
 });
 
@@ -2397,7 +2397,7 @@ test('круг5 п.1: «сделай статусы серыми» красит 
   const res = await runCommand({ doc, selection: [], utterance: 'сделай статусы серыми', provider, engine, activeArtboardId: 'summary' });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.deepEqual(res.ops.map((o) => o.id), ['c0_1', 'c1_1', 'c2_1', 'c3_1', 'c4_1']);
-  assert.match(res.warnings.join(' | '), /подходит узлов — 5/);
+  assert.match(res.warnings.join(' | '), /подходит слоёв — 5/);
 });
 
 test('круг5 п.1: колонка узнаётся и на глубине («Место» внутри «Текста пункта»)', () => {
@@ -2423,7 +2423,7 @@ test('круг5 п.1: содержимое оптом не переписыва�
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.deepEqual(res.ops.map((o) => o.id), ['time0'], 'текст — вещь личная, оптом не меняем');
   const w = res.warnings.join(' | ');
-  assert.match(w, /подходит узлов — 3/, w);
+  assert.match(w, /подходит слоёв — 3/, w);
   assert.match(w, /во всех/, 'подсказка есть и при точном совпадении: ' + w);
 });
 
@@ -2967,7 +2967,7 @@ test('круг7 п.6: при трёх одноимённых выбранный 
   });
   const res = await runCommand({ doc, selection: [], utterance: 'назови текст пункта иначе', provider, engine, activeArtboardId: 'screen' });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
-  const line = res.warnings.find((w) => /подходит узлов/.test(w)) || '';
+  const line = res.warnings.find((w) => /подходит слоёв/.test(w)) || '';
   assert.match(line, /правлю «Текст пункта» в «Пункт · /, line);
 });
 
@@ -3373,7 +3373,7 @@ test('круг9 п.5: при агентском выделении «правк�
   const w = res.warnings.join(' | ');
   assert.ok(!/правка ушла/.test(w), 'выделение сделал агент — это не область работы человека: ' + w);
   assert.ok(!/найден\S* вне выделения/.test(w), w);
-  assert.match(w, /подходит узлов — 5/, 'важное предупреждение на месте: ' + w);
+  assert.match(w, /подходит слоёв — 5/, 'важное предупреждение на месте: ' + w);
 });
 
 test('круг9 п.5: человеческое выделение по-прежнему даёт «правка ушла туда»', async () => {
@@ -3483,7 +3483,7 @@ test('круг9 п.9: «пропущено» и «ничего не измени
   const skipped = 'Правка radius: «восемь» — не число: правка пропущена';
   const nothing = 'Правка ни на что не повлияла: в макете ничего не изменилось — скажите точнее, что и где поправить';
   const outside = 'Слой «Статус» найден вне выделения — на экране «Сводка недели»; правка ушла туда';
-  const many = 'Под «Статус» подходит узлов — 5: правлю все';
+  const many = 'Под «Статус» подходит слоёв — 5: правлю все';
   assert.ok(warningRank(skipped) < warningRank(outside), `${warningRank(skipped)} < ${warningRank(outside)}`);
   assert.ok(warningRank(nothing) < warningRank(outside), `${warningRank(nothing)} < ${warningRank(outside)}`);
   assert.ok(warningRank(outside) < warningRank('Проверка макета: контраст 2.10:1'), 'макет ниже адресации');
@@ -3491,7 +3491,7 @@ test('круг9 п.9: «пропущено» и «ничего не измени
   const sorted = sortWarnings([outside, many, 'Починка не помогла — оставил первый вариант', nothing, skipped]);
   assert.match(sorted[0], /пропущена|ничего не изменилось/, sorted.join(' | '));
   assert.match(sorted[1], /пропущена|ничего не изменилось/, sorted.join(' | '));
-  assert.match(sorted[2] + sorted[3], /вне выделения|подходит узлов/, sorted.join(' | '));
+  assert.match(sorted[2] + sorted[3], /вне выделения|подходит слоёв/, sorted.join(' | '));
   assert.match(sorted[4], /Починка/);
 });
 
@@ -3978,7 +3978,7 @@ test('круг13 п.3: выделение фрейма и его же текст
   assert.deepEqual(resolveScope(doc, ['head', 'btn'], null).ids, ['head', 'btn']);
 });
 
-test('круг13 п.3: кандидат не задваивается и «подходит узлов — 2» больше не врёт', async () => {
+test('круг13 п.3: кандидат не задваивается и «подходит слоёв — 2» больше не врёт', async () => {
   const doc = makeDoc13();
   const engine = makeStubEngine();
   const scope = resolveScope(doc, ['btn', 'btnText'], engine, { selectionBy: 'agent' });
@@ -3991,7 +3991,7 @@ test('круг13 п.3: кандидат не задваивается и «по�
     provider, engine, activeArtboardId: 'screen', selectionBy: 'agent',
   });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
-  assert.ok(!/подходит узлов/.test(res.warnings.join(' | ')), res.warnings.join(' | '));
+  assert.ok(!/подходит слоёв/.test(res.warnings.join(' | ')), res.warnings.join(' | '));
   assert.equal(res.ops.length, 1);
 });
 

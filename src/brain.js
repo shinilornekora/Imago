@@ -652,7 +652,7 @@ function makeNodeBudget(note) {
       if (state.left <= 0) {
         if (!state.warned) {
           state.warned = true;
-          if (note) note(`Модель вернула больше ${MAX_TREE_NODES} узлов — оставлены первые ${MAX_TREE_NODES}, остальное отброшено`);
+          if (note) note(`Модель вернула больше ${MAX_TREE_NODES} слоёв — оставлены первые ${MAX_TREE_NODES}, остальное отброшено`);
         }
         return false;
       }
@@ -4636,7 +4636,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
   };
 
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    note('Узел не является объектом — отброшен');
+    note('Слой не является объектом — отброшен');
     return null;
   }
   if (!bud.take()) return null;                  // общий предел на число узлов (п.19)
@@ -4655,16 +4655,16 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     const called = [raw.of, raw.component, raw.master, raw.name].find((v) => typeof v === 'string' && v.trim()) || '';
     const who = `Экземпляр${called ? ` «${cutText(String(called).trim(), 40)}»` : ''}`;
     if (!list.length) {
-      note(`${who}: библиотеки компонентов в документе нет, ставить экземпляр не из чего — узел отброшен.`
-        + ' Соберите узел обычными слоями или сначала сделайте компонент');
+      note(`${who}: библиотеки компонентов в документе нет, ставить экземпляр не из чего — слой отброшен.`
+        + ' Соберите его обычными слоями или сначала сделайте компонент');
       return null;
     }
     const { info, ambiguous } = findComponent(list, called);
     if (!info) {
       note(ambiguous.length
         ? `${who}: под это имя подходит несколько компонентов — ${componentNames(ambiguous)}.`
-          + ' Узел отброшен: назовите компонент точно'
-        : `${who}: такого компонента в библиотеке нет — есть ${componentNames(list)}. Узел отброшен`);
+          + ' Слой отброшен: назовите компонент точно'
+        : `${who}: такого компонента в библиотеке нет — есть ${componentNames(list)}. Слой отброшен`);
       return null;
     }
     const spec = {
@@ -4682,7 +4682,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     if (w || h) spec.size = { ...(w ? { w } : {}), ...(h ? { h } : {}) };
     if (Array.isArray(raw.children) && raw.children.length) {
       note(`${who}: у экземпляра компонента детей не бывает — его содержимое задаёт сам компонент.`
-        + ` Вложенные узлы (${raw.children.length}) пропущены`);
+        + ` Вложенные слои (${raw.children.length}) пропущены`);
     }
     if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
     return spec;
@@ -4697,7 +4697,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     }
   }
   if (!NODE_TYPES.includes(type)) {
-    note(`Узел с типом «${raw.type}» неизвестен — отброшен`);
+    note(`Слой с типом «${raw.type}» неизвестен — отброшен`);
     return null;
   }
 
@@ -4707,7 +4707,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
   if (type === 'text') {
     const chars = [raw.text, raw.characters, raw.content, raw.value].find((v) => typeof v === 'string' && v.trim());
     if (!chars) {
-      if (!name) { note('Текстовый узел без содержимого — отброшен'); return null; }
+      if (!name) { note('Текстовый слой без содержимого — отброшен'); return null; }
       note(`Текст «${name}» пришёл без содержимого — подставлено имя слоя`);
     }
     spec.characters = clampChars(chars || name, note, `Текст «${name || 'без имени'}»`);
@@ -4726,7 +4726,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
       h: sizeOr(raw.size && raw.size.h, { mode: 'hug' }, `Текст «${name || ''}», высота`),
     };
   } else {
-    const fill = treeColor(raw.fill, `Узел «${name || type}»`);
+    const fill = treeColor(raw.fill, `Слой «${name || type}»`);
     if (fill) spec.fill = fill;
     const stroke = treeColor(raw.stroke, `Обводка «${name || type}»`);
     if (stroke) spec.stroke = stroke;
@@ -4736,10 +4736,10 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     const radiusRef = parseRef(raw.radius);
     const defRadius = onScaleQuiet(type === 'frame' ? 0 : P.radius, 'radii');
     if (raw.radius != null && raw.radius !== '' && !radiusRef && !(radius && radius.n >= 0)) {
-      note(`Узел «${name || type}»: скругление «${raw.radius}» непонятно — оставил ${scaleValueWords(doc, defRadius, 'radii', engine)}`);
+      note(`Слой «${name || type}»: скругление «${raw.radius}» непонятно — оставил ${scaleValueWords(doc, defRadius, 'radii', engine)}`);
     }
     const radiusPx = radiusRef || (radius && radius.n >= 0)
-      ? scaleValue(raw.radius, 'radii', doc, note, `Узел «${name || type}», скругление`, scaleOpts) : null;
+      ? scaleValue(raw.radius, 'radii', doc, note, `Слой «${name || type}», скругление`, scaleOpts) : null;
     spec.radius = radiusPx == null ? defRadius : radiusPx;
     if (type === 'image' && raw.src != null) {
       const src = safeSrc(raw.src, note, `Картинка «${name || 'без имени'}»`);
@@ -4748,7 +4748,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
 
     if (type === 'frame') {
       const l = raw.layout && typeof raw.layout === 'object' ? raw.layout : {};
-      const who = `Узел «${name || type}», раскладка`;
+      const who = `Слой «${name || type}», раскладка`;
       // круг 7, п.1: раньше «mode: "grid"» молча становился колонкой, «align: "flex-start"» —
       // «stretch». Теперь синоним подставляется со словами, а непонятное значение — с объяснением.
       const enumOr = (field, value, fallback) => (value == null || value === ''
@@ -4768,13 +4768,13 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
         wrap: !!l.wrap,
       };
       spec.size = {
-        w: sizeOr(raw.size && raw.size.w, { mode: 'fill' }, `Узел «${name || type}», ширина`),
-        h: sizeOr(raw.size && raw.size.h, { mode: 'hug' }, `Узел «${name || type}», высота`),
+        w: sizeOr(raw.size && raw.size.w, { mode: 'fill' }, `Слой «${name || type}», ширина`),
+        h: sizeOr(raw.size && raw.size.h, { mode: 'hug' }, `Слой «${name || type}», высота`),
       };
     } else {
       spec.size = {
-        w: sizeOr(raw.size && raw.size.w, { mode: 'fill' }, `Узел «${name || type}», ширина`),
-        h: sizeOr(raw.size && raw.size.h, { mode: 'fixed', value: 120 }, `Узел «${name || type}», высота`),
+        w: sizeOr(raw.size && raw.size.w, { mode: 'fill' }, `Слой «${name || type}», ширина`),
+        h: sizeOr(raw.size && raw.size.h, { mode: 'fixed', value: 120 }, `Слой «${name || type}», высота`),
       };
     }
   }
@@ -4784,11 +4784,11 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
   if (type === 'frame') {
     let kids = Array.isArray(raw.children) ? raw.children : [];
     if (depth >= MAX_TREE_DEPTH && kids.length) {
-      note(`Глубина дерева больше ${MAX_TREE_DEPTH} — вложенность узла «${name || type}» обрезана`);
+      note(`Глубина дерева больше ${MAX_TREE_DEPTH} — вложенность слоя «${name || type}» обрезана`);
       kids = [];
     }
     if (kids.length > MAX_CHILDREN) {
-      note(`У узла «${name || type}» ${kids.length} детей — оставлено ${MAX_CHILDREN}`);
+      note(`У слоя «${name || type}» ${kids.length} детей — оставлено ${MAX_CHILDREN}`);
       kids = kids.slice(0, MAX_CHILDREN);
     }
     spec.children = [];
@@ -4841,7 +4841,7 @@ function defaultName(spec) {
   if (spec.type === 'text') return cutText(spec.characters || 'Текст', 24);
   // экземпляр без своего имени зовётся как компонент: в списке слоёв так его и узнают
   if (spec.type === 'instance') return cutText(spec.compName || 'Экземпляр', 24);
-  return { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка' }[spec.type] || 'Узел';
+  return { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка' }[spec.type] || 'Слой';
 }
 
 function nextArtboardPos(doc) {
@@ -4884,7 +4884,7 @@ function wideTarget(doc, placement, fullWidth, note) {
 export function treeToOps({ doc, tree, parentId, index, engine, warn, persona, asArtboard, artboardSize, said = '' }) {
   const note = warn || (() => {});
   let spec = normalizeTree(tree, { doc, warn: note, persona, budget: makeNodeBudget(note), engine, said });
-  if (!spec) throw ERR('schema', 'Модель не вернула ни одного пригодного узла');
+  if (!spec) throw ERR('schema', 'Модель не вернула ни одного пригодного слоя');
 
   if (asArtboard && spec.type !== 'frame') {
     note('Корень дерева не фрейм — завернул в доску');
@@ -5332,7 +5332,7 @@ export function resolveRef(engine, doc, ref, scope, warn, opts = {}) {
       : narrowed
         ? `правлю ${pick} — его вы и назвали в команде`
         : `правлю ${pick}. Скажите «во всех…», чтобы поправить сразу все`;
-    warn(`Под «${raw}» подходит узлов — ${got.ids.length} (${names}${more}); ${what}.`);
+    warn(`Под «${raw}» подходит слоёв — ${got.ids.length} (${names}${more}); ${what}.`);
   }
   if (warn && !got.inScope) { const out = outsideNote(doc, scope, chosen, opts.purpose); if (out) warn(out); }
   return chosen;
@@ -5370,7 +5370,7 @@ export function resolveRefs(engine, doc, ref, scope, warn, opts = {}) {
         if (warn) {
           const names = listNames(doc, family.slice(0, 5)).join(', ');
           const tail = family.length > 5 ? ` и ещё ${family.length - 5}` : '';
-          warn(`Под «${String(ref).trim()}» нашёлся один узел, а просили про все: рядом такие же —`
+          warn(`Под «${String(ref).trim()}» нашёлся один слой, а просили про все: рядом такие же —`
             + ` правлю все ${family.length} (${names}${tail}). Нужен один — назовите его или выделите`);
           if (!got.inScope) { const out = outsideNote(doc, scope, family[0], opts.purpose); if (out) warn(out); }
         }
@@ -5381,7 +5381,7 @@ export function resolveRefs(engine, doc, ref, scope, warn, opts = {}) {
     if (warn && got.ids.length > 1) {
       const names = listNames(doc, got.ids.slice(0, 5)).join(', ');
       const tail = got.ids.length > 5 ? ` и ещё ${got.ids.length - 5}` : '';
-      warn(`Под «${String(ref).trim()}» подходит узлов — ${got.ids.length}: правлю все (${names}${tail})`);
+      warn(`Под «${String(ref).trim()}» подходит слоёв — ${got.ids.length}: правлю все (${names}${tail})`);
     }
     if (warn && !got.inScope) { const out = outsideNote(doc, scope, got.ids[0], opts.purpose); if (out) warn(out); }
     return got.ids;
@@ -5403,7 +5403,7 @@ export function resolveRefs(engine, doc, ref, scope, warn, opts = {}) {
       const one = opts.said && !opts.group ? narrowBySpokenHost(doc, got.ids, opts.said) : null;
       if (one) {
         if (warn) {
-          warn(`Под «${String(ref).trim()}» подходит узлов — ${got.ids.length},`
+          warn(`Под «${String(ref).trim()}» подходит слоёв — ${got.ids.length},`
             + ` но в команде назван вмещающий слой — правлю только ${nameOrId(doc, one)}.`
             + ' Нужны все — скажите «во всех…»');
           if (!got.inScope) { const out = outsideNote(doc, scope, one, opts.purpose); if (out) warn(out); }
@@ -5414,7 +5414,7 @@ export function resolveRefs(engine, doc, ref, scope, warn, opts = {}) {
         if (got.collision) warn(collisionNote(doc, String(ref).trim(), got.ids[0]));
         const names = listNames(doc, got.ids.slice(0, 5)).join(', ');
         const tail = got.ids.length > 5 ? ` и ещё ${got.ids.length - 5}` : '';
-        warn(`Под «${String(ref).trim()}» подходит узлов — ${got.ids.length}, и это одна колонка одного списка`
+        warn(`Под «${String(ref).trim()}» подходит слоёв — ${got.ids.length}, и это одна колонка одного списка`
           + ` (${names}${tail}): оформление поправил у всех. Нужен один — выделите его и повторите`);
         if (!got.inScope) { const out = outsideNote(doc, scope, got.ids[0], opts.purpose); if (out) warn(out); }
       }
@@ -5760,7 +5760,7 @@ function sizeValue(raw, path, doc, note, ctx) {
     const what = axis === 'w' ? 'боковые' : 'вертикальные';
     note(`Правка «${side}»: ${Math.round(n)} px — внутри ${nameOrId(doc, room.parentId)} свободно`
       + ` ${Math.round(room.inner)} px (${Math.round(room.box)} минус отступы ${Math.round(room.pad)}):`
-      + ` узел съест ${what} отступы контейнера. Поправку сделал — скажите ${Math.round(room.inner)},`
+      + ` слой съест ${what} отступы контейнера. Поправку сделал — скажите ${Math.round(room.inner)},`
       + ' если отступы надо сохранить');
   }
   return spec;
@@ -6570,10 +6570,10 @@ function nudgeOps({ doc, engine, geo, id, dx, dy, note }) {
   const rect = rects && rects[id];
   const pr = rects && rects[parent.id];
   if (!rect || !pr) {
-    note(`Не знаю, где сейчас ${who} на холсте — сдвиг пропущен; подвиньте узел стрелками или мышью`);
+    note(`Не знаю, где сейчас ${who} на холсте — сдвиг пропущен; подвиньте слой стрелками или мышью`);
     return [];
   }
-  note(`${who} сдвинут ${nudgeWords(dx, dy)} — узел отсоединён от раскладки родителя, как при перетаскивании мышью`);
+  note(`${who} сдвинут ${nudgeWords(dx, dy)} — слой отсоединён от раскладки родителя, как при перетаскивании мышью`);
   return [mkOp(engine, 'set', {
     id,
     path: 'override',
@@ -6665,6 +6665,9 @@ function instancePropOp({ doc, engine, id, path, raw, note, setSeen }) {
   return mkOp(engine, 'set', clearing ? { id, path: aimed } : { id, path: aimed, value });
 }
 
+/** Ключи прототипа: имя свойства из них ядро не примет (как и путь set через них). */
+const PROTO_NAMES = new Set(Object.getOwnPropertyNames(Object.prototype).concat(['__proto__']));
+
 /**
  * Круг 19, п.4: какие свойства объявить у НОВОГО компонента. Предлагает их приложение, а не
  * модель, и вот почему: имя компонента и имена свойств уже лежат в документе — это имена
@@ -6680,9 +6683,12 @@ function proposeProps(doc, id) {
   const out = [];
   for (const tid of texts) {
     const node = nodeOf(doc, tid);
-    let name = String((node && node.name) || '').trim().toLowerCase();
+    /* Круг 34: имя свойства — один сегмент пути `props.<имя>` у экземпляра; точка дробила
+       бы путь, и ядро такое имя не примет (checkComponent). Точки — пробелами; ключ
+       прототипа («constructor») — тоже не имя. */
+    let name = String((node && node.name) || '').replace(/\./g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
     if (texts.length === 1) name = 'текст';
-    if (!name) name = `текст ${out.length + 1}`;
+    if (!name || PROTO_NAMES.has(name)) name = `текст ${out.length + 1}`;
     while (used.has(name)) name = `${name} ${out.length + 1}`;
     used.add(name);
     out.push({ name, kind: 'text', target: tid, path: 'characters' });
@@ -6769,7 +6775,7 @@ function detachOpsFor({ engine, doc, id, note, budget }) {
   }
   const made = list.filter((o) => o && o.op === 'create').length;
   if (budget && made > budget.left) {
-    note(`${nameOrId(doc, id)}: копия компонента не помещается в предел ${MAX_TREE_NODES} узлов — правка пропущена`);
+    note(`${nameOrId(doc, id)}: копия компонента не помещается в предел ${MAX_TREE_NODES} слоёв — правка пропущена`);
     return [];
   }
   if (budget) budget.left -= made;
@@ -6856,12 +6862,12 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
        */
       const clearsPath = looksCleared(edit.value, path);
       if (MOVE_PATHS.has(head) && !(head === 'override' && clearsPath)) {
-        note('Задать положение напрямую нельзя: место узла считает раскладка.'
+        note('Задать положение напрямую нельзя: место слоя считает раскладка.'
           + ' Скажите, на сколько и куда сдвинуть, — это отдельная правка; эта пропущена');
         continue;
       }
       if (!ALLOWED_PATH_HEADS.has(head) && !(head === 'override' && clearsPath)) {
-        note(`Поля «${path}» у узлов этого редактора нет — правка пропущена`);
+        note(`Поля «${path}» у слоёв этого редактора нет — правка пропущена`);
         continue;
       }
       const targets = resolveRefs(engine, doc, edit.target, scope, note, {
@@ -6961,7 +6967,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
           const hint = REMOVE_PATH_HINT[rmPath];
           note(hint
             ? `Правка «${ruPath(rmPath)}»: ${hint}; правка пропущена`
-            : `Убрать ${ruPathGen(rmPath)} у узла нельзя: это поле либо обязательное, либо его у узлов нет.`
+            : `Убрать ${ruPathGen(rmPath)} у слоя нельзя: это поле либо обязательное, либо его у слоёв нет.`
               + ' Правка пропущена — скажите, какое значение поставить вместо');
           continue;
         }
@@ -7023,8 +7029,8 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
           parentId = resolveRef(engine, doc, edit.target, scope, note, { ...refOpts, container: true });
         } else if (aim && fallback && aim !== fallback) {
           const why = isBox
-            ? `под «${String(edit.target).trim()}» подходит несколько узлов`
-            : `«${String(edit.target).trim()}» — не контейнер, это внутри ${RU_TYPE[aimNode.type] || 'узла'} ${nameOrId(doc, aim)}`;
+            ? `под «${String(edit.target).trim()}» подходит несколько слоёв`
+            : `«${String(edit.target).trim()}» — не контейнер, это внутри ${RU_TYPE[aimNode.type] || 'слоя'} ${nameOrId(doc, aim)}`;
           note(`${why}, а куда класть новое, сказано не было: кладу в ${nameOrId(doc, fallback)}.`
             + ' Скажите, внутрь чего нужно, если место другое');
           parentId = fallback;
@@ -7036,12 +7042,12 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         parentId = placement.parentId;
         note(`Не понял, куда добавить — кладу в ${nameOrId(doc, parentId)}`);
       }
-      if (!parentId) { note('Некуда вставить новый узел — правка пропущена'); continue; }
+      if (!parentId) { note('Некуда вставить новый слой — правка пропущена'); continue; }
       const parentNode = nodeOf(doc, parentId);
       if (parentNode && parentNode.type !== 'frame' && parentNode.type !== 'page') {
         parentId = containerFor(doc, parentNode.parent);
       }
-      if (!parentId) { note('Некуда вставить новый узел — правка пропущена'); continue; }
+      if (!parentId) { note('Некуда вставить новый слой — правка пропущена'); continue; }
       const spec = normalizeTree(edit.node, { doc, warn: note, persona, budget, engine });
       if (!spec) continue;
       let at = edit.index != null ? Number(edit.index)
@@ -7092,7 +7098,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         const copy = cloneForDuplicate(engine, doc, id, ids, note);
         if (!copy) continue;
         if (copy.nodes.length > budget.left) {
-          note(`Копия «${src.name || id}» не помещается в предел ${MAX_TREE_NODES} узлов — правка пропущена`);
+          note(`Копия «${src.name || id}» не помещается в предел ${MAX_TREE_NODES} слоёв — правка пропущена`);
           continue;
         }
         budget.left -= copy.nodes.length;
@@ -7247,7 +7253,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
     if (inner.size) {
       for (const [id, host] of inner) {
         note(`${nameOrId(doc, id)} лежит внутри ${nameOrId(doc, host)}: это поддерево удаляется`
-          + ' целиком, так что отдельная правка пропущена — она бы не нашла узла');
+          + ' целиком, так что отдельная правка пропущена — она бы не нашла слоя');
       }
       ops2 = ops2.filter((o) => !(o && o.op === 'remove' && inner.has(o.id)));
     }
@@ -7335,7 +7341,7 @@ export function failureReasons(said) {
     let m = raw
       .replace(/\s+—\s+правка «([^»]*)» пропущена:\s*назовите слой, который надо поменять$/u, ' — «$1» задать некому')
       .replace(/\s*[:—,]\s*правка пропущена(?:,\s*назовите слой по имени)?(?=\.|$)/u, '')
-      .replace(/^(Под «[^»]*» подходит узлов — \d+)\s*\((?:«[^»]*»|[^()«])*\)/u, '$1');
+      .replace(/^(Под «[^»]*» подходит (?:слоёв|узлов) — \d+)\s*\((?:«[^»]*»|[^()«])*\)/u, '$1');
     if (out.length) {
       // «пробовал «X»» — лишнее, если X уже назван в причине
       m = m.replace(/;\s*пробовал (?:только )?(.+?)(?: — его назвали в команде)?$/u,
@@ -7357,7 +7363,7 @@ export function failureReasons(said) {
  */
 export function failureHint(said) {
   const first = orderedReasons(said)[0] || '';
-  return /не найден|непонятно, какому|подходит узлов|назовите слой|нет текста/u.test(first) ? 'name_layer' : null;
+  return /не найден|непонятно, какому|подходит (?:слоёв|узлов)|назовите слой|нет текста/u.test(first) ? 'name_layer' : null;
 }
 
 /**
@@ -7442,7 +7448,7 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
     const farthest = refs.reduce((m, r) => Math.max(m, Number(r.index) || 0), -1);
     if (v.length <= farthest) {
       note(`${cap(names.nom)}: модель прислала ${v.length} ${plural(v.length, 'шаг', 'шага', 'шагов')} вместо ${cur.length},`
-        + ` а на шаги вплоть до ${farthest}-го ссылаются узлы (${refs.length} ${plural(refs.length, 'значение', 'значения', 'значений')}).`
+        + ` а на шаги вплоть до ${farthest}-го ссылаются слои (${refs.length} ${plural(refs.length, 'значение', 'значения', 'значений')}).`
         + ' Укоротить шкалу значило бы сломать эти ссылки, поэтому правка шкалы пропущена — скажите значения'
         + ` всех ${cur.length} шагов`);
       return;
@@ -7457,7 +7463,7 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
       ? `изменены значения ${changed.length} ${plural(changed.length, 'шага', 'шагов', 'шагов')} из ${cur.length} (${sample})`
       : 'значения шагов остались прежними'}`
       + (grew > 0 ? `, добавлено шагов в конец: ${grew}` : grew < 0 ? `, шагов стало ${v.length} вместо ${cur.length}` : '')
-      + `. Узлы не правились: на шаги этой шкалы ссылаются ${refs.length} ${plural(refs.length, 'значение', 'значения', 'значений')}`
+      + `. Слои не правились: на шаги этой шкалы ссылаются ${refs.length} ${plural(refs.length, 'значение', 'значения', 'значений')}`
       + ' отступов, и они переверстались сами');
   };
   scaleOps('spacing', theme && theme.spacing);
@@ -7475,11 +7481,11 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
     const WHAT = { colors: 'цвета', type: 'шрифты и кегли', spacing: 'шкала отступов', radii: 'шкала скруглений', other: 'оформление' };
     const what = [...touched].map((k) => WHAT[k] || WHAT.other);
     const HOW = {
-      colors: 'Перекрасить один экран отдельно так нельзя: для этого надо менять заливку и цвет его узлов',
+      colors: 'Перекрасить один экран отдельно так нельзя: для этого надо менять заливку и цвет его слоёв',
       type: 'Поменять шрифт или кегль на одном экране отдельно так нельзя: для этого надо задать стиль его текстам',
-      spacing: 'Своя шкала у одного экрана невозможна: отступы и зазоры надо задавать его узлам поимённо',
-      radii: 'Своя шкала у одного экрана невозможна: скругления надо задавать его узлам поимённо',
-      other: 'Отдельно для одного экрана так нельзя: значения надо задавать его узлам поимённо',
+      spacing: 'Своя шкала у одного экрана невозможна: отступы и зазоры надо задавать его слоям поимённо',
+      radii: 'Своя шкала у одного экрана невозможна: скругления надо задавать его слоям поимённо',
+      other: 'Отдельно для одного экрана так нельзя: значения надо задавать его слоям поимённо',
     };
     // совет — по тому, что и правда поменялось; если поменялось разное, ведёт самое заметное
     const lead = ['colors', 'type', 'spacing', 'radii', 'other'].find((k) => touched.has(k)) || 'other';
@@ -7531,7 +7537,7 @@ const WARN_RANKS = [
     'в палитре от модели',
   ].join('|'), 'iu')],
   [1, new RegExp([
-    'найден\\p{L}* вне', 'правка ушла', 'источник взят', 'подходит узлов', 'правлю все',
+    'найден\\p{L}* вне', 'правка ушла', 'источник взят', 'подходит (?:слоёв|узлов)', 'правлю все',
     'кладу в', 'кладу уровнем выше', 'место вставки', 'существующ', 'названа',
     // круг 11, п.3: «поменялись все артборды» — это про то, КУДА легла правка, и человек
     // обязан увидеть это раньше замечаний о контрасте
@@ -7684,7 +7690,7 @@ function formatViolation(v, doc) {
     const re = /\b(gap|padding\.[trbl]|padding|radius)\s+(-?\d+(?:\.\d+)?)/g;
     let m;
     while ((m = re.exec(text))) fields.push(`${ruPath(m[1] === 'gap' ? 'layout.gap' : m[1] === 'radius' ? 'radius' : `layout.${m[1]}`)} ${m[2]}`);
-    if (fields.length) return `${who || 'Узел'}: мимо шкалы отступов — ${fields.join(', ')}`;
+    if (fields.length) return `${who || 'Слой'}: мимо шкалы отступов — ${fields.join(', ')}`;
     return `Отступы ${who} мимо шкалы документа: ${text.replace(/\bgap\b/g, 'зазор').replace(/\bpadding\.([trbl])\b/g, (_, k) => `отступ ${SIDE_RU[k]}`)}`;
   }
   return who ? `${who}: ${text}` : text;
@@ -7693,7 +7699,7 @@ function formatViolation(v, doc) {
 /** Заголовки видов нарушений для сводки «и ещё N таких же». */
 const VIOLATION_KIND = {
   overflow: 'не помещается содержимое',
-  'out-of-parent': 'узлы вылезают за родителя',
+  'out-of-parent': 'слои вылезают за родителя',
   'zero-size': 'невидимые (нулевые) слои',
   overlap: 'наложения',
   'low-contrast': 'плохо читается текст',
@@ -7921,7 +7927,7 @@ function componentIntent({ engine, doc, scope, utterance, ask, geo, emit }) {
     : `Компонент${ask.name ? ` «${ask.name}»` : ''} из ${nameOrId(doc, id)}`,
     isComp
       ? 'Имя компонента меняется разом во всех его экземплярах. Это делает редактор, модель тут не нужна.'
-      : 'Узел переезжает в библиотеку, на доске остаётся его экземпляр. Это делает редактор, модель тут не нужна.');
+      : 'Слой переезжает в библиотеку, на доске остаётся его экземпляр. Это делает редактор, модель тут не нужна.');
   return done({ edits: [{ op: 'component', target: `#${id}`, ...(ask.name ? { name: ask.name } : {}) }] },
     isComp ? 'componentRename' : 'component', plan);
 }
@@ -9404,12 +9410,12 @@ function pointlessEdit(doc, node, path, geo) {
   }
   if (path === 'radius' && node.type === 'ellipse') {
     return 'это эллипс, у него нет углов: скругление к нему не применяется совсем'
-      + ' — чтобы получить прямые углы, нужен прямоугольник (другой тип узла), а его правкой не сменить';
+      + ' — чтобы получить прямые углы, нужен прямоугольник (другой тип слоя), а его правкой не сменить';
   }
   const rect = (rectsOf(geo) || {})[node.id] || null;
   const flat = rect && (Math.round(Number(rect.w)) === 0 || Math.round(Number(rect.h)) === 0);
   if (flat && (path === 'fill' || path === 'stroke' || path === 'radius' || path === 'opacity' || path === 'src')) {
-    return `размер этого узла — ${rnd(rect.w)}×${rnd(rect.h)}: рисовать нечего, пока у него нет ширины или высоты`;
+    return `размер этого слоя — ${rnd(rect.w)}×${rnd(rect.h)}: рисовать нечего, пока у него нет ширины или высоты`;
   }
   return null;
 }
@@ -9428,7 +9434,7 @@ function layoutIgnores(doc, node, path, geo = null) {
   const pl = (parent && parent.layout) || null;
   if (path === 'align') return textAlignIdle(doc, node, geo);
   if (path.indexOf('layout.') === 0) {
-    if (!l || !l.mode || l.mode === 'none') return 'у этого узла нет раскладки (поток «свободно») — её значения ни на что не влияют';
+    if (!l || !l.mode || l.mode === 'none') return 'у этого слоя нет раскладки (поток «свободно») — её значения ни на что не влияют';
     if (kids < 2 && (path === 'layout.gap' || path === 'layout.mode' || path === 'layout.justify')) {
       return `внутри ${kids ? 'всего один элемент' : 'ничего нет'} — раскладке нечего расставлять`;
     }
@@ -9454,7 +9460,7 @@ function layoutIgnores(doc, node, path, geo = null) {
         return !!w && w.mode === 'fill';
       });
       if (fills.length >= 2 && fills.length === kids) {
-        return `внутри ${kids} узла с шириной «во всю ширину» — каждый растягивается во всю строку,`
+        return `внутри ${kids} ${plural(kids, 'слоя', 'слоёв', 'слоёв')} с шириной «во всю ширину» — каждый растягивается во всю строку,`
           + ' а следом идёт перенос, и строка выглядит той же колонкой.'
           + ' Чтобы получились колонки, задайте детям ширину по содержимому или числом';
       }
