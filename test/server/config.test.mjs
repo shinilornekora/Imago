@@ -23,7 +23,7 @@ test('умолчания — из limits.js', () => {
   const c = limitsFrom({}, {}, log);
   assert.deepEqual(c, {
     snapshotEvery: L.SNAPSHOT_EVERY, snapshotKeep: L.SNAPSHOT_KEEP, presenceTtlMs: L.PRESENCE_TTL_MS,
-    dbTimeoutMs: L.DB_TIMEOUT_MS, maxInflight: L.WS_INFLIGHT, writesMax: L.HTTP_WRITE_CONCURRENCY,
+    dbTimeoutMs: L.DB_TIMEOUT_MS, maxInflight: L.WS_INFLIGHT, maxConnecting: L.WS_CONNECTING, writesMax: L.HTTP_WRITE_CONCURRENCY,
     writesQueue: L.HTTP_WRITE_QUEUE, queueProjectBytes: L.QUEUE_PROJECT_BYTES, queueProjectTxs: L.QUEUE_PROJECT_TXS,
     queueTotalBytes: L.QUEUE_TOTAL_BYTES,
     tombKeepSeq: L.TOMB_KEEP_SEQ, tombPruneEvery: L.TOMB_PRUNE_EVERY, tombMax: L.TOMB_MAX,

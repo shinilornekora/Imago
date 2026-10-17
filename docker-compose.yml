@@ -33,6 +33,9 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.document
+    # Пределы — из .env (круг 29): всё, что Document service читает из окружения
+    # (ENV_LIMITS в server/document/index.js, таблица в server/document/README.md), задаётся
+    # здесь же; умолчания — те же, что в коде. Описание каждого — deploy/env.example.
     environment:
       DATABASE_URL: postgres://imago:imago@db:5432/imago
       PORT: "8080"
@@ -41,6 +44,25 @@ services:
       SNAPSHOT_KEEP: ${SNAPSHOT_KEEP:-5}
       # дедлайн обычного запроса к базе, мс: просрочка — 503, клиент повторит (миграции — без него)
       DB_TIMEOUT_MS: ${DB_TIMEOUT_MS:-8000}
+      PRESENCE_TTL_MS: ${PRESENCE_TTL_MS:-45000}
+      # сокеты: необработанных транзакций на сокет; сокетов от upgrade до hello
+      WS_INFLIGHT: ${WS_INFLIGHT:-2}
+      WS_CONNECTING: ${WS_CONNECTING:-6}
+      # HTTP-запись: одновременно, в очереди, бюджет тел (байт), срок тела (мс)
+      HTTP_WRITE_CONCURRENCY: ${HTTP_WRITE_CONCURRENCY:-8}
+      HTTP_WRITE_QUEUE: ${HTTP_WRITE_QUEUE:-64}
+      WRITE_BODY_BYTES: ${WRITE_BODY_BYTES:-67108864}
+      BODY_TIMEOUT_MS: ${BODY_TIMEOUT_MS:-30000}
+      # очереди секвенсора: проекта (байт, транзакций) и всего экземпляра (байт)
+      QUEUE_PROJECT_BYTES: ${QUEUE_PROJECT_BYTES:-33554432}
+      QUEUE_PROJECT_TXS: ${QUEUE_PROJECT_TXS:-256}
+      QUEUE_TOTAL_BYTES: ${QUEUE_TOTAL_BYTES:-134217728}
+      # надгробия и память головы секвенсора
+      TOMB_KEEP_SEQ: ${TOMB_KEEP_SEQ:-10000}
+      TOMB_PRUNE_EVERY: ${TOMB_PRUNE_EVERY:-500}
+      TOMB_MAX: ${TOMB_MAX:-50000}
+      RECENT_TXS: ${RECENT_TXS:-500}
+      RECENT_BYTES: ${RECENT_BYTES:-16777216}
       # общий с orchestrator секрет для /api/internal/traces; заглушку change-me сервис
       # не принимает — тогда трассы просто не пишутся (см. deploy/env.example)
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-change-me}
@@ -72,6 +94,16 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
       LLM_MODEL: ${LLM_MODEL:-local-model}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # пределы Orchestrator (server/orchestrator/README.md) — тоже из .env (круг 29)
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-120000}
+      # размер пула воркеров DSLV; пусто — min(2, число ядер)
+      WORKERS: ${WORKERS:-}
+      WORKER_MAX_MB: ${WORKER_MAX_MB:-512}
+      WORKER_TIMEOUT_MS: ${WORKER_TIMEOUT_MS:-60000}
+      WORKER_JOBS: ${WORKER_JOBS:-4}
+      POOL_QUEUE_MAX: ${POOL_QUEUE_MAX:-32}
+      POOL_QUEUE_WAIT_MS: ${POOL_QUEUE_WAIT_MS:-30000}
+      QUEUE_MAX: ${QUEUE_MAX:-4}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

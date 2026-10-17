@@ -230,6 +230,18 @@ export function compactDropped(list) {
 }
 
 /**
+ * Сколько операций не пережило слияние по выжимке `dropped`: записи + `{more: N}` хвоста
+ * (то же считает pg.recentTxMeta в SQL).
+ * @param {any} list
+ */
+export function droppedCount(list) {
+  if (!Array.isArray(list)) return 0;
+  let n = 0;
+  for (const d of list) n += d && typeof d === 'object' && typeof d.more === 'number' && d.index === undefined ? d.more : 1;
+  return n;
+}
+
+/**
  * Что из транзакции ложится в колонки: секвенсор отдаёт адаптеру уже слитую
  * форму (`ops` — применённая, `dropped`/`notes` — от слияния), адаптер добавляет
  * `seq`, `chain` и `created_at`.

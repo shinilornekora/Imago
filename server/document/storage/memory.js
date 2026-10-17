@@ -21,7 +21,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { toCommitted, txColumns, chainNext, newEpoch, jsonBytes, splitTombstones, joinTombstones, pgRejects } from './committed.js';
+import { toCommitted, txColumns, chainNext, newEpoch, jsonBytes, splitTombstones, joinTombstones, pgRejects, droppedCount } from './committed.js';
 import { PAGE_BYTES } from '../limits.js';
 
 const clone = (v) => (v === undefined ? undefined : structuredClone(v));
@@ -98,6 +98,8 @@ export function createMemoryStorage() {
     kind: 'memory',
 
     async init() {},
+    /** Жива ли база (J1): у памяти — всегда. */
+    async ping() { return true; },
     async close() {
       listeners.clear();
     },
@@ -205,11 +207,31 @@ export function createMemoryStorage() {
       let bytes = 0;
       for (const row of j.bySeq) {
         if (row.seq <= seq) continue;
-        const size = jsonBytes(row.ops) + jsonBytes(row.dropped);
+        const size = typeof row.ops_bytes === 'number' ? row.ops_bytes : jsonBytes(row.ops) + jsonBytes(row.dropped);
         if (out.length && bytes + size > maxBytes) break;
         bytes += size;
         out.push(toCommitted(clone(row)));
         if (out.length >= limit) break;
+      }
+      return out;
+    },
+
+    /** Сводки последних транзакций для истории (J2) — как у pg: от новых к старым, seq < beforeSeq. */
+    async recentTxMeta(projectId, { limit = 50, beforeSeq } = {}) {
+      const j = journals.get(String(projectId));
+      if (!j) return [];
+      const lim = Math.max(1, Math.min(1000, Math.floor(Number(limit)) || 50));
+      const before = beforeSeq !== undefined && beforeSeq !== null && Number.isFinite(Number(beforeSeq)) ? Math.floor(Number(beforeSeq)) : Infinity;
+      const out = [];
+      for (let i = j.bySeq.length - 1; i >= 0 && out.length < lim; i--) {
+        const r = j.bySeq[i];
+        if (r.seq >= before) continue;
+        out.push({
+          seq: r.seq, tx_id: String(r.tx_id), author: r.author ?? null, author_kind: r.author_kind || 'human',
+          title: r.title ?? null, created_at: r.created_at, client: r.client ?? null, command_id: r.command_id ?? null,
+          ops_count: typeof r.ops_count === 'number' ? r.ops_count : (Array.isArray(r.ops) ? r.ops.length : 0),
+          dropped_count: droppedCount(r.dropped)
+        });
       }
       return out;
     },
@@ -238,6 +260,9 @@ export function createMemoryStorage() {
       const chain = chainNext(p.head_chain, tx.tx_id, seq);
       if (expectChain !== undefined && chain !== expectChain) return { status: 'stale', reason: 'chain', head_seq: p.head_seq, epoch: p.epoch };
       const row = { project_id: p.id, seq, ...clone(cols), chain, created_at: new Date().toISOString() };
+      // вес и число операций — один раз при записи, как колонки pg (migrations/009)
+      row.ops_bytes = jsonBytes(row.ops) + jsonBytes(row.dropped);
+      row.ops_count = Array.isArray(row.ops) ? row.ops.length : 0;
       p.head_seq = seq;
       p.head_chain = chain;
       p.updated_at = row.created_at;

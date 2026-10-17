@@ -268,6 +268,36 @@ export function cleanDeep(v, maxDepth = MAX_VALUE_DEPTH, keyOf = cleanKey) {
   return walk(v, 0);
 }
 
+/**
+ * Чужое значение для текста ошибки или лога (круг 29): строка — чистая и не длиннее
+ * `max` кодовых точек, всё прочее — только название типа. Подставлять чужое значение в
+ * шаблон строки нельзя: шаблон зовёт toString/valueOf, а у `{"toString":1}` из JSON это
+ * TypeError — одно сообщение сокета роняло процесс.
+ * @param {any} v
+ * @param {number} [max]
+ * @returns {string}
+ */
+export function showValue(v, max = 40) {
+  if (typeof v === 'string') return cutText(cleanText(v), max);
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (v === null) return 'null';
+  if (v === undefined) return 'undefined';
+  return Array.isArray(v) ? 'массив' : typeof v === 'object' ? 'объект' : typeof v;
+}
+
+/**
+ * Подключение сокета (круг 29): сколько сокетов одновременно идут от upgrade до hello
+ * (1–3 чтения базы на каждый). Пул pg — 10 соединений: шторм подключений не должен
+ * занимать его весь, иначе запись ждёт соединения.
+ */
+export const WS_CONNECTING = 6;
+/** Журнал «Истории» (`GET …/history`, круг 29): страница по умолчанию и наибольшая. */
+export const HISTORY_PAGE = 50;
+export const HISTORY_PAGE_MAX = 200;
+/** Проверка хранилища в `GET /api/health` (круг 29): дедлайн пинга и сколько помнится ответ. */
+export const HEALTH_PING_MS = 1000;
+export const HEALTH_CACHE_MS = 1000;
+
 /** Числа, которые обязан знать клиент (сверяются тестом с `LIMITS` из src/sync.js). */
 export const CLIENT_LIMITS = Object.freeze({
   txBytes: MAX_BODY_BYTES,
@@ -277,4 +307,8 @@ export const CLIENT_LIMITS = Object.freeze({
   presenceSelection: PRESENCE_SELECTION,
   presenceHeartbeatMs: PRESENCE_HEARTBEAT_MS,
   replayMaxAgeMs: REPLAY_MAX_AGE_MS,
+  // надгробия реплики прореживаются по тем же числам, что у головы (круг 29, SYNC)
+  tombKeepSeq: TOMB_KEEP_SEQ,
+  tombPruneEvery: TOMB_PRUNE_EVERY,
+  tombMax: TOMB_MAX,
 });

@@ -150,8 +150,27 @@ test('nginx: записи на /api/ — client_body_timeout и limit_conn на 
   assert.equal(r.body.code, 'busy');
   assert.equal(r.body.retryable, true);
   assert.match(named, /add_header\s+Retry-After\s+\d+\s+always/);
-  // /ws предел записей не задевает (апгрейд — GET, и сокет долгий)
-  assert.doesNotMatch(locationBlock(nginxConf, '/ws'), /limit_conn\s/);
+  // /ws предел записей не задевает (апгрейд — GET, и сокет долгий): у сокетов своя зона
+  assert.doesNotMatch(locationBlock(nginxConf, '/ws'), new RegExp(`limit_conn\\s+${zone[2]}\\b`));
+});
+
+test('nginx: сокеты /ws — не больше 64 с адреса, сверх — 429 JSON busy (круг 29)', () => {
+  const zone = /limit_conn_zone\s+\$binary_remote_addr\s+zone=(\w+):\d+m;/.exec(nginxConf);
+  assert.ok(zone, 'нет зоны сокетов по адресу');
+  const ws = locationBlock(nginxConf, '/ws');
+  const lim = new RegExp(`limit_conn\\s+${zone[1]}\\s+(\\d+);`).exec(ws);
+  assert.ok(lim, '/ws: нет limit_conn');
+  assert.ok(Number(lim[1]) >= 16 && Number(lim[1]) <= 256, `предел ${lim[1]} — неразумный`);
+  assert.equal(directive(ws, 'limit_conn_status'), '429');
+  const busy = /error_page\s+429\s*=\s*(@\w+)/.exec(ws);
+  assert.ok(busy, '/ws: 429 отдаст HTML');
+  const r = returnJson(locationBlock(nginxConf, busy[1]));
+  assert.equal(r.status, 429);
+  assert.equal(r.body.code, 'busy');
+  assert.equal(r.body.retryable, true);
+  // зона /ws — не зона записей /api/: долгие сокеты не съедают предел записей
+  const apiZone = /limit_conn\s+(\w+)\s+\d+;/.exec(locationBlock(nginxConf, '/api/'))[1];
+  assert.notEqual(zone[1], apiZone);
 });
 
 test('nginx: ошибки 413/502/503/504 — единый JSON, апстрим назван и помечен заголовком', () => {
@@ -242,6 +261,37 @@ test('compose: document — DB_TIMEOUT_MS и SNAPSHOT_KEEP из окружени
     assert.equal(Number(m[1]), def, `${name}: умолчание compose расходится с server/document/limits.js`);
   }
   assert.match(read('deploy/env.example'), /DB_TIMEOUT_MS/);
+});
+
+test('compose: все пределы сервисов — из окружения (.env) с умолчаниями кода (круг 29)', async () => {
+  const docEnv = sub(services(compose).document, 'environment');
+  const orchEnv = sub(services(compose).orchestrator, 'environment');
+  const example = read('deploy/env.example');
+  const { ENV_LIMITS } = await import('../server/document/index.js');
+  for (const [name, [, def]] of Object.entries(ENV_LIMITS)) {
+    const m = new RegExp(`\\b${name}:\\s*\\$\\{${name}:-(\\d+)\\}`).exec(docEnv);
+    assert.ok(m, `document: нет ${name}: \${${name}:-…}`);
+    assert.equal(Number(m[1]), def, `${name}: умолчание compose расходится с кодом`);
+    assert.match(example, new RegExp(`^#?\\s*${name}=${def}\\s*$`, 'm'), `env.example: нет ${name}=${def}`);
+  }
+  const ol = await import('../server/orchestrator/limits.js');
+  const orchDefs = {
+    WORKER_MAX_MB: ol.WORKER_MAX_OLD_MB, WORKER_TIMEOUT_MS: ol.WORKER_TIMEOUT_MS, WORKER_JOBS: ol.WORKER_JOBS_MAX,
+    POOL_QUEUE_MAX: ol.POOL_QUEUE_MAX, POOL_QUEUE_WAIT_MS: ol.POOL_QUEUE_WAIT_MS, QUEUE_MAX: ol.MAX_QUEUE_PER_PROJECT,
+    LLM_TIMEOUT_MS: 120000, WORKERS: '',
+  };
+  // Orchestrator читает из окружения ровно эти (index.js) — compose передаёт каждый
+  const orchSrc = read('server/orchestrator/index.js');
+  for (const name of new Set([...orchSrc.matchAll(/env\.([A-Z][A-Z_]+)/g)].map((x) => x[1]))) {
+    if (['PORT', 'HOST', 'DOCUMENT_URL', 'INTERNAL_TOKEN', 'LLM_KIND', 'LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY'].includes(name)) continue;
+    assert.ok(name in orchDefs, `orchestrator читает ${name} — его нет в проверке compose`);
+  }
+  for (const [name, def] of Object.entries(orchDefs)) {
+    const m = new RegExp(`\\b${name}:\\s*\\$\\{${name}:-(\\d*)\\}`).exec(orchEnv);
+    assert.ok(m, `orchestrator: нет ${name}: \${${name}:-…}`);
+    assert.equal(m[1], String(def), `${name}: умолчание compose расходится с кодом`);
+    assert.match(example, new RegExp(`^#?\\s*${name}=${def}\\s*$`, 'm'), `env.example: нет ${name}`);
+  }
 });
 
 test('.dockerignore и запуск процессов: node напрямую, без npm', () => {
@@ -379,6 +429,7 @@ function listen(handler) {
   srv.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
   return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve({
     port: srv.address().port,
+    server: srv,
     close: () => new Promise((r) => { for (const s of sockets) s.destroy(); srv.close(() => r()); }),
   })));
 }
@@ -401,7 +452,7 @@ master_process off;
 worker_processes 1;
 pid ${join(dir, 'nginx.pid')};
 error_log ${join(dir, 'error.log')} warn;
-events { worker_connections 256; }
+events { worker_connections 512; }
 http {
   default_type application/octet-stream;
   types { text/html html; text/javascript js; text/css css; }
@@ -448,6 +499,12 @@ test('nginx -t на настоящем конфиге и живые маршру
       res.write('event: result\ndata: {"tx_id":"t"}\n\nevent: done\ndata: {}\n\n');
       res.end();
     });
+  });
+  // сокет: апгрейд принимается (101) и держится, как у Hub
+  doc.server.on('upgrade', (req, sock) => {
+    seenDoc.push({ url: req.url, token: req.headers['x-internal-token'] });
+    sock.on('error', () => {});
+    sock.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
   });
   t.after(() => doc.close());
   let orchUp = true;
@@ -584,6 +641,42 @@ test('nginx -t на настоящем конфиге и живые маршру
   }
   assert.equal(again.status, 200, 'после медленных запись снова проходит');
 
+  // круг 29: сокеты /ws — предел на адрес. 64 открыты и держатся, 65-й — 429 JSON busy;
+  // закрыли один — следующий снова проходит
+  const wsLimit = Number(/limit_conn\s+\w+\s+(\d+);/.exec(locationBlock(nginxConf, '/ws'))[1]);
+  const rawWs = () => new Promise((resolve) => {
+    const sock = net.connect(port, '127.0.0.1');
+    sock.reply = '';
+    sock.on('error', () => resolve(sock));
+    sock.on('data', (d) => { sock.reply += d.toString(); if (/\r\n\r\n/.test(sock.reply)) resolve(sock); });
+    sock.write('GET /ws?project=p HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n');
+    setTimeout(() => resolve(sock), 3000);
+  });
+  const socks = [];
+  try {
+    for (let i = 0; i < wsLimit; i++) socks.push(await rawWs());
+    assert.ok(socks.every((x) => /^HTTP\/1\.1 101/.test(x.reply)), `не все ${wsLimit} сокетов открылись: ${socks.find((x) => !/^HTTP\/1\.1 101/.test(x.reply))?.reply.slice(0, 60)}`);
+    const extra = await rawWs();
+    socks.push(extra);
+    assert.match(extra.reply, /^HTTP\/1\.1 429/, `сокет сверх ${wsLimit}: ${extra.reply.slice(0, 60)}`);
+    assert.match(extra.reply, /"code":"busy"/);
+    assert.match(extra.reply, /application\/json/i);
+    // записи /api/ предел сокетов не задевает
+    const w = await fetch(base + '/api/projects/p/tx', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+    assert.equal(w.status, 200);
+    socks[0].destroy();
+    let next = null;
+    for (let i = 0; i < 20; i++) {
+      next = await rawWs();
+      socks.push(next);
+      if (/^HTTP\/1\.1 101/.test(next.reply)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.match(next.reply, /^HTTP\/1\.1 101/, 'после закрытия сокета новый снова проходит');
+  } finally {
+    for (const x of socks) x.destroy();
+  }
+
   // апстрим лежит — JSON с upstream и X-Imago-Upstream: down
   await orch.close();
   orchUp = false;
@@ -616,4 +709,15 @@ test('ЗАПУСК.md говорит то же, что код (круг 27, п.9
   assert.ok(doc.includes(`«${down.note}.»`) || doc.includes(`«${down.note}»`), 'llm_down: подпись не та, что в коде');
   const restart = agentErrorWords({ code: 'shutting_down' });
   assert.ok(doc.includes(`«${restart.title}»`), 'shutting_down: заголовок не тот, что в коде');
+  // круг 29: пропавший проект — слова карточки и то, что работа переживает перезагрузку
+  const { PROJECT_GONE_WORDS } = await import('../src/shell.js');
+  assert.ok(doc.includes(`«${PROJECT_GONE_WORDS.title}»`));
+  assert.ok(doc.includes(`«${PROJECT_GONE_WORDS.action}»`));
+  assert.match(doc, /переживает\s+и перезагрузку страницы/);
+  // J4: хранилище лежит — те же слова, что в строке состояния
+  assert.match(doc, /«сервер не может сохранить — правки\s+ждут»/);
+  assert.ok(read('app.js').includes('сервер не может сохранить — правки ждут'));
+  // предел сокетов с адреса — тот же, что в nginx
+  const ws = Number(/limit_conn\s+\w+\s+(\d+);/.exec(locationBlock(nginxConf, '/ws'))[1]);
+  assert.match(doc, new RegExp(`${ws}\\s+сокетов`));
 });

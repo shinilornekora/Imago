@@ -619,7 +619,8 @@ test('сходимость: три реплики, случайные опера
   assert.ok(stats.reparented >= 1, 'были переприкрепления: ' + stats.reparented);
   assert.ok(stats.predicted >= 50, 'клиент предсказывал сервер: ' + stats.predicted);
   assert.equal(stats.dropped.invalid || undefined, undefined, 'invalid на сервере — признак расхождения клиента и сервера: ' + JSON.stringify(stats.dropped));
-  assert.ok(Date.now() - started < 2000, 'прогон уложился в 2 с: ' + (Date.now() - started) + ' мс');
+  // круг 29: порог с запасом — под нагрузкой соседних прогонов 2 с флапали (обычно ~1 с)
+  assert.ok(Date.now() - started < 10000, 'прогон уложился в 10 с: ' + (Date.now() - started) + ' мс');
 });
 
 test('сходимость: replay(confirmed, pending) на клиенте = сервер, когда подтверждённое клиента и есть голова', () => {

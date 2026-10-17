@@ -14,7 +14,12 @@
  *     годный по журналу и с известными надгробиями; seq 0 — всегда такой)
  *     `tombstones` снимка (круг 27, I1): v2 `{v:2, parents:{id → родитель}, seq:{id → seq удаления}, …}` или
  *     null — «неизвестно» (снимок записал экземпляр прежней версии); у seq 0 — всегда v2 (пусто)
- *   txsAfter(projectId, seq, limit, {maxBytes}?) → Committed[]   (первая — всегда, дальше — пока влезает в maxBytes)
+ *   txsAfter(projectId, seq, limit, {maxBytes, internal}?) → Committed[]   (первая — всегда, дальше — пока влезает в
+ *     maxBytes; вес — колонка ops_bytes, jsonb читается только у записей страницы; под пределом чтений журнала,
+ *     `internal: true` — чтение секвенсора, мимо предела)
+ *   recentTxMeta(projectId, {limit?, beforeSeq?}) → [{seq, tx_id, author, author_kind, title, created_at, client,
+ *     command_id, ops_count, dropped_count}]   (круг 29, J2: от новых к старым, seq < beforeSeq; без чтения ops)
+ *   ping({timeoutMs = 1000}?) → boolean   (круг 29, J1: SELECT 1, ответ помнится 1 с; не бросает)
  *   chainAt(projectId, seq) → string|null   (seq 0 → '')
  *   commitTx(projectId, tx, {expectSeq, expectChain, origin}) → {status:'committed'|'existing'|'stale'|'missing', …}
  *   writeSnapshot(projectId, seq, doc, engine, chain, tombstones?) → boolean · pruneSnapshots(projectId, keep)
@@ -46,13 +51,18 @@
  * Соединение слушателя — одно на экземпляр, и запросы на нём (эфемерные `pg_notify`, пинг)
  * идут строго по одному, своей очередью (`serial`): node-pg с 8.x предупреждает о запросе
  * поверх выполняющегося и в pg@9 перестанет их копить. Живость слушателя — по движению
- * очереди: запрос, выполняющийся дольше LISTEN_PING_TIMEOUT_MS, — соединение мертво.
+ * очереди: запрос, выполняющийся дольше LISTEN_PING_TIMEOUT_MS (`listenPingTimeoutMs`), —
+ * соединение мертво (отдельный пинг при занятой очереди не начинается — он встал бы за ним же).
  *
  * Чтение снимков (документ — до десятков МБ jsonb, секунды на соединении) — не больше
  * `snapshotReads` одновременно (по умолчанию min(4, max − 4)), остальные ждут места без
  * соединения: шторм открытий большого проекта не выедает пул, запись транзакций и лёгкие
  * чтения получают соединение. Не дождались за `snapshotReadWaitMs` (DB_TIMEOUT_MS) или
  * очередь длиннее `snapshotReadQueue` (64) — 503 `busy` (`detail.cause: 'snapshot_reads'`).
+ * Так же чтения журнала (круг 29: `txsAfter`, `recentTxMeta`) — `journalReads` (min(4, max − 4)),
+ * очередь `journalReadQueue` (64), `detail.cause: 'journal_reads'`; и оба вида вместе — не больше
+ * `heavyReads` (max − 4): из 10 соединений пула 4 всегда остаются записи и лёгким чтениям.
+ * Чтение секвенсора (`internal: true`) — мимо пределов: его ограничивает мьютекс проекта.
  *
  * Дедлайны: обычные запросы — statement_timeout и query_timeout = DB_TIMEOUT_MS;
  * соединение, на котором истёк query_timeout или которое оборвалось, в пул не
@@ -82,6 +92,7 @@ import pg from 'pg';
 import { toCommitted, txColumns, newEpoch, splitTombstones, joinTombstones } from './committed.js';
 import { DB_TIMEOUT_MS, PAGE_BYTES } from '../limits.js';
 import { busy } from '../errors.js';
+import { BYTES_SQL, COUNT_SQL } from './migrations/009_ops_size.mjs';
 
 export const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -108,6 +119,7 @@ const types = {
 };
 
 const OP_COLUMNS = 'project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, command_id, engine, chain, created_at';
+const OP_COLUMNS_O = OP_COLUMNS.split(', ').map((c) => 'o.' + c).join(', ');
 
 /** Сеанс, простаивающий в транзакции дольше этого, база обрывает сама (замок строки проекта отпускается). */
 export const IDLE_IN_TX_MS = 15000;
@@ -116,6 +128,8 @@ const KEEPALIVE_MS = 10000;
 /** Пинг слушателя LISTEN: раз в столько, ответ — не дольше LISTEN_PING_TIMEOUT_MS. */
 const LISTEN_PING_MS = 10000;
 const LISTEN_PING_TIMEOUT_MS = 5000;
+/** `ping()` (J1): ответ помнится столько мс — частый /api/health не нагружает базу. */
+export const PING_CACHE_MS = 1000;
 /** DDL миграции ждёт замок не дольше стольких мс и повторяется (до MIGRATION_LOCK_TRIES раз). */
 const MIGRATION_LOCK_TIMEOUT_MS = 1000;
 const MIGRATION_LOCK_TRIES = 60;
@@ -125,15 +139,23 @@ export const POOL_MAX = 10;
 export const SNAPSHOT_READS = 4;
 /** Ждущих места чтений снимка — не больше; сверх — 503 busy сразу. */
 export const SNAPSHOT_READ_QUEUE = 64;
+/** Чтений журнала (страницы `txsAfter`, история) одновременно — не больше (и не больше max − 4). */
+export const JOURNAL_READS = 4;
+/** Ждущих места чтений журнала — не больше; сверх — 503 busy сразу. */
+export const JOURNAL_READ_QUEUE = 64;
+/** Истории (`recentTxMeta`) за раз — не больше стольких записей. */
+export const RECENT_MAX = 1000;
 
 /**
- * Предел одновременных задач с очередью ожидания (чтение снимков). Место освобождается —
- * передаётся первому ждущему; ждущий дольше waitMs или сверх queue — `busy`.
+ * Предел одновременных задач с очередью ожидания (чтение снимков, чтение журнала). Место
+ * освобождается — передаётся первому ждущему; ждущий дольше waitMs или сверх queue — `busy`
+ * (`detail.cause` — чей предел). `parent` — общий предел над несколькими (все тяжёлые чтения
+ * вместе): место берётся сначала своё, потом общее, ожидание обоих — в пределах одного waitMs.
  */
-function createLimiter({ max, queue, waitMs, what }) {
+function createLimiter({ max, queue, waitMs, what, cause, parent = null }) {
   let active = 0;
   const waiting = [];
-  const full = (why) => busy(`${what}: ${why} — повторите чуть позже`, { detail: { cause: 'snapshot_reads', active, waiting: waiting.length } });
+  const full = (why) => busy(`${what}: ${why} — повторите чуть позже`, { detail: { cause, active, waiting: waiting.length } });
   const release = () => {
     const next = waiting.shift();
     if (next) {
@@ -143,28 +165,37 @@ function createLimiter({ max, queue, waitMs, what }) {
       active--;
     }
   };
+  /** null — место взято сразу; промис — ждём (до deadline); бросает — очередь полна. */
+  const acquire = (deadline) => {
+    if (active < max) {
+      active++;
+      return null;
+    }
+    if (waiting.length >= queue) throw full('очередь полна');
+    return new Promise((resolve, reject) => {
+      const w = { resolve, timer: null };
+      w.timer = setTimeout(() => {
+        const i = waiting.indexOf(w);
+        if (i >= 0) waiting.splice(i, 1);
+        reject(full(`не дождались места за ${waitMs} мс`));
+      }, Math.max(0, deadline - Date.now()));
+      if (w.timer.unref) w.timer.unref();
+      waiting.push(w);
+    });
+  };
   return {
     get active() { return active; },
     get waiting() { return waiting.length; },
     max,
-    async run(fn) {
-      if (active < max) {
-        active++;
-      } else {
-        if (waiting.length >= queue) throw full('очередь полна');
-        await new Promise((resolve, reject) => {
-          const w = { resolve, timer: null };
-          w.timer = setTimeout(() => {
-            const i = waiting.indexOf(w);
-            if (i >= 0) waiting.splice(i, 1);
-            reject(full(`не дождались места за ${waitMs} мс`));
-          }, waitMs);
-          if (w.timer.unref) w.timer.unref();
-          waiting.push(w);
-        });
-      }
+    /**
+     * @param {() => Promise<any>} fn
+     * @param {number} [deadline] срок ожидания места (общему пределу — от дочернего)
+     */
+    async run(fn, deadline = Date.now() + waitMs) {
+      const wait = acquire(deadline);
+      if (wait) await wait;
       try {
-        return await fn();
+        return parent ? await parent.run(fn, deadline) : await fn();
       } finally {
         release();
       }
@@ -232,6 +263,15 @@ function snapshotOf(row) {
   return out;
 }
 
+/** Сводка записи журнала для истории (recentTxMeta, J2). */
+function txMetaOf(r) {
+  return {
+    seq: Number(r.seq), tx_id: String(r.tx_id), author: r.author ?? null, author_kind: r.author_kind || 'human',
+    title: r.title ?? null, created_at: isoOf(r.created_at), client: r.client ?? null, command_id: r.command_id ?? null,
+    ops_count: Number(r.ops_count) || 0, dropped_count: Number(r.dropped_count) || 0
+  };
+}
+
 /** Проект из строки таблицы: даты — ISO-строками, как всё остальное в контракте. */
 function projectOf(row) {
   if (!row) return null;
@@ -257,11 +297,16 @@ function projectOf(row) {
  *   applicationName?: string,      // application_name сеансов (слушатель — с суффиксом «:listen»); видно в pg_stat_activity
  *   listenRetryMs?: number,        // первая пауза переподключения слушателя (200 мс; дальше — вдвое, до 10 с)
  *   listenPingMs?: number,         // пинг слушателя (10 с; 0 — без пинга)
+ *   listenPingTimeoutMs?: number,  // запрос на соединении слушателя дольше этого — соединение мертво (5 с)
  *   idleInTxMs?: number,           // idle_in_transaction_session_timeout (15 с)
  *   migrationLockTimeoutMs?: number, // lock_timeout DDL миграций (1 с; дальше — повтор)
  *   snapshotReads?: number,        // чтений снимка одновременно (min(SNAPSHOT_READS, max − 4), не меньше 1)
  *   snapshotReadQueue?: number,    // ждущих места чтений снимка (64); сверх — 503 busy
  *   snapshotReadWaitMs?: number,   // ждать места не дольше (DB_TIMEOUT_MS; 0 — 10 с)
+ *   journalReads?: number,         // чтений журнала одновременно (min(JOURNAL_READS, max − 4), не меньше 1)
+ *   journalReadQueue?: number,     // ждущих места чтений журнала (64); сверх — 503 busy
+ *   journalReadWaitMs?: number,    // ждать места не дольше (как snapshotReadWaitMs)
+ *   heavyReads?: number,           // снимков и журнала вместе одновременно (max − 4, не меньше 1)
  *   log?: {warn:Function, info:Function}
  * }} opts
  */
@@ -275,6 +320,7 @@ export function createPgStorage(opts = {}) {
   const listenRetryMs = opts.listenRetryMs > 0 ? opts.listenRetryMs : 200;
   const idleInTxMs = opts.idleInTxMs !== undefined ? opts.idleInTxMs : IDLE_IN_TX_MS;
   const listenPingMs = opts.listenPingMs !== undefined ? opts.listenPingMs : LISTEN_PING_MS;
+  const listenPingTimeoutMs = opts.listenPingTimeoutMs > 0 ? opts.listenPingTimeoutMs : LISTEN_PING_TIMEOUT_MS;
   const migrationLockTimeoutMs = opts.migrationLockTimeoutMs > 0 ? opts.migrationLockTimeoutMs : MIGRATION_LOCK_TIMEOUT_MS;
   const base = {
     connectionString: opts.connectionString,
@@ -296,11 +342,33 @@ export function createPgStorage(opts = {}) {
   });
   // ошибка простаивающего соединения (база перезапустилась) без обработчика роняет процесс
   pool.on('error', (err) => log.warn('[document/pg] соединение потеряно:', err.message));
+  const readWaitMs = opts.snapshotReadWaitMs > 0 ? opts.snapshotReadWaitMs : (dbTimeoutMs > 0 ? dbTimeoutMs : 10000);
+  // тяжёлые чтения вместе (снимки и журнал) — не больше max − 4: запись транзакций и лёгкие
+  // чтения (голова, проект, chainAt) всегда находят соединение в пуле
+  const heavyReads = createLimiter({
+    max: opts.heavyReads > 0 ? Math.floor(opts.heavyReads) : Math.max(1, poolMax - 4),
+    queue: Infinity,   // ждут здесь не больше, чем впустили дочерние пределы
+    waitMs: readWaitMs,
+    what: 'чтение базы занято',
+    cause: 'heavy_reads'
+  });
   const snapshotReads = createLimiter({
     max: opts.snapshotReads > 0 ? Math.floor(opts.snapshotReads) : Math.max(1, Math.min(SNAPSHOT_READS, poolMax - 4)),
     queue: opts.snapshotReadQueue >= 0 ? Math.floor(opts.snapshotReadQueue) : SNAPSHOT_READ_QUEUE,
-    waitMs: opts.snapshotReadWaitMs > 0 ? opts.snapshotReadWaitMs : (dbTimeoutMs > 0 ? dbTimeoutMs : 10000),
-    what: 'чтение снимков занято'
+    waitMs: readWaitMs,
+    what: 'чтение снимков занято',
+    cause: 'snapshot_reads',
+    parent: heavyReads
+  });
+  // чтения журнала (круг 29): шторм `ops?since=0` анонимов по большому журналу иначе занимал
+  // все соединения пула — запись в другие проекты ждала соединения и получала 503
+  const journalReads = createLimiter({
+    max: opts.journalReads > 0 ? Math.floor(opts.journalReads) : Math.max(1, Math.min(JOURNAL_READS, poolMax - 4)),
+    queue: opts.journalReadQueue >= 0 ? Math.floor(opts.journalReadQueue) : JOURNAL_READ_QUEUE,
+    waitMs: opts.journalReadWaitMs > 0 ? opts.journalReadWaitMs : readWaitMs,
+    what: 'чтение журнала занято',
+    cause: 'journal_reads',
+    parent: heavyReads
   });
 
   /* ------------------------------ уведомления ------------------------------ */
@@ -398,7 +466,7 @@ export function createPgStorage(opts = {}) {
       pingTimer = setInterval(() => {
         if (listener !== client) return;
         // очередь движется — соединение живо; запрос висит дольше предела — мёртво
-        if (serial.busyFor() > LISTEN_PING_TIMEOUT_MS) {
+        if (serial.busyFor() > listenPingTimeoutMs) {
           dead(`запрос без ответа ${serial.busyFor()} мс`);
           return;
         }
@@ -407,7 +475,7 @@ export function createPgStorage(opts = {}) {
         let timer;
         Promise.race([
           serial.query('SELECT 1'),
-          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('пинг слушателя без ответа')), LISTEN_PING_TIMEOUT_MS); })
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('пинг слушателя без ответа')), listenPingTimeoutMs); })
         ]).catch((e) => dead(e && e.message)).finally(() => {
           clearTimeout(timer);
           pinging = false;
@@ -610,19 +678,85 @@ export function createPgStorage(opts = {}) {
 
   const okId = (id) => UUID_RE.test(String(id));
 
-  /** Хвост после seq — на любом исполнителе запросов (пул или соединение транзакции). */
+  /**
+   * Хвост после seq — на любом исполнителе запросов (пул или соединение транзакции).
+   * Окно байт — по колонке `ops_bytes` (migrations/009): jsonb `ops` читается только у
+   * записей, попавших в страницу (прежде окно детоастило все записи после LIMIT — до 500,
+   * при транзакциях по 4 МБ ~2 ГБ на страницу). Запись без веса (после 009 таких нет) —
+   * вес считается из jsonb, как раньше (coalesce ленив: при весе в колонке jsonb не читается).
+   */
   async function txsAfterOn(q, projectId, seq, limit, maxBytes) {
     if (!okId(projectId)) return [];
     const res = await q.query(
-      `SELECT ${OP_COLUMNS} FROM (
-         SELECT l.*,
+      `SELECT ${OP_COLUMNS_O} FROM (
+         SELECT l.seq,
                 row_number() OVER (ORDER BY l.seq) AS rn,
-                sum(octet_length(l.ops::text) + octet_length(l.dropped::text)) OVER (ORDER BY l.seq ROWS UNBOUNDED PRECEDING) AS run_bytes
-           FROM (SELECT ${OP_COLUMNS} FROM operations WHERE project_id = $1 AND seq > $2 ORDER BY seq LIMIT $3) l
-       ) t WHERE rn = 1 OR run_bytes <= $4 ORDER BY seq`,
+                sum(l.b) OVER (ORDER BY l.seq ROWS UNBOUNDED PRECEDING) AS run_bytes
+           FROM (SELECT seq, ${hasOpsSize ? `coalesce(ops_bytes, ${BYTES_SQL('operations')})` : BYTES_SQL('operations')} AS b
+                   FROM operations WHERE project_id = $1 AND seq > $2 ORDER BY seq LIMIT $3) l
+       ) k JOIN operations o ON o.project_id = $1 AND o.seq = k.seq
+       WHERE k.rn = 1 OR k.run_bytes <= $4 ORDER BY o.seq`,
       [projectId, seq, limit, maxBytes]
     );
     return res.rows.map(toCommitted);
+  }
+
+  /**
+   * Колонки 009 есть (обычно — да; нет — каталог миграций без 009, как у тестов прежних
+   * версий): без них вес считается из jsonb, запись — без колонок (их посчитал бы триггер).
+   */
+  let hasOpsSize = true;
+  async function columnExists(table, column) {
+    const r = await pool.query(
+      'SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2 AND NOT attisdropped',
+      [table, column]
+    );
+    return r.rowCount > 0;
+  }
+
+  /* --------------------------------- здоровье --------------------------------- */
+
+  let pingCache = null;     // {at, value}
+  let pingFlight = null;    // ответ, которого ждут все одновременные ping()
+  let probing = null;       // проба базы ещё без ответа (могла пережить свой таймаут)
+
+  /** SELECT 1: из пула; пул выдан весь — на соединении слушателя (база жива, просто занята). */
+  function probe() {
+    const max = (pool.options && pool.options.max) || poolMax;
+    const l = listener;
+    const saturated = pool.idleCount === 0 && pool.totalCount >= max;
+    if (saturated && l && l.serial && l.serial.busyFor() === 0) return l.serial.query('SELECT 1');
+    return pool.query('SELECT 1');
+  }
+
+  /**
+   * Жива ли база (J1): true/false, не бросает. Ответ помнится PING_CACHE_MS; одновременные
+   * вызовы ждут одну пробу; нет ответа за timeoutMs — false, и следующая проба не начинается,
+   * пока та не ответит (зависшая база не копит пробы в очереди пула). Адаптер закрыт — false.
+   * @param {{timeoutMs?: number}} [o]
+   * @returns {Promise<boolean>}
+   */
+  function ping({ timeoutMs = 1000 } = {}) {
+    if (closing) return Promise.resolve(false);
+    if (pingCache && Date.now() - pingCache.at < PING_CACHE_MS) return Promise.resolve(pingCache.value);
+    if (pingFlight) return pingFlight;
+    pingFlight = (async () => {
+      let value = false;
+      if (!probing) {
+        const p = Promise.resolve().then(probe).then(() => true, () => false);
+        probing = p;
+        p.finally(() => { if (probing === p) probing = null; });
+        let timer;
+        value = await Promise.race([p, new Promise((r) => {
+          timer = setTimeout(() => r(false), Math.max(1, timeoutMs));
+          if (timer.unref) timer.unref();
+        })]);
+        clearTimeout(timer);
+      }
+      pingCache = { at: Date.now(), value };
+      return value;
+    })().finally(() => { pingFlight = null; });
+    return pingFlight;
   }
 
   const self = {
@@ -633,6 +767,7 @@ export function createPgStorage(opts = {}) {
     presenceChannel,
     migrate,
     publish,
+    ping,
     /** Что делают миграции сейчас (`{phase, migration, progress}`) или null — для 503 migrating. */
     get migrationState() { return migrationState ? { ...migrationState } : null; },
     /** Слушатель уведомлений подключён (тестам и /health-отладке). */
@@ -645,6 +780,7 @@ export function createPgStorage(opts = {}) {
       if (!initing) {
         initing = (async () => {
           await migrate();
+          hasOpsSize = await columnExists('operations', 'ops_bytes');
           if (canListen) await connectListener(false);
         })();
         initing.catch(() => { initing = null; });
@@ -804,6 +940,10 @@ export function createPgStorage(opts = {}) {
 
     /** Предел чтений снимков (тестам и отладке): {max, active, waiting}. */
     get snapshotReads() { return { max: snapshotReads.max, active: snapshotReads.active, waiting: snapshotReads.waiting }; },
+    /** Предел чтений журнала (тестам и отладке): {max, active, waiting}. */
+    get journalReads() { return { max: journalReads.max, active: journalReads.active, waiting: journalReads.waiting }; },
+    /** Общий предел тяжёлых чтений — снимков и журнала (тестам и отладке). */
+    get heavyReads() { return { max: heavyReads.max, active: heavyReads.active, waiting: heavyReads.waiting }; },
 
     /** Номера снимков проекта (тестам и отладке). */
     async snapshotSeqs(projectId) {
@@ -817,10 +957,47 @@ export function createPgStorage(opts = {}) {
      * запись входит всегда, даже если одна больше предела; дальше — только те, с
      * которыми сумма не больше maxBytes; так же режет адаптер в памяти). Окно
      * считается ПОСЛЕ LIMIT: иначе сумма шла бы по всему хвосту проекта, и
-     * дочитывание длинного журнала страницами стоило бы квадрат.
+     * дочитывание длинного журнала страницами стоило бы квадрат. Вес записи — колонка
+     * `ops_bytes` (009): jsonb читается только у записей самой страницы.
+     * Под пределом чтений журнала (круг 29): шторм догонов анонимов не выедает пул записи.
+     * `internal: true` — чтение самого сервиса (голова секвенсора догоняет журнал на пути
+     * записи) — мимо предела: его и так ограничивает мьютекс проекта, а ждать за анонимами
+     * запись не должна.
+     * @param {{maxBytes?: number, internal?: boolean}} [o]
      */
-    async txsAfter(projectId, seq, limit = 500, { maxBytes = PAGE_BYTES } = {}) {
-      return txsAfterOn(pool, projectId, seq, limit, maxBytes);
+    async txsAfter(projectId, seq, limit = 500, { maxBytes = PAGE_BYTES, internal = false } = {}) {
+      if (internal) return txsAfterOn(pool, projectId, seq, limit, maxBytes);
+      return journalReads.run(() => txsAfterOn(pool, projectId, seq, limit, maxBytes));
+    },
+
+    /**
+     * Сводки последних транзакций — для истории (J2): от новых к старым, без чтения `ops`
+     * (`ops_count` — колонка 009; `dropped` мал — выжимка, ≤ DROPPED_KEEP записей).
+     * `beforeSeq` — только seq < данного (следующая страница истории). Под пределом чтений журнала.
+     * @param {string} projectId
+     * @param {{limit?: number, beforeSeq?: number}} [o]
+     * @returns {Promise<Array<{seq: number, tx_id: string, author: string|null, author_kind: string, title: string|null,
+     *   created_at: string, client: string|null, command_id: string|null, ops_count: number, dropped_count: number}>>}
+     */
+    async recentTxMeta(projectId, { limit = 50, beforeSeq } = {}) {
+      if (!okId(projectId)) return [];
+      const lim = Math.max(1, Math.min(RECENT_MAX, Math.floor(Number(limit)) || 50));
+      const before = beforeSeq !== undefined && beforeSeq !== null && Number.isFinite(Number(beforeSeq)) ? Math.floor(Number(beforeSeq)) : null;
+      return journalReads.run(async () => {
+        const res = await pool.query(
+          `SELECT seq, tx_id, author, author_kind, title, created_at, client, command_id,
+                  ${hasOpsSize ? `coalesce(ops_count, ${COUNT_SQL('operations')})` : COUNT_SQL('operations')} AS ops_count,
+                  (SELECT coalesce(sum(CASE WHEN jsonb_typeof(e) = 'object' AND e ? 'more' AND NOT e ? 'index'
+                                                 AND jsonb_typeof(e -> 'more') = 'number'
+                                            THEN (e ->> 'more')::numeric ELSE 1 END), 0)::int
+                     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(dropped) = 'array' THEN dropped ELSE '[]'::jsonb END) e) AS dropped_count
+             FROM operations
+            WHERE project_id = $1 ${before !== null ? 'AND seq < $3' : ''}
+            ORDER BY seq DESC LIMIT $2`,
+          before !== null ? [projectId, lim, before] : [projectId, lim]
+        );
+        return res.rows.map(txMetaOf);
+      });
     },
 
     async chainAt(projectId, seq) {
@@ -862,13 +1039,19 @@ export function createPgStorage(opts = {}) {
         const seq = Number(up.rows[0].head_seq);
         const chain = up.rows[0].head_chain;
         const epoch = up.rows[0].epoch;
+        const opsJson = JSON.stringify(c.ops);
+        const droppedJson = JSON.stringify(c.dropped);
+        const params = [projectId, seq, c.tx_id, c.base_seq, opsJson, droppedJson, JSON.stringify(c.notes),
+          c.undo_of, c.redo_of, c.author, c.author_kind, c.client, c.title, c.engine, chain, c.command_id];
+        // вес и число операций (009) — из уже готового JSON: триггер (его ::text у 4 МБ — десятки
+        // мс на каждую запись) остаётся экземплярам прежней версии
+        if (hasOpsSize) params.push(Buffer.byteLength(opsJson, 'utf8') + Buffer.byteLength(droppedJson, 'utf8'), Array.isArray(c.ops) ? c.ops.length : 0);
         const ins = await client.query(
-          `INSERT INTO operations (project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, engine, chain, command_id)
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+          `INSERT INTO operations (project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, engine, chain, command_id${hasOpsSize ? ', ops_bytes, ops_count' : ''})
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16${hasOpsSize ? ', $17, $18' : ''})
            ON CONFLICT (project_id, tx_id) DO NOTHING
            RETURNING ${OP_COLUMNS}`,
-          [projectId, seq, c.tx_id, c.base_seq, JSON.stringify(c.ops), JSON.stringify(c.dropped), JSON.stringify(c.notes),
-            c.undo_of, c.redo_of, c.author, c.author_kind, c.client, c.title, c.engine, chain, c.command_id]
+          params
         );
         if (!ins.rowCount) {
           await client.query('ROLLBACK');

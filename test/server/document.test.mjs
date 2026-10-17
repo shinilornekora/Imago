@@ -66,7 +66,8 @@ for (const backend of list) {
     it('health: ok и версия движка', async () => {
       const r = await http.get('/api/health');
       assert.equal(r.status, 200);
-      assert.deepEqual(r.body, { ok: true, engine: E });
+      // круг 29 (J1): и хранилище
+      assert.deepEqual(r.body, { ok: true, engine: E, storage: 'up' });
     });
 
     it('OPTIONS → 204; неизвестный маршрут → 404', async () => {

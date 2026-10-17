@@ -135,6 +135,27 @@ const clamp = (v, lo, hi) => {
 const numIn = (v, lo, hi, fb) => (isNum(v) ? clamp(v, lo, hi) : fb);
 
 /**
+ * Круг 29: чужое значение — в текст сообщения. `${x}` на объекте `{toString:1}`
+ * бросает («Cannot convert object to primitive value»): вместо причины отказа
+ * человек получал «негодное значение», а решатель, споткнувшись о такое поле,
+ * вставал совсем. Строка — как есть (обрезанная), число и булево — как есть,
+ * прочее — словом. Не бросает никогда.
+ * @param {any} v @returns {string}
+ */
+function shown(v) {
+  if (typeof v === 'string') return cutText(v, 200);
+  if (v === null || v === undefined || typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return 'массив';
+  if (typeof v === 'object') return 'объект';
+  return typeof v;
+}
+
+/** Строковое поле чужого узла без приведения: не строка — пусто. @returns {string} */
+const strOf = (v) => (typeof v === 'string' ? v : '');
+/** Текст для измерения и показа: строка, число строкой, прочее — пусто. Не бросает. */
+const textOf = (v) => (typeof v === 'string' ? v : isNum(v) ? String(v) : '');
+
+/**
  * Максимум и минимум по списку — без spread. `Math.max(...arr)` раскладывает
  * массив в аргументы и на длине от ~130 000 роняет стек («Maximum call stack size
  * exceeded»): из интерфейса столько узлов в одной строке не набрать, но падать на
@@ -460,7 +481,7 @@ function checkScaleValue(v, scale, what) {
   if (isNum(v)) return v < 0 || v > MAX_SIZE ? `${what} вне диапазона` : null;
   const ref = parseScaleRef(v);
   if (!ref) return `${what} вне диапазона`;
-  if (ref.scale !== scale) return `${what}: ссылка «${v}» ведёт не в ${SCALE_CASES[scale].acc} (нужна ${scale}.<шаг>)`;
+  if (ref.scale !== scale) return `${what}: ссылка «${shown(v)}» ведёт не в ${SCALE_CASES[scale].acc} (нужна ${scale}.<шаг>)`;
   return null;
 }
 
@@ -724,6 +745,222 @@ function keepLayoutForm(doc, cur, value) {
   return out;
 }
 
+/* ------------------------------------------------------------------ *
+ * 2.4 Форма полей (круг 29)
+ *
+ * Схема проверяла не все поля и не до конца: `set style.token = {toString:1}`
+ * ложился в документ, и resolveTextStyle на первом же solve бросал — пустой
+ * холст у всех, навсегда (журнал переигрывается с той же записью). Правило
+ * теперь одно: КАЖДОЕ поле узла — значение своего вида (строка / число /
+ * булево / перечисление / объект нужной формы), а всё, чего схема не знает, —
+ * простые данные (null, булево, конечное число, строка, массив, простой
+ * объект) не глубже PLAIN_DEPTH. Значение не той формы — операция `bad-node`
+ * (в rebase — `dropped: invalid`).
+ * ------------------------------------------------------------------ */
+
+/** Предел вложенности значения поля: глубже — не данные макета, а мусор (или цикл). */
+const PLAIN_DEPTH = 32;
+/** Поля узла — строки. */
+const STRING_FIELDS = new Set(['name', 'characters', 'role', 'src', 'of']);
+/** Поля узла — булевы. */
+const BOOL_FIELDS = new Set(['clip', 'visible', 'locked']);
+/** Поля, которые проверяет структурная часть checkNode, а не форма поля. */
+const STRUCT_FIELDS = new Set(['id', 'type', 'parent', 'children']);
+const TEXT_ALIGNS = new Set(['left', 'center', 'right']);
+
+/**
+ * Простые данные: то, что одинаково переживает JSON, jsonb и IndexedDB.
+ * NaN и бесконечность сюда не входят — после JSON это null, и отпечаток
+ * документа у клиента и сервера разошёлся бы.
+ * @returns {string|null} причина или null
+ */
+function plainProblem(v, depth) {
+  if (v === null || v === undefined || typeof v === 'string' || typeof v === 'boolean') return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? null : 'не конечное число';
+  if (typeof v !== 'object') return `значение вида ${typeof v}`;
+  if (depth >= PLAIN_DEPTH) return `вложенность значения глубже ${PLAIN_DEPTH}`;
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) {
+      const err = plainProblem(v[i], depth + 1);
+      if (err) return err;
+    }
+    return null;
+  }
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return 'не простой объект';
+  for (const k of Object.keys(v)) {
+    // `{toString: 1}` — данные, которые ломают любое приведение объекта к строке
+    if (PROTO_KEYS.has(k)) return `ключ «${k}» зарезервирован`;
+    const err = plainProblem(v[k], depth + 1);
+    if (err) return err;
+  }
+  return null;
+}
+
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const optStr = (o, k) => o[k] === undefined || typeof o[k] === 'string';
+const optNum = (o, k, lo, hi) => o[k] === undefined || (isNum(o[k]) && o[k] >= lo && o[k] <= hi);
+
+/** Стиль текста: имя токена или объект; известные ключи — своего вида. */
+function styleProblem(v) {
+  if (typeof v === 'string') return null;
+  if (!isObj(v)) return 'text: style — имя токена или объект';
+  if (!optStr(v, 'token')) return 'style.token должен быть строкой';
+  if (!optStr(v, 'font')) return 'style.font должен быть строкой';
+  if (!optStr(v, 'fontFamily')) return 'style.fontFamily должен быть строкой';
+  for (const k of ['fontSize', 'lineHeight']) {
+    const x = v[k];
+    if (x !== undefined && (!isNum(x) || x <= 0 || x > 1000)) return `style.${k} вне диапазона`;
+  }
+  if (!optNum(v, 'fontWeight', 100, 900)) return 'style.fontWeight вне диапазона 100..900';
+  if (!optNum(v, 'letterSpacing', -1000, 1000)) return 'style.letterSpacing вне диапазона';
+  return null;
+}
+
+/** Цвет (fill, color, stroke.color): null, строка или обёртка {token|color|value: строка}. */
+function paintProblem(v, what) {
+  if (v === null || typeof v === 'string') return null;
+  if (!isObj(v)) return `${what}: цвет — строка или объект`;
+  for (const k of ['token', 'color', 'value']) if (!optStr(v, k)) return `${what}.${k} должен быть строкой`;
+  return null;
+}
+
+/** Обводка: null, строка или {color|token|value, width}. */
+function strokeProblem(v) {
+  if (v === null || typeof v === 'string') return null;
+  if (!isObj(v)) return 'stroke: строка или объект';
+  if (v.color !== undefined) {
+    const err = paintProblem(v.color, 'stroke.color');
+    if (err) return err;
+  }
+  for (const k of ['token', 'value']) if (!optStr(v, k)) return `stroke.${k} должен быть строкой`;
+  if (!optNum(v, 'width', 0, 1000)) return 'stroke.width вне диапазона 0..1000';
+  return null;
+}
+
+/** Размер: объект осей, ось — объект с режимом-строкой и числом. Перечни режимов — в checkNode. */
+function sizeShapeProblem(v) {
+  if (!isObj(v)) return 'size: нужен объект';
+  for (const ax of ['w', 'h']) {
+    const s = v[ax];
+    if (s === undefined) continue;
+    if (!isObj(s)) return `size.${ax}: нужен объект`;
+    if (typeof s.mode !== 'string' || !SIZE_MODES.has(s.mode)) return `size.${ax}: неизвестный режим`;
+    if (s.value !== undefined && s.value !== null && !isNum(s.value)) return `size.${ax}.value должен быть числом`;
+  }
+  return null;
+}
+
+/** Раскладка: объект; известные ключи — своего вида (у фрейма она к тому же нормализована). */
+function layoutShapeProblem(v) {
+  if (!isObj(v)) return 'layout должен быть объектом';
+  if (v.mode !== undefined && !LAYOUT_MODES.has(v.mode)) return `layout.mode: «${shown(v.mode)}»`;
+  if (v.align !== undefined && !ALIGNS.has(v.align)) return `layout.align: «${shown(v.align)}»`;
+  if (v.justify !== undefined && !JUSTIFIES.has(v.justify)) return `layout.justify: «${shown(v.justify)}»`;
+  if (v.wrap !== undefined && typeof v.wrap !== 'boolean') return 'layout.wrap: нужно true или false';
+  if (v.gap !== undefined && !isNum(v.gap) && !parseScaleRef(v.gap)) return 'layout.gap вне диапазона';
+  const p = v.padding;
+  if (p !== undefined && !isNum(p) && !parseScaleRef(p)) {
+    if (!p || typeof p !== 'object') return 'layout.padding должен быть объектом';
+    const vals = Array.isArray(p) ? p : PAD_KEYS.map((k) => p[k]);
+    for (const x of vals) if (x !== undefined && !isNum(x) && !parseScaleRef(x)) return 'layout.padding вне диапазона';
+  }
+  return null;
+}
+
+/**
+ * Раскладка фрейма ДО нормализации. normalizeLayout молча делает из негодного
+ * умолчание (неизвестный режим → 'none', мусор в отступе → 0) — так и было
+ * задумано для строк от модели. Но объект там, где ждут строку или число, —
+ * не опечатка, а чужие данные: такая операция отклоняется, а не «чинится».
+ * @returns {string|null}
+ */
+function rawLayoutProblem(l) {
+  if (l === undefined || l === null || typeof l !== 'object') return null;   // нормализация даст умолчание
+  if (Array.isArray(l)) return 'layout должен быть объектом';
+  for (const k of ['mode', 'align', 'justify', 'wrap', 'gap']) {
+    if (l[k] !== null && typeof l[k] === 'object') return `layout.${k}: нужно простое значение`;
+  }
+  const p = l.padding;
+  if (p && typeof p === 'object') {
+    const vals = Array.isArray(p) ? p : PAD_KEYS.map((k) => p[k]);
+    for (const x of vals) if (x !== null && typeof x === 'object') return 'layout.padding: стороны — числа или ссылки на шкалу';
+  }
+  // прочие ключи и негодные скаляры (NaN, 42 в align) нормализация отбрасывает сама
+  return null;
+}
+
+/**
+ * Форма ОДНОГО поля узла. Структурные поля (id, type, parent, children) — не
+ * здесь: их проверяет checkNode. Обязательность поля (size у фрейма,
+ * characters у текста) — тоже там.
+ * @param {object} node @param {string} k имя поля верхнего уровня
+ * @returns {string|null} причина или null
+ */
+function fieldProblem(node, k) {
+  if (STRUCT_FIELDS.has(k)) return null;
+  const v = node[k];
+  if (v === undefined) return null;
+  let err = null;
+  if (STRING_FIELDS.has(k)) err = typeof v === 'string' ? null : `${k} должен быть строкой`;
+  else if (BOOL_FIELDS.has(k)) err = typeof v === 'boolean' ? null : `${k}: нужно true или false`;
+  else {
+    switch (k) {
+      case 'style': err = styleProblem(v); break;
+      case 'fill': case 'color': err = paintProblem(v, k); break;
+      case 'stroke': err = strokeProblem(v); break;
+      case 'align':
+        err = node.type === 'text' ? (TEXT_ALIGNS.has(v) ? null : 'text.align') : (typeof v === 'string' ? null : 'align должен быть строкой');
+        break;
+      case 'opacity': err = isNum(v) && v >= 0 && v <= 1 ? null : 'opacity вне 0..1'; break;
+      case 'radius': err = checkRadiusValue(v); break;
+      case 'size': err = sizeShapeProblem(v); break;
+      case 'layout': err = layoutShapeProblem(v); break;
+      case 'pos':
+        err = isObj(v) && isNum(v.x) && isNum(v.y) ? null : 'pos: нужны числа x,y';
+        break;
+      case 'override':
+        if (v !== null && !(isObj(v) && isNum(v.x) && isNum(v.y))) err = 'override: нужны числа x,y';
+        else if (v && (!optNum(v, 'w', 0, MAX_SIZE) || !optNum(v, 'h', 0, MAX_SIZE))) err = 'override: w и h — числа';
+        break;
+      case 'props': err = isObj(v) ? null : 'props экземпляра: нужен объект'; break;
+      case 'component': err = isObj(v) ? null : 'component должен быть объектом'; break;
+      default: break;
+    }
+  }
+  if (err) return err;
+  const plain = plainProblem(v, 0);
+  return plain ? `${k}: ${plain}` : null;
+}
+
+/**
+ * Копия узла без полей негодной формы (кроме `keep`) — для проверки правки на
+ * узле из документа прежней версии. Обязательные поля получают заглушку того
+ * вида, что требует схема. Нечего снимать — тот же объект.
+ */
+function withoutBadFields(node, keep) {
+  let out = node;
+  for (const k of Object.keys(node)) {
+    if (k === keep || STRUCT_FIELDS.has(k) || !fieldProblem(node, k)) continue;
+    if (out === node) out = { ...node };
+    if (k === 'characters' && node.type === 'text') out.characters = '';
+    else if (k === 'size' && node.type !== 'page' && node.type !== 'instance') out.size = sizeSpec('hug', 'hug');
+    else if (k === 'of' && node.type === 'instance') out.of = '?' + node.id;
+    else delete out[k];
+  }
+  return out;
+}
+
+/** Форма всех полей узла: первая причина или null. */
+function fieldsProblem(node) {
+  for (const k of Object.keys(node)) {
+    if (PROTO_KEYS.has(k)) return `поле «${k}» зарезервировано`;
+    const err = fieldProblem(node, k);
+    if (err) return err;
+  }
+  return null;
+}
+
 /**
  * Проверка узла по схеме. Возвращает строку с ошибкой или null.
  * @param {any} node
@@ -734,7 +971,7 @@ function checkNode(node, doc, loose) {
   if (!node || typeof node !== 'object') return 'узел должен быть объектом';
   if (typeof node.id !== 'string' || !node.id) return 'нет id';
   if (PROTO_KEYS.has(node.id)) return `id «${node.id}» зарезервирован`;
-  if (!NODE_TYPES.has(node.type)) return `неизвестный тип «${node.type}»`;
+  if (!NODE_TYPES.has(node.type)) return `неизвестный тип «${shown(node.type)}»`;
   if (node.name !== undefined && typeof node.name !== 'string') return 'name должен быть строкой';
   if (node.type === 'page') {
     /* Круг 19, п.1: страница-библиотека — единственная страница с родителем
@@ -776,7 +1013,7 @@ function checkNode(node, doc, loose) {
     const l = node.layout;
     if (l !== undefined) {
       if (!l || typeof l !== 'object') return 'layout должен быть объектом';
-      if (!LAYOUT_MODES.has(l.mode)) return `layout.mode: «${l.mode}»`;
+      if (!LAYOUT_MODES.has(l.mode)) return `layout.mode: «${shown(l.mode)}»`;
       /* Круг 20 (SPEC §6.1): зазор и отступы — число в границах ЛИБО ссылка на
          шаг шкалы отступов ('spacing.<i>'). Ссылка не в ту шкалу отклоняется
          здесь; есть ли такой шаг — проверяет операция (см. deadScaleRefs). */
@@ -784,8 +1021,8 @@ function checkNode(node, doc, loose) {
         const err = checkScaleValue(l.gap, 'spacing', 'layout.gap');
         if (err) return err;
       }
-      if (l.align !== undefined && !ALIGNS.has(l.align)) return `layout.align: «${l.align}»`;
-      if (l.justify !== undefined && !JUSTIFIES.has(l.justify)) return `layout.justify: «${l.justify}»`;
+      if (l.align !== undefined && !ALIGNS.has(l.align)) return `layout.align: «${shown(l.align)}»`;
+      if (l.justify !== undefined && !JUSTIFIES.has(l.justify)) return `layout.justify: «${shown(l.justify)}»`;
       if (l.padding !== undefined) {
         if (!l.padding || typeof l.padding !== 'object') return 'layout.padding должен быть объектом';
         for (const k of PAD_KEYS) {
@@ -833,7 +1070,11 @@ function checkNode(node, doc, loose) {
     if (o.h !== undefined && (!isNum(o.h) || o.h < 0 || o.h > MAX_SIZE)) return 'override.h';
   }
   if (node.opacity !== undefined && (!isNum(node.opacity) || node.opacity < 0 || node.opacity > 1)) return 'opacity вне 0..1';
-  if (doc && node.parent && !ownNode(doc.nodes, node.parent)) return `родитель «${node.parent}» не найден`;
+  // круг 29: форма КАЖДОГО поля — строки строками, флаги булевы, обёртки цвета и
+  // стиля с полями своего вида, всё незнакомое — простые данные (см. fieldProblem)
+  const shapeErr = fieldsProblem(node);
+  if (shapeErr) return shapeErr;
+  if (doc && node.parent && !ownNode(doc.nodes, node.parent)) return `родитель «${shown(node.parent)}» не найден`;
   return null;
 }
 
@@ -923,7 +1164,7 @@ function checkComponent(node, doc, loose) {
     if (typeof p.name !== 'string' || !p.name.trim()) return 'component.props: нужно непустое имя пропса';
     if (seen.has(p.name)) return `component.props: имя «${p.name}» встречается дважды`;
     seen.add(p.name);
-    if (!PROP_KINDS.has(p.kind)) return `component.props «${p.name}»: kind «${p.kind}» неизвестен`;
+    if (!PROP_KINDS.has(p.kind)) return `component.props «${p.name}»: kind «${shown(p.kind)}» неизвестен`;
     if (typeof p.target !== 'string' || !p.target) return `component.props «${p.name}»: нет target`;
     if (typeof p.path !== 'string' || !p.path) return `component.props «${p.name}»: нет path`;
     // путь — тот же, что понимает set, значит и запреты те же
@@ -965,7 +1206,7 @@ function checkInstance(node, doc) {
   }
   if (node.props !== undefined) {
     if (!node.props || typeof node.props !== 'object' || Array.isArray(node.props)) return 'props экземпляра: нужен объект';
-    const master = doc && doc.nodes ? doc.nodes[node.of] : null;
+    const master = doc && doc.nodes ? ownNode(doc.nodes, node.of) : null;
     // мастера может ещё не быть (его создаёт соседняя операция той же транзакции) —
     // тогда имена пропсов проверять нечем, об этом скажет validate (dead-instance)
     if (master && master.component) {
@@ -1098,13 +1339,13 @@ function instanceSummary(doc, idOrNode) {
   const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
   if (!n || n.type !== 'instance') return '';
   const master = masterOf(doc, n);
-  const name = master ? componentName(master) : `?${n.of}`;
+  const name = master ? componentName(master) : `?${shown(n.of)}`;
   const known = propMap(master);
   const bits = [];
   for (const [key, p] of known) {
     const raw = n.props ? n.props[key] : undefined;
     if (raw === undefined) continue;
-    if (p.kind === 'text') bits.push(`"${raw}"`);
+    if (p.kind === 'text') bits.push(`"${shown(raw)}"`);
     else bits.push(`${key}=${typeof raw === 'string' ? raw : wrappedName(raw, WRAPPED_FIELDS.fill) || JSON.stringify(raw)}`);
   }
   return bits.length ? `${name} ${bits.join(' ')}` : name;
@@ -1127,7 +1368,7 @@ const expandCache = new WeakMap();
 /** Свежи ли зависимости записи кеша: те же объекты по тем же id. @returns {boolean} */
 function depsFresh(doc, deps) {
   for (let i = 0; i < deps.length; i += 2) {
-    if (doc.nodes[deps[i]] !== deps[i + 1]) return false;
+    if (ownNode(doc.nodes, deps[i]) !== deps[i + 1]) return false;   // круг 29: id из чужого of — не обязательно строка
   }
   return true;
 }
@@ -1149,7 +1390,7 @@ function depsFresh(doc, deps) {
 function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps) {
   const lib = libraryNode(doc);
   deps.push(lib ? lib.id : '', lib || undefined);
-  const master = doc.nodes[inst.of];
+  const master = ownNode(doc.nodes, inst.of);
   deps.push(inst.of, master);
   // мёртвая ссылка, мастер вне библиотеки, самовключение и перебор вложенности —
   // не зависание и не исключение, а отсутствие раскрытия: об этом скажет validate
@@ -1501,7 +1742,7 @@ function placeholderName(doc, idOrNode) {
     const master = doc ? masterOf(doc, n) : null;
     return master ? componentName(master) : 'Экземпляр';
   }
-  return PLACEHOLDER_NAMES[n.type] || 'Узел';
+  return (typeof n.type === 'string' && ownNode(PLACEHOLDER_NAMES, n.type)) || 'Узел';
 }
 const PLACEHOLDER_NAMES = {
   frame: 'Группа', text: 'Текст', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка',
@@ -1517,7 +1758,9 @@ const PLACEHOLDER_NAMES = {
  */
 function displayName(doc, idOrNode) {
   const n = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
-  const own = n && n.name !== undefined && n.name !== null ? String(n.name).trim() : '';
+  // круг 29: имя из документа прежней версии может быть чем угодно — без приведения
+  const raw = n ? n.name : undefined;
+  const own = typeof raw === 'string' ? raw.trim() : isNum(raw) ? String(raw) : '';
   return own || placeholderName(doc, n);
 }
 
@@ -1603,7 +1846,7 @@ function resolveTarget(doc, ref) {
   if (!doc || !doc.nodes || typeof ref !== 'string') return null;
   const key = ref.trim();
   if (!key) return null;
-  if (doc.nodes[key]) return doc.nodes[key];
+  if (ownNode(doc.nodes, key)) return doc.nodes[key];
   /* Круг 19: поиск по ИМЕНИ, РОЛИ и ТЕКСТУ не заходит в библиотеку. Мастер
      компонента «Кнопка» иначе перебивал кнопку на доске («кнопка» → мастер), и
      точечная правка от агента молча меняла бы ВСЕ экземпляры там, где человек
@@ -1612,9 +1855,7 @@ function resolveTarget(doc, ref) {
      мастер по-прежнему находится (проверка выше). */
   const libId = libraryId(doc);
   const hidden = libId ? new Set(subtreeIds(doc, libId)) : null;
-  const all = hidden
-    ? Object.values(doc.nodes).filter((n) => !hidden.has(n.id))
-    : Object.values(doc.nodes);
+  const all = Object.values(doc.nodes).filter((n) => n && typeof n === 'object' && !(hidden && hidden.has(n.id)));
   const low = key.toLowerCase();
   // роль учитываем только тогда, когда запрос указывает ровно на одну роль
   const roles = ROLE_PATTERNS.filter(([role, re]) => role === low || re.test(key));
@@ -1624,13 +1865,13 @@ function resolveTarget(doc, ref) {
   // возвращать null: неоднозначность роли не должна коротить поиск по тексту.
   const steps = [
     // 1. точное имя
-    () => all.filter((n) => (n.name || '').trim().toLowerCase() === low),
+    () => all.filter((n) => strOf(n.name).trim().toLowerCase() === low),
     // 2. частичное имя: ближе тот, чьё имя короче (и тем более начинается с запроса)
     () => {
-      const partial = all.filter((n) => (n.name || '').toLowerCase().includes(low));
+      const partial = all.filter((n) => strOf(n.name).toLowerCase().includes(low));
       if (!partial.length) return partial;
       const score = (n) => {
-        const name = (n.name || '').toLowerCase();
+        const name = strOf(n.name).toLowerCase();
         return (name.startsWith(low) ? 0 : 1000) + name.length;
       };
       const best = minOf(partial, score, Infinity);
@@ -1638,10 +1879,10 @@ function resolveTarget(doc, ref) {
     },
     // 3. роль: сначала по полю role, затем по имени в духе роли
     () => (role ? all.filter((n) => n.role === role[0]) : []),
-    () => (role ? all.filter((n) => role[1].test(n.name || '')) : []),
+    () => (role ? all.filter((n) => role[1].test(strOf(n.name))) : []),
     // 4. содержимое текста: точное совпадение важнее вхождения
-    () => all.filter((n) => n.type === 'text' && (n.characters || '').trim().toLowerCase() === low),
-    () => all.filter((n) => n.type === 'text' && (n.characters || '').toLowerCase().includes(low))
+    () => all.filter((n) => n.type === 'text' && strOf(n.characters).trim().toLowerCase() === low),
+    () => all.filter((n) => n.type === 'text' && strOf(n.characters).toLowerCase().includes(low))
   ];
   for (const step of steps) {
     const hit = onlyOne(step());
@@ -1975,6 +2216,82 @@ const depthErr = (what) => opErr('bad-parent', `${what}: вложенность 
 /** Токены после setToken — той формы, без которой документ не открыть. */
 const tokensShapeOk = (t) => !!(t && t.colors && t.type && Array.isArray(t.spacing) && Array.isArray(t.radii));
 
+/** Тип-токен: объект; шрифт — строка, числа — в границах (те же, что у style узла). */
+function typeEntryProblem(v, what) {
+  if (!isObj(v)) return `${what}: нужен объект`;
+  if (!optStr(v, 'font')) return `${what}.font должен быть строкой`;
+  for (const k of ['fontSize', 'lineHeight']) {
+    const x = v[k];
+    if (x !== undefined && (!isNum(x) || x <= 0 || x > 1000)) return `${what}.${k} вне диапазона`;
+  }
+  if (!optNum(v, 'fontWeight', 100, 900)) return `${what}.fontWeight вне диапазона 100..900`;
+  if (!optNum(v, 'letterSpacing', -1000, 1000)) return `${what}.letterSpacing вне диапазона`;
+  const plain = plainProblem(v, 1);
+  return plain ? `${what}: ${plain}` : null;
+}
+
+/** Шаг шкалы — конечное число в границах схемы. */
+const stepOk = (x) => isNum(x) && x >= 0 && x <= MAX_SIZE;
+
+/**
+ * Круг 29: форма значения, которое setToken пишет по пути. Проверяется только
+ * записываемое (не соседние ключи: мусор, уже лежащий в палитре старого
+ * документа, не должен запирать правку другого цвета). Группы colors / type /
+ * spacing / radii читаются решателем и сценой — у них форма строгая; прочие
+ * группы никто не читает, им достаточно простых данных.
+ * @param {string[]} parts путь, разобранный по точкам
+ * @param {any} value значение (undefined — снятие ключа)
+ * @param {object} tokens токены ДО записи — нужна длина шкалы
+ * @returns {string|null}
+ */
+function tokenWriteProblem(parts, value, tokens) {
+  const [group] = parts;
+  const n = parts.length;
+  const del = value === undefined;
+  if (group === 'colors') {
+    if (n === 1) {
+      if (del) return null;   // структуру сторожит tokensShapeOk
+      if (!isObj(value)) return 'colors: нужен объект';
+      for (const k of Object.keys(value)) if (typeof value[k] !== 'string') return `colors.${k} должен быть строкой`;
+      return null;
+    }
+    if (n > 2) return `${parts.slice(0, 2).join('.')}: цвет — строка`;
+    return del || typeof value === 'string' ? null : `colors.${parts[1]} должен быть строкой`;
+  }
+  if (group === 'type') {
+    if (n === 1) {
+      if (del) return null;
+      if (!isObj(value)) return 'type: нужен объект';
+      for (const k of Object.keys(value)) {
+        const err = typeEntryProblem(value[k], 'type.' + k);
+        if (err) return err;
+      }
+      return null;
+    }
+    if (n === 2) return del ? null : typeEntryProblem(value, 'type.' + parts[1]);
+    if (del) return null;
+    const entry = { [parts[2]]: n === 3 ? value : {} };
+    if (n > 3) return plainProblem(value, n - 1);
+    return typeEntryProblem(entry, 'type.' + parts[1]);
+  }
+  if (group === 'spacing' || group === 'radii') {
+    if (n === 1) {
+      if (del) return null;
+      if (!Array.isArray(value)) return `${group}: нужен массив чисел`;
+      return value.every(stepOk) ? null : `${group}: шаги — числа 0..${MAX_SIZE}`;
+    }
+    const cur = tokens && Array.isArray(tokens[group]) ? tokens[group] : [];
+    if (n > 2 || !/^(0|[1-9]\d*)$/.test(parts[1])) return `${group}: шаг адресуется номером`;
+    // снятие шага дало бы дыру в массиве (в JSON — null), запись за концом — тоже
+    if (del) return `${group}: шаг не снимают — шкалу пишут целиком`;
+    if (Number(parts[1]) > cur.length) return `${group}: шага ${parts[1]} нет — шкала длиной ${cur.length}`;
+    return stepOk(value) ? null : `${group}.${parts[1]}: число 0..${MAX_SIZE}`;
+  }
+  if (del) return null;
+  const plain = plainProblem(value, n);
+  return plain ? `${parts.join('.')}: ${plain}` : null;
+}
+
 /**
  * setToken на месте (круг 27): контейнеры по пути копируются один раз на
  * черновик, дальше пишутся на месте — 5000 setToken в палитру больше не копируют
@@ -2035,7 +2352,11 @@ function applyOne(draft, op, j) {
       // поэтому сырая операция с layout:{padding:8} отклонялась («padding должен
       // быть объектом»), а с {mode,gap} кладла в документ половину объекта.
       // Отсутствующий layout не добавляем — он равносилен DEFAULT_LAYOUT.
-      if (node.type === 'frame' && node.layout !== undefined) node.layout = normalizeLayout(node.layout);
+      if (node.type === 'frame' && node.layout !== undefined) {
+        const rawErr = rawLayoutProblem(node.layout);
+        if (rawErr) return opErr('bad-node', `create: ${rawErr}`);
+        node.layout = normalizeLayout(node.layout);
+      }
       const parent = node.parent ? ownNode(draft.nodes, node.parent) : null;
       /* Круг 19, п.1: родитель нужен всем, кроме страницы БЕЗ родителя (корень).
          Страница-библиотека — тоже ребёнок корня: ей нужен и живой родитель, и
@@ -2043,7 +2364,7 @@ function applyOne(draft, op, j) {
          и pruneBrokenEdges выбросил бы её как недостижимую. */
       const needsParent = node.type !== 'page' || !!node.parent;
       if (needsParent) {
-        if (!parent) return opErr('bad-parent', `create: родитель «${node.parent}» не найден`);
+        if (!parent) return opErr('bad-parent', `create: родитель «${shown(node.parent)}» не найден`);
         if (!CONTAINER_TYPES.has(parent.type)) return opErr('bad-parent', 'create: родитель не контейнер');
       }
       const err = checkNode(node, draft, !!op.exact);
@@ -2100,7 +2421,7 @@ function applyOne(draft, op, j) {
     }
     case 'remove': {
       const node = ownNode(draft.nodes, op.id);
-      if (!node) return opErr('not-found', `remove: узел «${op.id}» не найден`);
+      if (!node) return opErr('not-found', `remove: узел «${shown(op.id)}» не найден`);
       if (node.id === draft.root) return opErr('protected-path', 'remove: нельзя удалить корень');
       // круг 27: поддерево целиком, без предела глубины (раньше глубже MAX_DEPTH
       // оставались сироты) и без рекурсии (стек); порядок — прежний, сверху вниз
@@ -2124,17 +2445,22 @@ function applyOne(draft, op, j) {
     }
     case 'set': {
       const node = ownNode(draft.nodes, op.id);
-      if (!node) return opErr('not-found', `set: узел «${op.id}» не найден`);
-      const path = String(op.path || '');
+      if (!node) return opErr('not-found', `set: узел «${shown(op.id)}» не найден`);
+      const path = typeof op.path === 'string' ? op.path : isNum(op.path) ? String(op.path) : '';   // круг 29: без приведения объекта
       if (!path) return opErr('bad-op', 'set: пустой путь');
       const parts = path.split('.');
       if (PROTECTED_PATHS.has(parts[0])) return opErr('protected-path', `set: путь «${parts[0]}» защищён`);
       // ключи прототипа — на любом уровне: set(id, 'style.__proto__') так же опасен
-      const unsafe = parts.find((p) => UNSAFE_KEYS.has(p));
+      // круг 29: и любые имена Object.prototype — `style.toString = 1` ломает приведение
+      const unsafe = parts.find((p) => PROTO_KEYS.has(p));
       if (unsafe) return opErr('protected-path', `set: путь «${unsafe}» защищён`);
       // круг 16, п.1: строка поверх объекта-обёртки (style, stroke, fill, color) не
       // должна плодить второй вид того же значения — см. keepFieldForm; круг 20:
       // там же число, равное значению текущей ссылки на шаг шкалы, оставляет ссылку
+      // круг 29: записываемое — простые данные, ДО приведения формы: keepFieldForm
+      // раскрывает краткие записи и молча выбросил бы из `{toString:1}` всё лишнее
+      const plainErr = plainProblem(op.value, parts.length);
+      if (plainErr) return opErr('bad-node', `set ${path}: ${plainErr}`);
       const value = !op.exact ? keepFieldForm(node, path, op.value, draft) : op.value;
       let next = setPath(node, path, value);
       // круг 16, п.3: раскладку нормализуем, только если поле осталось в узле.
@@ -2142,9 +2468,25 @@ function applyOne(draft, op, j) {
       // без value) — и вместо удаления в узел ложился полный DEFAULT_LAYOUT: отмена
       // возвращала документ ПОХОЖИМ на исходный, но не равным ему.
       if (next.type === 'frame' && parts[0] === 'layout' && next.layout !== undefined) {
+        const rawErr = rawLayoutProblem(next.layout);
+        if (rawErr) return opErr('bad-node', `set ${path}: ${rawErr}`);
         next = { ...next, layout: normalizeLayout(next.layout) };
       }
-      const err = checkNode(next, draft, !!op.exact);
+      let err = checkNode(next, draft, !!op.exact);
+      /* Круг 29: причина, которая была у узла и ДО правки, — не причина отказать
+         этой правке. Схема стала строже (форма каждого поля), а в документах
+         прежних версий лежит то, что раньше проходило (`clip: 1`, объект в
+         style.token): узел не должен запираться от правки имени из-за соседнего
+         поля. Поэтому (1) соседние поля негодной формы на время проверки
+         снимаются (обязательные — заглушкой), и записанное проверяется схемой в
+         полном объёме; (2) прочая причина, бывшая и до правки, — тоже не повод.
+         Само записываемое поле обязано быть годным — так мусор не входит и через
+         «ту же самую» причину. */
+      if (err && !fieldProblem(next, parts[0])) {
+        const probe = withoutBadFields(next, parts[0]);
+        const perr = probe === next ? err : checkNode(probe, draft, !!op.exact);
+        if (!perr || perr === checkNode(withoutBadFields(node, parts[0]), draft, !!op.exact)) err = null;
+      }
       if (err) return opErr('bad-node', `set ${path}: ${err}`);
       /* Круг 20 (SPEC §6.1): ссылка на шаг, которого в шкале нет, операцией не
          проходит. Проверяем только то, что пишет ЭТА операция (путь и всё под
@@ -2160,9 +2502,9 @@ function applyOne(draft, op, j) {
     }
     case 'move': {
       const node = ownNode(draft.nodes, op.id);
-      if (!node) return opErr('not-found', `move: узел «${op.id}» не найден`);
+      if (!node) return opErr('not-found', `move: узел «${shown(op.id)}» не найден`);
       const parent = ownNode(draft.nodes, op.parent);
-      if (!parent) return opErr('bad-parent', `move: родитель «${op.parent}» не найден`);
+      if (!parent) return opErr('bad-parent', `move: родитель «${shown(op.parent)}» не найден`);
       if (!CONTAINER_TYPES.has(parent.type)) return opErr('bad-parent', 'move: родитель не контейнер');
       if (op.id === op.parent) return opErr('cycle', 'move: узел не может быть своим родителем');
       /* Круг 19, п.1: move схемой не перепроверяет узел (он не меняется), поэтому
@@ -2191,10 +2533,12 @@ function applyOne(draft, op, j) {
       return null;
     }
     case 'setToken': {
-      const path = String(op.path || '');
+      const path = typeof op.path === 'string' ? op.path : isNum(op.path) ? String(op.path) : '';   // круг 29: без приведения объекта
       if (!path) return opErr('bad-op', 'setToken: пустой путь');
-      const badKey = path.split('.').find((p) => UNSAFE_KEYS.has(p));
+      const badKey = path.split('.').find((p) => PROTO_KEYS.has(p));
       if (badKey) return opErr('protected-path', `setToken: путь «${badKey}» защищён`);
+      const tokErr = tokenWriteProblem(path.split('.'), op.value, draft.tokens);
+      if (tokErr) return opErr('bad-op', `setToken ${path}: ${tokErr}`);
       const st = DRAFT_STATE.get(draft);
       if (!st) {
         const next = setPath(draft.tokens, path, op.value);
@@ -2209,7 +2553,7 @@ function applyOne(draft, op, j) {
       return null;
     }
     default:
-      return opErr('bad-op', `неизвестная операция «${op.op}»`);
+      return opErr('bad-op', `неизвестная операция «${shown(op.op)}»`);
   }
 }
 
@@ -2251,7 +2595,7 @@ function applyOps(doc, opList) {
       const err = applyOne(draft, list[i]);
       if (err) {
         logOnce('apply:' + err.message, `операция ${i} отклонена: ${err.message}`);
-        return { doc, error: opErr(err.code, `операция ${i} (${list[i] && list[i].op}): ${err.message}`, err) };
+        return { doc, error: opErr(err.code, `операция ${i} (${shown(list[i] && list[i].op)}): ${err.message}`, err) };
       }
     }
   } catch (e) {
@@ -2355,7 +2699,7 @@ function applyBatches(doc, batches) {
  * @returns {{path:string, value:any}}
  */
 function inversePoint(container, path, opValue) {
-  const parts = String(path).split('.');
+  const parts = textOf(path).split('.');
   let cur = container && typeof container === 'object' ? container : {};
   for (let i = 0; i < parts.length - 1; i++) {
     const next = cur[parts[i]];
@@ -3133,16 +3477,23 @@ const FALLBACK_MONO = 'IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monos
 
 /** Итоговый стиль текста: токен из tokens.type + точечные переопределения узла. */
 function resolveTextStyle(doc, node) {
-  const table = (doc && doc.tokens && doc.tokens.type) || DEFAULT_TOKENS.type;
+  /* Круг 29: всё, что читается здесь, может прийти из документа прежней версии
+     в чужой форме (объект в style.token, число в font, массив вместо токена).
+     Ничего не приводим неявно: негодное поле пропускается, берётся запасное. */
+  const own = doc && doc.tokens && isObj(doc.tokens.type) ? doc.tokens.type : null;
+  const entry = (name) => {
+    const e = typeof name === 'string' ? (own ? ownNode(own, name) : ownNode(DEFAULT_TOKENS.type, name)) : undefined;
+    return isObj(e) ? e : undefined;
+  };
   const raw = node && node.style;
-  let base = table.body || DEFAULT_TOKENS.type.body;
+  let base = entry('body') || DEFAULT_TOKENS.type.body;
   let over = {};
-  if (typeof raw === 'string') base = table[raw] || base;
-  else if (raw && typeof raw === 'object') {
-    if (raw.token && table[raw.token]) base = table[raw.token];
+  if (typeof raw === 'string') base = entry(raw) || base;
+  else if (isObj(raw)) {
+    base = entry(raw.token) || base;
     over = raw;
   }
-  const font = over.font || base.font || 'IBM Plex Sans';
+  const font = (typeof over.font === 'string' && over.font) || (typeof base.font === 'string' && base.font) || 'IBM Plex Sans';
   const fontSize = isNum(over.fontSize) ? over.fontSize : (isNum(base.fontSize) ? base.fontSize : 15);
   const fontWeight = isNum(over.fontWeight) ? over.fontWeight : (isNum(base.fontWeight) ? base.fontWeight : 400);
   const lhRaw = isNum(over.lineHeight) ? over.lineHeight : base.lineHeight;
@@ -3359,7 +3710,7 @@ function makeMeasurer(opts) {
   };
   /** Перенос по словам. maxWidth === null → без переноса. */
   const wrap = (text, style, maxWidth) => {
-    const src = String(text === undefined || text === null ? '' : text);
+    const src = textOf(text);   // круг 29: без неявного приведения чужого значения
     const key = styleKey(style) + '\u0000' + (maxWidth === null || !Number.isFinite(maxWidth) ? '-' : r2(maxWidth)) + '\u0000' + src;
     let cached = wrapCache.get(key);
     if (cached) return cached;
@@ -3385,7 +3736,8 @@ function makeMeasurer(opts) {
   };
   const natural = (text, style) => {
     let max = 0;
-    for (const para of String(text === undefined || text === null ? '' : text).split('\n')) {
+    // круг 29: не строка (документ прежней версии) — пусто, без неявного приведения
+    for (const para of textOf(text).split('\n')) {
       max = Math.max(max, width(para, style));
     }
     return r2(max);
@@ -3513,7 +3865,7 @@ function flowLayout(ctx, node, boxW, boxH) {
   const pad = L.padding;
   // круг 19: детей берём из карты РАСКРЫТОГО документа — у раскрытого узла
   // экземпляра дети синтетические, в doc.nodes их нет (SPEC §5.6)
-  const kids = kidsOf(node).map((id) => ctx.nodes[id]).filter((n) => n && n.visible !== false);
+  const kids = kidsOf(node).map((id) => ownNode(ctx.nodes, id)).filter((n) => n && n.visible !== false);
   const flowKids = kids.filter((k) => !k.override);
   const absKids = kids.filter((k) => k.override);
   const innerW = boxW === null ? null : Math.max(0, r2(boxW - pad.l - pad.r));
@@ -3759,7 +4111,7 @@ function solve(doc, opts) {
   const root = doc.nodes[doc.root];
   ctx.rects[root.id] = { x: 0, y: 0, w: 0, h: 0 };
   for (const id of kidsOf(root)) {
-    const child = ctx.nodes[id];
+    const child = ownNode(ctx.nodes, id);
     if (!child) continue;
     const pos = nodePos(child);
     const m = measureNode(ctx, child, null, null);
@@ -3823,9 +4175,12 @@ function resolveColor(doc, value) {
     v = v.token !== undefined ? v.token : v.color !== undefined ? v.color : v.value;
   }
   if (typeof v !== 'string' || !v) return null;
-  const tokens = (doc && doc.tokens && doc.tokens.colors) || DEFAULT_TOKENS.colors;
-  if (tokens[v]) v = tokens[v];
-  if (v[0] !== '#') return null;
+  const tokens = (doc && doc.tokens && isObj(doc.tokens.colors) && doc.tokens.colors) || DEFAULT_TOKENS.colors;
+  // круг 29: только своё свойство палитры и только строка — `colors.constructor`
+  // давал функцию, а объект в палитре старого документа ронял проверку ниже
+  const named = ownNode(tokens, v);
+  if (named !== undefined) v = named;
+  if (typeof v !== 'string' || v[0] !== '#') return null;
   if (/^#[0-9a-fA-F]{3}$/.test(v)) return '#' + v.slice(1).split('').map((c) => c + c).join('').toLowerCase();
   if (/^#[0-9a-fA-F]{6}$/.test(v)) return v.toLowerCase();
   if (/^#[0-9a-fA-F]{8}$/.test(v)) return v.slice(0, 7).toLowerCase();
@@ -3876,7 +4231,7 @@ function nearestFill(doc, node) {
   while (cur && guard++ < 512) {
     const hex = resolveColor(doc, cur.fill);
     if (hex) return hex;
-    cur = cur.parent ? doc.nodes[cur.parent] : null;
+    cur = cur.parent ? ownNode(doc.nodes, cur.parent) : null;
   }
   return resolveColor(doc, (doc.tokens && doc.tokens.colors && doc.tokens.colors.canvas) || '#ffffff');
 }
@@ -3954,8 +4309,8 @@ function validateComponents(doc, add) {
     const master = masters.get(n.of);
     if (!master) {
       add('dead-instance', n.id, nodeById(doc, n.of)
-        ? `«${displayName(doc, n)}»: «${n.of}» — не компонент библиотеки`
-        : `«${displayName(doc, n)}»: компонента «${n.of}» в документе нет`);
+        ? `«${displayName(doc, n)}»: «${shown(n.of)}» — не компонент библиотеки`
+        : `«${displayName(doc, n)}»: компонента «${shown(n.of)}» в документе нет`);
       continue;
     }
     const known = propMap(master);
@@ -4015,7 +4370,7 @@ function validate(doc, geo, opts) {
        * а ребёнок уже нет: иначе на каждую обрезанную цепочку сыпались бы
        * десятки одинаковых строк. Обычному пути это ничего не стоит: сюда
        * попадают только узлы без прямоугольника, а их в норме нет. */
-      const up = node.parent ? doc.nodes[node.parent] : null;
+      const up = node.parent ? ownNode(doc.nodes, node.parent) : null;
       if (!up || !geo.rects[up.id]) continue;              // не начало обрыва — о нём уже сказали
       const chain = ancestors(doc, id);
       const top = chain.length ? chain[chain.length - 1] : null;
@@ -4040,12 +4395,12 @@ function validate(doc, geo, opts) {
       const needH = r2(lines.length * style.lineHeight);
       const widest = lines.reduce((s, l) => Math.max(s, m.width(l, style)), 0);
       if (needH > rect.h + 0.5) {
-        add('overflow', id, `текст «${(node.characters || '').slice(0, 24)}…» не помещается по высоте: нужно ${needH}, есть ${r2(rect.h)}`);
+        add('overflow', id, `текст «${strOf(node.characters).slice(0, 24)}…» не помещается по высоте: нужно ${needH}, есть ${r2(rect.h)}`);
       } else if (widest > rect.w + 0.5) {
-        add('overflow', id, `текст «${(node.characters || '').slice(0, 24)}…» шире рамки: ${r2(widest)} > ${r2(rect.w)}`);
+        add('overflow', id, `текст «${strOf(node.characters).slice(0, 24)}…» шире рамки: ${r2(widest)} > ${r2(rect.w)}`);
       }
       const fg = resolveColor(doc, node.color) || resolveColor(doc, 'text') || '#000000';
-      const parent = node.parent ? doc.nodes[node.parent] : null;
+      const parent = node.parent ? ownNode(doc.nodes, node.parent) : null;
       const bg = nearestFill(doc, parent || node);
       const ratio = contrastRatio(fg, bg);
       const large = style.fontSize >= 24 || (style.fontSize >= 18.66 && style.fontWeight >= 700);
@@ -4067,7 +4422,7 @@ function validate(doc, geo, opts) {
       for (const k of PAD_KEYS) if (!inScale(L.padding[k])) bad.push('padding.' + k + ' ' + L.padding[k]);
       if (bad.length) add('off-scale', id, `вне шкалы отступов: ${bad.join(', ')}`);
       if (L.mode === 'none') {
-        const kids = kidsOf(node).map((c) => doc.nodes[c]).filter(Boolean);
+        const kids = kidsOf(node).map((c) => ownNode(doc.nodes, c)).filter(Boolean);
         for (let i = 0; i < kids.length; i++) {
           for (let j = i + 1; j < kids.length; j++) {
             const a = geo.rects[kids[i].id];
@@ -4083,7 +4438,7 @@ function validate(doc, geo, opts) {
       }
     }
 
-    const parent = node.parent ? doc.nodes[node.parent] : null;
+    const parent = node.parent ? ownNode(doc.nodes, node.parent) : null;
     if (parent && parent.id !== doc.root) {
       const pr = geo.rects[parent.id];
       if (pr) {
@@ -4143,7 +4498,7 @@ function buildDemo(doc) {
   const nodes = doc.nodes;
   const push = (n) => {
     nodes[n.id] = n;
-    const p = nodes[n.parent];
+    const p = ownNode(nodes, n.parent);
     if (p && p.children) p.children.push(n.id);
     return n;
   };
@@ -4387,17 +4742,17 @@ function pruneBrokenEdges(doc) {
   const stack = [doc.root];
   while (stack.length) {
     const id = stack.pop();
-    const n = doc.nodes[id];
+    const n = ownNode(doc.nodes, id);
     if (!n || !Array.isArray(n.children)) continue;
     const kept = [];
     for (const c of n.children) {
-      const child = doc.nodes[c];
+      const child = ownNode(doc.nodes, c);
       if (!child) {
-        logOnce('prune:ghost:' + c, `createDoc: ребёнок «${c}» узла «${id}» не найден — ребро отброшено`);
+        logOnce('prune:ghost:' + shown(c), `createDoc: ребёнок «${shown(c)}» узла «${id}» не найден — ребро отброшено`);
         continue;
       }
       if (child.parent !== id) {
-        logOnce('prune:parent:' + c, `createDoc: у «${c}» parent «${child.parent}», а числится в «${id}» — ребро отброшено`);
+        logOnce('prune:parent:' + c, `createDoc: у «${c}» parent «${shown(child.parent)}», а числится в «${id}» — ребро отброшено`);
         continue;
       }
       if (seen.has(c) || c === id) {
@@ -4415,7 +4770,7 @@ function pruneBrokenEdges(doc) {
   for (const id of Object.keys(doc.nodes)) {
     if (seen.has(id)) continue;
     const n = doc.nodes[id];
-    logOnce('prune:orphan:' + id, `createDoc: узел «${id}» (parent «${n && n.parent}») не достижим из корня — удалён вместе с поддеревом`);
+    logOnce('prune:orphan:' + id, `createDoc: узел «${id}» (parent «${shown(n && n.parent)}») не достижим из корня — удалён вместе с поддеревом`);
     delete doc.nodes[id];
   }
 }
@@ -4481,11 +4836,11 @@ function repairNode(n, doc) {
     } else if (n.props && doc) {
       // пропс, которого мастер не объявлял, оставить нельзя: checkNode его отклоняет,
       // и узел вместе с ним уехал бы из документа целиком
-      const known = propMap(doc.nodes ? doc.nodes[n.of] : null);
+      const known = propMap(doc.nodes ? ownNode(doc.nodes, n.of) : null);
       for (const key of Object.keys(n.props)) {
         const p = known.get(key);
         if (p && propValue(p, n.props[key]) !== undefined) continue;
-        if (!known.size && !(doc.nodes && doc.nodes[n.of])) continue;   // мастера нет — скажет validate
+        if (!known.size && !(doc.nodes && ownNode(doc.nodes, n.of))) continue;   // мастера нет — скажет validate
         delete n.props[key]; mark('props.' + key);
       }
     }
@@ -4536,7 +4891,9 @@ function repairNode(n, doc) {
   if (n.radius !== undefined && checkRadiusValue(n.radius)) { delete n.radius; mark('radius'); }
   if (n.type === 'text') {
     if (typeof n.characters !== 'string') {
-      n.characters = n.characters === undefined || n.characters === null ? '' : String(n.characters);
+      // круг 29: число и булево — строкой, как раньше; объект — пусто (String() на нём бросает)
+      const c = n.characters;
+      n.characters = typeof c === 'number' || typeof c === 'boolean' ? String(c) : '';
       mark('characters');
     }
     if (n.style !== undefined && typeof n.style !== 'string' && (typeof n.style !== 'object' || !n.style)) {
@@ -4560,7 +4917,40 @@ function repairNode(n, doc) {
     if (typeof v === 'object' && typeof v.token === 'string') continue;
     delete n[k]; mark(k);
   }
+  repairShapes(n, mark);
   return fixed;
+}
+
+/**
+ * Круг 29: форма полей (fieldProblem) — то, что осталось после починки выше.
+ * Негодный подключ обёртки (style.token-объект, stroke.width-строка) снимается,
+ * соседние остаются; флаг приводится к булеву так, как его и читала отрисовка
+ * (clip и locked — по истинности, visible — «не false» значит виден); всё
+ * прочее негодное поле снимается целиком — узел остаётся и правится.
+ */
+function repairShapes(n, mark) {
+  const dropKeys = (obj, keys, field) => {
+    for (const k of keys) {
+      if (obj[k] === undefined) continue;
+      const probe = { [field]: { [k]: obj[k] } };
+      if (fieldProblem(probe, field)) { delete obj[k]; mark(field + '.' + k); }
+    }
+  };
+  if (isObj(n.style)) dropKeys(n.style, ['token', 'font', 'fontFamily', 'fontSize', 'lineHeight', 'fontWeight', 'letterSpacing'], 'style');
+  if (isObj(n.stroke)) dropKeys(n.stroke, ['color', 'token', 'value', 'width'], 'stroke');
+  for (const k of ['fill', 'color']) if (isObj(n[k])) dropKeys(n[k], ['token', 'color', 'value'], k);
+  for (const k of ['clip', 'locked']) {
+    if (n[k] !== undefined && typeof n[k] !== 'boolean') { n[k] = !!n[k]; mark(k); }
+  }
+  for (const k of Object.keys(n)) {
+    if (!fieldProblem(n, k)) continue;
+    // размер у не-экземпляра обязателен: его чинили выше; если всё ещё негоден — hug
+    if (k === 'size' && n.type !== 'page' && n.type !== 'instance') n.size = sizeSpec('hug', 'hug');
+    else if (k === 'characters' && n.type === 'text') n.characters = '';
+    else if (k === 'of' && n.type === 'instance') n.of = '';
+    else delete n[k];
+    mark(k);
+  }
 }
 
 /**
@@ -4573,8 +4963,8 @@ function repairNode(n, doc) {
  */
 function rootProblem(node, doc) {
   if (!node || typeof node !== 'object') return 'корня нет';
-  if (!CONTAINER_TYPES.has(node.type)) return `корень типа «${node.type}» не контейнер`;
-  if (node.parent !== null && node.parent !== undefined) return `у корня есть родитель «${node.parent}»`;
+  if (!CONTAINER_TYPES.has(node.type)) return `корень типа «${shown(node.type)}» не контейнер`;
+  if (node.parent !== null && node.parent !== undefined) return `у корня есть родитель «${shown(node.parent)}»`;
   if (!Array.isArray(node.children)) return 'children корня не массив';
   return checkNode(node, doc);
 }
@@ -4614,6 +5004,116 @@ function withLibrary(doc) {
   doc.nodes[lib.id] = lib;
   doc.nodes[doc.root].children.push(lib.id);
   return doc;
+}
+
+/** Предел узлов импортируемого документа по умолчанию (равен пределу Document service). */
+const MAX_IMPORT_NODES = 20000;
+
+/**
+ * Круг 29 (J7): годится ли ЧУЖОЙ документ в новый проект — до createDoc.
+ *
+ * createDoc чинит и прощает: так открываются документы прежних версий (в том
+ * числе глубже MAX_DEPTH — их можно поднимать и править, SPEC §9.13). Импорт —
+ * другое дело: цепочка в 19 000 уровней или объект в style.token, принятые
+ * один раз, живут в проекте вечно. Поэтому вход проверяется строго, а не
+ * чинится: глубина каждого узла (у корня 0) не больше MAX_DEPTH, циклов нет
+ * (ни по parent, ни ребром children на предка), узлов не больше предела,
+ * каждый узел — по схеме checkNode (форма каждого поля; ссылки на родителей и
+ * мастеров не сверяются — сирот и мёртвые ссылки createDoc уберёт или покажет
+ * validate), токены — той формы, что принимает setToken.
+ *
+ * Не бросает. Документ не меняет.
+ * @param {any} doc документ как пришёл (разобранный JSON)
+ * @param {{maxNodes?:number}} [opts]
+ * @returns {null|{code:'bad-doc', message:string, id?:string, limit?:'depth'|'nodes', max?:number}}
+ *   null — годен; иначе первая причина (сервер отвечает 400, оболочка — словами)
+ */
+function checkImportDoc(doc, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const maxNodes = isNum(o.maxNodes) && o.maxNodes > 0 ? Math.floor(o.maxNodes) : MAX_IMPORT_NODES;
+  const bad = (message, extra) => ({ code: 'bad-doc', message, ...(extra || {}) });
+  try {
+    if (!isObj(doc)) return bad('документ должен быть объектом');
+    if (!isObj(doc.nodes)) return bad('nodes должен быть объектом');
+    if (!isNodeId(doc.root) || !ownNode(doc.nodes, doc.root)) return bad('корень должен быть среди узлов');
+    const ids = Object.keys(doc.nodes);
+    if (ids.length > maxNodes) return bad(`узлов больше ${maxNodes}`, { limit: 'nodes', max: maxNodes });
+
+    const t = doc.tokens;
+    if (t !== undefined && t !== null) {
+      if (!isObj(t)) return bad('tokens должен быть объектом');
+      for (const g of Object.keys(t)) {
+        if (PROTO_KEYS.has(g)) return bad(`tokens: ключ «${g}» зарезервирован`);
+        const err = tokenWriteProblem([g], t[g], t);
+        if (err) return bad('tokens.' + err);
+      }
+    }
+
+    for (const id of ids) {
+      const n = doc.nodes[id];
+      if (!isNodeId(id)) return bad(`id «${shown(id)}» зарезервирован`, { id });
+      if (!isObj(n)) return bad(`узел «${id}» должен быть объектом`, { id });
+      if (n.id !== id) return bad(`узел «${id}»: внутри записан id «${shown(n.id)}»`, { id });
+      // форма полей — как пришли (до нормализации раскладки: объект в layout.mode
+      // нормализация молча заменила бы на 'none')
+      const shape = fieldsProblem(n);
+      if (shape) return bad(`узел «${id}»: ${shape}`, { id });
+      // остальная схема — после тех же умолчаний, что дописывает createDoc
+      const probe = { ...n };
+      if (probe.type === 'frame') probe.layout = normalizeLayout(probe.layout);
+      if (probe.type !== 'page' && probe.type !== 'instance' && !probe.size) probe.size = sizeSpec('hug', 'hug');
+      const err = id === doc.root ? rootProblem(probe, null) : checkNode(probe, null, true);
+      if (err) return bad(`узел «${id}»: ${err}`, { id });
+    }
+
+    /* Глубина и циклы — по parent: у узла один родитель, значит подъём от него
+       либо доходит до корня (глубина известна), либо до узла без живого
+       родителя (сирота — createDoc его уберёт, глубины нет), либо замыкается. */
+    const depth = new Map([[doc.root, 0]]);
+    for (const id of ids) {
+      if (depth.has(id)) continue;
+      const path = [];
+      const onPath = new Set();
+      let cur = id;
+      let d = null;
+      for (;;) {
+        if (depth.has(cur)) { d = depth.get(cur); break; }
+        if (onPath.has(cur)) return bad(`цикл: «${cur}» оказывается собственным предком`, { id: cur });
+        const n = ownNode(doc.nodes, cur);
+        if (!n) break;
+        onPath.add(cur);
+        path.push(cur);
+        if (!isNodeId(n.parent)) break;
+        cur = n.parent;
+      }
+      for (let k = path.length - 1; k >= 0; k--) {
+        d = d === null ? null : d + 1;
+        depth.set(path[k], d);
+        if (d !== null && d > MAX_DEPTH) {
+          return bad(`вложенность глубже ${MAX_DEPTH} уровней (узел «${path[k]}»)`, { id: path[k], limit: 'depth', max: MAX_DEPTH });
+        }
+      }
+    }
+    // ребро children на себя или на предка — цикл, даже если parent ребёнка его не подтверждает
+    for (const id of ids) {
+      const kids = doc.nodes[id].children;
+      if (!Array.isArray(kids) || !kids.length) continue;
+      const up = new Set([id]);
+      for (let p = doc.nodes[id].parent, guard = 0; isNodeId(p) && !up.has(p) && guard <= MAX_DEPTH + 1; guard++) {
+        up.add(p);
+        const pn = ownNode(doc.nodes, p);
+        p = pn ? pn.parent : null;
+      }
+      for (const c of kids) {
+        if (up.has(c)) return bad(`цикл: «${id}» называет ребёнком «${c}» — себя или своего предка`, { id });
+      }
+    }
+    return null;
+  } catch (e) {
+    // вход вне любых ожиданий (геттеры, прокси) — это тоже «не годен», а не исключение
+    logOnce('checkImportDoc:throw', 'checkImportDoc: исключение на входе', e);
+    return bad('документ не читается');
+  }
 }
 
 function createDoc(seed) {
@@ -5611,10 +6111,12 @@ class Stage {
    * @returns {object|undefined}
    */
   _rn(id) {
+    // круг 29: только своё свойство и только по строке — id из чужого children
+    // бывает объектом, и `nodes[{toString:1}]` бросает посреди отрисовки
     const ex = this.geo && this.geo.expanded;
-    const syn = ex ? ex[id] : undefined;
+    const syn = ex ? ownNode(ex, id) : undefined;
     if (syn) return syn;
-    return this.doc && this.doc.nodes ? this.doc.nodes[id] : undefined;
+    return this.doc && this.doc.nodes ? ownNode(this.doc.nodes, id) : undefined;
   }
 
   /**
@@ -6006,7 +6508,7 @@ class Stage {
       }));
     } else if (node.type === 'text') {
       const style = resolveTextStyle(doc, node);
-      const lines = (this.geo.lines && this.geo.lines[node.id]) || [node.characters || ''];
+      const lines = (this.geo.lines && this.geo.lines[node.id]) || [textOf(node.characters)];
       const anchor = node.align === 'center' ? 'middle' : node.align === 'right' ? 'end' : 'start';
       const tx = anchor === 'middle' ? r2(x + rect.w / 2) : anchor === 'end' ? r2(x + rect.w) : x;
       const t = svgEl('text', {
@@ -6121,7 +6623,7 @@ class Stage {
     // начертания текстов, которые живут только в мастере
     for (const n of this._subtreeNodes(id)) {
       if (!n || n.type !== 'text' || n.visible === false) continue;
-      const chars = String(n.characters === undefined || n.characters === null ? '' : n.characters);
+      const chars = textOf(n.characters);
       if (!chars) continue;
       const style = resolveTextStyle(doc, n);
       const family = String(style.font || '').trim().replace(/^['"]|['"]$/g, '');
@@ -6995,7 +7497,7 @@ class Stage {
     const walk = (node, depth) => {
       if (depth > MAX_DEPTH) return;
       for (const cid of kidsOf(node)) {
-        const child = doc.nodes[cid];
+        const child = ownNode(doc.nodes, cid);
         if (!child || child.visible === false || child.locked) continue;
         const r = this.geo.rects[cid];
         if (!r || !hits(r)) continue;
@@ -7045,7 +7547,7 @@ class Stage {
   _snap(rect, node) {
     const doc = this.doc;
     const out = { x: rect.x, y: rect.y, guides: [] };
-    const parent = doc.nodes[node.parent];
+    const parent = ownNode(doc.nodes, node.parent);
     if (!parent) return out;
     const pr = this.geo.rects[parent.id];
     const thr = 6 / this.view.zoom;
@@ -7308,8 +7810,8 @@ class Stage {
     if (!parent || !doc) return [];
     return (parent.children || []).filter((id) => {
       if (id === exceptId) return false;
-      const n = doc.nodes[id];
-      return n && !n.override && this.geo.rects[id];
+      const n = ownNode(doc.nodes, id);
+      return n && !n.override && ownNode(this.geo.rects, id);
     });
   }
 
@@ -7322,7 +7824,7 @@ class Stage {
     this._guides = [];
     this._insertion = null;
     this._clearShift();
-    const parent = doc.nodes[node.parent];
+    const parent = ownNode(doc.nodes, node.parent);
     const isRoot = !parent || parent.id === doc.root;
     const L = parent ? resolveLayout(doc, parent.layout) : DEFAULT_LAYOUT;
     const flow = !isRoot && (L.mode === 'row' || L.mode === 'column') && !node.override;
@@ -7662,7 +8164,7 @@ class Stage {
       this._commit([ops.set(d.id, 'pos', { x: r2(res.x), y: r2(res.y) })], `Сдвинуть «${name}»`);
       return;
     }
-    const parent = doc.nodes[node.parent];
+    const parent = ownNode(doc.nodes, node.parent);
     const pr = this.geo.rects[parent.id];
     if (!pr) return;
     if (res.kind === 'pos') {
@@ -7690,7 +8192,7 @@ class Stage {
     const p = d.preview;
     const list = [];
     if (node.override) {
-      const parent = doc.nodes[node.parent];
+      const parent = ownNode(doc.nodes, node.parent);
       const pr = (parent && this.geo.rects[parent.id]) || { x: 0, y: 0 };
       list.push(ops.set(d.id, 'override', { x: r2(p.x - pr.x), y: r2(p.y - pr.y), w: r2(p.w), h: r2(p.h) }));
     } else {
@@ -7702,7 +8204,7 @@ class Stage {
       const h = (typeof d.handle === 'string' && d.handle) || 'nwse';   // ручка неизвестна — как раньше, обе оси
       if (h.includes('e') || h.includes('w')) list.push(ops.set(d.id, 'size.w', { mode: 'fixed', value: r2(p.w) }));
       if (h.includes('n') || h.includes('s')) list.push(ops.set(d.id, 'size.h', { mode: 'fixed', value: r2(p.h) }));
-      const parent = doc.nodes[node.parent];
+      const parent = ownNode(doc.nodes, node.parent);
       const moved = Math.abs(p.x - d.rect0.x) > 0.5 || Math.abs(p.y - d.rect0.y) > 0.5;
       if (moved && parent) {
         const pr = this.geo.rects[parent.id] || { x: 0, y: 0 };
@@ -7854,7 +8356,7 @@ class Stage {
     el.className = 'imago-editor';
     el.contentEditable = 'true';
     el.spellcheck = false;
-    el.textContent = node.characters || '';
+    el.textContent = textOf(node.characters);
     el.addEventListener('keydown', (e) => {
       e.stopPropagation();
       // набор через IME: Enter подтверждает подсказку словаря, а не правку
@@ -7874,7 +8376,7 @@ class Stage {
     hint.textContent = EDIT_HINT;
     this.ui.appendChild(el);
     this.ui.appendChild(hint);
-    this._editing = { id: node.id, el, hint, original: node.characters || '' };
+    this._editing = { id: node.id, el, hint, original: textOf(node.characters) };
     this._positionEditor();
     el.focus();
     try {
@@ -7993,7 +8495,7 @@ class Stage {
     const doc = this.doc;
     const node = doc.nodes[id];
     if (!node) return [];
-    const parent = doc.nodes[node.parent];
+    const parent = ownNode(doc.nodes, node.parent);
     if (!parent || parent.id === doc.root) {
       const pos = nodePos(node);
       return [ops.set(id, 'pos', { x: r2(pos.x + dx), y: r2(pos.y + dy) })];
@@ -8028,7 +8530,7 @@ class Stage {
       if (!node || !node.parent) continue;
       const clone = cloneSubtree(doc, id);
       if (!clone.rootId) continue;
-      const parent = doc.nodes[node.parent];
+      const parent = ownNode(doc.nodes, node.parent);
       const index = (parent.children || []).indexOf(id) + 1;
       clone.nodes.forEach((n, i) => {
         const flat = { ...n };
@@ -8066,6 +8568,9 @@ export {
   /* Круг 27: надгробия v1/v2/«неизвестно» → {parents, seq}, прореживание по номеру
      удаления; чистка ключа (общая для сервера и реплики); предел вложенности — */
   normalizeTombstones, pruneTombstones, cleanKey, MAX_DEPTH,
+  /* Круг 29: строгая проверка чужого документа перед импортом (J7) и предел узлов
+     по умолчанию; форма поля узла — та же, что в checkNode (оболочке и мозгу) — */
+  checkImportDoc, MAX_IMPORT_NODES, fieldProblem,
   resetMeasureCache, measureEpoch, onMeasureEpoch,
   hashGeometry, nodeById, ancestors, isArtboard, artboards, subtreeIds, cloneSubtree,
   resolveTarget, resolveColor, resolveTextStyle, contrastRatio, sizeSpec, normalizeLayout,

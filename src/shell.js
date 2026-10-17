@@ -308,6 +308,7 @@ export function shellIntentFromServer(shell) {
  * поправить команду. Тексты сервера к знакомому коду приписываются, только если в них нет
  * служебного (адресов, кодов, «JSON», латиницы).
  */
+const PROJECT_GONE_AGENT_TITLE = 'Проекта больше нет на сервере — команда не выполнена';
 const ERROR_WORDS = {
   busy: ['Агент занят командами этого проекта', 'Повторите чуть позже.'],
   llm_down: ['Модель на сервере не отвечает', 'Попробуйте позже.'],
@@ -316,7 +317,11 @@ const ERROR_WORDS = {
   document_failed: ['Сервер агента не смог прочитать документ', 'Повторите через несколько секунд.'],
   too_large: ['Команда слишком большая для агента', 'Скажите короче или выделите узел поменьше.'],
   bad_request: ['Сервер агента не понял команду', 'Обновите страницу: версия редактора могла устареть.'],
-  not_found: ['Проекта нет на сервере', 'Откройте проект заново.'],
+  /* Круг 29: проекта нет (базу восстановили из копии, проект удалили) — «Откройте проект
+     заново» вело в никуда: открывать нечего. Работа цела во вкладке — её сохраняют копией. */
+  not_found: [PROJECT_GONE_AGENT_TITLE, 'Ваша работа цела в этой вкладке — сохраните её новым проектом.'],
+  /* J5 (круг 29): модель ответила, но ни одна правка не легла — это не «ошибка модели». */
+  not_applied: ['Не получилось применить правку', 'Назовите слой так, как он подписан в списке слоёв, — или выделите его и повторите.'],
   upstream_down: [AGENT_DOWN_WORDS.title, 'Правки руками сохраняются.'],
   upstream_timeout: ['Сервер агента не ответил вовремя', 'Повторите команду.'],
   network: [AGENT_DOWN_WORDS.title, 'Правки руками сохраняются.'],
@@ -332,7 +337,23 @@ const ERROR_WORDS = {
 /* Коды, у которых текст сервера человеку не добавляет ничего, кроме совета администратору
    («проверьте, что сервер модели запущен»): своих слов достаточно. */
 const OWN_SILENT = new Set(['llm_down', 'upstream_down', 'network', 'document_down', 'document_failed',
-  'shutting_down', 'busy', 'timeout', 'upstream_timeout', 'worker_failed', 'internal', 'engine', 'bad_response']);
+  'shutting_down', 'busy', 'timeout', 'upstream_timeout', 'worker_failed', 'internal', 'engine', 'bad_response', 'not_found']);
+
+/**
+ * Код ошибки агента словами — для «Подробностей» (круг 29, п.7): «код: llm_failed» человеку
+ * не говорит ничего. Незнакомый код — общими словами, без латиницы.
+ * @param {string} code
+ * @returns {string}
+ */
+export function errorCodeWords(code) {
+  const known = ERROR_WORDS[code];
+  if (known) {
+    const t = known[0].split(' — ')[0];
+    return t.charAt(0).toLowerCase() + t.slice(1);
+  }
+  if (code === 'cancelled') return 'команда остановлена';
+  return 'сбой агента';
+}
 
 /**
  * @param {{code?: string, message?: string, retryAfterMs?: number|null}} err
@@ -343,6 +364,24 @@ export function agentErrorWords(err) {
   const known = ERROR_WORDS[e.code];
   const own = cleanText(e.message || '');
   const ownOk = own && !isJargon(own);
+  /* J5: «Не получилось применить правку: <почему>» — причина от brain, если она человеческая
+     и сама не повторяет заголовок; подсказка — назвать слой. */
+  /* not_found бывает не только о проекте: «Варианты этой команды не найдены или устарели»
+     (POST /agent/apply). Не про проект — словами сервера, а не «проекта больше нет». */
+  if (e.code === 'not_found' && ownOk && !/проект/i.test(own)) {
+    const [head, ...rest] = own.split(/\s+—\s+/);
+    return { title: head.replace(/\s*[.:;]\s*$/, ''), note: rest.join(' — ').replace(/\s*[.]\s*$/, ''), waitMs: 0 };
+  }
+  if (e.code === 'not_applied') {
+    const [title, hint] = ERROR_WORDS.not_applied;
+    let why = ownOk ? own.replace(/\s*[.:;]\s*$/, '') : '';
+    const low = why.toLowerCase();
+    for (const lead of ['не получилось применить правку', 'ни одну правку не удалось применить', 'ни одна правка не применилась']) {
+      if (low.startsWith(lead)) { why = why.slice(lead.length).replace(/^\s*[:—–-]\s*/, ''); break; }
+    }
+    why = cutText(why, 140, { ellipsis: true });
+    return { title: why ? `${title}: ${why.charAt(0).toLowerCase()}${why.slice(1)}` : title, note: hint.replace(/\s*[.]\s*$/, ''), waitMs: 0 };
+  }
   const [title, hint] = known || [ownOk ? own : 'Агент на сервере не справился с командой', 'Повторите или скажите иначе.'];
   const bits = [];
   if (known && ownOk && !OWN_SILENT.has(e.code) && own !== title && !own.startsWith(title)) bits.push(own.replace(/\s*[.:;]\s*$/, ''));
@@ -551,7 +590,9 @@ export function stoppedWriteWords(tx, utterance = '') {
   const short = what.length > 80 ? `${what.slice(0, 79)}…` : what;
   return {
     title: 'Агент успел записать правку до остановки — можно отменить',
-    note: short ? `«${short}» уже на холсте. Отменить — кнопкой ниже или Ctrl+Z.` : 'Отменить — кнопкой ниже или Ctrl+Z.',
+    // круг 29, п.7: кнопка стоит справа от текста на широком экране и под ним на узком —
+    // «кнопкой ниже» было неправдой на половине экранов; называем её саму
+    note: short ? `«${short}» уже на холсте. Отменить — кнопкой «Отменить» или Ctrl+Z.` : 'Отменить — кнопкой «Отменить» или Ctrl+Z.',
   };
 }
 
@@ -689,9 +730,158 @@ export const OFFLINE_WORDS = Object.freeze({
  */
 export const PROJECT_GONE_WORDS = Object.freeze({
   title: 'Проекта больше нет на сервере',
-  note: 'Например, базу восстановили из резервной копии. Ваша работа сохранена в этой вкладке.',
+  // круг 29: работа лежит в журнале браузера — переживает и перезагрузку страницы
+  note: 'Например, базу восстановили из резервной копии. Ваша работа цела в этом браузере — и после перезагрузки страницы: сохраните её новым проектом.',
   action: 'Сохранить как новый проект',
 });
+
+/* -------------- круг 29: «Сохранить как новый проект» для большого документа -------------- */
+
+/** Пачка досылки — с запасом под пределом тела Document service и nginx (4 МБ, SPEC §9.8). */
+export const RESCUE_TX_BYTES = Math.floor(3.5 * 1024 * 1024);
+/** Операций в пачке — под пределом сервера (5000 на транзакцию). */
+export const RESCUE_TX_OPS = 4000;
+
+const enc = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+/** Байты UTF-8 строки (тело запроса меряется в байтах, а не в символах). */
+export function utf8Bytes(str) {
+  const s = String(str);
+  if (enc) return enc.encode(s).length;
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
+}
+
+/**
+ * Как сохранить документ новым проектом (арх. Д2, круг 29). Небольшой — одним
+ * `POST /api/projects {name, doc}` (`whole`). Больше пачки — тело в 4 МБ не пролезло бы
+ * (413), и работа пропавшего проекта не сохранялась бы вовсе: тогда проект создаётся с
+ * «остовом» (корень без детей и шкалы — тот же корень, те же токены), а узлы досылаются
+ * пачками `create` (exact — узел ложится ровно таким, каким был) в порядке родителей:
+ * родитель раньше детей, братья — по порядку (create кладёт в конец списка детей). Каждая
+ * пачка ≤ maxBytes байт JSON операций и ≤ maxOps операций; документ, собранный из остова и
+ * пачек, совпадает с исходным по hashDoc (test/shell.test.mjs).
+ *
+ * @param {{root: string, nodes: object, tokens?: object, meta?: object}} doc
+ * @param {{name?: string, maxBytes?: number, maxOps?: number}} [o]
+ * @returns {{whole: boolean, body?: object, skeleton?: object, batches: object[][], nodes: number, bytes: number, oversize: string[]}}
+ *   oversize — узлы, которые сами по себе больше пачки (их сервер не примет ни в какой пачке)
+ */
+export function rescuePlan(doc, { name = '', maxBytes = RESCUE_TX_BYTES, maxOps = RESCUE_TX_OPS } = {}) {
+  if (!doc || !doc.nodes || !doc.root || !doc.nodes[doc.root]) throw new Error('документа нет');
+  const whole = { name, doc };
+  const wholeBytes = utf8Bytes(JSON.stringify(whole));
+  if (wholeBytes <= maxBytes) return { whole: true, body: whole, batches: [], nodes: Object.keys(doc.nodes).length, bytes: wholeBytes, oversize: [] };
+  const rootNode = doc.nodes[doc.root];
+  const top = Array.isArray(rootNode.children) ? rootNode.children : [];
+  /* Библиотека — в остове (пустой, дети придут пачками): проект без неё, открытый кем-то
+     посреди досылки, получил бы от миграции оболочки вторую библиотеку. Остальные дети
+     корня встают вокруг неё по своим местам (create с index). */
+  const libId = top.find((id) => {
+    const n = doc.nodes[id];
+    return n && n.type === 'page' && (n.role === 'library' || (typeof CORE_NS.isLibrary === 'function' && CORE_NS.isLibrary(doc, n)));
+  }) || null;
+  const skeleton = {
+    root: doc.root,
+    nodes: { [doc.root]: { ...rootNode, children: libId ? [libId] : [] } },
+    tokens: doc.tokens,
+    ...(doc.meta ? { meta: doc.meta } : {}),
+  };
+  if (libId) skeleton.nodes[libId] = { ...doc.nodes[libId], children: [] };
+  const batches = [];
+  const oversize = [];
+  let cur = [];
+  let curBytes = 2;   // «[]»
+  let total = 0;
+  let count = 0;
+  const seen = new Set([doc.root]);
+  const kidsOf = (n) => (n && Array.isArray(n.children) ? n.children : []);
+  const stack = [];
+  const topIndex = new Map(top.map((id, i) => [id, i]));
+  for (let i = top.length - 1; i >= 0; i--) stack.push(top[i]);
+  while (stack.length) {
+    const id = stack.pop();
+    const n = doc.nodes[id];
+    if (!n || typeof n !== 'object' || seen.has(id)) continue;
+    seen.add(id);
+    const kids0 = kidsOf(n);
+    if (id === libId) {   // уже в остове — только дети
+      for (let i = kids0.length - 1; i >= 0; i--) stack.push(kids0[i]);
+      continue;
+    }
+    const node = { ...n };
+    // дети придут своими операциями — узел создаём пустым, порядок даст порядок обхода
+    if (Array.isArray(n.children)) node.children = []; else delete node.children;
+    const op = { op: 'create', node, exact: true };
+    // ребёнок корня — на своё место рядом с библиотекой из остова; прочие — в конец (по порядку)
+    if (libId && n.parent === doc.root && topIndex.has(id)) op.index = topIndex.get(id);
+    const b = utf8Bytes(JSON.stringify(op)) + 1;   // + запятая
+    if (b + 2 > maxBytes) oversize.push(id);
+    if (cur.length && (curBytes + b > maxBytes || cur.length >= maxOps)) {
+      batches.push(cur);
+      cur = [];
+      curBytes = 2;
+    }
+    cur.push(op);
+    curBytes += b;
+    total += b;
+    count += 1;
+    const kids = kidsOf(n);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+  }
+  if (cur.length) batches.push(cur);
+  return { whole: false, skeleton, body: { name, doc: skeleton }, batches, nodes: count + 1, bytes: total, oversize };
+}
+
+/* --------------- круг 29, J6: подписи транзакций словами («как в Истории») --------------- */
+
+/* Подписи ручных транзакций прежних версий — повелительные и безличные («Свойство»,
+   «Удалить «X»»): опоздавший к истории читал их как команды. Здесь — в прошедшем времени. */
+const LEGACY_TITLES = [
+  [/^Свойство$/, 'Изменил свойство'],
+  [/^Свойство «(.+)» у «(.+)»$/, 'Изменил свойство «$1» у «$2»'],
+  [/^Свойство «(.+)»$/, 'Изменил свойство «$1»'],
+  [/^Удалить (.+)$/, 'Удалил $1'],
+  [/^Убрать свойство (.+)$/, 'Убрал свойство $1'],
+  [/^Поставить (.+)$/, 'Поставил $1'],
+  [/^Сделать компонентом (.+)$/, 'Сделал компонентом $1'],
+  [/^Отсоединить (.+)$/, 'Отсоединил $1'],
+  [/^Имя компонента (.+)$/, 'Переименовал компонент в $1'],
+  [/^Вернуть в поток$/, 'Вернул в поток'],
+  [/^Новая доска$/, 'Добавил новую доску'],
+  [/^Шаг шкалы$/, 'Изменил шаг шкалы'],
+  [/^Новый шаг шкалы$/, 'Добавил шаг шкалы'],
+  [/^Правка$/, 'Изменил макет'],
+  [/^Миграция формата$/, 'Обновил формат документа'],
+  [/^(?:props|override|component\.props)$/, 'Изменил свойство'],
+];
+
+/**
+ * Подпись транзакции журнала для «Истории» (J3/J6): своя подпись словами — как есть;
+ * повелительная прежних версий — в прошедшем времени; «Отмена: …»/«Повтор: …» — «Отменил»/
+ * «Вернул». Пусто — пусто (оболочка скажет «N изменений»).
+ * @param {string} title
+ * @returns {string}
+ */
+export function txTitleWords(title) {
+  let t = cleanText(title);
+  if (!t) return '';
+  const undo = /^(Отмена|Повтор):\s*(.+)$/.exec(t);
+  if (undo) {
+    const inner = txTitleWords(undo[2]) || undo[2];
+    return `${undo[1] === 'Отмена' ? 'Отменил' : 'Вернул'}: ${inner.charAt(0).toLowerCase()}${inner.slice(1)}`;
+  }
+  for (const [re, to] of LEGACY_TITLES) {
+    if (re.test(t)) { t = t.replace(re, to); break; }
+  }
+  return t;
+}
 
 /**
  * Строка ленты стадий без служебного (круг 27, п.7): «Нет связи с моделью

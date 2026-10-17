@@ -13,6 +13,7 @@
  *                    «change-me» — внутренние маршруты отвечают 403
  *   PRESENCE_TTL_MS  без вестей от клиента столько — он ушёл (45000; клиент шлёт сердцебиение раз в 15 с)
  *   WS_INFLIGHT      необработанных транзакций на сокет (2), сверх — пауза чтения и `error busy`
+ *   WS_CONNECTING    сокетов одновременно от upgrade до hello (6), остальные ждут очереди
  *   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE   семафор `POST …/tx`: одновременно (8) и в очереди (64)
  *   QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES   очередь записи: на проект
  *                    (32 МиБ, 256 транзакций) и на экземпляр (128 МиБ); сверх — 503 busy
@@ -36,6 +37,12 @@
  * закрывается; во время миграций — обрывается соединение миграций (база откатывает
  * текущую пачку, сделанное раньше сохранено).
  *
+ * Страховка процесса (круг 29, `installCrashGuard`): необработанное исключение или
+ * отказ промиса — строка в лог со стеком, процесс живёт дальше: ошибка одного сокета или
+ * запроса не должна обрывать всех остальных. Фатальное — по-прежнему выход с кодом 1
+ * (через мягкий останов): до готовности сервиса, системные коды (порт занят, нет памяти)
+ * и шторм — больше 20 таких ошибок за минуту (значит, сломано что-то общее).
+ *
  * Экспорт `start(opts)` — тот же сервис программно (тесты поднимают его на
  * PORT=0 с любым адаптером; два `start` над одним хранилищем — два экземпляра);
  * промис — когда сервис готов. `launch(opts)` — то же, но промис — когда открыт
@@ -56,7 +63,7 @@ import { createRequestHandler } from './http.js';
 import { migrating, setStorageLog } from './errors.js';
 import {
   SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, PAGE_BYTES, VERIFY_MS, PRESENCE_TTL_MS,
-  WS_INFLIGHT, HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES,
+  WS_INFLIGHT, WS_CONNECTING, HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES,
   DB_TIMEOUT_MS, TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES, WRITE_BODY_BYTES, BODY_TIMEOUT_MS
 } from './limits.js';
 
@@ -70,6 +77,8 @@ export const ENV_LIMITS = Object.freeze({
   PRESENCE_TTL_MS: ['presenceTtlMs', PRESENCE_TTL_MS, 1000],
   DB_TIMEOUT_MS: ['dbTimeoutMs', DB_TIMEOUT_MS, 100],
   WS_INFLIGHT: ['maxInflight', WS_INFLIGHT, 1],
+  // круг 29: сокетов одновременно от upgrade до hello (шторм подключений не занимает весь пул)
+  WS_CONNECTING: ['maxConnecting', WS_CONNECTING, 1],
   HTTP_WRITE_CONCURRENCY: ['writesMax', HTTP_WRITE_CONCURRENCY, 1],
   HTTP_WRITE_QUEUE: ['writesQueue', HTTP_WRITE_QUEUE, 0],
   QUEUE_PROJECT_BYTES: ['queueProjectBytes', QUEUE_PROJECT_BYTES, 1],
@@ -140,6 +149,7 @@ export function limitsFrom(opts, env, log) {
  *   presenceTtlMs?: number,
  *   maxBuffered?: number,
  *   maxInflight?: number,
+ *   maxConnecting?: number,
  *   writes?: {max?: number, queue?: number, retryAfter?: number, bodyBytes?: number, bodyTimeoutMs?: number},
  *   tombKeepSeq?: number, tombPruneEvery?: number, tombMax?: number,
  *   recentTxs?: number, recentBytes?: number,
@@ -261,7 +271,7 @@ export async function launch(opts = {}) {
     server.off('upgrade', earlyUpgrade);
     const hub = createHub({
       server, dslr, dslts, bus, instanceId, pingInterval: opts.pingInterval,
-      presenceTtlMs: config.presenceTtlMs, maxInflight: config.maxInflight,
+      presenceTtlMs: config.presenceTtlMs, maxInflight: config.maxInflight, maxConnecting: config.maxConnecting,
       maxBuffered: opts.maxBuffered, frameCache: opts.frameCache, log
     });
     parts = { dslr, dslts, hub };
@@ -302,6 +312,47 @@ export async function launch(opts = {}) {
   };
 }
 
+/** Коды ошибок, после которых процессу не жить: сеть не поднять, памяти нет. */
+const FATAL_CODES = new Set(['EADDRINUSE', 'EACCES', 'EADDRNOTAVAIL', 'ENOMEM', 'ERR_WORKER_OUT_OF_MEMORY']);
+
+/**
+ * Страховка от необработанных ошибок (круг 29). Возвращает функцию снятия.
+ * @param {{
+ *   log?: {warn: Function},
+ *   onFatal: (e: any) => void,
+ *   isReady?: () => boolean,
+ *   stormMax?: number, stormWindowMs?: number,
+ *   target?: NodeJS.EventEmitter
+ * }} o `target` — кого слушать (process; тестам — свой EventEmitter)
+ * @returns {() => void}
+ */
+export function installCrashGuard({ log = console, onFatal, isReady = () => true, stormMax = 20, stormWindowMs = 60000, target = process }) {
+  let recent = [];
+  let fatal = false;
+  const handle = (kind, e) => {
+    const now = Date.now();
+    recent = recent.filter((t) => now - t < stormWindowMs);
+    recent.push(now);
+    const code = e && typeof e === 'object' && typeof e.code === 'string' ? e.code : '';
+    const why = !isReady() ? 'сервис ещё не готов' : FATAL_CODES.has(code) ? `код ${code}` : recent.length > stormMax ? `${recent.length} ошибок за ${Math.round(stormWindowMs / 1000)} с` : '';
+    try {
+      log.warn(`[document] ${kind}${why ? ` — фатально (${why}), выхожу` : ' — процесс продолжает работу'}:`, e && e.stack ? e.stack : e);
+    } catch (_) { /* лог — не наша забота */ }
+    if (why && !fatal) {
+      fatal = true;
+      onFatal(e);
+    }
+  };
+  const onException = (e) => handle('необработанное исключение', e);
+  const onRejection = (e) => handle('необработанный отказ промиса', e);
+  target.on('uncaughtException', onException);
+  target.on('unhandledRejection', onRejection);
+  return () => {
+    target.off('uncaughtException', onException);
+    target.off('unhandledRejection', onRejection);
+  };
+}
+
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   launch().then((l) => {
@@ -321,6 +372,15 @@ if (isMain) {
     // обработчики — до миграций: SIGTERM посреди долгой миграции не убивает процесс жёстко
     process.on('SIGTERM', () => stop('SIGTERM'));
     process.on('SIGINT', () => stop('SIGINT'));
+    installCrashGuard({
+      isReady: () => l.state === 'ready',
+      onFatal: () => {
+        process.exitCode = 1;
+        const hard = setTimeout(() => process.exit(1), 5000);
+        hard.unref();
+        l.close().finally(() => process.exit(1));
+      }
+    });
     l.ready.catch((e) => {
       if (stopping) return;
       console.error('[document] не запустился:', e && e.message ? e.message : e);

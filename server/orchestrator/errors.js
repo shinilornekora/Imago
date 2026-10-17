@@ -3,7 +3,7 @@
  * `error`. Тело — `{error: true, code, message, retryable, detail?}`.
  *
  * Коды: bad_request 400 · not_found 404 · method_not_allowed 405 · too_large 413 ·
- * busy 429 · llm_failed 502 · document_failed 502 · llm_down 503 · document_down 503 ·
+ * busy 429 · not_applied 422 (правка модели к документу не приложилась, круг 29) · llm_failed 502 · document_failed 502 · llm_down 503 · document_down 503 ·
  * shutting_down 503 · worker_failed 500 · timeout 504 · engine 426 · cancelled (только SSE).
  */
 

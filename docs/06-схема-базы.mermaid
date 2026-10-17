@@ -41,6 +41,8 @@ erDiagram
         text command_id "команда агента, породившая запись; NULL — человек (круг 25)"
         int engine
         text chain "sha256(prev_chain + tx_id + seq); CHECK not null; NULL от старого экземпляра — считает триггер"
+        int ops_bytes "байты JSON ops + dropped (пишет экземпляр; старый — NULL, считает триггер по jsonb::text): окно страницы журнала без чтения jsonb (009)"
+        int ops_count "число операций: история без чтения ops; NULL от старого экземпляра — считает триггер (009)"
         timestamptz created_at
     }
     SNAPSHOTS {

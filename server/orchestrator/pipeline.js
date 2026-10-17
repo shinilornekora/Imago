@@ -291,6 +291,10 @@ export function createPipeline(deps) {
           });
         } catch (e) {
           if (e && e.kind === 'network' && !signal.aborted) llm.markDown();
+          // круг 29 (J5): тело отказа модели («{"error":…}») — администратору в лог, не человеку
+          if (e && e.detail) {
+            log.warn(`[orchestrator] команда ${cmd.command_id}: модель отвергла запрос${e.status ? ` (${e.status})` : ''}: ${llm.redact(String(e.detail))}`);
+          }
           // наружу из главного потока — только очищенный текст
           throw Object.assign(new Error(llm.redact(e && e.message ? e.message : 'Сбой модели')), { kind: (e && e.kind) || 'model', code: e && e.code });
         } finally {
@@ -376,6 +380,9 @@ export function createPipeline(deps) {
       hintDown(msg);
       return llmDown();
     }
+    // круг 29 (J5): ответ модели разобран, но к документу не приложился — это не сбой модели
+    if (error.code === 'not_applied') return new OrchError(422, 'not_applied', msg, { retryable: error.retryable !== false });
+    if (error.detail) log.warn(`[orchestrator] ошибка модели: ${llm.redact(String(error.detail))}`);
     return new OrchError(502, 'llm_failed', msg, { retryable: error.retryable !== false });
   }
 

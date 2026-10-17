@@ -3800,9 +3800,15 @@ test('круг16 п.8: сырой текст исключения не уход�
   for (const value of [angry, circular]) {
     const r = applyOps(doc, [{ op: 'set', id, path: 'fill', value }]);
     assert.equal(r.doc, doc, 'документ не тронут');
-    assert.equal(r.error.code, 'bad-op', 'код из контракта applyOps');
     assert.ok(!/JSON|stack|Error|-->/i.test(r.error.message), 'без внутренностей движка: ' + r.error.message);
-    assert.match(r.error.message, /^правку не удалось применить/, r.error.message);
+    if (value === angry) {
+      assert.equal(r.error.code, 'bad-op', 'код из контракта applyOps');
+      assert.match(r.error.message, /^правку не удалось применить/, r.error.message);
+    } else {
+      // круг 29: цикл в значении — не исключение, а причина словами (форма поля, PLAIN_DEPTH)
+      assert.equal(r.error.code, 'bad-node', r.error.message);
+      assert.match(r.error.message, /вложенность значения/, r.error.message);
+    }
   }
 });
 

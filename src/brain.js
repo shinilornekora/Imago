@@ -108,12 +108,17 @@ export class BrainError extends Error {
 
 const ERR = (kind, message, extra) => new BrainError(kind, message, extra);
 
+/** Сервер модели отверг запрос (4xx): что сказать человеку (подробности — в `detail`). */
+export const MODEL_REJECTED = 'Модель не приняла запрос — попробуйте ещё раз или скажите команду иначе';
+
 /** Ошибка → всегда понятный человеку объект {kind, message}. */
 export function toErrorInfo(e) {
   if (e instanceof BrainError) {
     const info = { kind: e.kind, message: e.message };
     if (e.code) info.code = e.code;
     if (e.text) info.text = e.text;
+    // круг 29: служебные подробности (тело отказа модели) — не для экрана, для журнала
+    if (e.detail) info.detail = String(e.detail);
     // круг 16, п.8: «повторять нечего» — признак для оболочки, чтобы не звать «Повторить»
     if (e.retryable === false) info.retryable = false;
     return info;
@@ -1262,7 +1267,9 @@ function makeOpenAiProvider(cfg) {
         if (!res.ok) {
           const text = await (res.text ? res.text().catch(() => '') : Promise.resolve(''));
           if (res.status === 429 || res.status >= 500) throw ERR('network', `Сервер модели ответил ${res.status}`, { retryable: true });
-          throw ERR('model', `Сервер модели отверг запрос (${res.status}): ${cutText(text, 300)}`);
+          /* Круг 29 (J5): тело отказа («{"error":…}») — служебное: человеку нейтральные слова,
+           * а само тело и статус — полями `status`/`detail` (Orchestrator пишет их в лог). */
+          throw ERR('model', MODEL_REJECTED, { status: res.status, detail: cutText(text, 300) });
         }
         if (body.stream) {
           const out = await readSseStream(res, opts.onText);
@@ -7001,7 +7008,7 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
   /* Круг 7, п.1: если все правки отклонены, причина обязана быть В САМОЙ ошибке — иначе человек
    * читает голое «ни одну правку не удалось применить», а модель на починке не знает, что чинить. */
   if (!ops.length) {
-    const why = said.slice(0, 2).join(' ');
+    const why = failureReasons(said).join(' ');
     /**
      * Круг 16, п.8: «отмени скидку» → «Слой «Скидка» не найден», и оболочка предлагала
      * «Повторить». Повтор тут заведомо даст то же: цель не нашлась не потому, что модель
@@ -7018,10 +7025,45 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         const ref = String(e.target != null ? e.target : e.id);
         try { return refCandidates(engine, doc, ref, scope, { created }).ids.length === 0; } catch { return false; }
       });
-    throw ERR('schema', `Ни одну правку не удалось применить к документу${why ? `. ${why}` : ''}`,
-      allMissing ? { retryable: false } : null);
+    /* Круг 29 (J5): своим кодом `not_applied` — это не сбой модели: ответ разобран, но к
+     * документу не приложился. Текст — сама причина (оболочка говорит «Не получилось применить
+     * правку: …»), а служебная шапка — только когда причины нет. */
+    throw ERR('schema', why || 'Ни одну правку не удалось применить к документу',
+      { code: 'not_applied', ...(allMissing ? { retryable: false } : {}) });
   }
   return ops;
+}
+
+/**
+ * Круг 29 (J5): причины отказа, когда не применилось НИЧЕГО. Заметки об адресации писались
+ * для случая, когда правка легла: «правлю «Заголовок и период». Скажите «во всех…»», «правка
+ * ушла туда», «оформление поправил у всех». Рядом с «ни одну правку не удалось применить» это
+ * противоречие: человек читал, что правлю, и тут же — что не правил. Оставляем факт (какие
+ * узлы подошли и какой пробовали), убираем обещание. Не больше двух строк, причина — первой.
+ * @param {string[]} said
+ * @returns {string[]}
+ */
+export function failureReasons(said) {
+  const all = [];
+  for (const raw of Array.isArray(said) ? said : []) {
+    let m = String(raw == null ? '' : raw).trim();
+    if (!m) continue;
+    m = m
+      .replace(/;\s*(?:правлю|кладу в)\s+(.+?)(?:\s+—\s+его вы и назвали в команде)?(?:\.\s*Скажите «во всех…», чтобы поправить сразу все)?\.?$/u,
+        (_, pick) => `; пробовал ${pick}`)
+      .replace(/,\s*но в команде назван вмещающий слой\s+—\s+правлю только\s+(.+?)\.\s*Нужны все\s+—\s+скажите «во всех…»$/u,
+        (_, pick) => `; пробовал только ${pick} — его назвали в команде`)
+      .replace(/:\s*правлю все\s*(\(.*\))$/u, (_, list) => ` ${list}`)
+      .replace(/(\(.*\)):\s*оформление поправил у всех\.\s*Нужен один\s+—\s+выделите его и повторите$/u, (_, list) => list)
+      .replace(/(?:;|\s+—)\s+правка ушла (?:туда|в него)$/u, '')
+      .replace(/\.$/u, '');
+    if (!all.includes(m)) all.push(m);
+  }
+  // сама причина отказа (ранг 0: «правка пропущена», «не найден») — первой: оболочка
+  // показывает начало текста, и причина не должна уйти за обрез
+  const cause = all.filter((m) => warningRank(m) === 0);
+  const rest = all.filter((m) => warningRank(m) !== 0);
+  return cause.concat(rest).slice(0, 2).map((m) => (/[.!?]$/u.test(m) ? m : `${m}.`));
 }
 
 /**
@@ -7246,6 +7288,22 @@ const STAGE_LABELS = {
  * Нарушение → строка для человека (п.17): имя слоя вместо технического id,
  * контраст — по-русски, а не «low-contrast #t3».
  */
+/**
+ * Круг 29: ядро пишет выход за рамки «на 40×0»; оболочка переводила это в «на 40 px по ширине»
+ * только в предупреждениях, а в стадии «Чиню» человек читал «40×0». Переводим у источника —
+ * одни слова и в ленте, и в итоге.
+ */
+export function overflowWords(text) {
+  return String(text == null ? '' : text).replace(/на\s+(\d+(?:[.,]\d+)?)\s*[×x]\s*(\d+(?:[.,]\d+)?)/gu, (all, a, b) => {
+    const w = Number(String(a).replace(',', '.'));
+    const h = Number(String(b).replace(',', '.'));
+    const bits = [];
+    if (w >= 0.5) bits.push(`${Math.round(w)} px по ширине`);
+    if (h >= 0.5) bits.push(`${Math.round(h)} px по высоте`);
+    return bits.length ? `на ${bits.join(' и ')}` : 'на доли пикселя';
+  });
+}
+
 function formatViolation(v, doc) {
   if (v == null) return 'неизвестное нарушение';
   if (typeof v === 'string') return v;
@@ -7300,7 +7358,7 @@ function formatViolation(v, doc) {
   }
   if (v.code === 'instance-too-deep') return `Экземпляры вложены слишком глубоко: ${text}`;
   if (v.code === 'zero-size') return `Слой ${who} не виден: ${text}`;
-  if (v.code === 'out-of-parent') return `Слой ${who} вылез за рамки: ${text}`;
+  if (v.code === 'out-of-parent') return `Слой ${who} вылез за рамки: ${overflowWords(text)}`;
   if (v.code === 'empty-frame') return `Фрейм ${who} пуст — внутри ничего нет`;
   /**
    * Круг 20 (SPEC §6.7): человек шкалу знать не обязан — ни spacing, ни radii, ни gap в его строках.
@@ -8301,6 +8359,11 @@ async function runCommandCore(options = {}) {
       }
     }
 
+    // круг 29: экран собран новой доской — «собираю внутри выделенного» стало неправдой
+    if (attempt.movedToBoard && placement.insideNote) {
+      const i = warnings.indexOf(placement.insideNote);
+      if (i >= 0) warnings.splice(i, 1);
+    }
     for (const w of attempt.warnings) warn(w);
     /**
      * Круг 16, п.8: «повторять нечего» вправе сказать только прогон, у которого ВСЕ попытки
@@ -8355,7 +8418,7 @@ async function runCommandCore(options = {}) {
      * — замечание, а не успех; и подпись записи — что сделано, а не пересказ модели. */
     const afterDoc = attempt.preview && attempt.preview.doc;
     if (!attempt.nothingChanged) {
-      for (const w of checkOutcome({ doc, after: afterDoc, ops: attempt.ops, utterance, placement })) warn(w);
+      for (const w of checkOutcome({ doc, after: afterDoc, ops: attempt.ops, utterance, placement: attempt.placement || placement })) warn(w);
     }
     let changeSummary = '';
     try { changeSummary = describeChange(attempt.ops, doc, afterDoc, engine); } catch { changeSummary = ''; }
@@ -8843,6 +8906,7 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
    * теперь только слабый довод: она не отменяет команду, но человеку об этом говорят словами.
    */
   const planText = [plan && plan.title ? String(plan.title) : '', plan && plan.summary ? String(plan.summary) : ''].join(' ');
+  let insideNote = '';
   const saidNew = RE_NEW_ARTBOARD.test(spoken) || RE_ARTBOARD_WORD.test(spoken);
   const saidWhole = RE_WHOLE_SCREEN.test(spoken);
   const planOnlyNew = !saidNew && !saidWhole && scope.kind !== 'selection'
@@ -8860,9 +8924,15 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
   } else if (saidWhole && !asArtboard && scope.kind === 'selection') {
     /* Круг 27: «собери экран …» при выделении человека собирается ВНУТРИ выделенного — так он
      * решил выделением; но сказать об этом надо: по словам команды ждут отдельный экран. */
-    note(`Собираю внутри выделенного ${nameOrId(doc, insert ? insert.parentId : scope.containerId)}: выделение ваше.`
-      + ' Нужен отдельный экран — снимите выделение или скажите «новой доской»');
+    insideNote = `Собираю внутри выделенного ${nameOrId(doc, insert ? insert.parentId : scope.containerId)}: выделение ваше.`
+      + ' Нужен отдельный экран — снимите выделение или скажите «новой доской»';
+    note(insideNote);
   }
+  /* Круг 29: выделен мелкий узел (ряд чипов, ярлык), а не доска. Экран в него может заведомо
+   * не влезть — это видно, только когда дерево уже построено; materialize проверяет и, если
+   * экран вылезает за выделенное, собирает его новой доской (screenInSelection). */
+  const screenInSelection = !!insideNote && !insert && !!container && container.type !== 'page'
+    && artboardOf(doc, container.id) !== container.id;
 
   if (insert) {
     const node = nodeOf(doc, insert.parentId);
@@ -8889,6 +8959,7 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
       insert: false,
       index: null,
       parentId: scope.containerId,
+      ...(screenInSelection ? { screenInSelection: true, insideNote } : {}),
       text: `Результат добавляется ВНУТРЬ ${where} #${scope.containerId} «${container.name || ''}» `
         + `(его раскладка: ${container.layout ? container.layout.mode : 'нет'}, ширина ${container.size && container.size.w ? sizeWord(container.size.w) : '?'}). `
         + 'Корень ответа — ОДИН узел, который туда вложится: не повторяй доску и не задавай ему позицию. '
@@ -8902,6 +8973,40 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
     parentId: doc.root,
     text: 'Результат становится НОВОЙ доской на холсте (об этом попросили явно). '
       + 'Корень ответа — frame с фиксированной шириной (мобильный экран 390, десктопный блок 1200) и высотой "hug".',
+  };
+}
+
+/**
+ * Круг 29: «собери экран» при выделенном мелком узле (ряд чипов «Ярлыки», ярлык). Раньше экран
+ * шириной 390 ложился в ряд шириной 350 и записывался с заведомым «вылез за рамки на 40 px»,
+ * а модель получала круг починки, который этого не исправит. Пробуем положить дерево в
+ * выделенное; если корень вылезает за него (нарушение out-of-parent у корня, которого не было
+ * до правки), — собираем новой доской и говорим почему. null — влезает, оставляем как решил человек.
+ */
+function screenOutgrows({ engine, doc, data, placement, persona, said, baseline }) {
+  let built;
+  try {
+    built = treeToOps({ doc, tree: data, engine, warn: () => {}, persona, said, parentId: placement.parentId, asArtboard: false });
+  } catch { return null; }
+  const top = asArray(built && built.ops).find((o) => o && o.op === 'create' && o.node && o.node.parent === placement.parentId);
+  if (!top) return null;
+  let applied;
+  try { applied = engine.applyOps(doc, built.ops); } catch { return null; }
+  if (!applied || applied.error || !applied.doc) return null;
+  const geo = safeSolve(engine, applied.doc);
+  const base = baseline || new Set();
+  const out = safeValidate(engine, applied.doc, geo)
+    .find((v) => v && v.code === 'out-of-parent' && (v.nodeId || v.id) === top.node.id && !base.has(violationKey(v)));
+  if (!out) return null;
+  const rect = (id) => (geo && geo.rects && geo.rects[id]) || null;
+  const own = rect(top.node.id);
+  const host = rect(placement.parentId);
+  const sizes = own && host ? ` (${Math.round(own.w)} px против ${Math.round(host.w)} px)` : '';
+  const name = (data && data.name) || top.node.name || 'Экран';
+  return {
+    placement: { asArtboard: true, insert: false, index: null, parentId: doc.root, text: placement.text },
+    note: `«${cutText(String(name), 60)}» не влезает в выделенный ${nameOrId(doc, placement.parentId)}${sizes} —`
+      + ' собрал его новой доской. Нужен внутри — выделите доску или фрейм пошире',
   };
 }
 
@@ -9260,6 +9365,16 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
 
   try {
     if (intent === 'create') {
+      // круг 29: экран, который заведомо не влезает в выделенный мелкий узел, — новой доской
+      if (placement.screenInSelection) {
+        const moved = screenOutgrows({ engine, doc, data, placement, persona, said, baseline });
+        if (moved) {
+          placement = moved.placement;
+          out.movedToBoard = true;
+          warn(moved.note);
+        }
+      }
+      out.placement = placement;
       // круг 7, п.3: блок во всю ширину не кладём в узкую обёртку якоря — поднимаемся уровнем выше
       const wide = placement.insert
         ? wideTarget(doc, placement, wantsFullWidth(data && data.size), warn)

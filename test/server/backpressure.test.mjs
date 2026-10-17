@@ -205,11 +205,24 @@ describe('предел входящих записей (§9.10)', () => {
   });
 
   it('HTTP-запись — под семафором: сверх очереди — 503 busy с Retry-After, тело не читается', async () => {
-    const s = await stack({ delayMs: 60, writes: { max: 1, queue: 1 } });
+    // круг 29: ворота вместо задержки — под нагрузкой машины третий запрос успевал прийти
+    // после первой записи (60 мс), и «принято ровно 2» флапало
+    let open;
+    const gate = { promise: new Promise((r) => { open = r; }) };
+    const s = await stack({ gate, writes: { max: 1, queue: 1 } });
     try {
       const id = await s.project();
       const h = api(s.url);
-      const res = await Promise.all(Array.from({ length: 5 }, () => h.post(`/api/projects/${id}/tx`, bigTx(1024))));
+      const posts = Array.from({ length: 5 }, () => h.post(`/api/projects/${id}/tx`, bigTx(1024)));
+      // три отказа приходят, пока запись стоит у ворот; потом ворота — и две записи ложатся
+      const settled = posts.map((p) => p.then((r) => r.status));
+      for (let t = 0; t < 500; t++) {
+        const done = await Promise.all(settled.map((p) => Promise.race([p, sleep(0).then(() => 0)])));
+        if (done.filter((c) => c === 503).length >= 3) break;
+        await sleep(10);
+      }
+      open();
+      const res = await Promise.all(posts);
       const codes = res.map((r) => r.status).sort();
       assert.equal(codes.filter((c) => c === 201).length, 2, JSON.stringify(codes));
       const busy = res.filter((r) => r.status === 503);

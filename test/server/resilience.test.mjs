@@ -653,3 +653,222 @@ describe('соединение слушателя и пул · pg (круг 27)'
     }
   });
 });
+
+/* -------------------- круг 29: страница журнала, чтения журнала, слушатель -------------------- */
+
+/**
+ * TCP-прокси к Postgres: соединение, пославшее `marker`, с этого мига больше не получает
+ * ответов базы (запросы уходят, ответы теряются) — как зависшее соединение. Остальные — как есть.
+ */
+async function muteProxy(target, marker) {
+  const pairs = new Set();
+  const state = { muted: 0 };
+  const server = net.createServer((c) => {
+    const s = net.connect(target.port, target.host);
+    const pair = { c, s, mute: false };
+    pairs.add(pair);
+    c.on('data', (d) => {
+      if (!pair.mute && d.includes(marker)) {
+        pair.mute = true;
+        state.muted++;
+      }
+      if (!s.destroyed) s.write(d);
+    });
+    s.on('data', (d) => { if (!pair.mute && !c.destroyed) c.write(d); });
+    c.on('close', () => s.destroy());
+    s.on('close', () => { c.destroy(); pairs.delete(pair); });
+    c.on('error', () => {});
+    s.on('error', () => {});
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return {
+    port: server.address().port,
+    state,
+    async close() {
+      for (const p of pairs) { p.c.destroy(); p.s.destroy(); }
+      await new Promise((r) => server.close(r));
+    }
+  };
+}
+
+const median = (xs) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
+
+describe('журнал и слушатель · pg (круг 29)', { skip: pgUp ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
+  it('страница журнала над записями по 4 МБ: время и прочитанные буферы не растут с числом записей после since', async () => {
+    const { pgStorage } = await import('./helpers.mjs');
+    const { randomBytes } = await import('node:crypto');
+    const s = pgStorage({ listen: false });
+    await s.init();
+    try {
+      const fill = async (n) => {
+        const p = await s.createProject({ name: 'журнал ' + n, kind: 'design', doc: core.createDoc('empty'), engine: E });
+        // 4 МБ плохо сжимаемых данных (hex случайных байт): TOAST хранит их почти целиком
+        for (let i = 0; i < n; i++) {
+          const r = await s.commitTx(p.id, tx(i, [{ op: 'set', id: 'n0', path: 'name', value: randomBytes(2e6).toString('hex') }]));
+          assert.equal(r.status, 'committed');
+        }
+        return p.id;
+      };
+      const few = await fill(2);
+      const many = await fill(14);
+      // страница — по умолчанию DSLR (2 МБ): входит только первая запись
+      const page = (id) => s.txsAfter(id, 0, 500, { maxBytes: 2 * 1024 * 1024 });
+      assert.deepEqual((await page(many)).map((t) => t.seq), [1]);
+      assert.deepEqual((await s.txsAfter(many, 0, 500, { maxBytes: 9e6 })).map((t) => t.seq), [1, 2]);
+      const timeOf = async (id) => {
+        const xs = [];
+        for (let k = 0; k < 5; k++) {
+          const t0 = process.hrtime.bigint();
+          await page(id);
+          xs.push(Number(process.hrtime.bigint() - t0) / 1e6);
+        }
+        return median(xs);
+      };
+      await timeOf(few);
+      await timeOf(many);   // прогрев: кеш базы одинаково тёплый у обоих
+      const tFew = await timeOf(few);
+      const tMany = await timeOf(many);
+      // буферы, которые читает сам запрос страницы (EXPLAIN ANALYZE BUFFERS того же текста)
+      const buffersOf = async (id) => {
+        const q = s.pool.query.bind(s.pool);
+        let seen = null;
+        s.pool.query = (text, params) => { if (!seen && /FROM operations WHERE project_id = \$1 AND seq > \$2/.test(text)) seen = { text, params }; return q(text, params); };
+        try {
+          await page(id);
+        } finally {
+          s.pool.query = q;
+        }
+        const plan = (await q(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${seen.text}`, seen.params)).rows[0]['QUERY PLAN'][0];
+        // вывод EXPLAIN ANALYZE не детоастится — читаем результат отдельно: он и есть «строки страницы»
+        return plan.Plan['Shared Hit Blocks'] + plan.Plan['Shared Read Blocks'];
+      };
+      const bFew = await buffersOf(few);
+      const bMany = await buffersOf(many);
+      assert.ok(bMany <= bFew * 1.5 + 50, `буферов страницы: 2 записи — ${bFew}, 14 — ${bMany} (окно не читает jsonb записей вне страницы)`);
+      assert.ok(tMany < tFew * 2.5 + 40, `страница: 2 записи — ${tFew.toFixed(1)} мс, 14 — ${tMany.toFixed(1)} мс`);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('шторм чтений журнала (ops?since=0 анонимов) не выедает пул: запись идёт, одновременно — не больше предела; сверх очереди — busy journal_reads; чтение сервиса — мимо предела', async () => {
+    const { pgStorage } = await import('./helpers.mjs');
+    // ждать места — сколько угодно: здесь проверяется предел, а не срок (срок — ниже, очередью)
+    const s = pgStorage({ max: 10, connectionTimeoutMillis: 1500, listen: false, journalReadWaitMs: 120000 });
+    await s.init();
+    try {
+      const big = await s.createProject({ name: 'длинный журнал', kind: 'design', doc: core.createDoc('empty'), engine: E });
+      const small = await s.createProject({ name: 'малый', kind: 'design', doc: core.createDoc('empty'), engine: E });
+      const chunk = 'x'.repeat(200000);
+      for (let i = 0; i < 40; i++) await s.commitTx(big.id, tx(i, [{ op: 'set', id: 'n0', path: 'name', value: chunk + i }]));
+      let maxActive = 0;
+      let maxHeavy = 0;
+      const reads = Promise.all(Array.from({ length: 40 }, () => s.txsAfter(big.id, 0, 500, { maxBytes: 16 * 1024 * 1024 }).then((x) => {
+        maxActive = Math.max(maxActive, s.journalReads.active);
+        maxHeavy = Math.max(maxHeavy, s.heavyReads.active);
+        return x.length;
+      }, (e) => e.code || e.message)));
+      await delay(50);
+      const errors = [];
+      const lat = [];
+      for (let i = 0; i < 10; i++) {
+        const t = Date.now();
+        try {
+          assert.equal((await s.commitTx(small.id, tx(i, []))).status, 'committed');
+        } catch (e) {
+          errors.push(e.message);
+        }
+        lat.push(Date.now() - t);
+        assert.ok(s.journalReads.active <= s.journalReads.max);
+      }
+      const rs = await reads;
+      assert.deepEqual(errors, [], 'запись во время шторма');
+      assert.ok(Math.max(...lat) < 1500, `запись не ждёт соединения: ${lat.join(',')}`);
+      assert.deepEqual([...new Set(rs)], [40], 'все чтения дождались места и прочли страницу целиком');
+      assert.ok(maxActive <= 4 && s.journalReads.max === 4, 'чтений журнала одновременно ≤ 4: ' + maxActive);
+      assert.ok(maxHeavy <= 6, 'тяжёлых чтений вместе ≤ max − 4: ' + maxHeavy);
+    } finally {
+      await s.close();
+    }
+
+    const tiny = pgStorage({ max: 10, listen: false, journalReads: 1, journalReadQueue: 0 });
+    await tiny.init();
+    try {
+      const p = await tiny.createProject({ name: 'т', kind: 'design', doc: core.createDoc('empty'), engine: E });
+      await tiny.commitTx(p.id, tx(0, []));
+      const [a, b, c, h] = await Promise.allSettled([
+        tiny.txsAfter(p.id, 0), tiny.txsAfter(p.id, 0), tiny.txsAfter(p.id, 0, 500, { internal: true }), tiny.recentTxMeta(p.id)
+      ]);
+      assert.equal(a.status, 'fulfilled');
+      assert.equal(b.status, 'rejected');
+      assert.equal(b.reason.status, 503);
+      assert.equal(b.reason.code, 'busy');
+      assert.equal(b.reason.detail.cause, 'journal_reads');
+      assert.equal(c.status, 'fulfilled', 'чтение сервиса (голова секвенсора) не ждёт за анонимами');
+      assert.equal(h.status, 'rejected', 'история — под тем же пределом');
+      assert.equal((await tiny.txsAfter(p.id, 0)).length, 1, 'место освободилось');
+    } finally {
+      await tiny.close();
+    }
+
+    // общий предел: снимки и журнал вместе
+    const one = pgStorage({ max: 10, listen: false, heavyReads: 1 });
+    await one.init();
+    try {
+      const p = await one.createProject({ name: 'о', kind: 'design', doc: core.createDoc('empty'), engine: E });
+      // одновременность — по запросам в полёте на пуле (а не по счётчику самого предела)
+      let inflight = 0;
+      let peak = 0;
+      const q = one.pool.query.bind(one.pool);
+      one.pool.query = (...a) => {
+        inflight++;
+        peak = Math.max(peak, inflight);
+        return q(...a).finally(() => { inflight--; });
+      };
+      const jobs = Array.from({ length: 10 }, (_, i) => (i % 2 ? one.latestSnapshot(p.id) : one.txsAfter(p.id, 0)));
+      assert.ok(one.snapshotReads.active + one.journalReads.active >= 2, 'свои пределы впустили больше одного');
+      const all = await Promise.all(jobs);
+      one.pool.query = q;
+      assert.equal(all.length, 10);
+      assert.ok(peak <= 1, 'снимков и журнала вместе ≤ heavyReads: ' + peak);
+    } finally {
+      await one.close();
+    }
+  });
+
+  it('пинг слушателя при зависшей очереди publish: запрос без ответа дольше предела — соединение мертво, переподключение и resync (мутант N14)', async () => {
+    const u = new URL(DB_URL);
+    const MARK = 'freeze_' + RUN_ID;
+    const proxy = await muteProxy({ host: u.hostname, port: Number(u.port || 5432) }, MARK);
+    const via = new URL(DB_URL);
+    via.hostname = '127.0.0.1';
+    via.port = String(proxy.port);
+    const { pgStorage } = await import('./helpers.mjs');
+    const s = pgStorage({ connectionString: via.toString(), listenPingMs: 50, listenPingTimeoutMs: 400 });
+    try {
+      await s.init();
+      assert.equal(s.listening, true);
+      let resync = 0;
+      const got = [];
+      s.onNotify((m) => {
+        if (m.k === 'resync') resync++;
+        if (m.k === 'presence') got.push(m.c);
+      });
+      // запрос с меткой встаёт в очередь слушателя после пинга (по одному) — и остаётся без ответа:
+      // очередь занята, отдельный пинг не начинается; живость — только по времени висящего запроса
+      assert.equal(s.publish({ k: 'presence', p: 'x', i: 'i', c: MARK }), true);
+      await waitFor(() => proxy.state.muted === 1, 'запрос слушателя без ответа', 3000);
+      for (let k = 0; k < 5; k++) s.publish({ k: 'presence', p: 'x', i: 'i', c: 'ждёт' + k });
+      const t0 = Date.now();
+      await waitFor(() => resync > 0, 'слушатель признан мёртвым и переподключён', 4000);
+      assert.ok(Date.now() - t0 < 3000, 'за предел запроса, а не за сетевые таймауты: ' + (Date.now() - t0) + ' мс');
+      await waitFor(() => s.listening, 'слушатель вернулся', 4000);
+      assert.equal(s.publish({ k: 'presence', p: 'x', i: 'i', c: 'после' }), true);
+      await waitFor(() => got.includes('после'), 'новое соединение слушателя доставляет', 3000);
+      assert.equal(proxy.state.muted, 1, 'новое соединение — не в ловушке');
+    } finally {
+      await s.close();
+      await proxy.close();
+    }
+  });
+});

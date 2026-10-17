@@ -18,7 +18,7 @@
  * провайдер вида `claude` с самописной способностью `sample.json` поверх Messages API.
  */
 
-import { makeProvider, parseModelJson, BrainError } from '../../../src/brain.js';
+import { makeProvider, parseModelJson, BrainError, MODEL_REJECTED, cutText } from '../../../src/brain.js';
 import { LLM_HEALTH_CACHE_MS, LLM_HEALTH_TIMEOUT_MS } from '../limits.js';
 
 /** Разобрать адрес модели: публичная часть, query, заголовок авторизации, секреты для redact. */
@@ -207,7 +207,9 @@ export function createLlm(cfg = {}) {
     }
     if (!res.ok) {
       if (res.status === 429 || res.status >= 500) throw new BrainError('network', `Сервер модели ответил ${res.status}`, { retryable: true });
-      throw new BrainError('model', `Сервер модели отверг запрос (${res.status})`);
+      // круг 29 (J5): человеку — нейтральные слова, тело отказа — полем detail (в лог)
+      const text = await res.text().catch(() => '');
+      throw new BrainError('model', MODEL_REJECTED, { status: res.status, detail: cutText(text, 300) });
     }
     const body = await res.json().catch(() => null);
     const text = body && Array.isArray(body.content)

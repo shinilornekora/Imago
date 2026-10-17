@@ -42,6 +42,12 @@
  * переименован (здесь или на другом экземпляре, I4); проекта не стало в базе (I3) —
  * `error {code:'not_found', retryable:false}` всем сокетам проекта и закрытие 4404.
  *
+ * Круг 29: чужие значения в тексты ошибок — только через showValue; обработчики
+ * `message`/`connection` — под try. Кадр tx — один Buffer на событие для всех сокетов.
+ * Подключение: не больше maxConnecting сокетов одновременно до hello; attach — без
+ * мьютекса записи (dslts.peek до чтения строки проекта). Сбой хранилища в догоне после
+ * hello — `error unavailable` и повтор догона, а не закрытие (J4).
+ *
  * Медленный читатель: больше MAX_BUFFERED байт неотправленного — сокет закрывается
  * (4503), клиент переподключится с since и догонит из базы, а память экземпляра не
  * копит кадры для вкладки, которая не читает.
@@ -55,7 +61,7 @@ import { applyServerTimeouts } from './http.js';
 import {
   MAX_BODY_BYTES, WS_ENVELOPE_BYTES, PRESENCE_PER_SECOND as PRESENCE_RATE, PRESENCE_SELECTION, PRESENCE_ID_CHARS,
   PRESENCE_PAYLOAD_BYTES, PRESENCE_TTL_MS, FRAME_CACHE_FRAMES, FRAME_CACHE_ROOM_BYTES, FRAME_CACHE_TOTAL_BYTES,
-  WS_INFLIGHT, BUSY_RETRY_S, isCleanText, cleanText, cutText
+  WS_INFLIGHT, WS_CONNECTING, BUSY_RETRY_S, isCleanText, cleanText, cutText, showValue
 } from './limits.js';
 
 /** Предел сообщения — тело транзакции (4 МБ) плюс конверт; больше — ws закрывает сокет кодом 1009. */
@@ -71,6 +77,13 @@ const isFlag = (v) => typeof v === 'boolean' || (typeof v === 'number' && Number
 const utf8 = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
 /** Коды закрытия: 4400 форма запроса, 4404 нет проекта, 4410 эпоха сменилась, 4503 хранилище/занято. */
 export const CLOSE = { bad: 4400, notFound: 4404, epoch: 4410, unavailable: 4503 };
+/**
+ * Догон после hello не дочитался из-за хранилища (503, retryable): сокет не закрывается
+ * сразу (J4, круг 29) — ему `error unavailable`, и догон повторяется через 0,5 · 2^k с
+ * (не дольше 8 с); столько неудач подряд — закрытие 4503, клиент переподключится.
+ */
+const PUMP_RETRIES = 5;
+const PUMP_RETRY_MS = 500;
 
 /**
  * @param {{
@@ -84,12 +97,14 @@ export const CLOSE = { bad: 4400, notFound: 4404, epoch: 4410, unavailable: 4503
  *   maxBuffered?: number,
  *   maxInflight?: number,
  *   frameCache?: {frames?: number, roomBytes?: number, totalBytes?: number},
+ *   maxConnecting?: number,
  *   log?: {warn:Function, info:Function}
- * }} opts
+ * }} opts `maxConnecting` — сокетов, одновременно идущих от upgrade до hello
  */
 export function createHub({
   server, dslr, dslts, bus = null, instanceId = 'i', pingInterval = 30000,
-  presenceTtlMs = PRESENCE_TTL_MS, maxBuffered = MAX_BUFFERED, maxInflight = WS_INFLIGHT, frameCache = {}, log = console
+  presenceTtlMs = PRESENCE_TTL_MS, maxBuffered = MAX_BUFFERED, maxInflight = WS_INFLIGHT, frameCache = {}, log = console,
+  maxConnecting = WS_CONNECTING
 }) {
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE });
   // таймауты приёма запроса (круг 27, медленное тело): Hub — единственный модуль, которому
@@ -112,9 +127,11 @@ export function createHub({
   let tokenCounter = 0;
   let closing = false;
 
+  /** Кадр — объект, строка или готовый Buffer (один на всех получателей: ws не копирует его без маски). */
   const send = (ws, msg) => {
     if (ws.readyState !== ws.OPEN) return;
-    ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    if (Buffer.isBuffer(msg)) ws.send(msg, { binary: false });
+    else ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
     // читатель не успевает: неотправленное копится в памяти экземпляра — закрыть, догонит из базы
     if (ws.bufferedAmount > maxBuffered && !ws.slowClosed) {
       ws.slowClosed = true;
@@ -146,20 +163,32 @@ export function createHub({
   }
 
   /**
-   * Кадр `{type:'tx', tx}` из кеша комнаты: ключ — seq и chain. Кеш ограничен
-   * числом кадров и байтами — на комнату и на экземпляр; кадр больше четверти
+   * Кадр `{type:'tx', tx}` (Buffer UTF-8) из кеша комнаты: ключ — seq и chain. Кеш
+   * ограничен числом кадров и байтами — на комнату и на экземпляр; кадр больше четверти
    * предела комнаты не кешируется вовсе (одна большая вставка вытеснила бы всё).
+   *
+   * Круг 29: кадр одного события сериализуется один раз на событие, а не на сокет —
+   * `frameMemo` по самому объекту Committed (рассылка отдаёт всем сокетам один и тот же
+   * объект). Раньше кадр больше предела кеша (транзакция 1–4 МБ) сериализовался заново
+   * на каждый сокет: 300 сокетов — цикл событий стоял секунды. Память — пока жив объект
+   * (рассылка, буфер догона), WeakMap держит не дольше.
    */
+  const frameMemo = new WeakMap();
+  let framesSerialized = 0;
   function frameOf(projectId, committed) {
+    const memo = frameMemo.get(committed);
+    if (memo) return memo;
     const room = rooms.get(projectId);
     const key = `${committed.seq}:${committed.chain || ''}`;
     if (room) {
       const hit = room.frames.get(key);
       if (hit) return hit.text;
     }
-    const text = JSON.stringify({ type: 'tx', tx: committed });
+    const text = Buffer.from(JSON.stringify({ type: 'tx', tx: committed }), 'utf8');
+    framesSerialized += 1;
+    frameMemo.set(committed, text);
     if (room) {
-      const size = Buffer.byteLength(text, 'utf8');
+      const size = text.length;
       if (size <= cacheRoomBytes / 4) {
         room.frames.set(key, { text, size });
         room.frameBytes += size;
@@ -188,7 +217,7 @@ export function createHub({
     if (committed.seq > ws.lastSeq + 1) {
       ws.catchingUp = true;
       ws.buffer.push(committed);
-      pump(ws).catch((e) => fail(ws, e));
+      runPump(ws);
       return;
     }
     sendTx(ws, committed);
@@ -458,6 +487,42 @@ export function createHub({
     for (const tx of buffered) deliverTx(ws, tx);
   }
 
+  /**
+   * Догон с повтором (J4, круг 29): сбой хранилища после hello — сокету `error unavailable`
+   * (`detail.cause` — как у HTTP), догон повторяется позже; живое тем временем копится в
+   * буфере. Не хранилище, не после hello или неудач больше PUMP_RETRIES — закрытие (fail).
+   */
+  function runPump(ws) {
+    if (ws.pumping) return Promise.resolve();
+    ws.pumping = true;
+    return pump(ws).then(() => {
+      ws.pumping = false;
+      ws.pumpFails = 0;
+      // буфер досылался внутри pump и нашёл дыру — догон снова (повторный вызов там отбит флагом)
+      if (ws.catchingUp && ws.readyState === ws.OPEN) runPump(ws);
+    }, (e) => {
+      ws.pumping = false;
+      if (ws.readyState !== ws.OPEN) return;
+      // повторяется только сбой хранилища (viaStorage: cause storage|timeout) и занятость его
+      // чтений (busy); журнал, который не дочитывается за снимком, — не сбой связи: закрыть
+      // сразу, а не читать снимок по кругу
+      const cause = e instanceof DocError && e.detail && typeof e.detail === 'object' ? e.detail.cause : undefined;
+      const transient = ws.ready && e instanceof DocError
+        && (e.code === 'busy' || (e.code === 'unavailable' && (cause === 'storage' || cause === 'timeout')));
+      ws.pumpFails = (ws.pumpFails || 0) + 1;
+      if (!transient || ws.pumpFails > PUMP_RETRIES) {
+        fail(ws, e);
+        return;
+      }
+      send(ws, errorMessage(e));
+      const t = setTimeout(() => {
+        if (ws.readyState === ws.OPEN) runPump(ws);
+      }, Math.min(8000, PUMP_RETRY_MS * 2 ** (ws.pumpFails - 1)));
+      if (t.unref) t.unref();
+      ws.once('close', () => clearTimeout(t));
+    });
+  }
+
   function sendGone(ws, view) {
     send(ws, { type: 'gone', snapshot: view.snapshot, head_seq: view.head_seq, epoch: ws.epoch, tip: view.snapshot.chain || '' });
     ws.lastSeq = view.snapshot.seq;
@@ -512,7 +577,66 @@ export function createHub({
 
   /* ------------------------------ подключение ------------------------------ */
 
+  /**
+   * Очередь подключений (круг 29): до hello сокет читает базу 1–3 раза (проект, якорь, эпоха);
+   * 2000 сокетов разом занимали весь пул, и запись ждала соединения секундами. Одновременно
+   * решают не больше maxConnecting, остальные ждут своей очереди в памяти (закрытый,
+   * пока ждал, места не занимает).
+   */
+  let connecting = 0;
+  const connectQueue = [];
+  function acquireConnecting(ws) {
+    if (connecting < maxConnecting) {
+      connecting += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => connectQueue.push({ ws, resolve }));
+  }
+  function releaseConnecting() {
+    connecting -= 1;
+    while (connectQueue.length && connecting < maxConnecting) {
+      const next = connectQueue.shift();
+      connecting += 1;
+      next.resolve();
+    }
+  }
+
+  /** Одно сообщение сокета. Чужие значения в текст — только через showValue. */
+  function onMessage(ws, projectId, data) {
+    let msg;
+    try {
+      msg = JSON.parse(data.toString());
+    } catch (_) {
+      send(ws, errorMessage(badRequest('сообщение не JSON')));
+      return;
+    }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      send(ws, errorMessage(badRequest('сообщение должно быть объектом')));
+      return;
+    }
+    if (!ws.ready) return;   // до hello сообщения не принимаем: проект ещё не проверен
+    switch (msg.type) {
+      case 'tx':
+        onTx(ws, projectId, msg.tx, data.length).catch((e) => log.warn('[document/hub] tx сокета:', e && e.stack ? e.stack : e));
+        break;
+      case 'presence':
+        onPresence(ws, projectId, msg);
+        break;
+      default:
+        send(ws, errorMessage(badRequest(`неизвестный тип сообщения «${showValue(msg.type)}»`)));
+    }
+  }
+
   wss.on('connection', (ws, req) => {
+    try {
+      onConnection(ws, req);
+    } catch (e) {
+      log.warn('[document/hub] подключение:', e && e.stack ? e.stack : e);
+      try { fail(ws, e); } catch (_) { ws.terminate(); }
+    }
+  });
+
+  function onConnection(ws, req) {
     const url = new URL(req.url, 'http://localhost');
     const projectId = url.searchParams.get('project') || '';
     const sinceRaw = url.searchParams.get('since');
@@ -553,28 +677,14 @@ export function createHub({
 
     let joined = false;
     let gone = false;
+    // круг 29: обработчик целиком под try — ошибка разбора одного сообщения (чужое
+    // значение в шаблоне строки, `{"type":{"toString":1}}`) роняла процесс со всеми сокетами
     ws.on('message', (data) => {
-      let msg;
       try {
-        msg = JSON.parse(data.toString());
-      } catch (_) {
-        send(ws, errorMessage(badRequest('сообщение не JSON')));
-        return;
-      }
-      if (!msg || typeof msg !== 'object') {
-        send(ws, errorMessage(badRequest('сообщение должно быть объектом')));
-        return;
-      }
-      if (!ws.ready) return;   // до hello сообщения не принимаем: проект ещё не проверен
-      switch (msg.type) {
-        case 'tx':
-          onTx(ws, projectId, msg.tx, data.length);
-          break;
-        case 'presence':
-          onPresence(ws, projectId, msg);
-          break;
-        default:
-          send(ws, errorMessage(badRequest(`неизвестный тип сообщения «${msg.type}»`)));
+        onMessage(ws, projectId, data);
+      } catch (e) {
+        log.warn('[document/hub] сообщение сокета:', e && e.stack ? e.stack : e);
+        try { send(ws, errorMessage(badRequest('сообщение не разобрано'))); } catch (_) { /* сокет уже не годен */ }
       }
     });
     ws.on('close', () => {
@@ -587,7 +697,20 @@ export function createHub({
     });
     ws.on('error', (e) => log.warn('[document/hub] сокет:', e && e.message));
 
+    let slot = false;
+    const freeSlot = () => {
+      if (!slot) return;
+      slot = false;
+      releaseConnecting();
+    };
     (async () => {
+      // шторм подключений (круг 29): решают одновременно не больше maxConnecting сокетов —
+      // их чтения не забирают у записи пул базы; ждут здесь, а не в мьютексе записи
+      await acquireConnecting(ws);
+      slot = true;
+      if (gone || ws.readyState !== ws.OPEN) return;
+      // снимок головы — до чтения строки проекта: тогда attach обходится без второго чтения
+      const peek = typeof dslts.peek === 'function' ? dslts.peek(projectId) : null;
       // проверяем проект до подписки: в комнате не должно быть сокетов чужих id
       const project = await dslr.project(projectId);
       // сокет закрылся, пока проверяли: в комнату его не пускать — иначе он остался бы
@@ -595,8 +718,9 @@ export function createHub({
       if (gone || ws.readyState !== ws.OPEN) return;
       join(projectId, ws);
       joined = true;
-      // голова загружена и сверена с базой: откат, о котором экземпляр не знал, ловится здесь
-      let head = await dslts.attach(projectId);
+      // голова загружена и согласна с базой (без мьютекса записи, если можно): откат, о
+      // котором экземпляр не знал, ловится здесь
+      let head = await dslts.attach(projectId, peek ? { peek, project } : undefined);
       let decision = 'live';
       if (since !== undefined) decision = await dslr.classify(projectId, { since, tip, epoch }, head);
       if (decision === 'evidence') head = await dslts.clientEvidence(projectId, { token: ws.token });
@@ -627,15 +751,20 @@ export function createHub({
       } else if (decision === 'tail') {
         ws.lastSeq = since;
       } else {
-        // снимок — не конец догона: за ним могут лежать транзакции до головы
-        sendGone(ws, await dslr.gone(projectId));
+        // снимок — не конец догона: за ним могут лежать транзакции до головы. Его шлёт сам
+        // догон (since -1 → gone), чтобы и чтение снимка повторялось при сбое хранилища
+        ws.lastSeq = -1;
       }
-      await pump(ws);
+      // место в очереди подключений — до hello: догон длинного журнала не должен держать
+      // чужие hello (чтения журнала ограничивает хранилище, journalReads)
+      freeSlot();
+      // после hello догон повторяется при сбое хранилища, а не закрывает сокет (J4)
+      runPump(ws);
     })().catch((e) => {
       // комнату покинет обработчик close (он же скажет left, если присутствие было)
       fail(ws, e);
-    });
-  });
+    }).finally(freeSlot);
+  }
 
   // ping/pong: сокет без pong за интервал считается мёртвым и закрывается —
   // иначе комната копит вкладки, у которых давно отвалилась сеть
@@ -678,6 +807,8 @@ export function createHub({
       const room = rooms.get(projectId);
       return room ? [...room.remote.values()].map((e) => ({ instance: e.i, client: e.c })) : [];
     },
+    /** Сколько кадров tx сериализовано (тестам: один раз на событие, а не на сокет). */
+    framesSerialized: () => framesSerialized,
     /** Сколько транзакций сокеты получили `busy` сверх предела «в полёте» (тестам). */
     busyRefused: () => busyRefused,
     /** Прогнать TTL присутствия сейчас (тестам). */

@@ -36,7 +36,9 @@ test('воркер вышел за память — ошибка worker_failed, 
 test('воркер считает дольше таймаута — ошибка timeout, воркер заменён', async (t) => {
   const document = await startDocument();
   const llm = await startFakeLlm(SCRIPT);
-  const orch = await startOrch({ document, llm: { baseUrl: llm.base }, workers: 1, workerTimeoutMs: 800 });
+  // круг 29: 1,5 с, а не 0,8 — следующая команда идёт на свежем («холодном») воркере, и под
+  // нагрузкой её первый прогон сам подбирался к 0,8 с (загрузка модулей в счёт уже не идёт)
+  const orch = await startOrch({ document, llm: { baseUrl: llm.base }, workers: 1, workerTimeoutMs: 1500 });
   t.after(async () => { await orch.close(); await document.close(); await llm.close(); });
   const p = await createProject(document);
 

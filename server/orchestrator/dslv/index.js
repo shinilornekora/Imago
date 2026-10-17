@@ -15,17 +15,43 @@
  *
  * Вызовы модели воркер шлёт сообщением сюда (см. worker.js); их исполняет `onLlm`
  * вызывающего — в главном потоке, с общим AbortSignal команды.
+ *
+ * Круг 29:
+ *   • соседи упавшего воркера не страдают за чужую вину. Воркер вышел за память или его
+ *     пришлось снять (счёт соседа, застрявший «стоп») — задания, которые в этот миг ЖДАЛИ
+ *     модель, в падении не виноваты: они встают в начало очереди пула и идут заново на
+ *     свежем воркере (один раз). Вызов модели при этом не повторяется: ответы (и ещё не
+ *     пришедшие ответы) хранятся у задания по слепку запроса, и повторный прогон получает
+ *     тот же ответ без нового обращения. Виновник (задание, которое считало) получает
+ *     «не уложился в память»; сосед, которому не помог и повтор, — правду: расчёт пришлось
+ *     перезапустить, повторите.
+ *   • о коротком ожидании воркера не говорим, и ожидание, пока свежий воркер стартует
+ *     (загрузка модулей и первый, «холодный» прогон), коротким считается всегда: часы
+ *     извещения заводятся заново, когда воркер прогрелся (не дольше `COLD_GRACE_MS`). Сам порог
+ *     — `QUEUED_NOTICE_MS`, но не меньше измеренного старта воркера: под нагрузкой медленнее всё.
  */
 
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { OrchError, shuttingDown } from '../errors.js';
 import { WORKER_MAX_OLD_MB, WORKER_TIMEOUT_MS, WORKER_JOBS_MAX, POOL_QUEUE_MAX, POOL_QUEUE_WAIT_MS } from '../limits.js';
 import { SCHEMAS } from '../../../src/brain.js';
 
 const WORKER_URL = new URL('./worker.js', import.meta.url);
-/** Ожидание воркера короче этого клиенту не объявляется событием `queued`. */
+/**
+ * Ожидание воркера короче этого клиенту не объявляется событием `queued`. Круг 29: порог —
+ * не меньше, чем последний старт воркера (`noticeMs()`): под нагрузкой медленнее и старт, и
+ * чужой счёт до модели, и ожидание короче старта воркера — короткое. Не больше COLD_GRACE_MS.
+ */
 const QUEUED_NOTICE_MS = 400;
+/**
+ * Сколько ожидание извиняется стартом воркера: от его создания до первого обращения к модели
+ * (или конца первого задания). Дольше — это уже очередь, и о ней говорим.
+ */
+const COLD_GRACE_MS = 3000;
+/** Сколько раз задание, чей воркер упал не по его вине, идёт заново. */
+const RESTARTS_MAX = 1;
 
 /** Что из окружения процесса видит воркер: язык, часовой пояс, пути — и больше ничего. */
 const WORKER_ENV_KEYS = new Set(['PATH', 'HOME', 'LANG', 'LANGUAGE', 'TZ', 'NODE_ENV', 'TMPDIR', 'TEMP', 'TMP']);
@@ -63,13 +89,18 @@ export function createDslv(o = {}) {
   const waiting = [];          // задания, ждущие воркер
   let jobSeq = 0;
   let closed = false;
-  const stats = { spawned: 0, crashed: 0, timedOut: 0, queued: 0, queueRejected: 0, queueExpired: 0, peakJobs: 0 };
+  const stats = {
+    spawned: 0, crashed: 0, timedOut: 0, queued: 0, queueRejected: 0, queueExpired: 0, peakJobs: 0,
+    // круг 29: перезапуски соседей упавшего воркера, ответы модели без повторного вызова,
+    // отложенные из-за старта воркера извещения об очереди, сделанные извещения, старт воркера
+    restarted: 0, llmReused: 0, noticeDeferred: 0, announced: 0, lastWarmMs: 0, maxWarmMs: 0,
+  };
 
   const cancelled = () => new OrchError(499, 'cancelled', 'Команда остановлена', { retryable: false });
 
   function spawn() {
     const worker = new Worker(WORKER_URL, {
-      workerData: { testHooks: !!o.testHooks },
+      workerData: { testHooks: !!o.testHooks, ...(o.testHooks && o.testStartDelayMs ? { startDelayMs: o.testStartDelayMs } : {}) },
       resourceLimits: { maxOldGenerationSizeMb: maxOldMb, maxYoungGenerationSizeMb: Math.min(64, Math.max(8, Math.round(maxOldMb / 8))) },
       // NODE_OPTIONS родителя (например, --max-old-space-size) воркеру не передаём: он ломает resourceLimits
       execArgv: [],
@@ -77,7 +108,8 @@ export function createDslv(o = {}) {
       // адреса с учётными данными воркеру не нужны (модель зовёт главный поток)
       env: workerEnv(process.env),
     });
-    const slot = { worker, jobs: new Map(), dead: false, stuck: null };
+    // warm — воркер уже дошёл до модели (или закончил задание): старт и «холодный» прогон позади
+    const slot = { worker, jobs: new Map(), dead: false, stuck: null, ready: false, warm: false, spawnedAt: Date.now() };
     stats.spawned++;
     worker.on('message', (msg) => onMessage(slot, msg));
     worker.on('error', (e) => onDeath(slot, e));
@@ -93,8 +125,11 @@ export function createDslv(o = {}) {
    */
   const computing = (slot) => !!slot.stuck || [...slot.jobs.values()].some((j) => !j.llmPending);
 
-  /** Снять воркер; его незавершённые задания получают ошибку (кроме `except`). */
-  function drop(slot, err, except = null) {
+  /**
+   * Снять воркер; его незавершённые задания получают ошибку `err(job)` — кроме тех, кого
+   * `innocent(job)` признаёт непричастными: они (один раз) встают в начало очереди пула.
+   */
+  function drop(slot, err, innocent = null) {
     if (slot.dead) return;
     slot.dead = true;
     const i = slots.indexOf(slot);
@@ -102,11 +137,40 @@ export function createDslv(o = {}) {
     if (slot.stuck) { clearTimeout(slot.stuck.timer); slot.stuck = null; }
     const jobs = [...slot.jobs.values()];
     slot.jobs.clear();
+    const again = [];
     for (const job of jobs) {
-      if (job === except || job.settled) continue;
+      if (job.settled) continue;
       job.slot = null;
+      if (innocent && innocent(job)) {
+        if (job.restarts < RESTARTS_MAX) { again.push(job); continue; }
+        finish(job, null, restartFailed());
+        continue;
+      }
       finish(job, null, err(job));
     }
+    // в прежнем порядке и впереди всех: они ждали дольше остальных
+    for (const job of again.reverse()) requeue(job);
+    rearmCold();
+  }
+
+  const restartFailed = () => new OrchError(500, 'worker_failed',
+    'Расчёт макета пришлось перезапустить из-за соседней команды, и повтор тоже не удался. Повторите команду.',
+    { retryable: true });
+
+  /** Задание — заново, на другом воркере: всё, кроме ответов модели, начинается с нуля. */
+  function requeue(job) {
+    disarm(job);
+    job.restarts++;
+    job.gen++;
+    job.spent = 0;
+    job.llmPending = 0;
+    job.used = new Map();
+    // стадии повторного прогона те же, что уже ушли клиенту: второй раз их не шлём
+    job.stageSkip = job.stagesSent;
+    stats.restarted++;
+    log.warn(`[orchestrator/dslv] задание ${job.id} перезапускается на другом воркере (соседнее задание уронило воркер)`);
+    waiting.unshift(job);
+    armNotice(job, noticeMs());
   }
 
   function onDeath(slot, err) {
@@ -116,9 +180,15 @@ export function createDslv(o = {}) {
       stats.crashed++;
       log.warn(`[orchestrator/dslv] воркер упал${oom ? ' (память)' : ''}: ${err ? err.code || err.message : 'выход'}`);
     }
+    /* Круг 29: виноват тот, кто СЧИТАЛ (поток у воркера один, новые задания считающему не
+       даются); кто ждал модель, — сосед и идёт заново. Не считал никто — виновника не знаем,
+       и заново идут все (один раз: второе падение — уже ошибка). */
+    const live = [...slot.jobs.values()].filter((j) => !j.settled);
+    const anyComputing = live.some((j) => !j.llmPending);
     drop(slot, () => new OrchError(500, 'worker_failed', oom
       ? 'Расчёт макета не уложился в память — команда не выполнена. Попробуйте команду поменьше.'
-      : 'Расчёт макета прервался сбоем — команда не выполнена. Попробуйте ещё раз.', { retryable: true }));
+      : 'Расчёт макета прервался сбоем — команда не выполнена. Попробуйте ещё раз.', { retryable: true }),
+    (job) => !anyComputing || job.llmPending > 0);
     pump();
   }
 
@@ -143,12 +213,13 @@ export function createDslv(o = {}) {
     }
   }
 
-  /** Воркер снимается принудительно (таймаут счёта): соседние задания — повторяемая ошибка. */
+  /**
+   * Воркер снимается принудительно (таймаут счёта, застрявший «стоп»): виновник уже получил
+   * свою ошибку, остальные задания на нём ни при чём и идут заново (круг 29).
+   */
   function kill(slot) {
     if (slot.dead) return;
-    drop(slot, () => new OrchError(500, 'worker_failed',
-      'Расчёт макета прервался: соседняя команда считала слишком долго, и расчёт пришлось перезапустить. Повторите команду.',
-      { retryable: true }));
+    drop(slot, () => restartFailed(), () => true);
     slot.worker.terminate().catch(() => {});
     pump();
   }
@@ -158,6 +229,7 @@ export function createDslv(o = {}) {
     job.settled = true;
     disarm(job);
     if (job.queueTimer) { clearTimeout(job.queueTimer); job.queueTimer = null; }
+    if (job.noticeTimer) { clearTimeout(job.noticeTimer); job.noticeTimer = null; }
     if (job.signal && job.onAbort) job.signal.removeEventListener('abort', job.onAbort);
     const slot = job.slot;
     if (slot && slot.jobs.get(job.id) === job) slot.jobs.delete(job.id);
@@ -168,6 +240,26 @@ export function createDslv(o = {}) {
 
   async function onMessage(slot, msg) {
     if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'ready') {
+      /* Круг 29: загрузка модулей воркера — не счёт задания. Часы заданий, отданных воркеру до
+         его готовности, начинаются заново (зависший на загрузке воркер всё равно снимается:
+         до готовности часы шли). */
+      slot.ready = true;
+      for (const job of slot.jobs.values()) {
+        if (job.settled || !job.timer) continue;
+        disarm(job);
+        job.spent = 0;
+        arm(job);
+      }
+      return;
+    }
+    if (!slot.warm && (msg.type === 'llm' || msg.type === 'done')) {
+      // воркер стартовал и прогрелся; ждавшим из-за его старта часы извещения — заново
+      slot.warm = true;
+      stats.lastWarmMs = Date.now() - slot.spawnedAt;
+      if (stats.lastWarmMs > stats.maxWarmMs) stats.maxWarmMs = stats.lastWarmMs;
+      queueMicrotask(rearmCold);
+    }
     // воркер отпустил задание, снятое «стопом»: он снова свободен
     if (msg.type === 'done' && slot.stuck && slot.stuck.id === msg.id) {
       clearTimeout(slot.stuck.timer);
@@ -178,6 +270,8 @@ export function createDslv(o = {}) {
     const job = slot.jobs.get(msg.id);
     if (!job) return;
     if (msg.type === 'stage') {
+      if (job.stageSkip > 0) { job.stageSkip--; return; }
+      job.stagesSent++;
       try { job.onStage && job.onStage(msg.rec); } catch { /* интерфейс не роняет прогон */ }
       return;
     }
@@ -190,23 +284,46 @@ export function createDslv(o = {}) {
       job.llmPending++;
       // задание ждёт модель — воркер свободен для следующего (круг 27)
       pump();
-      const usage = [];
-      let reply;
-      try {
-        const schema = msg.schema && msg.schema.ref ? SCHEMAS[msg.schema.ref] : msg.schema;
-        const data = await job.onLlm(msg.messages, schema, { ...msg.opts, onUsage: (u) => usage.push(u) });
-        reply = { type: 'llm-reply', callId: msg.callId, ok: true, data, usage };
-      } catch (e) {
-        reply = {
-          type: 'llm-reply', callId: msg.callId, ok: false, usage,
-          error: { kind: (e && e.kind) || 'model', message: (e && e.message) || 'Сбой модели', ...(e && e.code ? { code: e.code } : {}) },
-        };
-      }
+      const gen = job.gen;
+      const answer = await modelCall(job, msg);
+      // задание ушло на другой воркер (этот упал): ответ дождётся его повторный прогон
+      if (job.gen !== gen) return;
       job.llmPending--;
+      const reply = { type: 'llm-reply', callId: msg.callId, ...answer };
       if (job.settled || slot.dead) return;
       if (!job.llmPending) arm(job);
       try { slot.worker.postMessage(reply); } catch { /* воркер уже ушёл */ }
     }
+  }
+
+  /**
+   * Вызов модели задания. Круг 29: ответы хранятся у задания по слепку запроса (и порядковому
+   * номеру одинаковых запросов), чтобы повторный прогон после падения воркера получил тот же
+   * ответ — в том числе ещё не пришедший — без второго обращения к модели.
+   * @returns {Promise<{ok: boolean, data?: any, error?: object, usage: object[]}>} без отказа
+   */
+  function modelCall(job, msg) {
+    const key = createHash('sha1').update(JSON.stringify([msg.messages, msg.schema, msg.opts])).digest('base64');
+    const k = job.used.get(key) || 0;
+    job.used.set(key, k + 1);
+    let list = job.calls.get(key);
+    if (!list) { list = []; job.calls.set(key, list); }
+    if (list[k]) { stats.llmReused++; return list[k]; }
+    const usage = [];
+    const p = (async () => {
+      try {
+        const schema = msg.schema && msg.schema.ref ? SCHEMAS[msg.schema.ref] : msg.schema;
+        const data = await job.onLlm(msg.messages, schema, { ...msg.opts, onUsage: (u) => usage.push(u) });
+        return { ok: true, data, usage };
+      } catch (e) {
+        return {
+          ok: false, usage,
+          error: { kind: (e && e.kind) || 'model', message: (e && e.message) || 'Сбой модели', ...(e && e.code ? { code: e.code } : {}) },
+        };
+      }
+    })();
+    list[k] = p;
+    return p;
   }
 
   /** Куда поставить задание: свободный воркер → новый воркер → воркер, чьи задания ждут модель. */
@@ -239,13 +356,63 @@ export function createDslv(o = {}) {
   function announce() {
     waiting.forEach((job, i) => {
       if (!job.announced || job.settled || !job.onQueued || job.queuedAt === i + 1) return;
+      if (!job.queuedAt) stats.announced++;
       job.queuedAt = i + 1;
       try { job.onQueued({ position: i + 1 }); } catch { /* ignore */ }
     });
   }
 
+  /** Порог извещения об очереди: 0,4 с, но не меньше последнего старта воркера (до 3 с). */
+  const noticeMs = () => Math.min(COLD_GRACE_MS, Math.max(QUEUED_NOTICE_MS, stats.lastWarmMs));
+
+  /** До какого мига ожидание извиняется стартом воркера (0 — холодных воркеров нет). */
+  function coldUntil() {
+    let t = 0;
+    for (const s of slots) if (!s.dead && !s.warm) t = Math.max(t, s.spawnedAt + COLD_GRACE_MS);
+    return t;
+  }
+
+  /**
+   * Часы извещения об очереди. Задание обычно ждёт воркер доли секунды — пока соседнее дойдёт
+   * до модели; о таком ожидании человеку не говорим (в ленте мигало бы «в очереди»). Пока
+   * какой-то воркер стартует, ожидание — из-за старта, и часы ждут его прогрева (круг 29).
+   */
+  function armNotice(job, ms) {
+    if (job.noticeTimer) clearTimeout(job.noticeTimer);
+    job.noticeTimer = setTimeout(() => {
+      job.noticeTimer = null;
+      if (job.settled || job.slot || job.announced) return;
+      const until = coldUntil();
+      if (until > Date.now()) {
+        if (!job.coldWait) stats.noticeDeferred++;
+        job.coldWait = true;
+        armNotice(job, until - Date.now());
+        return;
+      }
+      // сообщения воркеров, пришедшие, пока часы ждали своей очереди в цикле событий (главный
+      // поток под нагрузкой отстаёт), — сначала: может быть, место уже освободилось
+      setImmediate(() => {
+        if (job.settled || job.slot || job.announced) return;
+        job.announced = true;
+        announce();
+      });
+    }, Math.max(1, ms));
+    if (job.noticeTimer.unref) job.noticeTimer.unref();
+  }
+
+  /** Воркер прогрелся или снят: ждавшим из-за старта — свежие часы извещения. */
+  function rearmCold() {
+    for (const job of waiting) {
+      if (job.coldWait && !job.settled && !job.slot && !job.announced) {
+        job.coldWait = false;
+        armNotice(job, noticeMs());
+      }
+    }
+  }
+
   function start(slot, job) {
     if (job.queueTimer) { clearTimeout(job.queueTimer); job.queueTimer = null; }
+    if (job.noticeTimer) { clearTimeout(job.noticeTimer); job.noticeTimer = null; }
     slot.jobs.set(job.id, job);
     job.slot = slot;
     let n = 0;
@@ -272,6 +439,10 @@ export function createDslv(o = {}) {
         id: `j${++jobSeq}`, payload, resolve, reject, settled: false, slot: null,
         onStage: hooks.onStage, onLlm: hooks.onLlm, onQueued: hooks.onQueued, signal: hooks.signal,
         timer: null, spent: 0, armedAt: 0, llmPending: 0, onAbort: null, queueTimer: null, queuedAt: 0,
+        noticeTimer: null, announced: false, coldWait: false,
+        // круг 29: перезапуск на другом воркере — ответы модели (calls), их счёт в прогоне (used),
+        // поколение (ответ, пришедший прежнему прогону, ему уже не нужен) и отосланные стадии
+        restarts: 0, gen: 0, calls: new Map(), used: new Map(), stagesSent: 0, stageSkip: 0,
       };
       if (hooks.signal) {
         if (hooks.signal.aborted) { reject(cancelled()); return; }
@@ -314,20 +485,19 @@ export function createDslv(o = {}) {
         job.queueTimer = setTimeout(() => {
           const i = waiting.indexOf(job);
           if (i < 0 || job.settled) return;
+          // о долгом ожидании клиент узнаёт до отказа за него, даже если порог извещения не прошёл
+          if (!job.announced && job.onQueued) {
+            stats.announced++;
+            try { job.onQueued({ position: i + 1 }); } catch { /* ignore */ }
+          }
+          job.announced = true;
           waiting.splice(i, 1);
           stats.queueExpired++;
           finish(job, null, new OrchError(503, 'busy', `Агент перегружен: команда ждала расчёта дольше ${Math.round(queueWaitMs / 1000)} с и не выполнена. Повторите чуть позже.`, { retryAfter: 10 }));
           pump();
         }, queueWaitMs);
         if (job.queueTimer.unref) job.queueTimer.unref();
-        /* Задание обычно ждёт воркер доли секунды — пока соседнее дойдёт до модели. О таком
-           ожидании человеку не говорим (в ленте мигало бы «в очереди»): только о долгом. */
-        const notice = setTimeout(() => {
-          if (job.settled || job.slot) return;
-          job.announced = true;
-          announce();
-        }, QUEUED_NOTICE_MS);
-        if (notice.unref) notice.unref();
+        armNotice(job, noticeMs());
       }
     });
   }

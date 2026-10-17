@@ -732,7 +732,9 @@ test('провайдер lmstudio: 4xx не повторяется и даёт k
   });
   await assert.rejects(
     () => provider.complete([{ role: 'user', content: 'x' }], SCHEMAS.answer, {}),
-    (e) => e.kind === 'model' && /400/.test(e.message),
+    // круг 29 (J5): статус и тело отказа — полями (для журнала), в тексте — человеческие слова
+    (e) => e.kind === 'model' && e.status === 400 && e.detail === 'bad schema'
+      && /не приняла запрос/.test(e.message) && !/400|bad schema/.test(e.message),
   );
   assert.equal(n, 1);
 });
@@ -3105,7 +3107,9 @@ test('круг7 п.1: когда отклонены все правки, при�
   const res = await runCommand({ doc, selection: ['metrics'], utterance: 'разложи показатели сеткой', provider, engine });
   assert.ok(res.error, 'правок не осталось — это ошибка команды');
   assert.match(res.error.message, /grid/, res.error.message);
-  assert.match(res.error.message, /Ни одну правку/);
+  // круг 29 (J5): свой код и текст — сама причина, без служебной шапки
+  assert.equal(res.error.code, 'not_applied');
+  assert.doesNotMatch(res.error.message, /Ни одну правку/);
   const repair = provider.calls.filter((c) => c.schema === 'patch').pop().messages.map((m) => m.content).join('\n');
   assert.match(repair, /grid/, 'на починку модель получает причину, а не только «не удалось»');
 });

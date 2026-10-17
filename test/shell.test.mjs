@@ -346,5 +346,91 @@ test('круг 27: слова — перезапуск агента с очер�
   assert.match(OFFLINE_WORDS.title, /^Нет сети/);
   assert.doesNotMatch(OFFLINE_WORDS.title + OFFLINE_WORDS.note, /сервер агента/i);
   assert.equal(PROJECT_GONE_WORDS.action, 'Сохранить как новый проект');
-  assert.match(PROJECT_GONE_WORDS.note, /сохранена в этой вкладке/);
+  assert.match(PROJECT_GONE_WORDS.note, /цела в этом браузере/);
+  assert.match(PROJECT_GONE_WORDS.note, /перезагрузки/);
+});
+
+/* ------------------------------ круг 29 ------------------------------ */
+
+test('круг 29, Д2: «Сохранить как новый» для документа больше 4 МБ — остов и пачки ≤ 3,5 МБ, hashDoc совпадает', async () => {
+  const { rescuePlan, utf8Bytes, RESCUE_TX_BYTES } = await import('../src/shell.js');
+  let doc = core.createDoc();
+  const board = core.artboards(doc)[0].id;
+  // вложенность: рамки в рамках, в каждой — длинные тексты (кириллица — по 2 байта)
+  const list = [];
+  let n = 0;
+  for (let f = 0; f < 40; f++) {
+    const fid = `f_big_${f}`;
+    list.push(core.ops.create({ type: 'frame', id: fid, name: `Рамка ${f}`, parent: board, layout: { mode: 'column', gap: 8 }, size: { w: { mode: 'fill' }, h: { mode: 'hug' } } }));
+    const inner = `f_in_${f}`;
+    list.push(core.ops.create({ type: 'frame', id: inner, name: `Внутри ${f}`, parent: fid, size: { w: { mode: 'fill' }, h: { mode: 'hug' } } }));
+    for (let i = 0; i < 60; i++) {
+      list.push(core.ops.create({ type: 'text', id: `t_${n++}`, name: `т${f}_${i}`, parent: i % 2 ? inner : fid, characters: 'текст '.repeat(220), style: { token: 'body' }, color: 'muted', align: 'left' }));
+    }
+  }
+  const r0 = core.applyOps(doc, list);
+  assert.ok(!r0.error, r0.error && r0.error.message);
+  doc = r0.doc;
+  const want = core.hashDoc(doc);
+  const bytes = utf8Bytes(JSON.stringify({ name: 'спасённый', doc }));
+  assert.ok(bytes > 6 * 1024 * 1024, `документ ${bytes} байт`);
+
+  const plan = rescuePlan(doc, { name: 'спасённый' });
+  assert.equal(plan.whole, false);
+  assert.ok(plan.batches.length >= 2, `пачек ${plan.batches.length}`);
+  assert.deepEqual(plan.oversize, []);
+  assert.ok(utf8Bytes(JSON.stringify(plan.body)) < 64 * 1024, 'остов маленький');
+  for (const b of plan.batches) {
+    assert.ok(utf8Bytes(JSON.stringify(b)) <= RESCUE_TX_BYTES, 'пачка не больше 3,5 МБ');
+    assert.ok(b.length <= 5000);
+  }
+  // сервер: createDoc(остов) → пачки по порядку applyOps — тот же документ
+  let got = core.createDoc(plan.body.doc);
+  for (const b of plan.batches) {
+    const r = core.applyOps(got, b);
+    assert.ok(!r.error, r.error && r.error.message);
+    got = r.doc;
+  }
+  assert.equal(core.hashDoc(got), want);
+  assert.equal(Object.keys(got.nodes).length, Object.keys(doc.nodes).length);
+
+  // библиотека — в остове (миграция у того, кто откроет проект посреди досылки, не заведёт вторую)
+  const lib = core.libraryNode(doc);
+  assert.ok(lib && plan.body.doc.nodes[lib.id], 'библиотеки нет в остове');
+  // библиотека посередине детей корня — порядок тот же
+  const root = doc.nodes[doc.root];
+  const mid = { ...doc, nodes: { ...doc.nodes, [doc.root]: { ...root, children: [root.children[0], lib.id, ...root.children.filter((id) => id !== lib.id).slice(1)] } } };
+  const plan2 = rescuePlan(mid, { maxBytes: 1024 * 1024 });
+  let got2 = core.createDoc(plan2.body.doc);
+  for (const b of plan2.batches) { const r = core.applyOps(got2, b); assert.ok(!r.error, r.error && r.error.message); got2 = r.doc; }
+  assert.deepEqual(got2.nodes[doc.root].children, mid.nodes[doc.root].children);
+  assert.equal(core.hashDoc(got2), core.hashDoc(mid));
+
+  // небольшой документ — одним телом, как прежде
+  const small = rescuePlan(core.createDoc(), { name: 'малый' });
+  assert.equal(small.whole, true);
+  assert.equal(small.batches.length, 0);
+  assert.equal(core.hashDoc(core.createDoc(small.body.doc)), core.hashDoc(core.createDoc(small.body.doc)));
+});
+
+test('круг 29, J5/J6/п.7: слова not_applied, пропавшего проекта, подписей и кодов', async () => {
+  const { agentErrorWords, txTitleWords, errorCodeWords, isModelError } = await import('../src/shell.js');
+  const na = agentErrorWords({ code: 'not_applied', message: 'Ни одну правку не удалось применить: слой «Шапка» не найден' });
+  assert.equal(na.title, 'Не получилось применить правку: слой «Шапка» не найден');
+  assert.match(na.note, /Назовите слой/);
+  assert.equal(agentErrorWords({ code: 'not_applied', message: 'invalid_ops: bad' }).title, 'Не получилось применить правку');
+  assert.equal(isModelError({ code: 'not_applied' }), false);
+  const nf = agentErrorWords({ code: 'not_found', message: 'проект не найден' });
+  assert.doesNotMatch(nf.title + nf.note, /Откройте проект заново/);
+  assert.match(nf.note, /новым проектом/);
+  const vnf = agentErrorWords({ code: 'not_found', message: 'Варианты этой команды не найдены или устарели — попросите их заново' });
+  assert.equal(vnf.title, 'Варианты этой команды не найдены или устарели');
+  assert.equal(vnf.note, 'попросите их заново');
+  assert.equal(txTitleWords('Свойство'), 'Изменил свойство');
+  assert.equal(txTitleWords('Удалить «Ярлыки»'), 'Удалил «Ярлыки»');
+  assert.equal(txTitleWords('Отмена: Удалить «Ярлыки»'), 'Отменил: удалил «Ярлыки»');
+  assert.equal(txTitleWords('Переименовал «Шапка» в «Шапка Ани»'), 'Переименовал «Шапка» в «Шапка Ани»');
+  assert.equal(errorCodeWords('llm_failed'), 'модель ответила ошибкой');
+  assert.doesNotMatch(errorCodeWords('whatever_code'), /[a-z]/);
+  assert.doesNotMatch(stoppedWriteWords({ title: 'x' }).note, /ниже/);
 });

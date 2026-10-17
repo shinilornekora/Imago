@@ -603,6 +603,125 @@ describe('миграции · pg', { skip: available ? false : 'нет базы 
     }
   });
 
+  /** Чтение журнала круга 28 (до 009) дословно: окно — по jsonb, явный список колонок. */
+  const OLD_COLUMNS = 'project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, command_id, engine, chain, created_at';
+  const round28TxsAfter = async (pool, projectId, seq, limit, maxBytes) => (await pool.query(
+    `SELECT ${OLD_COLUMNS} FROM (
+       SELECT l.*,
+              row_number() OVER (ORDER BY l.seq) AS rn,
+              sum(octet_length(l.ops::text) + octet_length(l.dropped::text)) OVER (ORDER BY l.seq ROWS UNBOUNDED PRECEDING) AS run_bytes
+         FROM (SELECT ${OLD_COLUMNS} FROM operations WHERE project_id = $1 AND seq > $2 ORDER BY seq LIMIT $3) l
+     ) t WHERE rn = 1 OR run_bytes <= $4 ORDER BY seq`,
+    [projectId, seq, limit, maxBytes]
+  )).rows.map((r) => r.seq);
+
+  it('009: вес и число операций — дозаполнение пачками при пишущем экземпляре прежней версии; его записи после — триггером; его чтение журнала работает', async () => {
+    const name = await schema();
+    const upTo008 = storageIn(name, { migrationsDir: await migrationsDir((f) => /^00[1-8]_/.test(f)) });
+    await upTo008.init();
+    // commitTx этого круга пишет те же колонки, что и круг 28 (ops_bytes/ops_count не передаёт)
+    const p = await upTo008.createProject({ name: 'Вес', kind: 'design', doc: createDoc('empty'), engine: E });
+    const big = 'ж'.repeat(3000);
+    const dropped = [{ index: 0, reason: 'invalid', op: { op: 'remove', id: 'x' } }, { more: 4 }];
+    for (let i = 0; i < 40; i++) {
+      const list = Array.from({ length: i % 4 }, (_, k) => ({ op: 'set', id: 'n' + k, path: 'name', value: i % 7 === 0 ? big : 'v' + i }));
+      await upTo008.commitTx(p.id, { tx_id: 'old' + i, base_seq: i, ops: list, dropped: i % 5 === 0 ? dropped : [], engine: E });
+    }
+    // экземпляр прежней версии пишет всё время, пока идёт 009
+    let stop = false;
+    const errors = [];
+    let writes = 0;
+    const writer = (async () => {
+      while (!stop) {
+        try {
+          const head = (await upTo008.getProject(p.id)).head_seq;
+          await upTo008.commitTx(p.id, { tx_id: 'w' + writes, base_seq: head, ops: [{ op: 'set', id: 'n0', path: 'name', value: 'w' }], engine: E });
+          writes++;
+        } catch (e) {
+          errors.push(e.message);
+        }
+        await new Promise((r) => setTimeout(r, 2));
+      }
+    })();
+    const s = storageIn(name);
+    try {
+      await s.init();
+      await new Promise((r) => setTimeout(r, 50));
+      stop = true;
+      await writer;
+      assert.deepEqual(errors, [], 'прежний экземпляр пишет без ошибок');
+      assert.ok(writes > 0);
+      const after = 'after';
+      await upTo008.commitTx(p.id, { tx_id: after, base_seq: 0, ops: [{ op: 'set', id: 'n0', path: 'name', value: big }, { op: 'remove', id: 'n1' }], engine: E });
+      const check = async () => (await s.pool.query(
+        `SELECT count(*)::int AS n,
+                count(*) FILTER (WHERE ops_bytes IS DISTINCT FROM octet_length(ops::text) + octet_length(dropped::text))::int AS bad_bytes,
+                count(*) FILTER (WHERE ops_count IS DISTINCT FROM jsonb_array_length(ops))::int AS bad_count
+           FROM operations WHERE project_id = $1`, [p.id])).rows[0];
+      const c = await check();
+      assert.equal(c.n, 41 + writes);
+      assert.equal(c.bad_bytes, 0, 'вес у всех записей — до, во время и после миграции');
+      assert.equal(c.bad_count, 0, 'число операций — тоже');
+      const last = (await s.pool.query('SELECT ops_bytes, ops_count FROM operations WHERE project_id = $1 AND tx_id = $2', [p.id, after])).rows[0];
+      assert.equal(last.ops_count, 2);
+      assert.ok(last.ops_bytes > 6000, 'кириллица — байтами UTF-8: ' + last.ops_bytes);
+      // экземпляр этой версии передаёт вес сам — байты своего JSON (как память), близко к jsonb::text
+      const mine = { op: 'set', id: 'n0', path: 'name', value: big };
+      const head = (await s.getProject(p.id)).head_seq;
+      const own = await s.commitTx(p.id, { tx_id: 'own', base_seq: head, ops: [mine, { op: 'remove', id: 'n1' }], dropped, engine: E });
+      const ownRow = (await s.pool.query(
+        'SELECT ops_bytes, ops_count, octet_length(ops::text) + octet_length(dropped::text) AS pg_bytes FROM operations WHERE project_id = $1 AND seq = $2', [p.id, own.committed.seq])).rows[0];
+      assert.equal(ownRow.ops_bytes, Buffer.byteLength(JSON.stringify([mine, { op: 'remove', id: 'n1' }])) + Buffer.byteLength(JSON.stringify(dropped)));
+      assert.equal(ownRow.ops_count, 2);
+      assert.ok(Math.abs(ownRow.ops_bytes - ownRow.pg_bytes) / ownRow.pg_bytes < 0.1, `меры близки: ${ownRow.ops_bytes} и ${ownRow.pg_bytes}`);
+      await s.pool.query('DELETE FROM operations WHERE project_id = $1 AND tx_id = $2', [p.id, 'own']);
+      await s.pool.query('UPDATE projects SET head_seq = head_seq - 1 WHERE id = $1', [p.id]);
+
+      // страница журнала: новый режет по колонке так же, как круг 28 по jsonb
+      for (const [since, lim, bytes] of [[0, 500, 2e6], [0, 500, 20000], [0, 500, 1], [5, 7, 1e9], [10, 500, 9000]]) {
+        assert.deepEqual((await s.txsAfter(p.id, since, lim, { maxBytes: bytes })).map((t) => t.seq), await round28TxsAfter(s.pool, p.id, since, lim, bytes), `since ${since} limit ${lim} maxBytes ${bytes}`);
+      }
+      const meta = await s.recentTxMeta(p.id, { limit: 200 });
+      const m0 = meta.find((t) => t.tx_id === 'old0');
+      assert.deepEqual({ ops_count: m0.ops_count, dropped_count: m0.dropped_count }, { ops_count: 0, dropped_count: 5 });
+      assert.equal(meta.find((t) => t.tx_id === 'old3').ops_count, 3);
+
+      // дозаполнение пачками (ключом по первичному индексу) — с прерванного места
+      await s.pool.query('UPDATE operations SET ops_bytes = NULL, ops_count = NULL WHERE project_id = $1 AND seq % 3 = 0', [p.id]);
+      const { backfill } = await import(pathToFileURL(path.join(MIGRATIONS_DIR, '009_ops_size.mjs')).href);
+      const client = new pg.Client({ connectionString: DB_URL, options: `-c search_path=${name}` });
+      await client.connect();
+      try {
+        const batches = [];
+        const n = await backfill(client, { batch: 10, onBatch: (u, seen) => batches.push(seen) });
+        assert.equal(n, Math.floor((41 + writes) / 3));
+        assert.ok(batches.length >= 2, 'несколько пачек: ' + batches.join(','));
+        assert.equal(await backfill(client, { batch: 10 }), 0, 'повтор — нечего считать');
+        let stopped = 0;
+        await s.pool.query('UPDATE operations SET ops_bytes = NULL WHERE project_id = $1', [p.id]);
+        await assert.rejects(backfill(client, { batch: 10, closing: () => stopped++ > 1 }), /остановка/);
+        assert.ok(Number((await s.pool.query('SELECT count(*) FROM operations WHERE project_id = $1 AND ops_bytes IS NULL', [p.id])).rows[0].count) > 0, 'прерванное — не всё');
+        await backfill(client, { batch: 10 });
+      } finally {
+        await client.end();
+      }
+      const c2 = await check();
+      assert.equal(c2.bad_bytes + c2.bad_count, 0);
+
+      // запись без веса (если бы такая нашлась) — страница считает его из jsonb, а не ломается
+      await s.pool.query('ALTER TABLE operations DISABLE TRIGGER operations_size');
+      await s.pool.query("INSERT INTO operations (project_id, seq, tx_id, base_seq, ops, engine, chain) VALUES ($1, 100000, 'raw', 0, $2::jsonb, $3, 'x')", [p.id, JSON.stringify([{ op: 'remove', id: 'z' }]), E]);
+      await s.pool.query('ALTER TABLE operations ENABLE TRIGGER operations_size');
+      assert.deepEqual((await s.txsAfter(p.id, 99999, 10)).map((t) => t.tx_id), ['raw']);
+      assert.equal((await s.recentTxMeta(p.id, { limit: 1 }))[0].ops_count, 1);
+    } finally {
+      stop = true;
+      await writer;
+      await s.close();
+      await upTo008.close();
+    }
+  });
+
   it('DDL миграции не стоит в очереди за долгой транзакцией: lock_timeout и повтор — читатели ждут не дольше lock_timeout', async () => {
     const name = await schema();
     const base = storageIn(name);

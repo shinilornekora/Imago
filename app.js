@@ -147,11 +147,28 @@ function stageErrorNote(e) {
   return String(inner.message || inner.code || inner);
 }
 
+/**
+ * Круг 29, п.9. Начертания, которые впервые появляются с инспектором (моноширинный для чисел,
+ * полужирный заголовков), браузер грузит по первому требованию — и когда шрифт приходит,
+ * весь документ раскладывается заново («Fonts changed»). На большом макете это лишние
+ * треть секунды на первом выделении. Просим их сразу, пока холст пуст.
+ */
+function warmFonts() {
+  try {
+    if (!document.fonts || typeof document.fonts.load !== 'function') return;
+    for (const f of ['400 12px "IBM Plex Sans"', '500 12px "IBM Plex Sans"', '600 12px "IBM Plex Sans"',
+      '400 12px "IBM Plex Mono"', '500 12px "IBM Plex Mono"', 'italic 400 12px "Instrument Serif"', '400 12px "Instrument Serif"']) {
+      document.fonts.load(f, 'Аа0').catch(() => { /* шрифта нет — останется запасной */ });
+    }
+  } catch { /* FontFaceSet нет — не страшно */ }
+}
+
 async function boot() {
   // есть ли сервер, выясняем параллельно с первой отрисовкой: ответ нужен только
   // к моменту восстановления документа (initCapabilities), а ждать его до первого кадра незачем
   serverProbe = serverAllowed() ? probeServer() : Promise.resolve(null);
   cacheDom();
+  warmFonts();
   applyTheme(settings.theme);
   /* Порядок важен: applyRail решает, открыт рельс или нет, и только потом имеет смысл
      мерить его ширину. Наоборот — и шторка на узком экране открывалась сама
@@ -605,7 +622,17 @@ async function initServer(health) {
       // проект из ссылки может быть и дальше первой страницы — спрашиваем его самого
       project = server.list.find((p) => p && p.id === wanted) || (await fetchProjectHead(wanted));
       if (!project) {
-        toast(`Проекта «${clip(wanted, 24)}» на сервере нет — открыл последний.`, 'plain', 8000);
+        /* Круг 29 (арх. Д1, UX Д3): проекта нет, а его работа лежит в журнале этой вкладки
+           (базу восстановили из копии, где его ещё не было). «Открыл последний» уводил от
+           неё молча — открываем локальную копию: реплика скажет not_found, и оболочка
+           покажет карточку «Сохранить как новый проект». */
+        const local = await localCopyOf(wanted);
+        if (local) {
+          openProject({ id: wanted, name: local.name || knownName });
+          return;
+        }
+        const was = knownName || '';
+        toast(was ? `Проекта «${clip(was, 40)}» на сервере нет — открыл последний.` : 'Проекта из ссылки на сервере нет — открыл последний.', 'plain', 8000);
       }
     }
     if (!project) project = latestProject(server.list);
@@ -623,6 +650,29 @@ async function initServer(health) {
     return;
   }
   openProject(project);
+}
+
+/**
+ * Круг 29: есть ли в журнале IndexedDB работа проекта — документ с пользовательскими узлами
+ * или очередь неотправленных правок. Ключи журнала — как у реплики (`<id>` и `<id>#doc`).
+ * @returns {Promise<{name: string, nodes: number, pending: number}|null>}
+ */
+async function localCopyOf(id) {
+  if (!id) return null;
+  let storage = null;
+  try { storage = idbStorage(); } catch { return null; }
+  try {
+    const rec = await storage.get(id);
+    if (!rec || typeof rec !== 'object') return null;
+    const docRec = rec.doc && rec.doc.nodes ? rec : await storage.get(id + '#doc');
+    const doc = docRec && docRec.doc && docRec.doc.nodes ? docRec.doc : null;
+    const nodes = doc ? SHELL.userNodeCount(doc) : 0;
+    const pending = Array.isArray(rec.pending) ? rec.pending.length : 0;
+    if (!doc || (!nodes && !pending)) return null;
+    const ex = rec.extra && typeof rec.extra === 'object' ? rec.extra : {};
+    const name = ex.project && typeof ex.project.name === 'string' ? cutText(cleanText(ex.project.name), 120) : '';
+    return { name, nodes, pending };
+  } catch { return null; }
 }
 
 /**
@@ -669,6 +719,7 @@ function openProject(project) {
   state.saveBlocked = null;
   sessionJournal.length = 0;
   journalHuman.clear();
+  clientNames.clear();
   removedInfo.clear();
   hideVariants();
   hideMsg();
@@ -724,11 +775,20 @@ function journalExtra() {
     history: past.list,
     cursor: past.cursor,
     collapsed: state.collapsed ? [...state.collapsed].slice(0, 400) : null,
+    // круг 29: имя проекта — пропавший с сервера проект узнаётся по имени, а не по UUID
+    project: server && server.project ? { name: server.project.name || '' } : null,
+    // круг 29, п.7: чьи вкладки (client → имя) — подпись «Агент · Аня», когда Ани уже нет
+    clients: clientNamesList(),
   };
 }
 
 function adoptJournalExtra(extra) {
   const e = extra && typeof extra === 'object' ? extra : {};
+  if (server && server.project && !server.project.name && e.project && typeof e.project.name === 'string' && e.project.name) {
+    server.project.name = cutText(cleanText(e.project.name), 120);
+    setDocNameText(docTitle());
+  }
+  adoptClientNames(e.clients);
   state.chat = sanitizeChat(e.chat);
   state.pairs = sanitizePairs(e.pairs);
   const past = sanitizeHistory(e.history, e.cursor);
@@ -767,9 +827,12 @@ function onSyncChange(view, info = {}) {
       state.userView = false;
       fitSmart();
       refreshSheet();
-      // снимок с сервера свеж — мигрировать можно сразу; локальная копия дождётся синхронизации
-      if (info.from === 'server') maybeMigrate();
+      /* Миграция формата — только когда реплика догнала сервер (onSyncStatus): снимок при
+         открытии приходит с первой страницей хвоста, остальное — по сокету. Большой документ,
+         чья библиотека лежит дальше первой страницы (например, сохранённый пачками), иначе
+         получал вторую библиотеку (круг 29). */
       askAuthorIfNeeded();
+      notePreReloadCommands();
       return;
     }
     case 'confirmed': {
@@ -796,6 +859,7 @@ function onSyncChange(view, info = {}) {
       refreshSheet();
       // круг 23: транзакция агента с сервера — уже применена репликой; здесь только итог
       if (info.tx && info.tx.author_kind === 'agent') onAgentTx(info.tx, prevDoc, diff, !!info.mine);
+      if (info.tx && !info.mine && (info.tx.undo_of || info.tx.redo_of)) noteRemoteRewind(info.tx);
       return;
     }
     default: {
@@ -808,10 +872,70 @@ function onSyncChange(view, info = {}) {
   }
 }
 
+/** Реплика видит сервер живым и сохраняющим (J4): в сети, без ошибки, хранилище не лежит. */
+function syncHealthy() {
+  const s = (server && server.status) || {};
+  return !!s.online && !s.error && s.storage !== 'down';
+}
+
+/**
+ * Круг 29 (J4, п.7): карточка про документ агента согласована со строкой состояния.
+ * «Снова доступен» при упавшей связи или хранилище уступает место «не видит документ»;
+ * «не видит документ» сменяется на «снова доступен», когда и реплика, и health это видят.
+ */
+function syncDocCard() {
+  const role = dom.dockmsg && !dom.dockmsg.hidden ? dom.dockmsg.dataset.role : '';
+  if (role === 'doc-back' && !syncHealthy()) {
+    const again = serverAgent.docBack || null;
+    serverAgent.lastFailed = again;
+    const w = agentErrorWords({ code: 'document_down' });
+    showMsg('error', w.title, {
+      note: w.note,
+      role: 'doc-down',
+      actions: again ? [{ label: 'Повторить', primary: true, onClick: () => retryFailed(again) }] : [],
+    });
+    watchAgentHealth();
+    return;
+  }
+  if (role === 'doc-down' && syncHealthy()) {
+    const h = serverAgent.health;
+    if (h && h.ok === true && h.document === 'up' && h.llm === 'up') onAgentHealthChanged({ ok: false }, h);
+  }
+}
+
+/* Круг 29, п.7: соавтор перемотал историю («Вернуться сюда» — N отмен подряд). Каждая
+   отмена — своя транзакция, и молча документ у остальных просто менялся на глазах. Отмены
+   одного человека, пришедшие подряд, сводим в одну строку: «Аня откатила 3 правки». */
+const rewinds = new Map();   // author → {undo, redo, timer, who}
+function noteRemoteRewind(tx) {
+  const key = `${tx.author_kind || 'human'}:${tx.author || ''}`;
+  const r = rewinds.get(key) || { undo: 0, redo: 0, timer: null, who: { author: tx.author, author_kind: tx.author_kind }, title: '' };
+  if (tx.undo_of) r.undo += 1; else r.redo += 1;
+  r.title = cleanText(tx.title);
+  if (r.timer) clearTimeout(r.timer);
+  r.timer = setTimeout(() => {
+    rewinds.delete(key);
+    const parts = [];
+    const n = (k) => `${k} ${plural(k, 'правку', 'правки', 'правок')}`;
+    if (r.undo) parts.push(r.undo === 1 ? `${SHELL.whoDid(r.who, 'отменил')} правку` : `${SHELL.whoDid(r.who, 'откатил')} ${n(r.undo)}`);
+    if (r.redo) {
+      const verb = SHELL.whoDid(r.who, 'вернул');
+      // второй глагол — без имени: «Аня откатила 3 правки и вернула 1 правку»
+      parts.push(`${parts.length ? verb.split(' ').pop() : verb} ${r.redo === 1 ? 'правку' : n(r.redo)}`);
+    }
+    if (!parts.length) return;
+    const head = parts.join(' и ');
+    const one = r.undo + r.redo === 1 && r.title ? ` — ${clip(SHELL.txTitleWords(r.title).replace(/^(?:Отменил|Вернул):\s*/, ''), 60)}` : '';
+    toast(`${head.charAt(0).toUpperCase()}${head.slice(1)}${one}. Что изменилось — в «Истории».`, 'plain', 8000);
+  }, 900);
+  rewinds.set(key, r);
+}
+
 function onSyncStatus(s) {
   if (!server) return;
   server.status = s;
   renderSyncStatus();
+  syncDocCard();
   const opened = !!(server.sync && server.sync.view);
   /* Ни сервера, ни локальной копии: показать нечего, и говорим об этом честно. Реплика
      сама пробует снова по нарастающей паузе; кнопка будит её раньше срока. */
@@ -860,12 +984,15 @@ function onSyncProject(summary) {
  * удалили), а вид документа у вкладки есть: работа не пропала — её можно сохранить новым
  * проектом. Очередь реплики не снимается: правки целы в этой вкладке.
  */
-function projectGoneMsg() {
-  if (!server || !server.project || server.goneShown) return;
+function projectGoneMsg({ force = false } = {}) {
+  if (!server || !server.project) return;
+  if (server.goneShown && !force) return;
+  if (server.rescue && server.rescue.running) return;   // идёт сохранение — его карточка главнее
   server.goneShown = true;
   const w = SHELL.PROJECT_GONE_WORDS;
+  const left = server.rescue && server.rescue.failed ? server.rescue : null;
   showMsg('error', w.title, {
-    note: w.note,
+    note: left ? `${w.note} Прошлая попытка сохранить остановилась на части ${left.done + 1} из ${left.total} — «Сохранить» продолжит с неё.` : w.note,
     role: 'project-gone',
     actions: [
       { label: w.action, primary: true, onClick: () => saveAsNewProject() },
@@ -874,27 +1001,121 @@ function projectGoneMsg() {
   });
 }
 
+/** Команда агенту, пока проекта нет на сервере: не отправлена — почему и что делать. */
+function projectGoneCommandMsg(utterance) {
+  restoreCommand(utterance);
+  const w = SHELL.PROJECT_GONE_WORDS;
+  showMsg('error', 'Проекта больше нет на сервере — команда не отправлена', {
+    note: 'Агент работает с проектом на сервере, а его там нет. Сохраните работу новым проектом — команда останется в строке, и её можно будет выполнить уже там.',
+    role: 'project-gone',
+    actions: [
+      { label: w.action, primary: true, onClick: () => saveAsNewProject() },
+      { label: 'Проекты', onClick: () => openProjects() },
+    ],
+  });
+  server.goneShown = true;
+}
+
+/** Пропал ли открытый проект с сервера, а работа его — во вкладке (круг 29). */
+function projectGone() {
+  return !!(server && server.status && server.status.error === 'not_found' && server.sync && server.sync.view);
+}
+
+/**
+ * «Сохранить как новый проект» (I3; круг 29, арх. Д2). Небольшой документ — одним
+ * `POST /api/projects {name, doc}`. Больше пачки (3,5 МБ) — тело упёрлось бы в предел 4 МБ
+ * (413), поэтому проект создаётся с остовом документа (корень и шкалы), а узлы досылаются
+ * транзакциями `create` по порядку родителей (`SHELL.rescuePlan`), с прогрессом в доке.
+ * Сорвалось на середине — новый проект уже есть: повтор продолжит с той же пачки.
+ */
 async function saveAsNewProject() {
   const sync = server && server.sync;
   const view = sync && sync.view;
   if (!view) { toast('Сохранять нечего: документа в этой вкладке нет.', 'error', 8000); return; }
+  if (server.rescue && server.rescue.running) return;
   const name = cutText(cleanText(server.project.name || docTitle()), 120) || 'Восстановленный проект';
+  // прошлая попытка остановилась на середине — продолжаем её, а не создаём ещё один проект
+  let job = server.rescue && server.rescue.failed && server.rescue.from === sync ? server.rescue : null;
+  if (!job) {
+    let plan;
+    try { plan = SHELL.rescuePlan(view, { name }); } catch (e) { toast(`Не сохранилось: ${humanError(e)}`, 'error', 9000); return; }
+    if (plan.oversize.length) {
+      showMsg('error', 'Работу не сохранить одним проектом', {
+        note: `В документе есть ${plan.oversize.length === 1 ? 'слой' : 'слои'} больше 3,5 МБ — сервер не примет их ни в какой пачке. Экспортируйте документ в JSON (меню экспорта), чтобы не потерять работу.`,
+        role: 'project-gone',
+      });
+      return;
+    }
+    job = { from: sync, plan, project: null, seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
+    server.rescue = job;
+  }
+  job.running = true;
+  job.failed = false;
+  renderSyncStatus();   // кнопка в строке состояния — «сохраняю…», второй раз не нажать
+  const progress = () => {
+    if (!job.total) return;
+    showMsg('plain', 'Сохраняю работу новым проектом…', {
+      note: `Документ большой — отправляю частями: ${job.done} из ${job.total}. Не закрывайте вкладку.`,
+      role: 'project-saving',
+    });
+  };
   try {
-    const got = await apiJson('/api/projects', { method: 'POST', body: { name, doc: view } });
-    if (!got || !got.id) throw new Error('сервер не вернул проект');
+    if (!job.project) {
+      progress();
+      const got = await apiJson('/api/projects', { method: 'POST', body: job.plan.body });
+      if (!got || !got.id) throw new Error('сервер не вернул проект');
+      job.project = got;
+      job.seq = Number(got.head_seq) || 0;
+    }
+    while (job.done < job.total) {
+      progress();
+      const ops = job.plan.batches[job.done];
+      const r = await sendRescueBatch(job.project.id, ops, job.seq, `Восстановил работу: часть ${job.done + 1} из ${job.total}`);
+      job.seq = Number(r && r.seq) || job.seq + 1;
+      job.done += 1;
+    }
+    job.running = false;
+    server.rescue = null;
     hideMsg();
+    const got = job.project;
     openProject(got);
     toast(`Сохранил работу новым проектом «${clip(got.name || name, 60)}».`, 'plain', 8000);
   } catch (e) {
+    job.running = false;
+    job.failed = true;
     server.goneShown = false;
-    toast(`Не сохранилось: ${humanError(e)}`, 'error', 9000);
-    projectGoneMsg();
+    toast(job.total && job.project
+      ? `Сохранено ${job.done} из ${job.total} частей: ${humanError(e)}`
+      : `Не сохранилось: ${humanError(e)}`, 'error', 9000);
+    projectGoneMsg({ force: true });
+  }
+  renderSyncStatus();
+}
+
+/** Пачка досылки — HTTP-транзакцией; занято (503/429) — подождать и повторить. */
+async function sendRescueBatch(projectId, ops, baseSeq, title) {
+  const body = { tx_id: CORE.uid('tx'), base_seq: baseSeq, engine: CORE.ENGINE_VERSION, ops, title, author_kind: 'human' };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await apiJson(`/api/projects/${encodeURIComponent(projectId)}/tx`, { method: 'POST', body });
+      if (r && Array.isArray(r.dropped) && r.dropped.length) {
+        // сервер не отказывает, а отбрасывает: документ упёрся в предел — дальше слать незачем
+        const lim = r.dropped.find((d) => d && d.limit);
+        if (lim) throw Object.assign(new Error(lim.limit === 'doc_nodes' ? 'документ упёрся в предел числа слоёв' : 'документ упёрся в предел размера'), { retryable: false });
+      }
+      return r;
+    } catch (e) {
+      const busy = e && (e.status === 503 || e.status === 429 || e.code === 'busy');
+      if (!busy || attempt >= 4) throw e;
+      await new Promise((res) => setTimeout(res, 800 * (attempt + 1)));
+    }
   }
 }
 
 function onSyncPresence(list) {
   if (!server) return;
   server.others = Array.isArray(list) ? list : [];
+  noteClientNames(server.others);
   renderSyncStatus();
   renderPresence();
 }
@@ -1039,6 +1260,45 @@ function noteJournal(tx) {
     mine: !!(server && server.sync && tx.client && tx.client === server.sync.clientId),
   });
   if (sessionJournal.length > JOURNAL_KEEP) sessionJournal.length = JOURNAL_KEEP;
+}
+
+/* Круг 29, п.7: чья вкладка (client) — какое имя. Правка агента по чужой команде подписана
+   «Агент · Аня», пока Аня в сети (присутствие); ушла — имя берём отсюда. Запоминается из
+   присутствия и живёт в локальном журнале проекта (journalExtra.clients). */
+const CLIENT_NAMES_KEEP = 100;
+const clientNames = new Map();   // client → имя
+
+function noteClientNames(list) {
+  let changed = false;
+  for (const p of Array.isArray(list) ? list : []) {
+    if (!p || typeof p.client !== 'string' || !p.client) continue;
+    const name = cutText(cleanText(p.author), 60);
+    if (!name || clientNames.get(p.client) === name) continue;
+    clientNames.delete(p.client);
+    clientNames.set(p.client, name);
+    changed = true;
+  }
+  while (clientNames.size > CLIENT_NAMES_KEEP) clientNames.delete(clientNames.keys().next().value);
+  if (changed && server && server.sync && typeof server.sync.touch === 'function') server.sync.touch();
+}
+
+function clientNamesList() {
+  return [...clientNames].slice(-CLIENT_NAMES_KEEP);
+}
+
+function adoptClientNames(list) {
+  if (!Array.isArray(list)) return;
+  for (const pair of list) {
+    if (!Array.isArray(pair) || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') continue;
+    if (!clientNames.has(pair[0])) clientNames.set(pair[0], cutText(cleanText(pair[1]), 60));
+  }
+}
+
+/** Имя автора команды, по которой работал агент: присутствие, потом память. */
+function commandAuthorOf(t) {
+  if (!t || !t.client) return '';
+  const live = server && Array.isArray(server.others) ? server.others.find((p) => p && p.client === t.client) : null;
+  return (live && cleanText(live.author)) || clientNames.get(t.client) || '';
 }
 
 /** Подтверждённые транзакции проекта, новые первыми: журнал реплики или свой журнал сеанса. */
@@ -1263,6 +1523,8 @@ function renderSyncStatus() {
   else if (s.error === 'unreachable') { text = 'сервер недоступен'; kind = 'error'; }
   else if (s.error === 'not_found') { text = s.label || 'проект не найден на сервере'; kind = 'error'; }
   else if (!opened) { text = 'открываю проект…'; kind = 'busy'; }
+  // J4 (круг 29): сервер на связи, но его хранилище не пишет — правки ждут в очереди
+  else if (s.storage === 'down') { text = s.label || 'сервер не может сохранить — правки ждут'; kind = 'error'; }
   else {
     /* Слова статуса — у реплики (statusLine, SPEC §9.5): одна формулировка на всех, кто
        показывает её состояние. Оболочка добавляет лишь то, чего реплика не знает: сокет
@@ -1286,6 +1548,22 @@ function renderSyncStatus() {
   label.className = 'sync-text';
   label.textContent = text;
   host.append(dot, label);
+  /* Круг 29 (UX Д3): проект пропал с сервера, а работа — во вкладке. Карточку спасения
+     могли закрыть крестиком или сменить другими сообщениями; путь к ней остаётся здесь,
+     в строке состояния, пока проекта нет. */
+  const gone = s.error === 'not_found' && opened && SHELL.userNodeCount(server.sync.view) > 0;
+  host.dataset.gone = gone ? 'on' : '';
+  if (gone) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'sync-act';
+    const busy = !!(server.rescue && server.rescue.running);
+    b.textContent = busy ? 'сохраняю…' : 'сохранить как новый';
+    b.disabled = busy;
+    b.title = 'Работа этой вкладки цела — сохранить её новым проектом';
+    b.addEventListener('click', () => projectGoneMsg({ force: true }));
+    host.append(b);
+  }
   host.dataset.state = kind;
   const full = names.length ? `${text}. В сети: ${names.join(', ')}` : text;
   host.title = full;
@@ -1558,7 +1836,13 @@ function onAgentHealthChanged(prev, next) {
   const failed = serverAgent.lastFailed;
   const restarted = role === 'agent-restart' && back
     && (!failed || !failed.instance || !next.instance || next.instance !== failed.instance || (prev && prev.ok !== true));
+  /* Круг 29 (J4, п.7): «Документ снова доступен агенту» — только когда и наша реплика
+     видит сервер живым: при недоступном хранилище или сервере такая карточка рядом со
+     статусом «сервер не может сохранить» / «сервер недоступен» — неправда. Подождём:
+     onSyncStatus покажет её, когда реплика снова сохраняет. */
+  if (back && role === 'doc-down' && !syncHealthy()) return;
   if (back && (role === 'model-down' || role === 'agent-down' || role === 'doc-down' || restarted)) {
+    retryHold = null;   // сервис вернулся раньше срока — повтор можно сразу
     const again = serverAgent.lastFailed;
     const rest = again && Array.isArray(again.rest) ? again.rest : [];
     const head = role === 'model-down' ? 'Модель на сервере снова отвечает'
@@ -1569,7 +1853,9 @@ function onAgentHealthChanged(prev, next) {
         : `Команда «${clip(again.utterance, 60)}» не выполнялась — её можно повторить.`) : '',
       actions: again ? [{ label: 'Повторить', primary: true, onClick: () => retryFailed(again) }] : [],
       ms: again ? 0 : 6000,
+      role: role === 'doc-down' ? 'doc-back' : '',
     });
+    if (role === 'doc-down') serverAgent.docBack = again;
     serverAgent.lastFailed = null;
     return;
   }
@@ -1629,6 +1915,7 @@ async function runOnServer(utterance, { variants, ctrl, runId }) {
      команды больше нет; тот же instance — он жив и, может быть, ещё её доделывает. */
   const instance = serverAgent.health && serverAgent.health.ok && serverAgent.health.instance ? serverAgent.health.instance : '';
   serverAgent.current = { commandId, utterance, at: startedAt, instance };
+  rememberInflight({ commandId, utterance, at: startedAt });
   try {
     out = await agentClient.run({
       command_id: commandId,
@@ -1648,7 +1935,10 @@ async function runOnServer(utterance, { variants, ctrl, runId }) {
       signal: ctrl.signal,
       onEvent: (ev) => onServerAgentEvent(ev, runId, variants),
     });
+    if (!pageLeaving) forgetInflight(commandId);
   } catch (e) {
+    // страница уходит (перезагрузка): поток оборван ею, а не сервером — отметка остаётся
+    if (!pageLeaving) forgetInflight(commandId);
     if (isCancelled(e)) {
       /* Круг 27, п.2. Транзакция пришла ещё до «стопа» — noteStoppedCommand уже сказал
          «агент успел записать — можно отменить». Признак уходит в catch runUtterance:
@@ -1884,6 +2174,23 @@ function agentDownMsg(utterance, { variants = false } = {}) {
   watchAgentHealth();
 }
 
+/* Круг 29, п.7: «Повторить через 8 с» выключена до срока — но текст команды вернулся в
+   строку, и Enter отправлял его сразу, мимо отсчёта, получая тот же отказ. До срока та же
+   команда из строки не уходит: человеку сказано, сколько ждать. */
+let retryHold = null;   // {utterance, until}
+function holdRetry(utterance, waitMs) {
+  retryHold = waitMs > 0 ? { utterance: String(utterance || '').trim(), until: Date.now() + waitMs } : null;
+}
+/** true — команда придержана (сказано, сколько ждать). */
+function retryHeld(utterance) {
+  if (!retryHold) return false;
+  const left = retryHold.until - Date.now();
+  if (left <= 0) { retryHold = null; return false; }
+  if (retryHold.utterance !== String(utterance || '').trim()) return false;
+  toast(`Повторить можно через ${Math.ceil(left / 1000)} с — сервер попросил подождать.`, 'plain', 4000);
+  return true;
+}
+
 /** «Повторить» после сбоя агента: строка уже держит текст — её и отправляем. */
 function retryAfterProbe(utterance, { variants = false } = {}) {
   if (dom.command.value.trim() === String(utterance || '').trim()) dom.command.value = '';
@@ -1910,6 +2217,23 @@ function watchAgentHealth() {
 /** Отказ сервера агента — тем же доком, что отказ модели в браузере. */
 function showServerAgentError(e, utterance, { variants = false } = {}) {
   if (e && e.code === 'shutting_down') { shuttingDownMsg(e, utterance, { variants }); return; }
+  /* Круг 29: агент не нашёл проект — он пропал с сервера (реплика узнает чуть позже).
+     Не «откройте заново», а путь к работе: сохранить её новым проектом. */
+  if (e && e.code === 'not_found' && (!e.message || /проект/i.test(e.message))
+    && server && server.sync && server.sync.view && SHELL.userNodeCount(server.sync.view) > 0) {
+    const w = agentErrorWords(e);
+    restoreCommand(utterance);
+    server.goneShown = true;
+    showMsg('error', w.title, {
+      note: w.note,
+      role: 'project-gone',
+      actions: [
+        { label: SHELL.PROJECT_GONE_WORDS.action, primary: true, onClick: () => saveAsNewProject() },
+        { label: 'Проекты', onClick: () => openProjects() },
+      ],
+    });
+    return;
+  }
   // связь пропала у самого компьютера, а не у сервера агента (круг 27, п.7)
   if (e && (e.code === 'network' || AGENT.isUpstreamDown(e)) && isOffline()) { offlineMsg(utterance, { variants }); return; }
   const words = agentErrorWords(e);
@@ -1934,9 +2258,13 @@ function showServerAgentError(e, utterance, { variants = false } = {}) {
   const docDown = e.code === 'document_down' || e.code === 'document_failed';
   const role = modelDown ? 'model-down' : agentDown ? 'agent-down' : docDown ? 'doc-down' : '';
   if (role) serverAgent.lastFailed = { utterance, variants };
+  holdRetry(utterance, e.retryable !== false ? words.waitMs : 0);
+  // «Подробности» с одной строкой «причина: …», повторяющей заголовок, — шум (круг 29, п.7)
+  let details = techDetails(null, e);
+  if (details === `причина: ${SHELL.errorCodeWords(e.code)}` && words.title.toLowerCase().startsWith(SHELL.errorCodeWords(e.code))) details = '';
   showMsg('error', words.title, {
     note: words.note,
-    details: techDetails(null, e),
+    details,
     actions,
     role,
   });
@@ -1963,6 +2291,7 @@ function shuttingDownMsg(e, utterance, { variants = false } = {}) {
   restoreCommand(utterance);
   addChat('agent', words.title);
   const waitMs = Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0 ? Math.min(e.retryAfterMs, 15000) : 0;
+  holdRetry(utterance, waitMs);
   showMsg('error', words.title, {
     note: words.note,
     role: 'agent-restart',
@@ -2120,10 +2449,99 @@ function onAgentTx(tx, prevDoc, diff, mine) {
     settleDetachedTx(det, tx, prevDoc, diff);
     return;
   }
+  // круг 29 (UX Д2): своя правка агента по команде, начатой до перезагрузки этой вкладки
+  const pre = mine ? inflightBefore(tx) : null;
+  if (pre) { settlePreReloadTx(pre, tx, prevDoc, diff); return; }
   serverAgent.arrived.set(tx.tx_id, { tx, prevDoc, diff, mine: !!mine, at: Date.now() });
   while (serverAgent.arrived.size > AGENT_ARRIVED_MAX) {
     serverAgent.arrived.delete(serverAgent.arrived.keys().next().value);
   }
+}
+
+/* ---------- круг 29 (UX Д2): команда, начатая до перезагрузки ---------- */
+/* Команда ушла на сервер, вкладку перезагрузили, а Orchestrator её доделал: транзакция
+   приходит своей (client тот же), но ждать её некому — стек отмены и итог остались в
+   прежней странице. Отметка «команда в пути» живёт в sessionStorage (переживает
+   перезагрузку этой вкладки, а другим вкладкам не видна) с id загрузки страницы: своя
+   идущая команда этой загрузки отметкой «до перезагрузки» не считается. */
+const INFLIGHT_KEY = 'imago.inflight.v1';
+let pageLeaving = false;
+try {
+  addEventListener('beforeunload', () => { pageLeaving = true; });
+  addEventListener('pagehide', () => { pageLeaving = true; });
+  addEventListener('pageshow', () => { pageLeaving = false; });   // вернулись из кеша истории
+} catch { /* не браузер */ }
+const INFLIGHT_MAX_AGE = 15 * 60 * 1000;
+const PAGE_LOAD = CORE.uid('pg');
+
+function readInflight() {
+  try {
+    const raw = sessionStorage.getItem(INFLIGHT_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    const now = Date.now();
+    return Array.isArray(list) ? list.filter((m) => m && typeof m.commandId === 'string' && now - Number(m.at) < INFLIGHT_MAX_AGE) : [];
+  } catch { return []; }
+}
+
+function writeInflight(list) {
+  try { sessionStorage.setItem(INFLIGHT_KEY, JSON.stringify(list.slice(-8))); } catch { /* хранилища нет — без отметки */ }
+}
+
+function rememberInflight({ commandId, utterance, at }) {
+  if (!server || !server.project || !commandId) return;
+  writeInflight([...readInflight().filter((m) => m.commandId !== commandId),
+    { commandId, utterance: String(utterance || '').slice(0, 300), at, project: server.project.id, page: PAGE_LOAD }]);
+}
+
+function forgetInflight(commandId) {
+  const list = readInflight();
+  const next = list.filter((m) => m.commandId !== commandId);
+  if (next.length !== list.length) writeInflight(next);
+}
+
+/** Отметки команд этого проекта, начатых прежними загрузками страницы. */
+function inflightOfPast() {
+  const id = server && server.project ? server.project.id : '';
+  return readInflight().filter((m) => m.project === id && m.page !== PAGE_LOAD);
+}
+
+/** Команда до перезагрузки, которой принадлежит своя транзакция агента (или null). */
+function inflightBefore(tx) {
+  const past = inflightOfPast();
+  if (!past.length || !tx) return null;
+  if (tx.command_id) return past.find((m) => m.commandId === tx.command_id) || null;
+  // Orchestrator без command_id в транзакции: самая ранняя из прежних, если сейчас своя не идёт
+  if (serverAgent.current) return null;
+  return past.slice().sort((a, b) => a.at - b.at)[0] || null;
+}
+
+function settlePreReloadTx(pre, tx, prevDoc, diff) {
+  forgetInflight(pre.commandId);
+  const human = cleanText(tx.title) || describeOps(Array.isArray(tx.ops) ? tx.ops : [], prevDoc) || 'правка записана';
+  settleAgentTx(tx, prevDoc, diff, { label: pre.utterance, human, select: [] });
+  const undoable = state.history.some((t) => t.id === tx.tx_id);
+  if (dom.command && dom.command.value.trim() === String(pre.utterance || '').trim()) dom.command.value = '';
+  addChat('agent', `Команда «${clip(pre.utterance, 60)}», начатая до перезагрузки, выполнена: ${human}`);
+  rememberPair(pre.utterance, human);
+  showMsg('result', 'Команда, начатая до перезагрузки, выполнена', {
+    note: `«${clip(pre.utterance, 60)}» — ${human.charAt(0).toLowerCase()}${human.slice(1)}.${undoable ? ' Отменить — кнопкой «Отменить» или Ctrl+Z.' : ''}`,
+    actions: undoable ? [{ label: 'Отменить', onClick: () => undoTx(tx.tx_id) }] : [],
+    undoTx: undoable ? tx.tx_id : null,
+  });
+}
+
+/** После открытия: команда до перезагрузки ещё может идти — сказать, что её итог придёт сам. */
+const preReloadSaid = new Set();   // о каких командах уже сказано в этой загрузке страницы
+function notePreReloadCommands() {
+  const past = inflightOfPast().filter((m) => Date.now() - m.at < 5 * 60 * 1000 && !preReloadSaid.has(m.commandId));
+  if (!past.length) return;
+  for (const m of past) preReloadSaid.add(m.commandId);
+  const last = past[past.length - 1];
+  showMsg('plain', 'Команда, начатая до перезагрузки, могла продолжиться на сервере', {
+    note: `«${clip(last.utterance, 60)}» — если агент её доделает, правка придёт сама и появится в «Истории».`,
+    role: 'pre-reload',
+    ms: 9000,
+  });
 }
 
 /**
@@ -2250,6 +2668,52 @@ async function openProjects() {
   openSheet('Проекты', (body) => fillProjects(body, list, { loading: false }), { size: 'auto', key: 'projects' });
 }
 
+/** Имя нового проекта: «Новый проект», а если такое уже есть — «Новый проект 2», «3»… */
+function freshProjectName(list) {
+  const taken = new Set((list || []).map((p) => p && cleanText(p.name)).filter(Boolean));
+  const base = 'Новый проект';
+  if (!taken.has(base)) return base;
+  for (let i = 2; i < 1000; i++) if (!taken.has(`${base} ${i}`)) return `${base} ${i}`;
+  return base;
+}
+
+/** «16.10 в 23:20» — точное время (различает проекты с одинаковым именем). */
+function exactWhen(iso) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  const day = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+  const time = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: Date.now() - t < 3600 * 1000 ? '2-digit' : undefined });
+  return `${day} в ${time}`;
+}
+
+/** Строка пропавшего с сервера проекта в шторке «Проекты»: имя и путь к спасению. */
+function goneProjectItem() {
+  const item = document.createElement('div');
+  item.className = 'pitem';
+  item.dataset.current = 'true';
+  item.dataset.gone = 'on';
+  const head = document.createElement('div');
+  head.className = 'phead';
+  const name = document.createElement('span');
+  name.className = 'pname';
+  name.textContent = server.project.name || docTitle() || 'Без названия';
+  head.append(name);
+  const meta = document.createElement('span');
+  meta.className = 'pwhen';
+  meta.textContent = 'открыт · на сервере его больше нет — работа цела в этом браузере';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'btn accent small';
+  save.textContent = SHELL.PROJECT_GONE_WORDS.action;
+  save.addEventListener('click', () => { closeSheet(); saveAsNewProject(); });
+  const foot = document.createElement('div');
+  foot.className = 'pgone';
+  foot.appendChild(save);
+  item.append(head, meta, foot);
+  return item;
+}
+
 /** Перерисовать шторку проектов по уже загруженному списку (без запроса). */
 function redrawProjects() {
   if (!server || state.sheetOpen !== 'projects') return;
@@ -2278,11 +2742,13 @@ function fillProjects(body, list, { loading } = {}) {
   const add = document.createElement('button');
   add.type = 'button';
   add.className = 'btn subtle wide';
-  add.textContent = 'Новый проект';
+  /* Круг 29, п.7: кнопка звалась так же, как новый проект в списке, — две строки «Новый
+     проект» подряд. Кнопка — действием, новый проект — с номером, если имя уже занято. */
+  add.textContent = 'Создать проект';
   add.addEventListener('click', async () => {
     add.disabled = true;
     try {
-      const p = await createProject('Новый проект');
+      const p = await createProject(freshProjectName(list || server.list));
       closeSheet();
       openProject(p);
       toast('Открыт новый проект — имя правится в шапке.', 'plain', 6000);
@@ -2317,6 +2783,11 @@ function fillProjects(body, list, { loading } = {}) {
     return;
   }
   const current = server.project ? server.project.id : '';
+  // круг 29: открытого проекта на сервере нет — он в списке не придёт, но работа его здесь
+  if (projectGone() && !items.some((p) => p.id === current)) body.appendChild(goneProjectItem());
+  // одинаковые имена различаем временем создания (п.7)
+  const names = new Map();
+  for (const p of items) names.set(p.name || '', (names.get(p.name || '') || 0) + 1);
   for (const p of items) {
     const item = document.createElement('div');
     item.className = 'pitem';
@@ -2333,8 +2804,13 @@ function fillProjects(body, list, { loading } = {}) {
     });
     const meta = document.createElement('span');
     meta.className = 'pwhen';
-    const when = whenWords(p.updated_at);
-    meta.textContent = [p.kind === 'library' ? 'библиотека' : '', when ? `менялся ${when}` : ''].filter(Boolean).join(' · ');
+    /* Одноимённые различаем точным временем правки и числом правок: «5 минут назад» у
+       двух «Новых проектов» подряд не говорит, какой из них какой (круг 29, п.7). */
+    const twin = names.get(p.name || '') > 1;
+    const when = twin ? exactWhen(p.updated_at || p.created_at) : whenWords(p.updated_at);
+    const edits = twin && Number.isFinite(Number(p.head_seq))
+      ? (Number(p.head_seq) ? `${p.head_seq} ${plural(Number(p.head_seq), 'правка', 'правки', 'правок')}` : 'без правок') : '';
+    meta.textContent = [p.id === current ? 'открыт' : '', p.kind === 'library' ? 'библиотека' : '', when ? `менялся ${when}` : '', edits].filter(Boolean).join(' · ');
     const rename = document.createElement('button');
     rename.type = 'button';
     rename.className = 'btn ghost small';
@@ -2618,8 +3094,15 @@ function serverCommit(opsList, label, who = 'human', extra = {}) {
   const prevDoc = state.doc;
   const prevGeo = state.geo;
   const kind = extra.system ? 'system' : who === 'agent' ? 'agent' : 'human';
+  /* J6 (круг 29): подпись транзакции человека — описание словами, как в «Истории»
+     («Переименовал «A» в «B»», «Удалил «X»»), а не имя действия («Свойство», «Удалить»):
+     её читают все, кто открыл «Историю» позже, и они видят только её. */
+  const described = extra.human || describeOps(opsList, prevDoc);
+  const title = kind !== 'human' ? label
+    : extra.title ? extra.title
+      : cutText(described || SHELL.txTitleWords(label) || label, 200);
   const r = sync.commit(opsList, {
-    title: label, author_kind: kind, undo_of: extra.undoOf, redo_of: extra.redoOf,
+    title, author_kind: kind, undo_of: extra.undoOf, redo_of: extra.redoOf,
   });
   if (!r.tx) {
     // ни одной применимой операции: узлов уже нет — правка ушла в никуда, о чём и говорим
@@ -2641,7 +3124,7 @@ function serverCommit(opsList, label, who = 'human', extra = {}) {
   const tx = {
     id: r.tx.tx_id, kind: 'ops',
     ops: r.applied, inverse, label, who, at: Date.now(), undone: false,
-    human: extra.human || describeOps(opsList, prevDoc),
+    human: described,
     pending: true,
     predicted: r.dropped.filter((d) => Number.isInteger(d.index)).map((d) => d.index).sort((a, b) => a - b),
     ...extra,
@@ -2721,8 +3204,11 @@ function serverStep(back, { quiet = false } = {}) {
     const i = back ? state.cursor - 1 : state.cursor;
     const tx = state.history[i];
     const list = back ? tx.inverse : tx.ops;
+    // J6: «Отменил: переименовал «A» в «B»» — словами записи, а не именем действия
+    const said = cleanText(tx.human || SHELL.txTitleWords(tx.label) || tx.label);
     const r = serverCommit(list, `${what}: ${tx.label}`, 'human', {
       [back ? 'undoOf' : 'redoOf']: tx.id, quiet: true, noRender: quiet,
+      title: cutText(`${back ? 'Отменил' : 'Вернул'}: ${said.charAt(0).toLowerCase()}${said.slice(1)}`, 200),
     });
     if (r.ok) {
       if (back) tx.ops = r.inverse; else tx.inverse = r.inverse;
@@ -3729,7 +4215,7 @@ function applyView(view) {
 function fitView(ids, opts = {}) {
   if (!stage || !state.doc) return;
   const rects = (state.geo && state.geo.rects) || {};
-  const wanted = ids && ids.length ? ids : artboards(state.doc).map((a) => a.id);
+  const wanted = ids && ids.length ? ids : fitAllIds();
   const list = wanted.filter((id) => finiteRect(rects[id]));
   // узлов, по которым вписывали, больше нет (отмена, удаление) — и пересчитывать вид по ним
   // тоже нечего: иначе каждая проверка вида будет упираться в тот же пустой список
@@ -3797,7 +4283,7 @@ function fitScopeNow() {
     const want = computeView(box, { padding: 48, inset, maxZoom: 2 });
     return !want || stage.view.zoom >= want.zoom * 0.88;
   };
-  const abs = artboards(state.doc).map((a) => a.id);
+  const abs = fitAllIds();
   if (abs.length && whole(abs)) return 'all';
   const act = activeArtboardId();
   if (act && whole([act])) return 'one';
@@ -4065,7 +4551,7 @@ function fitTargetVisible() {
   const fit = state.lastFit;
   if (!fit || !stage || !state.doc || !viewIsSane(stage.view) || typeof stage.toScreen !== 'function') return true;
   const rects = (state.geo && state.geo.rects) || {};
-  const ids = (fit.ids && fit.ids.length ? fit.ids : artboards(state.doc).map((a) => a.id))
+  const ids = (fit.ids && fit.ids.length ? fit.ids : fitAllIds())
     .filter((id) => finiteRect(rects[id]));
   if (!ids.length) return true;
   const box = boundsOf(ids);
@@ -4086,8 +4572,21 @@ function fitTargetVisible() {
  * Вписать по-доброму. Вписать все артборды на узком экране — это 21% и нечитаемый
  * макет; человеку нужен тот экран, с которым он работает. Все — по второму нажатию (п.13).
  */
+/**
+ * Что значит «весь документ» для вписывания (круг 29, п.7): доски и компоненты библиотеки.
+ * Библиотека рисуется на холсте под досками (SPEC §5.3); вписывание по одним доскам
+ * оставляло её верх выглядывать из-под подсказок и командной строки.
+ */
+function fitAllIds() {
+  const ids = artboards(state.doc).map((a) => a.id);
+  const lib = state.doc ? libraryNode(state.doc) : null;
+  const rects = (state.geo && state.geo.rects) || {};
+  if (lib && Array.isArray(lib.children)) for (const c of lib.children) if (finiteRect(rects[c])) ids.push(c);
+  return ids;
+}
+
 function fitSmart(opts = {}) {
-  const abs = artboards(state.doc).map((a) => a.id);
+  const abs = fitAllIds();
   const act = activeArtboardId();
   if (abs.length > 1 && act && (state.geo.rects || {})[act]) {
     const all = computeView(boundsOf(abs), {
@@ -4250,7 +4749,23 @@ function announceIssues(fresh) {
 }
 
 let issuesGeo = null;   // геометрия, по которой посчитаны state.issues
+/* Круг 29, п.9. Большой документ: каждая раскладка холста стоит сотни миллисекунд (SVG-текст
+   перекладывается целиком). Колонки сетки въезжали анимацией (.18 с), и появление
+   инспектора давало пять-шесть раскладок подряд — по одной на кадр анимации; прокрутка
+   рельса к строке слоя заставляла раскладку ещё и синхронно. В «тяжёлом» режиме колонки
+   меняются сразу, а прокрутка рельса ждёт кадра. */
+const HEAVY_NODES = 3000;
+function markHeavy() {
+  const n = state.doc && state.doc.nodes ? Object.keys(state.doc.nodes).length : 0;
+  const heavy = n >= HEAVY_NODES ? 'on' : '';
+  if (dom.app && (dom.app.dataset.heavy || '') !== heavy) dom.app.dataset.heavy = heavy;
+}
+function docIsHeavy() {
+  return !!(dom.app && dom.app.dataset.heavy === 'on');
+}
+
 function renderAll(opts = {}) {
+  markHeavy();
   // та же геометрия (переименование) — раскладка та же: проверку досчитаем в простое
   if (state.geo && state.geo === issuesGeo) refreshIssuesSoon();
   else state.issues = layoutIssues(state.doc, state.geo);
@@ -5033,7 +5548,17 @@ function revealLayerRow() {
   const id = state.selection[0];
   if (!id || !dom.layers) return;
   const row = dom.layers.querySelector(`.layer[data-id="${CSS.escape(id)}"]`);
-  if (row) row.scrollIntoView({ block: 'nearest' });
+  if (!row) return;
+  /* Круг 29, п.9: scrollIntoView раскладывает документ синхронно — вместе с холстом,
+     который выделение только что пометило грязным. На большом документе — после кадра,
+     когда раскладка уже сделана и прокрутка стоит копейки. */
+  if (docIsHeavy()) {
+    requestAnimationFrame(() => setTimeout(() => {
+      if (row.isConnected && state.selection[0] === id) row.scrollIntoView({ block: 'nearest' });
+    }, 0));
+    return;
+  }
+  row.scrollIntoView({ block: 'nearest' });
 }
 
 /* Круг 19, п.2. Экземпляр помечен ТЕМ ЖЕ знаком, что на холсте: Stage._instanceLabel
@@ -6824,6 +7349,10 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
     }
   }
 
+  /* Круг 29 (UX Д3): проекта на сервере нет — агенту его не прочитать и не записать.
+     Команду не отправляем (она вернулась бы «проект не найден»), а говорим, что делать. */
+  if (server && projectGone()) { projectGoneCommandMsg(utterance); return; }
+  if (server && !local && retryHeld(utterance)) return;
   /* Круг 27, п.7. Сети нет у самого компьютера — так и говорим. Раньше команда ждала
      проверки сервера агента и получала «сервер агента не отвечает», хотя дело не в нём. */
   if (server && !local && isOffline()) { offlineMsg(utterance, { variants }); return; }
@@ -7501,7 +8030,8 @@ function techDetails(warnings, err, notes) {
     if (s && INTERNAL_WARN.some((re) => re.test(s)) && !bits.includes(s)) bits.push(s);
   }
   if (err && typeof err !== 'string') {
-    if (err.code) bits.push(`код: ${err.code}`);
+    // круг 29, п.7: «код: llm_failed» человеку не говорит ничего — причина словами
+    if (err.code) bits.push(`причина: ${SHELL.errorCodeWords(err.code)}`);
     // «вид: agent» — имя класса ошибки, а не сведение о ней (круг 27, п.7)
     if (err.kind && err.kind !== err.code && err.kind !== 'agent') bits.push(`вид: ${err.kind}`);
     for (const line of providerDetails(err)) bits.push(line);
@@ -7696,6 +8226,11 @@ function humanError(e) {
   const code = typeof e.code === 'string' ? e.code : '';
   const kind = typeof e.kind === 'string' ? e.kind : '';
   if (kind === 'cancelled' || code === 'cancelled' || e.name === 'AbortError') return 'Команда остановлена';
+  // J5 (круг 29): «ни одна правка не легла» — не сбой модели; те же слова, что у сервера
+  if (code === 'not_applied') {
+    const w = agentErrorWords(e);
+    return `${w.title} · ${w.note}`;
+  }
 
   // собственное сообщение ошибки точнее любого общего: оно и есть первая строка —
   // если в нём нет служебного: «Failed to fetch», адреса, коды HTTP человеку не говорят
@@ -9657,8 +10192,17 @@ function othersEdits() {
   if (!server) return [];
   const own = new Set(state.history.map((t) => t.id));
   for (const t of state.history) if (t.lastTx) own.add(t.lastTx);
-  return journalList().filter((t) => t && t.tx_id && !t.mine && !own.has(t.tx_id)
-    && t.author_kind !== 'system' && !(t.client && server.sync && t.client === server.sync.clientId));
+  /* Круг 29 (J3, UX Д2): своя транзакция, которой нет в стеке отмены, — правка агента по
+     команде, начатой до перезагрузки, правка из другой вкладки этого браузера или старше
+     сохранённой истории. Её тоже видно — «вы» / «Агент · вы», без кнопок: отменять её
+     отсюда нечем. Служебные свои (отмена и повтор) — состояние записи стека, не строка. */
+  return journalList().filter((t) => t && t.tx_id && !own.has(t.tx_id) && t.author_kind !== 'system'
+    && !(isOwnTx(t) && /^(?:Отмена|Повтор|Отменил|Вернул):/.test(cleanText(t.title))));
+}
+
+/** Своя ли транзакция журнала: отметка реплики или своя вкладка (client). */
+function isOwnTx(t) {
+  return !!(t && (t.mine || (t.client && server && server.sync && t.client === server.sync.clientId)));
 }
 
 /** Строка чужой правки: время, что (заголовок или описание), кто. Отменять чужое нельзя. */
@@ -9677,21 +10221,34 @@ function otherEditItem(t) {
   const what = document.createElement('span');
   what.className = 'what';
   const described = journalHuman.get(t.tx_id) || '';
-  const title = cleanText(t.title);
-  const text = human(described || title || (t.ops_count
+  // J3/J6: у опоздавших описания по операциям нет — подпись транзакции, словами
+  const title = SHELL.txTitleWords(t.title);
+  const mine = isOwnTx(t);
+  if (mine) item.dataset.who = agent ? 'agent' : 'mine';
+  // отмена и повтор — своей подписью («Отменил: …»): описание операций назвало бы их новой правкой
+  const rewind = /^(?:Отменил|Вернул):/.test(title);
+  const text = human((rewind ? title : described) || title || (t.ops_count
     ? `${t.ops_count} ${plural(t.ops_count, 'изменение', 'изменения', 'изменений')}`
     : 'Правка без изменений'));
   what.textContent = text;
   what.title = title && title !== text ? `${text} · ${title}` : text;
   const who = document.createElement('span');
   who.className = 'who';
-  // правка агента по чужой команде: чья команда — по вкладке (client) из присутствия
-  const by = agent && t.client ? (server.others || []).find((p) => p && p.client === t.client) : null;
-  const byName = by ? cutText(cleanText(by.author), 16, { ellipsis: true }) : '';
-  who.textContent = agent ? (byName ? `Агент · ${byName}` : 'Агент') : (cutText(cleanText(t.author), 24, { ellipsis: true }) || 'Без имени');
-  who.title = agent
-    ? (byName ? `Правка агента по команде: ${cleanText(by.author)}` : 'Правка агента по команде участника')
-    : `Правку сделал(а) ${cleanText(t.author) || 'участник без имени'}`;
+  /* Правка агента по чужой команде: чья команда — по вкладке (client) из присутствия, а
+     когда автор ушёл — из памяти (круг 29, п.7). Своя — «Агент · вы». */
+  const fullBy = agent && !mine ? commandAuthorOf(t) : '';
+  const byName = fullBy ? cutText(fullBy, 16, { ellipsis: true }) : '';
+  if (mine) {
+    who.textContent = agent ? 'Агент · вы' : 'вы';
+    who.title = agent
+      ? 'Правка агента по вашей команде — например, начатой до перезагрузки страницы. Отменить её отсюда нельзя: её нет в стеке отмены этой вкладки'
+      : 'Ваша правка из другой вкладки или старше сохранённой истории — отменить её отсюда нельзя';
+  } else {
+    who.textContent = agent ? (byName ? `Агент · ${byName}` : 'Агент') : (cutText(cleanText(t.author), 24, { ellipsis: true }) || 'Без имени');
+    who.title = agent
+      ? (byName ? `Правка агента по команде: ${fullBy}` : 'Правка агента по команде участника')
+      : `Правку сделал(а) ${cleanText(t.author) || 'участник без имени'}`;
+  }
   head.append(when, what, who);
   item.appendChild(head);
   const dropped = Number(t.dropped_count) || 0;
@@ -9746,7 +10303,8 @@ function fillEdits(body) {
     what.className = 'what'; what.textContent = text;
     what.title = tx.label && tx.label !== text ? `${text} · команда: ${human(tx.label)}` : text;
     const who = document.createElement('span');
-    who.className = 'who'; who.textContent = tx.who === 'agent' ? 'агент' : 'вы';
+    // круг 29, п.7: правка агента по своей команде — «Агент · вы», как у соавторов «Агент · Аня»
+    who.className = 'who'; who.textContent = tx.who === 'agent' ? 'Агент · вы' : 'вы';
     head.append(when, what, who);
 
     const foot = document.createElement('div');

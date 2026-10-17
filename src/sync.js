@@ -48,6 +48,12 @@
  * догона очередь идёт сама (откат базы при многих вкладках); ack во время догона ждёт его
  * конца; пропавший проект — `not_found` без потери очереди; `onProject`; надгробия снимка
  * v2/v1/null.
+ *
+ * Круг 29: надгробия подтверждённых — с номером удаления и прореживаются правилом сервера
+ * (LIMITS.tomb*), надгробия view — наложение ожидающих поверх подтверждённых, без копии на
+ * кадр; журнал «Истории» после hello и после снимка подгружается с сервера (`/history`, J3);
+ * хранилище сервера недоступно — `status.storage: 'down'`, «сервер не может сохранить —
+ * правки ждут», правка не снимается как «отравленная», health снимает статус (J4).
  */
 
 const WRITE_DELAY = 200;          // пауза между изменением и записью журнала (очередь, mine, extra)
@@ -76,6 +82,7 @@ const CLOSE_NOT_FOUND = 4404;     // сервер: проекта нет (баз
 const CLOSE_TOO_BIG = 1009;       // ws: сообщение больше предела
 const VALUE_DEPTH = 64;           // вложенность значений: глубже сервер ответит 400 (MAX_VALUE_DEPTH)
 const COMMAND_ID_CHARS = 128;     // command_id транзакции: длиннее сервер выбросит (MAX_COMMAND_ID)
+const HISTORY_LIMIT = 100;        // «История» после открытия и снимка: столько последних транзакций с сервера (J3)
 
 /**
  * Числа протокола, которые клиент держит рядом с серверными (круг 26): тест
@@ -106,6 +113,14 @@ export const LIMITS = Object.freeze({
   presenceSelection: 200,        // id в выделении присутствия — больше сервер обрежет (truncated)
   presenceHeartbeatMs: 15000,    // сердцебиение присутствия: сервер считает ушедшим после 45 с тишины
   replayMaxAgeMs: 24 * 60 * 60 * 1000,   // свои правки старше суток после отката базы не переигрываются (SPEC §9.10)
+  /* Надгробия подтверждённых (круг 29): прореживаются тем же правилом, что голова сервера
+     (server/document/limits.js TOMB_KEEP_SEQ / TOMB_PRUNE_EVERY / TOMB_MAX — тест сверяет):
+     на каждой границе номера, кратной tombPruneEvery, уходят удалённые раньше, чем за
+     tombKeepSeq до неё; сверх tombMax остаются самые новые. Без этого реплика копила
+     надгробия вечно (196 тыс. — 4,7 с на 20 чужих кадров). */
+  tombKeepSeq: 10000,
+  tombPruneEvery: 500,
+  tombMax: 50000,
 });
 
 /** Причины отброшенных операций — словами человека (SPEC §9.1 DropReason, §9.8 limit). */
@@ -194,15 +209,20 @@ export function droppedLine(dropped) {
   return why.length ? `${head}: ${why.join(', ')}` : head;
 }
 
+/** Слова статуса «хранилище сервера недоступно» (J4) — одни для всех вкладок. */
+export const STORAGE_DOWN_LABEL = 'сервер не может сохранить — правки ждут';
+
 /**
  * Статус реплики одной строкой (SPEC §9.5): «в сети · всё сохранено» /
- * «не в сети · N правок ждут» / «синхронизация…».
- * @param {{online:boolean, pending:number, syncing:boolean, error?:string|null}} s
+ * «не в сети · N правок ждут» / «синхронизация…» / «сервер не может сохранить — правки
+ * ждут» (круг 29, J4: хранилище сервера лежит — и при открытом сокете, и при закрытом).
+ * @param {{online:boolean, pending:number, syncing:boolean, error?:string|null, storage?:string}} s
  */
 export function statusLine(s) {
   if (!s) return '';
   if (s.error === 'engine') return 'версия движка устарела — обновите страницу';
   if (s.error === 'not_found') return 'проект не найден на сервере';
+  if (s.storage === 'down') return s.pending ? STORAGE_DOWN_LABEL : 'сервер не может сохранить';
   if (!s.online) {
     const n = s.pending || 0;
     return n ? `не в сети · ${n} ${plural(n, 'правка ждёт', 'правки ждут', 'правок ждут')}` : 'не в сети';
@@ -226,6 +246,18 @@ function retryAfterOf(res, body) {
 }
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * Ответ сервера говорит, что лежит хранилище (J4): `unavailable` с `detail.cause`
+ * 'storage' (или 'timeout' — база не уложилась в дедлайн), либо health
+ * `detail.storage: 'down'`. Прочие 503 (busy, migrating) — не про это.
+ */
+function storageFailure(body) {
+  if (!body || typeof body !== 'object') return false;
+  const d = body.detail && typeof body.detail === 'object' ? body.detail : null;
+  if (d && d.storage === 'down') return true;
+  return String(body.code || '') === 'unavailable' && !!d && (d.cause === 'storage' || d.cause === 'timeout');
+}
 /** busy/queued присутствия (§9.9): булево или число. */
 const isFlag = (v) => typeof v === 'boolean' || isNum(v);
 
@@ -234,21 +266,72 @@ function clone(v) {
   return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
 }
 
-/** Надгробия в форме для журнала и обратно: Map не переживает JSON. */
-function tombToList(map) {
+/**
+ * Надгробия в форме для журнала и обратно: Map не переживает JSON. Круг 29: тройки
+ * `[id, parent, seq]` — номер удаления нужен прореживанию; пары прежнего журнала
+ * читаются, номер у них — `atSeq` (номер документа записи).
+ */
+function tombToList(map, seqs) {
   const out = [];
-  for (const [id, parent] of map) out.push([id, parent === undefined ? null : parent]);
+  for (const [id, parent] of map) {
+    const s = seqs ? seqs.get(id) : undefined;
+    out.push(isNum(s) ? [id, parent === undefined ? null : parent, s] : [id, parent === undefined ? null : parent]);
+  }
   return out;
 }
-function tombFromList(list) {
-  const m = new Map();
+/** → {parents: Map, seq: Map} в порядке удаления (по номеру; равные — как на входе). */
+function tombFromList(list, atSeq = 0, seqObj = null) {
+  const rows = [];
+  const at = isNum(atSeq) ? atSeq : 0;
+  const seqOf = (id, v) => {
+    const x = v !== undefined ? v : seqObj && Object.prototype.hasOwnProperty.call(seqObj, id) ? seqObj[id] : undefined;
+    return Number.isSafeInteger(x) && x >= 0 ? x : at;
+  };
   if (Array.isArray(list)) {
-    for (const pair of list) if (Array.isArray(pair) && pair[0]) m.set(String(pair[0]), pair[1] == null ? null : String(pair[1]));
+    for (const pair of list) if (Array.isArray(pair) && pair[0]) rows.push([String(pair[0]), pair[1] == null ? null : String(pair[1]), seqOf(String(pair[0]), pair[2])]);
   } else if (list && typeof list === 'object') {
     // снимок сервера (§9.10): объект id → родитель
-    for (const [id, p] of Object.entries(list)) m.set(id, p == null ? null : String(p));
+    for (const [id, p] of Object.entries(list)) rows.push([id, p == null ? null : String(p), seqOf(id, undefined)]);
   }
-  return m;
+  let sorted = true;
+  for (let k = 1; k < rows.length && sorted; k++) if (rows[k][2] < rows[k - 1][2]) sorted = false;
+  if (!sorted) rows.sort((a, b) => a[2] - b[2]);   // sort устойчив: равные — как на входе
+  const parents = new Map();
+  const seq = new Map();
+  for (const [id, p, n] of rows) {
+    if (parents.has(id)) { parents.delete(id); seq.delete(id); }
+    parents.set(id, p);
+    seq.set(id, n);
+  }
+  return { parents, seq };
+}
+
+/**
+ * Надгробия view = ожидающие поверх подтверждённых (круг 29): своё — удалённое ожидающими,
+ * остальное читается из словаря подтверждённых без копии. Раньше переигрывание копировало
+ * словарь подтверждённых целиком на каждый кадр (`new Map(tomb)`). Наследник Map — движок
+ * (`core.rebase`) берёт Map как есть и спрашивает только has/get.
+ */
+class TombOverlay extends Map {
+  constructor(base) {
+    super();
+    this.base = base;
+  }
+  has(k) { return super.has(k) || this.base.has(k); }
+  get(k) { return super.has(k) ? super.get(k) : this.base.get(k); }
+  get size() {
+    let n = this.base.size;
+    for (const k of super.keys()) if (!this.base.has(k)) n += 1;
+    return n;
+  }
+  *entries() {
+    for (const e of super.entries()) yield e;
+    for (const e of this.base.entries()) if (!super.has(e[0])) yield e;
+  }
+  *keys() { for (const [k] of this.entries()) yield k; }
+  *values() { for (const [, v] of this.entries()) yield v; }
+  [Symbol.iterator]() { return this.entries(); }
+  forEach(fn, thisArg) { for (const [k, v] of this.entries()) fn.call(thisArg, v, k, this); }
 }
 
 /**
@@ -260,22 +343,23 @@ function tombFromList(list) {
  *      своих надгробий вслепую не сбрасывать.
  * Нормализатор движка (`core.normalizeTombstones`), если он есть, — первым: формат его.
  */
-function snapshotTombs(core, x) {
+function snapshotTombs(core, x, atSeq) {
   if (x == null) return null;
-  if (Array.isArray(x)) return tombFromList(x);
+  if (Array.isArray(x)) return tombFromList(x, atSeq);
   if (typeof x !== 'object') return null;
   if (typeof core.normalizeTombstones === 'function') {
     try {
-      const n = core.normalizeTombstones(x);
+      const n = core.normalizeTombstones(x, { seq: atSeq });
       // null у движка — «формат неизвестен» (чужая версия v): как null снимка
-      return n && n.parents && typeof n.parents === 'object' ? tombFromList(n.parents) : null;
+      return n && n.parents && typeof n.parents === 'object' ? tombFromList(n.parents, atSeq, n.seq && typeof n.seq === 'object' ? n.seq : null) : null;
     } catch { /* разберём сами */ }
   }
   if (typeof x.v === 'number' && x.v !== 2) return null;
   if (x.v === 2 || (x.parents && typeof x.parents === 'object' && !Array.isArray(x.parents))) {
-    return x.parents && typeof x.parents === 'object' && !Array.isArray(x.parents) ? tombFromList(x.parents) : null;
+    const seqObj = x.seq && typeof x.seq === 'object' && !Array.isArray(x.seq) ? x.seq : null;
+    return x.parents && typeof x.parents === 'object' && !Array.isArray(x.parents) ? tombFromList(x.parents, atSeq, seqObj) : null;
   }
-  return tombFromList(x);
+  return tombFromList(x, atSeq);
 }
 
 /** Есть ли в операциях remove (после него надгробия меняются — граница пачки переигрывания). */
@@ -427,7 +511,7 @@ export function memoryStorage() {
  * @param {Function} [o.WebSocketImpl]
  * @param {Function} [o.fetchImpl]
  * @param {Function} [o.onChange]   (view, info) — view изменился не по своему commit: open · confirmed · remote · gone · error · ack
- * @param {Function} [o.onStatus]   ({online, pending, syncing, error, head, label})
+ * @param {Function} [o.onStatus]   ({online, pending, syncing, error, head, storage: 'up'|'down', label})
  * @param {Function} [o.onDropped]  (committed + {label, by}) — сервер отбросил часть операций своей транзакции;
  *                                  у каждой записи dropped — `by` (кто помешал, если узнаётся) и `label` (подпись правки)
  * @param {Function} [o.onJournal]  (list) — журнал подтверждённых изменился (как replica.journal())
@@ -461,6 +545,10 @@ export function createSync(o) {
   const epochReopenMs = isNum(o.epochReopenMs) ? o.epochReopenMs : EPOCH_REOPEN_MS;
   const heartbeatMs = isNum(o.presenceHeartbeatMs) ? o.presenceHeartbeatMs : LIMITS.presenceHeartbeatMs;
   const presenceTtl = isNum(o.presenceTtl) ? o.presenceTtl : PRESENCE_TTL;
+  // прореживание надгробий (круг 29): числа сервера; опции — для тестов и для сервиса с другими
+  const tombKeepSeq = isNum(o.tombKeepSeq) && o.tombKeepSeq >= 0 ? o.tombKeepSeq : LIMITS.tombKeepSeq;
+  const tombPruneEvery = isNum(o.tombPruneEvery) && o.tombPruneEvery >= 1 ? o.tombPruneEvery : LIMITS.tombPruneEvery;
+  const tombMax = isNum(o.tombMax) && o.tombMax >= 0 ? o.tombMax : LIMITS.tombMax;
   const setT = (fn, ms) => {
     const id = setTimeout(fn, ms);
     // в Node таймер держит процесс: тесты не должны ждать паузу переподключения
@@ -470,10 +558,11 @@ export function createSync(o) {
 
   /* ---- состояние ---- */
   let confirmed = { seq: 0, doc: null };
-  let tomb = new Map();        // надгробия подтверждённых: id удалённого → последний родитель
+  let tomb = new Map();        // надгробия подтверждённых: id удалённого → последний родитель (порядок — порядок удаления)
+  let tombSeq = new Map();     // …и номер транзакции, которая удалила (прореживание, круг 29)
   let pending = [];            // Tx[] в порядке отправки
   let view = null;
-  let viewTomb = new Map();    // надгробия подтверждённых + ожидающих (для прогноза следующей правки)
+  let viewTomb = new TombOverlay(tomb); // ожидающие поверх подтверждённых (для прогноза следующей правки)
   let extraLoaded = undefined; // что лежало в журнале рядом с документом
 
   let socket = null;
@@ -511,6 +600,14 @@ export function createSync(o) {
   let buffer = [];
   let heldAcks = [];           // ack, пришедшие во время догона: confirmed ещё не окончательный — разобрать после
   let notFound = false;        // проекта нет на сервере (I3): очередь цела, переподключение редкое
+  let storageDown = false;     // J4: хранилище сервера недоступно — правки ждут (снимается записью или health)
+  let storageTries = 0;        // повторов отправки подряд при лежащем хранилище — для паузы
+  let healthTimer = null;      // следующая проверка /api/health, пока хранилище лежит
+  let healthTries = 0;
+  let healthBusy = false;
+  let historyLoaded = false;   // J3: «История» с сервера взята (после открытия; после снимка — снова)
+  let historyReq = 0;          // номер последнего запроса истории: ответ на прежний не берётся
+  let journalEra = 0;          // журнал очищен (эпоха сменилась) — ответы, запрошенные до, не берутся
   const notFoundRetry = isNum(o.notFoundRetryMs) ? o.notFoundRetryMs : NOT_FOUND_RETRY;
 
   /* Прогноз (круг 27): применённая форма каждой ожидающей, как её посчитало последнее
@@ -566,6 +663,7 @@ export function createSync(o) {
       syncing: online && !halted && (catchingUp || pending.length > 0 || confirmed.seq < helloHead),
       error,
       head: confirmed.seq,
+      storage: storageDown ? 'down' : 'up',
     };
   }
   function statusFull() {
@@ -578,6 +676,58 @@ export function createSync(o) {
     if (key === lastStatus) return;
     lastStatus = key;
     call(o.onStatus, statusFull());
+  }
+
+  /* ---- надгробия подтверждённых (круг 29) ---- */
+
+  /** Надгробие с номером удаления; повторное удаление того же id — в конец (порядок = порядок удаления). */
+  function addTomb(id, parent, seq) {
+    if (tomb.has(id)) { tomb.delete(id); tombSeq.delete(id); }
+    tomb.set(id, parent);
+    tombSeq.set(id, isNum(seq) ? seq : confirmed.seq);
+  }
+
+  /**
+   * Прореживание тем же правилом, что голова сервера (dslts pruneTombs): граница — номер
+   * головы, кратный tombPruneEvery, минус tombKeepSeq; сверх tombMax — самые старые.
+   * Только по номерам: реплика и сервер на одном seq знают одно и то же (прогноз
+   * `reparented`/`orphan` совпадает). Снимает с начала — амортизированно O(1) на кадр.
+   */
+  function pruneTomb(headSeq = confirmed.seq) {
+    if (!tombSeq.size) return;
+    const bound = Math.floor(headSeq / tombPruneEvery) * tombPruneEvery - tombKeepSeq;
+    for (const [id, seq] of tombSeq) {
+      if (seq >= bound && tombSeq.size <= tombMax) break;
+      tombSeq.delete(id);
+      tomb.delete(id);
+    }
+  }
+
+  /** Надгробия снимка/журнала вместо своих. */
+  function setTombs(t) {
+    tomb = t.parents;
+    tombSeq = t.seq;
+    // id без номера (не должно быть, но журнал мог прийти чужой) — номер документа
+    if (tombSeq.size !== tomb.size) for (const id of tomb.keys()) if (!tombSeq.has(id)) tombSeq.set(id, confirmed.seq);
+  }
+
+  /**
+   * Надгробия пачки подтверждённых (applyBatches отдаёт их подряд за все пачки): номер
+   * удаления — по корню (id операции remove) каждой транзакции, потомки идут за корнем.
+   * Как absorbPage сервера.
+   */
+  function addTombsOf(list, tombstones) {
+    if (!tombstones.length) return;
+    const roots = list.map((e) => {
+      let set = null;
+      for (const op of e.ops || []) if (op && op.op === 'remove' && typeof op.id === 'string') (set || (set = new Set())).add(op.id);
+      return set;
+    });
+    let k = 0;
+    for (const [id, parent] of tombstones) {
+      for (let j = k; j < list.length; j++) if (roots[j] && roots[j].has(id)) { k = j; break; }
+      addTomb(id, parent, list[k].seq);
+    }
   }
 
   /* ---- переигрывание: view = replay(confirmed.doc, pending) ---- */
@@ -643,7 +793,8 @@ export function createSync(o) {
    * ожидающих на 19 000 узлах стоили 3,7 с на каждую входящую чужую транзакцию.
    */
   function replayAll() {
-    const t = new Map(tomb);
+    // круг 29: не копия словаря подтверждённых (десятки тысяч надгробий на каждый кадр), а наложение
+    const t = new TombOverlay(tomb);
     let doc = confirmed.doc;
     const ops = [];
     let i = 0;
@@ -691,8 +842,9 @@ export function createSync(o) {
       noteTail(c.seq, list, c.chain);
     }
     lastRemoved = [];
-    for (const [id, p] of removed) { tomb.set(id, p); lastRemoved.push(id); }
+    for (const [id, p] of removed) { addTomb(id, p, c.seq); lastRemoved.push(id); }
     confirmed = { seq: c.seq, doc: next };
+    pruneTomb(c.seq);
     tip = typeof c.chain === 'string' && c.chain ? c.chain : null;
     docDirty = true;
     return before;
@@ -731,7 +883,7 @@ export function createSync(o) {
     };
   }
   function docRecord() {
-    return { v: 3, gen, seq: confirmed.seq, doc: confirmed.doc, tombstones: tombToList(tomb), tip, epoch, updatedAt: Date.now() };
+    return { v: 3, gen, seq: confirmed.seq, doc: confirmed.doc, tombstones: tombToList(tomb, tombSeq), tip, epoch, updatedAt: Date.now() };
   }
 
   function putAll(entries) {
@@ -838,7 +990,8 @@ export function createSync(o) {
       return false;
     }
     confirmed = { seq: isNum(docRec.seq) ? docRec.seq : 0, doc: docRec.doc };
-    tomb = tombFromList(docRec.tombstones);
+    setTombs(tombFromList(docRec.tombstones, confirmed.seq));
+    pruneTomb();
     tip = typeof docRec.tip === 'string' && docRec.tip ? docRec.tip : null;
     epoch = typeof docRec.epoch === 'string' && docRec.epoch ? docRec.epoch : null;
     if (docRec === rec || typeof docRec.gen !== 'string' || !docRec.gen) { newGen(); return true; }
@@ -859,8 +1012,9 @@ export function createSync(o) {
         const r = applyRun(confirmed.doc, tail.map((e) => e.ops));
         const bad = r.results.findIndex((x) => !!x);
         if (bad < 0) {   // отказ — хвост не берём целиком: догоним у сервера
-          for (const [id, p] of r.tombstones) tomb.set(id, p);
+          addTombsOf(tail, r.tombstones);
           confirmed = { seq: tail[tail.length - 1].seq, doc: r.doc };
+          pruneTomb();
           tip = tail[tail.length - 1].chain || null;
           for (const e of tail) noteTail(e.seq, e.ops, e.chain);
           docDirty = true;
@@ -888,6 +1042,8 @@ export function createSync(o) {
   async function http(path, init) {
     let r = await httpOnce(path, init);
     for (let i = 0; i < HTTP_RETRIES && (r.status === 503 || r.status === 429) && !closed; i++) {
+      // J4: хранилище лежит — сказать сразу, а не после всех повторов
+      if (r.status === 503 && storageFailure(r.body)) markStorageDown();
       // Retry-After — не раньше срока (плюс разброс до половины); без него — экспонента с разбросом
       const wait = r.retryAfter != null ? r.retryAfter * 1000 : reconnectMin * Math.pow(2, i);
       const delay = r.retryAfter != null ? wait + Math.random() * wait * 0.5 : jitter(wait);
@@ -895,7 +1051,115 @@ export function createSync(o) {
       await new Promise((resolve) => setTimeout(resolve, Math.max(1, delay)));
       r = await httpOnce(path, init);
     }
+    if (r.status === 503 && storageFailure(r.body)) markStorageDown();
     return r;
+  }
+
+  /* ---- хранилище сервера (J4) ---- */
+
+  /**
+   * Хранилище сервера недоступно: правки остаются в очереди, статус — «сервер не может
+   * сохранить — правки ждут» (одинаково во всех вкладках: у той, что с открытым сокетом, и у
+   * той, чей сокет сервер закрыл). Снимается успешной записью (подтверждение/ack своей) или
+   * health; пока лежит — /api/health с растущей паузой.
+   */
+  function markStorageDown() {
+    if (closed) return;
+    const first = !storageDown;
+    storageDown = true;
+    if (first) { healthTries = 0; emitStatus(); }
+    armHealth();
+  }
+  function storageUp() {
+    storageTries = 0;
+    if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
+    if (!storageDown) return false;
+    storageDown = false;
+    emitStatus();
+    return true;
+  }
+  function armHealth() {
+    if (closed || healthTimer || healthBusy || !fetchImpl) return;
+    const wait = jitter(Math.min(reconnectMax, reconnectMin * Math.pow(2, Math.min(healthTries, 12))));
+    healthTries += 1;
+    healthTimer = setT(() => { healthTimer = null; checkHealth(); }, Math.max(1, wait));
+  }
+  /**
+   * GET /api/health (J1): 200 — хранилище живо (очередь — сразу, не дожидаясь паузы); 503
+   * с `storage: 'down'` — проверить позже. Сервис без health (404) или недоступен вовсе —
+   * про хранилище ничего не известно: флаг снимается, дальше решат сокет и запись.
+   */
+  async function checkHealth() {
+    if (closed || healthBusy || !fetchImpl) return;
+    healthBusy = true;
+    let r = null;
+    try { r = await httpOnce('/api/health'); } catch (e) { r = null; }
+    healthBusy = false;
+    if (closed) return;
+    if (r && r.ok) {
+      const down = r.body && typeof r.body === 'object' && (r.body.storage === 'down' || r.body.ok === false);
+      if (down) { markStorageDown(); return; }
+      if (storageUp() && pending.length) {
+        if (resendTimer) { clearTimeout(resendTimer); resendTimer = null; }
+        sendNext();
+      }
+      return;
+    }
+    if (r && r.status === 503 && storageFailure(r.body)) { markStorageDown(); return; }
+    if (r && r.status === 503) { if (storageDown) armHealth(); return; }   // занят — спросим позже
+    storageUp();
+  }
+
+  /* ---- «История» с сервера (J3) ---- */
+
+  /**
+   * Последние транзакции проекта без операций (`GET …/history?limit=100`, J2) — в журнал
+   * «Истории»: после перезагрузки и после снимка он не пуст. Слияние — по seq, без дублей;
+   * живые записи (с листьями и удалёнными узлами для «кто помешал») не заменяются. Номера
+   * новее confirmed не берутся — они придут живыми (догон или сокет).
+   */
+  function loadHistory() {
+    if (closed || !fetchImpl) return;
+    const req = ++historyReq;
+    const era = journalEra;
+    const ep = epoch;
+    http(`/api/projects/${encodeURIComponent(projectId)}/history?limit=${HISTORY_LIMIT}`).then((r) => {
+      if (closed || req !== historyReq) return;
+      if (r.status === 404 || r.status === 405) { historyLoaded = true; return; }   // сервис без истории
+      if (!r.ok || !r.body) return;   // попробуем при следующем hello
+      const items = Array.isArray(r.body.items) ? r.body.items : Array.isArray(r.body) ? r.body : null;
+      if (!items) { historyLoaded = true; return; }
+      historyLoaded = true;
+      if (era !== journalEra || ep !== epoch) return;   // журнал сменил историю, пока шёл запрос
+      mergeHistory(items);
+    }, (e) => report('history', e));
+  }
+
+  function mergeHistory(items) {
+    const have = new Set(journalList.map((e) => e.pub.seq));
+    const add = [];
+    for (const it of items) {
+      if (!it || typeof it !== 'object' || !isNum(it.seq) || it.seq <= 0 || it.seq > confirmed.seq || have.has(it.seq)) continue;
+      have.add(it.seq);
+      const client = typeof it.client === 'string' ? it.client : '';
+      add.push({
+        pub: {
+          seq: it.seq, tx_id: String(it.tx_id || ''), author: typeof it.author === 'string' ? it.author : '',
+          author_kind: typeof it.author_kind === 'string' && it.author_kind ? it.author_kind : 'human',
+          title: typeof it.title === 'string' ? it.title : '',
+          created_at: typeof it.created_at === 'string' ? it.created_at : '', client,
+          command_id: typeof it.command_id === 'string' ? it.command_id : '',
+          ops_count: isNum(it.ops_count) ? it.ops_count : 0, dropped_count: isNum(it.dropped_count) ? it.dropped_count : 0,
+          mine: !!client && client === clientId,
+        },
+        created: [], leaves: [], removed: [],
+      });
+    }
+    if (!add.length) return;
+    const merged = journalList.concat(add).sort((a, b) => a.pub.seq - b.pub.seq);
+    while (merged.length > JOURNAL_KEEP) dropEntry(merged.shift());
+    journalList = merged;
+    noteJournal();
   }
 
   /** Запрос `?since=…` с якорем: tip и эпоха, если известны. */
@@ -935,8 +1199,9 @@ export function createSync(o) {
     confirmed = { seq: isNum(snapshot.seq) ? snapshot.seq : 0, doc: snapshot.doc };
     tip = typeof snapshot.chain === 'string' && snapshot.chain ? snapshot.chain : null;
     if (typeof nextEpoch === 'string' && nextEpoch) epoch = nextEpoch;
-    const t = snapshotTombs(core, snapshot.tombstones);
-    if (t) tomb = t;
+    const t = snapshotTombs(core, snapshot.tombstones, confirmed.seq);
+    if (t) setTombs(t);
+    pruneTomb();
     newGen();
     journalTrim(moved ? -1 : confirmed.seq);
     const list = Array.isArray(tail) ? tail.slice().sort((a, b) => a.seq - b.seq) : [];
@@ -996,6 +1261,8 @@ export function createSync(o) {
     epochMoved = false;
     // база откатилась: свои транзакции прежней эпохи могли пропасть вместе с ней — переиграть
     adoptSnapshot(snapshot, [], nextEpoch, moved);
+    // J3: журнал «Истории» после снимка — с сервера (эпоха сменилась — он очищен целиком)
+    loadHistory();
     call(o.onGone, snapshot);
     call(o.onChange, view, { reason: 'gone', head: headSeq });
     emitStatus();
@@ -1062,6 +1329,7 @@ export function createSync(o) {
       const own = pending.splice(i, 1)[0];
       if (inflight === c.tx_id) clearInflight();
       if (poison && poison.tx_id === c.tx_id) poison = null;
+      if (!opts.silent) storageUp();   // J4: своя записана — хранилище живо
       rememberMine(own, c.seq, c.created_at);
       if (fast && !lastDiverged) {
         plan.ops.shift();
@@ -1173,7 +1441,13 @@ export function createSync(o) {
       }
     }
     const entry = { pub, created, leaves, removed: Array.isArray(removedIds) ? removedIds : [] };
-    journalList.push(entry);
+    const last = journalList.length ? journalList[journalList.length - 1] : null;
+    if (!last || last.pub.seq < pub.seq) journalList.push(entry);
+    else {
+      // запись из «Истории» сервера с тем же номером — живая её заменяет (у неё листья и удалённые)
+      const k = journalList.findIndex((e) => e.pub.seq >= pub.seq);
+      if (journalList[k].pub.seq === pub.seq) { dropEntry(journalList[k]); journalList[k] = entry; } else journalList.splice(k, 0, entry);
+    }
     for (const id of entry.removed) removedBy.set(id, entry);
     while (journalList.length > JOURNAL_KEEP) dropEntry(journalList.shift());
     noteJournal();
@@ -1183,6 +1457,7 @@ export function createSync(o) {
   }
   /** Оставить записи не новее seq (-1 — очистить: эпоха сменилась, это другая история). */
   function journalTrim(seq) {
+    if (seq < 0) journalEra += 1;
     if (!journalList.length) return;
     const keep = seq < 0 ? [] : journalList.filter((e) => e.pub.seq <= seq);
     if (keep.length === journalList.length) return;
@@ -1407,6 +1682,7 @@ export function createSync(o) {
       const own = pending.splice(i, 1)[0];
       if (inflight === own.tx_id) clearInflight();
       if (poison && poison.tx_id === own.tx_id) poison = null;
+      storageUp();
       rememberMine(own, msg.seq);
       replayAll();
       scheduleWrite();
@@ -1532,6 +1808,13 @@ export function createSync(o) {
         sendNext();
         sendPresence();
         startHeartbeat();
+        // J3: «История» переживает перезагрузку — после первого hello с сервера
+        if (!historyLoaded) loadHistory();
+        /* J4: hello не доказывает, что хранилище живо (голова сервера — в памяти), и не
+           доказывает обратного: спросить health — вкладка, открытая при лежащей базе, скажет
+           то же, что та, у которой правка уже получила отказ */
+        if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
+        checkHealth();
         break;
       }
       case 'tx':
@@ -1567,6 +1850,21 @@ export function createSync(o) {
         // прежний сервер не говорил retryable — тогда судим по коду
         const retryable = typeof msg.retryable === 'boolean' ? msg.retryable : /unavailable|busy|internal|timeout/i.test(code);
         const wait = isNum(msg.retry_after) ? Math.min(msg.retry_after, RETRY_AFTER_MAX) * 1000 : 0;
+        if (retryable && !halted && storageFailure(msg)) {
+          /* J4: хранилище сервера лежит — правка не «отравлена» (в счёт снятия не идёт), ждёт
+             в очереди; статус — «сервер не может сохранить»; повтор — с растущей паузой, а
+             раньше — как только health скажет, что хранилище вернулось */
+          serverWait = Math.max(serverWait, wait);
+          if (tx && inflight === tx.tx_id) clearInflight();
+          markStorageDown();
+          if (tx) {
+            if (poison && poison.tx_id === tx.tx_id) poison = null;
+            storageTries += 1;
+            scheduleResend(Math.max(wait, Math.min(reconnectMax, reconnectMin * Math.pow(2, Math.min(storageTries - 1, 12)))));
+          }
+          emitStatus();
+          break;
+        }
         if (retryable && !halted) {
           // сервер занят или хранилище недоступно: транзакция остаётся в очереди и уйдёт позже
           serverWait = Math.max(serverWait, wait);
@@ -1846,6 +2144,7 @@ export function createSync(o) {
   function close() {
     closed = true;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
     if (presenceTimer) { clearTimeout(presenceTimer); presenceTimer = null; }
     stopHeartbeat();
     if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
@@ -1879,6 +2178,8 @@ export function createSync(o) {
     journal,
     /** Кто удалил узел: {author, author_kind, seq, title} или null. */
     whoRemoved,
+    /** Надгробия подтверждённых: [id, seq удаления] в порядке удаления (тесты, отладка; круг 29). */
+    tombstoneIds: () => [...tombSeq],
     get extra() { return extraLoaded; },
     get clientId() { return clientId; },
     get projectId() { return projectId; },

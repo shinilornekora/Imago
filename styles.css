@@ -158,6 +158,9 @@ button, input, textarea { font: inherit; color: inherit; }
 }
 /* Закрытый рельс обнуляет КОЛОНКУ, а не свою ширину: по --rail-w оболочка считает,
    сколько места рельс попросит, когда вернётся (круг 16, п.1). */
+/* Круг 29, п.9: большой документ — колонки без анимации: каждый её кадр перекладывал бы
+   весь холст (сотни миллисекунд на кадр), и инспектор появлялся за полторы секунды. */
+.app[data-heavy="on"] { transition: none; }
 .app[data-rail="off"] { --rail-col: 0px; }
 .app[data-insp="on"] { --insp-col: var(--insp-w); }
 .app[data-variants="on"] { --vars-col: var(--vars-w); }
@@ -249,6 +252,21 @@ button, input, textarea { font: inherit; color: inherit; }
 .sync-dot[data-state="off"] { background: var(--warn); }
 .sync-dot[data-state="error"] { background: var(--danger); }
 .sync-status[data-state="error"] { color: var(--danger); }
+/* Круг 29: пропавший проект — путь к «Сохранить как новый» живёт в строке состояния,
+   пока проекта нет: карточку можно закрыть, а работа во вкладке остаётся. */
+/* строка пропавшего проекта в шторке «Проекты»: имя целиком, кнопка спасения — под ним */
+.pgone { display: flex; justify-content: flex-start; margin-top: 6px; }
+.sync-act {
+  flex: none; font: inherit; font-size: var(--t-xs); color: var(--accent); background: none;
+  border: 1px solid currentColor; border-radius: 999px; padding: 1px 8px; cursor: pointer; white-space: nowrap;
+}
+.sync-act:hover { background: var(--panel-2); }
+.sync-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sync-act:disabled { opacity: .6; cursor: default; }
+/* на средней ширине шапке тесно: у пропавшего проекта говорит кнопка, слова — в title */
+@media (max-width: 1280px) {
+  .sync-status[data-gone="on"] .sync-text { display: none; }
+}
 /* Круг 23 (SPEC §10). Где работает агент — тем же языком, что синхронизация, через тонкий
    разделитель: «агент: сервер» — сплошная точка цвета агента, «в браузере» — приглушённая,
    «недоступен» — красная. Текст не краснеет: агент без сервера — не авария, документ живёт. */
@@ -1033,7 +1051,9 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   border-radius: 8px; padding: 2px; flex: 1 1 auto; min-width: 0;
 }
 .seg button {
-  flex: 1; border: none; background: transparent; color: var(--muted);
+  /* круг 29, п.7: ширина — по слову, а не поровну: на 1024 px «свободно» упиралось в край,
+     пока «строка» держала лишнее место */
+  flex: 1 1 auto; border: none; background: transparent; color: var(--muted); white-space: nowrap;
   /* 8 снаружи минус 1 рамка минус 2 отступа = 5: иначе подложка вылезала за скругление (п.13) */
   border-radius: 5px; padding: 4px 2px; cursor: pointer; font-size: var(--t-sm); min-width: 0;
 }
@@ -1429,6 +1449,10 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 
 @media (max-width: 1100px) {
   .app { --insp-w: 252px; }
+  /* узкий инспектор: «столбец · строка · свободно» помещаются с воздухом по краям */
+  .inspector .row > label { width: 60px; }
+  .inspector .seg { gap: 1px; }
+  .inspector .seg button { font-size: var(--t-xs); padding: 4px 4px; }
 }
 
 /* Круг 18, п.2. Тосты остаются там, где были (сверху по центру или у той панели, в
@@ -1522,6 +1546,10 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   .app[data-insp="on"] .empty-state { display: none; }
   .dockmsg { flex-wrap: wrap; }
   .dockmsg-actions { margin-left: auto; }
+  /* круг 29: длинные кнопки («Сохранить как новый проект» + «Проекты») сжимали текст до
+     столбика в слово шириной — тексту не меньше 180 px, иначе кнопки уходят строкой ниже */
+  .dockmsg-body { flex: 1 1 180px; }
+  .dockmsg-actions { flex-wrap: wrap; justify-content: flex-end; }
 }
 
 @media (max-width: 560px) {
@@ -1541,6 +1569,9 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   }
   .proj-wrap .agent-status { top: auto; bottom: 1px; }
   .proj-wrap .sync-dot { width: 7px; height: 7px; box-shadow: 0 0 0 1.5px var(--panel); }
+  /* круг 29: на телефоне от состояния — точка; путь к «Сохранить как новый» — карточка и
+     строка пропавшего проекта в шторке «Проекты» (кнопка рядом с точкой) */
+  .proj-wrap .sync-act { display: none; }
   .topbar-center { min-width: 124px; flex: 1 1 0; }
   .tab.pick { min-width: 0; }
   /* круг 27: кружков нет, но видно, что соавторы есть — один кружок с их числом */

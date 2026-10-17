@@ -41,7 +41,7 @@ import {
   QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES, BUSY_RETRY_S,
   REPLAY_MAX_AGE_MS, REPLAY_SCAN_TXS, MAX_VALUE_DEPTH, MAX_OP_ID, MAX_COMMAND_ID,
   TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES,
-  isCleanText, cleanText, cutText, cleanDeep
+  isCleanText, cleanText, cutText, cleanDeep, showValue
 } from './limits.js';
 
 /** Предел операций в транзакции (совместимость: прежде экспортировался отсюда). */
@@ -137,7 +137,8 @@ export function validateTx(raw, ctx = {}) {
   if (!isMissing(raw.replay_at) && !(typeof raw.replay_at === 'string' && raw.replay_at.length <= 40 && Number.isFinite(Date.parse(raw.replay_at)))) throw bad('replay_at: дата ISO');
   // версия движка — после формы: у мусора нет версии, у старого клиента есть, и ему нужен именно 426
   if (raw.engine !== ENGINE_VERSION) {
-    throw new DocError(426, 'engine', `версия движка ${raw.engine === undefined ? 'не указана' : raw.engine}, сервер работает с ${ENGINE_VERSION} — обновите клиент`, {
+    // чужое значение — только через showValue: `{"engine":{"toString":1}}` в шаблоне строки — TypeError и 500
+    throw new DocError(426, 'engine', `версия движка ${raw.engine === undefined ? 'не указана' : showValue(raw.engine)}, сервер работает с ${ENGINE_VERSION} — обновите клиент`, {
       retryable: false, detail: { engine: ENGINE_VERSION }, compat: { engine: ENGINE_VERSION, ...txId }
     });
   }
@@ -1015,6 +1016,65 @@ export function createSequencer({
 
   const info = (head) => ({ head_seq: head.head_seq, chain: head.chain, epoch: head.epoch });
 
+  /** Подключения в полёте под мьютексом (голову грузит первый) и счёт путей подключения. */
+  const attaching = new Map();
+  /** peek → голова, с которой он снят (Hub получает только номера, сама голова — здесь). */
+  const peeks = new WeakMap();
+  const attachCounts = { fast: 0, slow: 0 };
+
+  /**
+   * Подключение без мьютекса (круг 29): снимок головы в памяти, затем строка проекта
+   * из базы — именно в таком порядке. Голова движется только вперёд, поэтому база,
+   * прочитанная позже снимка, не может оказаться позади него, если не было отката:
+   *   та же эпоха, тот же номер и та же цепочка  → снимок годен;
+   *   та же эпоха, база впереди                   → ответ по базе (писал этот или другой
+   *                                                 экземпляр), сверка головы — фоном
+   *                                                 (scheduleSync сливает такие в одну);
+   *   иначе (база позади, другая цепочка или эпоха, головы нет) → null: под мьютексом,
+   *   как прежде — там ловится откат, о котором экземпляр не знал.
+   * Согласованность hello с догоном та же, что раньше: сокет уже в комнате (живое копится
+   * в буфере), Hub дочитывает журнал из базы после номера hello и сшивает с буфером по
+   * seq. База впереди — сверяется якорь на номере снимка (`chainAt`): не тот — откат,
+   * путь под мьютексом.
+   * @returns {Promise<{head_seq:number, chain:string, epoch:string}|null>}
+   */
+  async function attachFast(projectId, pre) {
+    let head;
+    let snap;
+    let p;
+    const given = pre && pre.peek && peeks.get(pre.peek);
+    if (given && pre.project && typeof pre.project === 'object') {
+      // снимок головы взят (peek) до того, как Hub прочёл строку проекта: чтение не нужно
+      head = given;
+      snap = { head_seq: pre.peek.head_seq, chain: pre.peek.chain, epoch: pre.peek.epoch };
+      p = pre.project;
+    } else {
+      head = heads.get(projectId);
+      if (!head) return null;
+      snap = info(head);
+      p = await viaStorage(storage.getProject(projectId));
+    }
+    if (!p || heads.get(projectId) !== head || p.epoch !== snap.epoch) return null;
+    if (p.head_seq === snap.head_seq) {
+      if ((p.head_chain || '') !== (snap.chain || '')) return null;
+      touch(projectId, head);
+      attachCounts.fast += 1;
+      return snap;
+    }
+    if (p.head_seq < snap.head_seq) return null;
+    // база впереди снимка: своя запись между снимком и чтением или чужой экземпляр —
+    // журнал базы обязан продолжать снимок (тот же якорь на его номере), иначе откат
+    if (snap.head_seq > 0 && typeof storage.chainAt === 'function') {
+      const at = await viaStorage(storage.chainAt(projectId, snap.head_seq));
+      if (at !== snap.chain) return null;
+    }
+    if (heads.get(projectId) !== head) return null;
+    if (p.head_seq > head.head_seq) scheduleSync(projectId);
+    touch(projectId, head);
+    attachCounts.fast += 1;
+    return { head_seq: p.head_seq, chain: p.head_chain || '', epoch: p.epoch };
+  }
+
   return {
     /**
      * Подписка на события: `{kind:'tx', projectId, committed}` в порядке seq · `{kind:'epoch', projectId, epoch, token?}` ·
@@ -1031,12 +1091,39 @@ export function createSequencer({
     },
 
     /**
-     * Голова проекта загружена и сверена с базой — для сокета, который
-     * подключается: {head_seq, chain, epoch}. Тут же ловится откат базы, если
-     * экземпляр ещё не знал о нём.
+     * Снимок головы в памяти сейчас (круг 29): `{head_seq, chain, epoch}` или null (не
+     * загружена). Hub берёт его ДО чтения строки проекта и отдаёт обоих в attach — тогда
+     * подключение обходится без лишнего запроса к базе.
      */
-    async attach(projectId) {
-      return withLock(projectId, async () => {
+    peek(projectId) {
+      const head = heads.get(projectId);
+      if (!head) return null;
+      const out = Object.freeze(info(head));
+      peeks.set(out, head);
+      return out;
+    },
+
+    /**
+     * Голова проекта загружена и согласна с базой — для сокета, который
+     * подключается: {head_seq, chain, epoch}. Тут же ловится откат базы, если
+     * экземпляр ещё не знал о нём (путь под мьютексом, см. attachFast).
+     * @param {string} projectId
+     * @param {{peek?: object, project?: object}} [pre] снимок peek() и строка проекта,
+     *   прочитанная ПОСЛЕ него (необязательно: без них attach читает строку сам)
+     */
+    async attach(projectId, pre) {
+      // круг 29: подключение не встаёт в очередь записи. Голова загружена и с базой
+      // согласна — ответ без мьютекса (2000 сокетов не задерживают запись, hello не ждёт
+      // тяжёлых слияний); голову грузит первый, остальные ждут его, а не мьютекс
+      for (let round = 0; round < 3 && !closed; round++) {
+        const fast = await attachFast(projectId, round === 0 ? pre : null);
+        if (fast) return fast;
+        const pending = attaching.get(projectId);
+        if (!pending) break;
+        await pending.catch(() => {});
+      }
+      const slow = withLock(projectId, async () => {
+        attachCounts.slow += 1;
         let head = await ensureHead(projectId);
         const r = await syncHead(projectId);
         // проекта не стало между загрузкой головы и сверкой (I3): сокету — 404, а не hello
@@ -1044,6 +1131,14 @@ export function createSequencer({
         if (r === 'epoch' || r === 'rollback') head = await ensureHead(projectId);
         return info(head);
       });
+      attaching.set(projectId, slow);
+      slow.finally(() => { if (attaching.get(projectId) === slow) attaching.delete(projectId); }).catch(() => {});
+      return slow;
+    },
+
+    /** Подключений, отвеченных без мьютекса и под ним (тестам, отладке). */
+    attachStats() {
+      return { ...attachCounts };
     },
 
     /**

@@ -14,6 +14,7 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
+import * as core from '../../src/core.js';
 import { createDoc, ENGINE_VERSION } from '../../src/core.js';
 import { DocError, badRequest, notFound, tooLarge, internalBody, viaStorage } from './errors.js';
 import { jsonBytes, projectSummary } from './storage/committed.js';
@@ -22,7 +23,8 @@ import {
   MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX,
   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, PROJECTS_PAGE, PROJECTS_PAGE_MAX,
   WRITE_BODY_BYTES, BODY_TIMEOUT_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
-  isCleanText, cleanText, cutText, cleanDeep
+  HISTORY_PAGE, HISTORY_PAGE_MAX, HEALTH_PING_MS, HEALTH_CACHE_MS,
+  isCleanText, cleanText, cutText, cleanDeep, showValue
 } from './limits.js';
 
 /** Предел тела запроса (совместимость: прежде экспортировался отсюда). */
@@ -246,8 +248,87 @@ function cleanBody(v, what) {
   }
 }
 
-/** Имя проекта: чистая строка не длиннее MAX_PROJECT_NAME кодовых точек. */
+/** Имя проекта: чистая строка не длиннее MAX_PROJECT_NAME кодовых точек (звать только со строкой). */
 const projectName = (v) => cutText(cleanText(String(v)), MAX_PROJECT_NAME);
+
+/** Предел глубины дерева: из движка, если он его даёт, иначе — тот же, что в core (256). */
+const MAX_TREE_DEPTH = Number.isInteger(core.MAX_DEPTH) && core.MAX_DEPTH > 0 ? core.MAX_DEPTH : 256;
+
+/**
+ * Глубина дерева документа от корня по `children` (у корня 0) — без рекурсии; узел,
+ * встреченный второй раз, не обходится снова (цикл). Больше `limit` — сразу выход.
+ * @returns {number} наибольшая глубина (или limit + 1, если предел превышен)
+ */
+function treeDepth(doc, limit) {
+  const nodes = doc && doc.nodes ? doc.nodes : {};
+  const own = (id) => (typeof id === 'string' && Object.prototype.hasOwnProperty.call(nodes, id) ? nodes[id] : null);
+  const seen = new Set();
+  const stack = [doc.root, 0];
+  let max = 0;
+  while (stack.length) {
+    const d = stack.pop();
+    const id = stack.pop();
+    if (seen.has(id)) continue;
+    const n = own(id);
+    if (!n) continue;
+    seen.add(id);
+    if (d > max) max = d;
+    if (max > limit) return max;
+    if (Array.isArray(n.children)) for (const c of n.children) stack.push(c, d + 1);
+  }
+  return max;
+}
+
+/**
+ * Ответ `core.checkImportDoc` (J7, круг 29) → текст ошибки или null. Форму ответа движок
+ * выбирает сам: null/undefined/true/`{ok:true}` — годен; строка, `{error}`, `{ok:false}`
+ * или исключение — нет.
+ */
+function importDocError(d) {
+  if (typeof core.checkImportDoc !== 'function') return null;
+  let r;
+  try {
+    r = core.checkImportDoc(d);
+  } catch (e) {
+    return e && typeof e.message === 'string' ? e.message : 'документ не прошёл проверку';
+  }
+  if (r === null || r === undefined || r === true) return null;
+  if (typeof r === 'string') return r || null;
+  if (r === false) return 'документ не прошёл проверку';
+  if (typeof r === 'object') {
+    const err = r.error !== undefined ? r.error : r.ok === false ? (r.message || r.reason || true) : null;
+    if (err === null || err === undefined || err === false) return null;
+    if (typeof err === 'string') return err;
+    if (err && typeof err === 'object' && typeof err.message === 'string') return err.message;
+    return 'документ не прошёл проверку';
+  }
+  return null;
+}
+
+/** Число выпавших операций по выжимке `dropped` (`{more: N}` — ещё N). */
+function droppedCount(list) {
+  if (!Array.isArray(list)) return 0;
+  let n = 0;
+  for (const d of list) n += d && typeof d.more === 'number' && d.index === undefined ? d.more : 1;
+  return n;
+}
+
+/**
+ * Строка «Истории» (J2, круг 29): мета транзакции без операций. `empty: true` — в
+ * журнале запись без единой операции (повтор правки агента или переигранная правка, у
+ * которой все операции выпали при слиянии: она получает seq ради идемпотентности).
+ */
+function historyItem(m) {
+  const out = {
+    seq: Number(m.seq), tx_id: m.tx_id,
+    author: m.author ?? null, author_kind: m.author_kind || 'human', title: m.title ?? null,
+    created_at: m.created_at instanceof Date ? m.created_at.toISOString() : m.created_at,
+    client: m.client ?? null, command_id: m.command_id ?? null,
+    ops_count: Number(m.ops_count) || 0, dropped_count: Number(m.dropped_count) || 0
+  };
+  if (out.ops_count === 0) out.empty = true;
+  return out;
+}
 
 /**
  * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, internalToken?: string, log?: object,
@@ -299,6 +380,37 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
   if (internalToken === PLACEHOLDER_TOKEN) log.warn('[document/http] INTERNAL_TOKEN = «change-me» — это заглушка; внутренние маршруты закрыты, пока не задан настоящий токен');
   const methodNotAllowed = () => new DocError(405, 'method_not_allowed', 'метод не поддерживается', { retryable: false });
 
+  /**
+   * Хранилище отвечает? (J1) `storage.ping({timeoutMs})` (STORE; кеш 1 с — у него); нет
+   * такого метода (хранилище прежней версии) — дешёвое чтение строки проекта с тем же
+   * дедлайном и своим кешем на HEALTH_CACHE_MS. Пинги в полёте сливаются в один.
+   */
+  let pingCache = { at: 0, up: true };
+  let pingInFlight = null;
+  function storageUp() {
+    if (typeof storage.ping === 'function') {
+      return Promise.resolve().then(() => storage.ping({ timeoutMs: HEALTH_PING_MS })).then((v) => v !== false, () => false);
+    }
+    if (Date.now() - pingCache.at < HEALTH_CACHE_MS) return Promise.resolve(pingCache.up);
+    if (pingInFlight) return pingInFlight;
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), HEALTH_PING_MS);
+      if (timer.unref) timer.unref();
+    });
+    pingInFlight = Promise.race([
+      // id — годный uuid: pg на не-uuid отвечает «нет проекта», не спрашивая базу
+      Promise.resolve().then(() => storage.getProject('00000000-0000-0000-0000-000000000000')).then(() => true, () => false),
+      deadline
+    ]).then((up) => {
+      clearTimeout(timer);
+      pingCache = { at: Date.now(), up };
+      pingInFlight = null;
+      return up;
+    });
+    return pingInFlight;
+  }
+
   /** 410: снимок и голова — с верхнего уровня тела, как раньше. */
   function sendGone(res, view, epoch) {
     const e = new DocError(410, 'gone', 'с этого места журнал не догнать — нужен снимок', {
@@ -326,10 +438,13 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       throw notFound('нет такого маршрута');
     }
 
-    // GET /api/health
+    // GET /api/health — и хранилище (J1, круг 29): не отвечает — 503 unavailable
     if (parts.length === 2 && parts[1] === 'health') {
       if (method !== 'GET') throw methodNotAllowed();
-      sendJSON(res, 200, { ok: true, engine: ENGINE_VERSION });
+      if (!(await storageUp())) {
+        throw new DocError(503, 'unavailable', 'хранилище недоступно', { retryable: true, retryAfter: 1, detail: { storage: 'down' } });
+      }
+      sendJSON(res, 200, { ok: true, engine: ENGINE_VERSION, storage: 'up' });
       return;
     }
 
@@ -420,9 +535,11 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
   /** POST /api/projects: тело уже прочитано и разобрано (под слотом записи). */
   async function createProject(res, body) {
     if (typeof body !== 'object' || Array.isArray(body)) throw badRequest('тело должно быть объектом');
+    // круг 29: имя — строка (число — тоже можно, как прежде); объект в String() — TypeError и 500
+    if (body.name !== undefined && body.name !== null && typeof body.name !== 'string' && typeof body.name !== 'number') throw badRequest('name: строка');
     const name = body.name === undefined || body.name === null ? '' : projectName(body.name);
     const kind = body.kind === undefined || body.kind === null ? 'design' : body.kind;
-    if (!PROJECT_KINDS.has(kind)) throw badRequest('kind: design | library');
+    if (!PROJECT_KINDS.has(kind)) throw badRequest(`kind: design | library, а не «${showValue(kind)}»`);
     let doc;
     if (body.doc === undefined || body.doc === null) {
       // новый проект — пустая страница; демо-документ — только по просьбе (§9.10)
@@ -434,12 +551,58 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         throw badRequest('doc: объект с nodes и root, корень должен быть среди узлов');
       }
       if (Object.keys(d.nodes).length > MAX_DOC_NODES) throw tooLarge(`doc: не больше ${MAX_DOC_NODES} узлов`, { detail: { limit: 'doc_nodes', max: MAX_DOC_NODES } });
-      doc = createDoc(d);
+      // J7 (круг 29): глубина и типы полей — проверка движка до приведения; без неё документ
+      // глубже предела ложился снимком, и потом каждая операция над ним шла по краю
+      const why = importDocError(d);
+      if (why) throw badRequest(`doc: ${why}`, { detail: { limit: 'import' } });
+      try {
+        doc = createDoc(d);
+      } catch (e) {
+        // документ чужой: исключение движка на нём — негодный документ (400), а не сбой сервиса
+        // (круг 29: `type: {"toString":1}` у узла давал TypeError в тексте предупреждения движка)
+        log.warn('[document/http] createDoc не принял документ импорта:', e && e.message);
+        throw badRequest('doc: документ не разобран — проверьте типы полей узлов');
+      }
+      // своя проверка глубины — по приведённому дереву (движок прежней версии checkImportDoc не знает)
+      if (treeDepth(doc, MAX_TREE_DEPTH) > MAX_TREE_DEPTH) {
+        throw badRequest(`doc: вложенность глубже ${MAX_TREE_DEPTH} уровней`, { detail: { limit: 'depth', max: MAX_TREE_DEPTH } });
+      }
     }
     if (name) doc.meta = { ...(doc.meta || {}), name };
     if (jsonBytes(doc) > MAX_DOC_BYTES) throw tooLarge('doc: больше предела документа', { detail: { limit: 'doc_bytes', max: MAX_DOC_BYTES } });
     const project = await viaStorage(storage.createProject({ name, kind, doc, engine: ENGINE_VERSION }));
     sendJSON(res, 201, { id: project.id, name: project.name, kind: project.kind, head_seq: 0, engine: project.engine, epoch: project.epoch, tip: '', created_at: project.created_at, updated_at: project.updated_at });
+  }
+
+  /**
+   * Мета транзакций журнала, новые первыми, `seq < before` (без before — от головы),
+   * не больше `limit`. `storage.recentTxMeta` (STORE, J2) читает без jsonb операций;
+   * хранилище прежней версии — страницы `txsAfter` с конца (операции читаются, но наружу
+   * идёт только их число).
+   */
+  async function historyPage(id, p, limit, before) {
+    if (typeof storage.recentTxMeta === 'function') {
+      const rows = await viaStorage(storage.recentTxMeta(id, before !== undefined ? { limit, beforeSeq: before } : { limit }));
+      return (Array.isArray(rows) ? rows : [])
+        .filter((r) => r && Number.isInteger(Number(r.seq)) && (before === undefined || Number(r.seq) < before))
+        .sort((a, b) => Number(b.seq) - Number(a.seq))
+        .slice(0, limit);
+    }
+    const top = Math.min(before !== undefined ? before - 1 : p.head_seq, p.head_seq);
+    if (top < 1) return [];
+    const from = Math.max(0, top - limit);
+    const out = [];
+    let seq = from;
+    while (seq < top) {
+      const page = await viaStorage(storage.txsAfter(id, seq, top - seq, { maxBytes: 16 * 1024 * 1024 }));
+      if (!page.length) break;
+      for (const tx of page) {
+        if (tx.seq > top) break;
+        out.push({ ...tx, ops_count: Array.isArray(tx.ops) ? tx.ops.length : 0, dropped_count: droppedCount(tx.dropped) });
+      }
+      seq = page[page.length - 1].seq;
+    }
+    return out.sort((a, b) => b.seq - a.seq).slice(0, limit);
   }
 
   /** Маршруты `/api/projects/:id/…`. */
@@ -479,6 +642,20 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
           const { committed, existing } = await dslts.commit(id, body, { author: authorOf(req), bytes: req.bodyBytes });
           sendJSON(res, existing ? 200 : 201, committed);
         });
+        return;
+      }
+      // GET /api/projects/:id/history?limit=&before= — журнал «Истории» без операций (J2)
+      if (parts[3] === 'history') {
+        if (method !== 'GET') throw methodNotAllowed();
+        const limit = intParam(url, 'limit', { min: 1, max: HISTORY_PAGE_MAX }) || HISTORY_PAGE;
+        const before = intParam(url, 'before', { min: 1 });
+        const p = await dslr.project(id);
+        const metas = await historyPage(id, p, limit + 1, before);
+        const items = metas.slice(0, limit).map(historyItem);
+        // лишняя строка пришла — дальше есть; хранилище, зажавшее limit до 200, отдаст ровно
+        // limit — тогда по номеру: журнал сплошной с 1, младшая не 1 — значит, есть ещё
+        const more = metas.length > limit || (items.length === limit && items[items.length - 1].seq > 1);
+        sendJSON(res, 200, { items, more });
         return;
       }
       // GET /api/projects/:id/traces?limit= — последние трассы, только чтение

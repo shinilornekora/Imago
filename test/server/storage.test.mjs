@@ -270,8 +270,94 @@ for (const backend of list) {
       assert.deepEqual(results.map((r) => r.committed.seq).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6]);
       assert.equal((await storage.getProject(p.id)).head_seq, 6);
     });
+
+    it('recentTxMeta (J2): от новых к старым, beforeSeq — следующая страница; ops_count и dropped_count без ops', async () => {
+      const p = await storage.createProject({ name: 'История', kind: 'design', doc: createDoc('empty'), engine: E });
+      assert.deepEqual(await storage.recentTxMeta(p.id), []);
+      const dropped = compactDropped(Array.from({ length: 60 }, (_, i) => ({ index: i, reason: 'invalid', op: { op: 'remove', id: 'n' + i } })));
+      assert.equal(dropped.length, 51, 'выжимка: 50 записей и {more: 10}');
+      await storage.commitTx(p.id, record(0, [ops.setToken('colors.accent', '#000000'), ops.setToken('colors.text', '#111111')], { author: 'Аня', title: 'Цвета', client: 'c1' }));
+      await storage.commitTx(p.id, record(1, [], { author_kind: 'agent', title: 'Агент', command_id: 'cmd_1', dropped }));
+      await storage.commitTx(p.id, record(2, [ops.setToken('colors.bg', '#ffffff')]));
+      const all = await storage.recentTxMeta(p.id, { limit: 50 });
+      assert.deepEqual(all.map((t) => t.seq), [3, 2, 1]);
+      const [c, b, a] = all;
+      assert.deepEqual(Object.keys(a).sort(), ['author', 'author_kind', 'client', 'command_id', 'created_at', 'dropped_count', 'ops_count', 'seq', 'title', 'tx_id']);
+      assert.equal('ops' in a, false, 'операций в сводке нет');
+      assert.deepEqual({ author: a.author, author_kind: a.author_kind, title: a.title, client: a.client, command_id: a.command_id, ops_count: a.ops_count, dropped_count: a.dropped_count },
+        { author: 'Аня', author_kind: 'human', title: 'Цвета', client: 'c1', command_id: null, ops_count: 2, dropped_count: 0 });
+      assert.deepEqual({ author_kind: b.author_kind, command_id: b.command_id, ops_count: b.ops_count, dropped_count: b.dropped_count, author: b.author },
+        { author_kind: 'agent', command_id: 'cmd_1', ops_count: 0, dropped_count: 60, author: null });
+      assert.equal(c.ops_count, 1);
+      assert.ok(!Number.isNaN(Date.parse(a.created_at)) && typeof a.created_at === 'string');
+      assert.equal(a.tx_id, (await storage.txsAfter(p.id, 0, 1))[0].tx_id);
+      // страницы истории
+      assert.deepEqual((await storage.recentTxMeta(p.id, { limit: 2 })).map((t) => t.seq), [3, 2]);
+      assert.deepEqual((await storage.recentTxMeta(p.id, { limit: 2, beforeSeq: 2 })).map((t) => t.seq), [1]);
+      assert.deepEqual(await storage.recentTxMeta(p.id, { beforeSeq: 1 }), []);
+      assert.deepEqual(await storage.recentTxMeta('00000000-0000-4000-8000-000000000000'), []);
+      assert.deepEqual(await storage.recentTxMeta('мусор'), []);
+    });
+
+    it('ping (J1): живое хранилище — true', async () => {
+      assert.equal(await storage.ping(), true);
+      assert.equal(await storage.ping({ timeoutMs: 50 }), true);
+    });
   });
 }
+
+describe('ping · pg (J1)', { skip: list.find((b) => b.name === 'pg').available ? false : 'нет базы (TEST_DATABASE_URL)' }, () => {
+  it('ответ помнится 1 с: частый health не ходит в базу; одновременные — одной пробой', async () => {
+    const s = pgStorage({ listen: false });
+    await s.init();
+    try {
+      let probes = 0;
+      const q = s.pool.query.bind(s.pool);
+      s.pool.query = (...a) => { if (a[0] === 'SELECT 1') probes++; return q(...a); };
+      assert.deepEqual(await Promise.all([s.ping(), s.ping(), s.ping()]), [true, true, true]);
+      assert.equal(probes, 1, 'одновременные — одна проба');
+      for (let i = 0; i < 20; i++) assert.equal(await s.ping(), true);
+      assert.equal(probes, 1, 'в пределах секунды — из памяти');
+      await new Promise((r) => setTimeout(r, 1100));
+      assert.equal(await s.ping(), true);
+      assert.equal(probes, 2, 'через секунду — новая проба');
+    } finally {
+      await s.close();
+    }
+    assert.equal(await s.ping(), false, 'закрытое хранилище — false');
+  });
+
+  it('база не отвечает: false за timeoutMs, а не за connectionTimeout; зависшая проба не копит новые', async () => {
+    const net = await import('node:net');
+    // «база», которая принимает соединение и молчит (полуоткрытая сеть)
+    const sockets = new Set();
+    const mute = net.createServer((c) => { sockets.add(c); c.on('error', () => {}); });
+    await new Promise((r) => mute.listen(0, '127.0.0.1', r));
+    const s = pgStorage({ connectionString: `postgres://imago:imago@127.0.0.1:${mute.address().port}/x`, listen: false, connectionTimeoutMillis: 4000 });
+    try {
+      const t0 = Date.now();
+      assert.equal(await s.ping({ timeoutMs: 300 }), false);
+      const ms = Date.now() - t0;
+      assert.ok(ms >= 250 && ms < 1500, `ответ за timeoutMs: ${ms} мс`);
+      await new Promise((r) => setTimeout(r, 1100));
+      const t1 = Date.now();
+      assert.equal(await s.ping({ timeoutMs: 300 }), false);
+      assert.ok(Date.now() - t1 < 200, 'прежняя проба ещё висит — сразу false, без новой');
+      assert.ok(s.pool.totalCount + s.pool.waitingCount <= 1, `проб в пуле: ${s.pool.totalCount} + ${s.pool.waitingCount}`);
+      // отказ соединения (порт закрыт) — тоже false, быстро
+      const dead = pgStorage({ connectionString: 'postgres://imago:imago@127.0.0.1:1/x', listen: false });
+      try {
+        assert.equal(await dead.ping({ timeoutMs: 2000 }), false);
+      } finally {
+        await dead.close().catch(() => {});
+      }
+    } finally {
+      for (const c of sockets) c.destroy();
+      await s.close().catch(() => {});
+      await new Promise((r) => mute.close(r));
+    }
+  });
+});
 
 describe('viaStorage: причина 503 — в лог одной строкой', () => {
   it('сбой хранилища → 503 и строка лога без переводов строк и не длиннее ~250 символов; повторы — не чаще раза в секунду', async () => {

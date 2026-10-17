@@ -17,6 +17,11 @@ import * as core from '../../../src/core.js';
 import { runCommand, runVariants, BrainError, SCHEMAS, raceAbort } from '../../../src/brain.js';
 
 const testHooks = !!(workerData && workerData.testHooks);
+// проверка: медленный старт воркера (загрузка модулей под нагрузкой) — круг 29
+if (testHooks && workerData.startDelayMs > 0) {
+  const until = Date.now() + workerData.startDelayMs;
+  while (Date.now() < until) { /* «грузимся» */ }
+}
 const jobs = new Map();      // id → AbortController
 const calls = new Map();     // callId → {resolve, reject}
 let callSeq = 0;
@@ -75,6 +80,19 @@ async function run(id, job) {
     }
     if (testHooks && job.test === 'spin') {
       for (;;) { /* бесконечный счёт: проверка таймаута */ }
+    }
+    // круг 29: счёт заданной длины (busyMs), до и/или после вызова модели (llm: true);
+    // spinAfterLlm — после ответа модели воркер зависает (часы счёта обязаны снова идти)
+    if (testHooks && job.test && typeof job.test === 'object') {
+      const t = job.test;
+      const busy = (ms) => { const until = Date.now() + (ms || 0); while (Date.now() < until) { /* считаем */ } };
+      busy(t.busyMs);
+      let answer = null;
+      if (t.llm) answer = await proxyProvider(id).complete([{ role: 'user', content: String(t.prompt || 'проба') }], null, { signal: ctl.signal });
+      if (t.spinAfterLlm) for (;;) { /* завис после ответа модели */ }
+      busy(t.afterMs);
+      parentPort.postMessage({ type: 'done', id, result: { ops: [], warnings: [], test: { answer } } });
+      return;
     }
     const onStage = (rec) => {
       if (!rec || rec.partial !== undefined) return;
