@@ -144,6 +144,25 @@ export const MAX_VALUE_DEPTH = 64;
 export const MAX_OP_ID = 512;
 /** command_id транзакции (связь с трассой агента). */
 export const MAX_COMMAND_ID = 128;
+/**
+ * Круг 32: частей одной большой правки (`undo_part.n`) — не больше. Правка режется по 5000
+ * операций (SPEC §9.15): 10 000 частей — 50 млн операций, больше не бывает; больше — поля нет.
+ */
+export const MAX_UNDO_PARTS = 10000;
+
+/**
+ * Часть большой правки `{i, n}` (круг 32, SPEC §9.15): i — номер с 0, n — частей (2…MAX_UNDO_PARTS).
+ * Метаданные: негодное значение правку не губит — поля просто нет (null).
+ * @param {any} v
+ * @returns {{i: number, n: number}|null}
+ */
+export function undoPartOf(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const { i, n } = v;
+  if (!Number.isSafeInteger(i) || !Number.isSafeInteger(n)) return null;
+  if (n < 2 || n > MAX_UNDO_PARTS || i < 0 || i >= n) return null;
+  return { i, n };
+}
 
 /* ------------------------------- строки ------------------------------- */
 

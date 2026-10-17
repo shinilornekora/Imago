@@ -5937,6 +5937,12 @@ const AB_LABEL_SIZE = 11;
 const AB_LABEL_MIN_W = 80;
 /** Ширина знака IBM Plex Sans в среднем 0.56 кегля (замерено) — берём 0.6 с запасом. */
 const AB_LABEL_CHAR = 0.6;
+/**
+ * Круг 32: узлов в одной правке, сверх которых сцена не подсвечивает и не анимирует каждый
+ * (рамка подсветки на узел — слой композитора; 8000 таких — кадр на 9–11 с), а обводит
+ * правку двумя общими рамками: удалённое и созданное с изменённым.
+ */
+const STAGE_PULSE_MAX = 200;
 
 /**
  * Сцена: рисует документ в SVG и обрабатывает ввод.
@@ -7513,6 +7519,31 @@ class Stage {
     if (!created.length && !changed.length && !removed.length) { this._refreshPulses(); return; }
     this._pulses = [];
     const reduced = prefersReducedMotion();
+    /* Круг 32: большая правка (отмена импорта на 8000 узлов, удаление большой доски) — не по
+       рамке и анимации на каждый узел: тысячи анимированных прямоугольников — тысячи слоёв
+       композитора, и один кадр стоял 9–11 с. Сверх STAGE_PULSE_MAX — одна рамка вокруг
+       удалённого и одна вокруг созданного и изменённого, без переездов и проявлений. */
+    if (created.length + changed.length + removed.length > STAGE_PULSE_MAX) {
+      const union = (ids, rects) => {
+        let box = null;
+        for (const id of ids) {
+          const r = rects[id];
+          if (!r) continue;
+          if (!box) { box = { x: r.x, y: r.y, x2: r.x + r.w, y2: r.y + r.h }; continue; }
+          box.x = Math.min(box.x, r.x); box.y = Math.min(box.y, r.y);
+          box.x2 = Math.max(box.x2, r.x + r.w); box.y2 = Math.max(box.y2, r.y + r.h);
+        }
+        return box ? { x: box.x, y: box.y, w: box.x2 - box.x, h: box.y2 - box.y } : null;
+      };
+      const gone = union(removed, this._prevRects || {});
+      if (gone) this._pulses.push({ rect: gone });
+      const fresh = union(created.concat(changed), (this.geo && this.geo.rects) || {});
+      if (fresh) this._pulses.push({ rect: fresh });
+      this._paintUI();
+      this._cancelLater(this._pulseTimer);
+      this._pulseTimer = this._later(() => { this._pulses = []; this._paintUI(); }, 950);
+      return;
+    }
     for (const id of removed) {
       const prev = this._prevRects[id];
       if (prev) this._pulses.push({ rect: prev });   // узла уже нет — id помнить незачем

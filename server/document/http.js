@@ -24,7 +24,7 @@ import {
   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, PROJECTS_PAGE, PROJECTS_PAGE_MAX,
   WRITE_BODY_BYTES, BODY_TIMEOUT_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
   HISTORY_PAGE, HISTORY_PAGE_MAX, HEALTH_PING_MS, HEALTH_CACHE_MS,
-  isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue
+  isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue, undoPartOf
 } from './limits.js';
 
 /** Предел тела запроса (совместимость: прежде экспортировался отсюда). */
@@ -341,6 +341,11 @@ function historyItem(m) {
     client: m.client ?? null, command_id: m.command_id ?? null,
     // круг 30: кто дал команду агенту (подпись «Агент · Аня»); у человеческой и старой записи — null
     command_author: meta(m.command_author),
+    // круг 32: отмена/повтор (`undo_of`/`redo_of`) и часть большой правки (`undo_part`) — оболочка
+    // сводит части одной правки в одну строку точно, а не по подписи
+    undo_of: typeof m.undo_of === 'string' && m.undo_of ? m.undo_of : null,
+    redo_of: typeof m.redo_of === 'string' && m.redo_of ? m.redo_of : null,
+    undo_part: undoPartOf(m.undo_part),
     ops_count: Number(m.ops_count) || 0, dropped_count: Number(m.dropped_count) || 0
   };
   if (out.ops_count === 0) out.empty = true;

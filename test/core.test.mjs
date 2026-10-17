@@ -2057,6 +2057,30 @@ test('подсветка агента не гаснет от лишнего ре
   assert.equal(st._pulses.length, 0, 'гаснет по таймеру');
 });
 
+test('круг 32: большая правка — две общие рамки подсветки вместо рамки на каждый узел', () => {
+  const { doc, geo } = columnScene(false);
+  const st = gestureStage(doc, geo);
+  st._later = () => 1;
+  st._cancelLater = () => {};
+  st._paintUI = () => {};
+  // 600 удалённых узлов (их прямоугольники — из прежней геометрии) и 300 созданных
+  st._prevRects = {};
+  const removed = [];
+  for (let i = 0; i < 600; i++) { st._prevRects['r' + i] = { x: i, y: 10, w: 5, h: 5 }; removed.push('r' + i); }
+  const rects = { ...st.geo.rects };
+  const created = [];
+  for (let i = 0; i < 300; i++) { rects['c' + i] = { x: 1000 + i, y: 2000, w: 10, h: 20 }; created.push('c' + i); }
+  st.geo = { ...st.geo, rects };
+  st._flip({ created, changed: [], removed });
+  assert.equal(st._pulses.length, 2, 'две рамки, а не 900');
+  assert.deepEqual(st._pulses[0].rect, { x: 0, y: 10, w: 604, h: 5 }, 'вокруг удалённого');
+  assert.deepEqual(st._pulses[1].rect, { x: 1000, y: 2000, w: 309, h: 20 }, 'вокруг созданного');
+  // мелкая правка — как прежде, рамка на узел
+  st._flip({ created: ['b'], changed: [], removed: [] });
+  assert.equal(st._pulses.length, 1);
+  assert.equal(st._pulses[0].id, 'b');
+});
+
 test('_duplicate не копирует потомков выделенных узлов дважды', () => {
   const doc = scene(() => [
     ops.create(frame('card', 'ab', { mode: 'column', gap: 4 }, { w: { mode: 'fixed', value: 200 }, h: { mode: 'hug' } })),

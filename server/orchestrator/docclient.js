@@ -90,17 +90,18 @@ export function createDocClient(o) {
 
   /**
    * Круг 31 (K2): здоровье с причиной. `reason` — только у 'down': 'storage' — сервис отвечает,
-   * но его база недоступна (503 с `detail.storage: 'down'`); 'unreachable' — сервис не ответил,
-   * ответил не тем или ещё не готов.
-   * @returns {Promise<{document: 'up'|'down', reason?: 'storage'|'unreachable'}>}
+   * но его база недоступна (503 с `detail.storage: 'down'`); 'schema' (круг 32) — база отвечает,
+   * но схема догоняется после восстановления из копии (503 с `detail.storage: 'schema'`, обычно
+   * секунды); 'unreachable' — сервис не ответил, ответил не тем или ещё не готов.
+   * @returns {Promise<{document: 'up'|'down', reason?: 'storage'|'schema'|'unreachable'}>}
    */
   async function healthDetail() {
     try {
       const r = await call('GET', '/api/health', undefined, { timeout: DOC_HEALTH_TIMEOUT_MS });
       return r.status === 200 && r.body && r.body.ok ? { document: 'up' } : { document: 'down', reason: 'unreachable' };
     } catch (e) {
-      const storage = e && e.docDetail && e.docDetail.storage === 'down';
-      return { document: 'down', reason: storage ? 'storage' : 'unreachable' };
+      const storage = e && e.docDetail ? e.docDetail.storage : undefined;
+      return { document: 'down', reason: storage === 'down' ? 'storage' : storage === 'schema' ? 'schema' : 'unreachable' };
     }
   }
 

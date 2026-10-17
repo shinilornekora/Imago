@@ -26,13 +26,13 @@ const tx = (base_seq, list, extra = {}) => ({ tx_id: uid('tx'), base_seq, ops: l
 const list = await backends();
 const pgOk = await pgAvailable();
 
-/** Схема «как в копии до 009/010»: колонок и учёта миграций нет (триггер 009 — тоже). */
+/** Схема «как в копии до 009/010» (круг 32 — и до 011): колонок и учёта миграций нет (триггер 009 — тоже). */
 const DRIFT = `DROP TRIGGER IF EXISTS operations_size ON operations;
-  ALTER TABLE operations DROP COLUMN IF EXISTS command_author, DROP COLUMN IF EXISTS ops_bytes, DROP COLUMN IF EXISTS ops_count;
-  DELETE FROM schema_migrations WHERE name IN ('009_ops_size.mjs', '010_command_author.sql')`;
+  ALTER TABLE operations DROP COLUMN IF EXISTS command_author, DROP COLUMN IF EXISTS ops_bytes, DROP COLUMN IF EXISTS ops_count, DROP COLUMN IF EXISTS undo_part;
+  DELETE FROM schema_migrations WHERE name IN ('009_ops_size.mjs', '010_command_author.sql', '011_undo_part.sql')`;
 const COLS_SQL = `SELECT string_agg(attname, ',' ORDER BY attname) AS c FROM pg_attribute
-  WHERE attrelid = 'operations'::regclass AND attnum > 0 AND NOT attisdropped AND attname IN ('ops_bytes', 'ops_count', 'command_author')`;
-const ALL_COLS = 'command_author,ops_bytes,ops_count';
+  WHERE attrelid = 'operations'::regclass AND attnum > 0 AND NOT attisdropped AND attname IN ('ops_bytes', 'ops_count', 'command_author', 'undo_part')`;
+const ALL_COLS = 'command_author,ops_bytes,ops_count,undo_part';
 
 describe('круг 31: база из копии до миграций 009/010 под работающим экземпляром · pg', { skip: pgOk ? false : 'нет базы' }, () => {
   let admin;
@@ -60,7 +60,7 @@ describe('круг 31: база из копии до миграций 009/010 п
 
       const steps = {
         commitTx: async () => {
-          const c = await commit('b', { author_kind: 'agent', command_author: 'Борис' });
+          const c = await commit('b', { author_kind: 'agent', command_author: 'Борис', undo_of: 'tx_x', undo_part: { i: 0, n: 2 } });
           assert.equal(c.seq, seq);
         },
         txsAfter: async () => {
@@ -85,9 +85,9 @@ describe('круг 31: база из копии до миграций 009/010 п
         assert.equal(await cols(), '', `${name}: схема откачена`);
         await step();
         await waitFor(async () => (await cols()) === ALL_COLS && s.schemaState === null, `${name}: колонки вернулись`, 10000);
-        assert.deepEqual(s.schemaFlags, { opsSize: true, commandAuthor: true });
-        const applied = (await admin.query(`SELECT name FROM schema_migrations WHERE name IN ('009_ops_size.mjs', '010_command_author.sql') ORDER BY name`)).rows.map((r) => r.name);
-        assert.deepEqual(applied, ['009_ops_size.mjs', '010_command_author.sql'], `${name}: учёт миграций догнан`);
+        assert.deepEqual(s.schemaFlags, { opsSize: true, commandAuthor: true, undoPart: true });
+        const applied = (await admin.query(`SELECT name FROM schema_migrations WHERE name IN ('009_ops_size.mjs', '010_command_author.sql', '011_undo_part.sql') ORDER BY name`)).rows.map((r) => r.name);
+        assert.deepEqual(applied, ['009_ops_size.mjs', '010_command_author.sql', '011_undo_part.sql'], `${name}: учёт миграций догнан`);
       }
       // после сверки имя автора команды снова пишется, вес — заполнен у всех записей (009 дозаполнила)
       const c = await commit('c', { author_kind: 'agent', command_author: 'Вера' });
@@ -148,7 +148,7 @@ describe('круг 31: база из копии до миграций 009/010 п
       const pid = s.listenerPid;
       await admin.query('SELECT pg_terminate_backend($1)', [pid]);
       await waitFor(async () => (await cols()) === ALL_COLS && s.schemaState === null && s.listenerPid && s.listenerPid !== pid, 'слушатель вернулся и миграции догнаны', 10000);
-      assert.deepEqual(s.schemaFlags, { opsSize: true, commandAuthor: true });
+      assert.deepEqual(s.schemaFlags, { opsSize: true, commandAuthor: true, undoPart: true });
     } finally {
       await s.close();
     }

@@ -1,7 +1,7 @@
 /**
  * HTTP-транспорт Orchestrator (SPEC §10.2) на node:http, без фреймворков.
  *
- *   GET  /agent/health    {ok, engine, llm, document, document_reason?, model?} (document_reason — круг 31: storage|unreachable)
+ *   GET  /agent/health    {ok, engine, llm, document, document_reason?, model?} (document_reason — круг 31: storage|unreachable; круг 32: schema)
  *   POST /agent/command   SSE §10.3 (ошибки до старта потока — JSON с кодом)
  *   POST /agent/stop      {stopped}
  *   POST /agent/apply     событие result одним JSON

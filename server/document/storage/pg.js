@@ -18,7 +18,7 @@
  *     maxBytes; вес — колонка ops_bytes, jsonb читается только у записей страницы; под пределом чтений журнала,
  *     `internal: true` — чтение секвенсора, мимо предела)
  *   recentTxMeta(projectId, {limit?, beforeSeq?}) → [{seq, tx_id, author, author_kind, title, created_at, client,
- *     command_id, command_author, ops_count, dropped_count}]   (круг 29, J2: от новых к старым, seq < beforeSeq; без чтения ops)
+ *     command_id, command_author, undo_of, redo_of, undo_part, ops_count, dropped_count}]   (круг 29, J2: от новых к старым, seq < beforeSeq; без чтения ops)
  *   ping({timeoutMs = 1000}?) → boolean   (круг 29, J1: SELECT 1, ответ помнится 1 с; не бросает)
  *   schemaState → null | {reason, since, phase, error?, migration?}   (круг 31: схема отстала от кода — база
  *     восстановлена из копии до миграций; идёт сверка — /api/health 503 `storage:'schema'`)
@@ -28,7 +28,8 @@
  *   saveSnapshot(projectId, {seq, doc, engine, chain, tombstones}) → boolean   (то же, объектом)
  *     `tombstones` на входе — v2 (номера удаления известны), v1 (объект id → родитель, Map, пары —
  *     номеров нет: прочтётся как null) или null; раскладка по колонкам — migrations/007
- *   Committed несёт `command_id` и `command_author` (круг 30, миграция 010), если транзакция их прислала (SPEC §9.11)
+ *   Committed несёт `command_id` и `command_author` (круг 30, миграция 010) и `undo_part` (круг 32, миграция 011),
+ *     если транзакция их прислала (SPEC §9.11, §9.15)
  *   findTx(projectId, txId) → Committed|null
  *   knownEpoch(projectId, epoch) → boolean · bumpEpoch(projectId, fromEpoch, cause, origin) → {status:'bumped'|'moved', epoch, cause}
  *   addTrace({projectId, commandId, body}) → {id, created_at}|null · listTraces(projectId, limit) → Trace[]
@@ -92,7 +93,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { toCommitted, txColumns, newEpoch, splitTombstones, joinTombstones } from './committed.js';
-import { DB_TIMEOUT_MS, PAGE_BYTES } from '../limits.js';
+import { DB_TIMEOUT_MS, PAGE_BYTES, undoPartOf } from '../limits.js';
 import { busy } from '../errors.js';
 import { BYTES_SQL, COUNT_SQL } from './migrations/009_ops_size.mjs';
 
@@ -121,9 +122,12 @@ const types = {
 };
 
 const OP_COLUMNS_BASE = 'project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, command_id, engine, chain, created_at';
-/** Колонки журнала: с `command_author` (миграция 010, круг 30) — если она в схеме. */
-const opColumns = (withAuthor) => (withAuthor ? OP_COLUMNS_BASE + ', command_author' : OP_COLUMNS_BASE);
-const opColumnsO = (withAuthor) => opColumns(withAuthor).split(', ').map((c) => 'o.' + c).join(', ');
+/**
+ * Колонки журнала: с `command_author` (миграция 010, круг 30) и `undo_part` (011, круг 32) — если
+ * они в схеме.
+ */
+const opColumns = (withAuthor, withPart) => OP_COLUMNS_BASE + (withAuthor ? ', command_author' : '') + (withPart ? ', undo_part' : '');
+const opColumnsO = (withAuthor, withPart) => opColumns(withAuthor, withPart).split(', ').map((c) => 'o.' + c).join(', ');
 
 /** Сеанс, простаивающий в транзакции дольше этого, база обрывает сама (замок строки проекта отпускается). */
 export const IDLE_IN_TX_MS = 15000;
@@ -273,6 +277,8 @@ function txMetaOf(r) {
     seq: Number(r.seq), tx_id: String(r.tx_id), author: r.author ?? null, author_kind: r.author_kind || 'human',
     title: r.title ?? null, created_at: isoOf(r.created_at), client: r.client ?? null, command_id: r.command_id ?? null,
     command_author: r.command_author ?? null,
+    // круг 32: отмена/повтор и часть большой правки — «История» сводит части точно
+    undo_of: r.undo_of ?? null, redo_of: r.redo_of ?? null, undo_part: undoPartOf(r.undo_part),
     ops_count: Number(r.ops_count) || 0, dropped_count: Number(r.dropped_count) || 0
   };
 }
@@ -697,7 +703,7 @@ export function createPgStorage(opts = {}) {
   async function txsAfterOn(q, projectId, seq, limit, maxBytes) {
     if (!okId(projectId)) return [];
     const res = await q.query(
-      `SELECT ${opColumnsO(hasCommandAuthor)} FROM (
+      `SELECT ${opColumnsO(hasCommandAuthor, hasUndoPart)} FROM (
          SELECT l.seq,
                 row_number() OVER (ORDER BY l.seq) AS rn,
                 sum(l.b) OVER (ORDER BY l.seq ROWS UNBOUNDED PRECEDING) AS run_bytes
@@ -717,6 +723,8 @@ export function createPgStorage(opts = {}) {
   let hasOpsSize = true;
   /** Колонка 010 (`command_author`) есть: без неё имя автора команды не пишется и не читается. */
   let hasCommandAuthor = true;
+  /** Колонка 011 (`undo_part`, круг 32) есть: без неё часть большой правки не пишется и не читается. */
+  let hasUndoPart = true;
   async function columnExists(table, column) {
     const r = await pool.query(
       'SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2 AND NOT attisdropped',
@@ -728,6 +736,7 @@ export function createPgStorage(opts = {}) {
   async function refreshFlags() {
     hasOpsSize = await columnExists('operations', 'ops_bytes');
     hasCommandAuthor = await columnExists('operations', 'command_author');
+    hasUndoPart = await columnExists('operations', 'undo_part');
   }
 
   /* -------------------- сверка схемы под работающим экземпляром -------------------- */
@@ -775,7 +784,7 @@ export function createPgStorage(opts = {}) {
         await refreshFlags();
         schemaState = null;
         reschemaFailedAt = 0;
-        log.warn(`[document/pg] схема базы сверена (${reason}): миграции догнаны, колонки журнала — ops_bytes ${hasOpsSize ? 'есть' : 'нет'}, command_author ${hasCommandAuthor ? 'есть' : 'нет'}`);
+        log.warn(`[document/pg] схема базы сверена (${reason}): миграции догнаны, колонки журнала — ops_bytes ${hasOpsSize ? 'есть' : 'нет'}, command_author ${hasCommandAuthor ? 'есть' : 'нет'}, undo_part ${hasUndoPart ? 'есть' : 'нет'}`);
       } catch (e) {
         flagsDone();
         reschemaFailedAt = Date.now();
@@ -915,7 +924,7 @@ export function createPgStorage(opts = {}) {
     /** Сверить схему сейчас (тестам и отладке): промис сверки. */
     recheckSchema(reason = 'по запросу') { return reschema(reason).done; },
     /** Колонки журнала, которые адаптер сейчас пишет и читает (тестам). */
-    get schemaFlags() { return { opsSize: hasOpsSize, commandAuthor: hasCommandAuthor }; },
+    get schemaFlags() { return { opsSize: hasOpsSize, commandAuthor: hasCommandAuthor, undoPart: hasUndoPart }; },
 
     /** Миграции и слушатель уведомлений; повторный вызов (второй экземпляр на том же адаптере) — тот же промис. */
     init() {
@@ -1127,7 +1136,7 @@ export function createPgStorage(opts = {}) {
       const before = beforeSeq !== undefined && beforeSeq !== null && Number.isFinite(Number(beforeSeq)) ? Math.floor(Number(beforeSeq)) : null;
       return journalReads.run(async () => {
         const res = await pool.query(
-          `SELECT seq, tx_id, author, author_kind, title, created_at, client, command_id,${hasCommandAuthor ? ' command_author,' : ''}
+          `SELECT seq, tx_id, author, author_kind, title, created_at, client, command_id, undo_of, redo_of,${hasCommandAuthor ? ' command_author,' : ''}${hasUndoPart ? ' undo_part,' : ''}
                   ${hasOpsSize ? `coalesce(ops_count, ${COUNT_SQL('operations')})` : COUNT_SQL('operations')} AS ops_count,
                   (SELECT coalesce(sum(CASE WHEN jsonb_typeof(e) = 'object' AND e ? 'more' AND NOT e ? 'index'
                                                  AND jsonb_typeof(e -> 'more') = 'number'
@@ -1190,18 +1199,20 @@ export function createPgStorage(opts = {}) {
         if (hasOpsSize) params.push(Buffer.byteLength(opsJson, 'utf8') + Buffer.byteLength(droppedJson, 'utf8'), Array.isArray(c.ops) ? c.ops.length : 0);
         // круг 30: имя автора команды агента (010); схема без 010 — не пишется
         if (hasCommandAuthor) params.push(c.command_author);
-        const extra = [...(hasOpsSize ? ['ops_bytes', 'ops_count'] : []), ...(hasCommandAuthor ? ['command_author'] : [])];
+        // круг 32: часть большой правки {i, n} (011); схема без 011 — не пишется
+        if (hasUndoPart) params.push(c.undo_part ? JSON.stringify(c.undo_part) : null);
+        const extra = [...(hasOpsSize ? ['ops_bytes', 'ops_count'] : []), ...(hasCommandAuthor ? ['command_author'] : []), ...(hasUndoPart ? ['undo_part'] : [])];
         const ins = await client.query(
           `INSERT INTO operations (project_id, seq, tx_id, base_seq, ops, dropped, notes, undo_of, redo_of, author, author_kind, client, title, engine, chain, command_id${extra.map((x) => ', ' + x).join('')})
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16${extra.map((_, i) => `, $${17 + i}`).join('')})
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16${extra.map((x, i) => `, $${17 + i}${x === 'undo_part' ? '::jsonb' : ''}`).join('')})
            ON CONFLICT (project_id, tx_id) DO NOTHING
-           RETURNING ${opColumns(hasCommandAuthor)}`,
+           RETURNING ${opColumns(hasCommandAuthor, hasUndoPart)}`,
           params
         );
         if (!ins.rowCount) {
           await client.query('ROLLBACK');
           const ex = await client.query(
-            `SELECT ${opColumns(hasCommandAuthor)} FROM operations WHERE project_id = $1 AND tx_id = $2`,
+            `SELECT ${opColumns(hasCommandAuthor, hasUndoPart)} FROM operations WHERE project_id = $1 AND tx_id = $2`,
             [projectId, c.tx_id]
           );
           return { status: 'existing', committed: toCommitted(ex.rows[0]) };
@@ -1276,7 +1287,7 @@ export function createPgStorage(opts = {}) {
     async findTx(projectId, txId) {
       if (!okId(projectId)) return null;
       const res = await pool.query(
-        `SELECT ${opColumns(hasCommandAuthor)} FROM operations WHERE project_id = $1 AND tx_id = $2`,
+        `SELECT ${opColumns(hasCommandAuthor, hasUndoPart)} FROM operations WHERE project_id = $1 AND tx_id = $2`,
         [projectId, String(txId)]
       );
       return res.rows[0] ? toCommitted(res.rows[0]) : null;

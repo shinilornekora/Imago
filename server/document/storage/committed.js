@@ -10,7 +10,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { DROPPED_KEEP, DROPPED_OP_BYTES, DROPPED_PREVIEW_CHARS, cleanMeta } from '../limits.js';
+import { DROPPED_KEEP, DROPPED_OP_BYTES, DROPPED_PREVIEW_CHARS, cleanMeta, undoPartOf } from '../limits.js';
 
 /** Необязательные поля транзакции: в записи есть, только если заданы. */
 const OPTIONAL = ['undo_of', 'redo_of', 'author', 'client', 'title', 'command_id', 'command_author'];
@@ -170,6 +170,9 @@ export function toCommitted(row) {
   for (const k of OPTIONAL) {
     if (row[k] !== undefined && row[k] !== null) out[k] = row[k];
   }
+  // круг 32: часть большой правки (колонка 011) — только годная пара {i, n}
+  const part = undoPartOf(row.undo_part);
+  if (part) out.undo_part = part;
   return out;
 }
 
@@ -265,6 +268,8 @@ export function txColumns(tx) {
     command_id: typeof tx.command_id === 'string' && tx.command_id ? tx.command_id : null,
     // круг 30: кто дал команду агенту (имя, ≤ 200 символов) — подпись «Агент · Аня» в истории
     command_author: typeof tx.command_author === 'string' && tx.command_author ? tx.command_author : null,
+    // круг 32: часть большой правки {i, n} (миграция 011) — оболочка сводит части в один шаг
+    undo_part: undoPartOf(tx.undo_part),
     engine: tx.engine
   };
 }

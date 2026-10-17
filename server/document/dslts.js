@@ -41,7 +41,7 @@ import {
   QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES, BUSY_RETRY_S,
   REPLAY_MAX_AGE_MS, REPLAY_SCAN_TXS, MAX_VALUE_DEPTH, MAX_OP_ID, MAX_COMMAND_ID,
   TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES,
-  isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue
+  isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue, undoPartOf
 } from './limits.js';
 
 /** Предел операций в транзакции (совместимость: прежде экспортировался отсюда). */
@@ -152,6 +152,9 @@ export function validateTx(raw, ctx = {}) {
   const tx = { tx_id: raw.tx_id, base_seq: raw.base_seq, ops, engine: ENGINE_VERSION };
   if (raw.undo_of) tx.undo_of = raw.undo_of;
   if (raw.redo_of) tx.redo_of = raw.redo_of;
+  // круг 32: часть большой правки {i, n} — метаданные: хранится и рассылается, негодное — поля нет
+  const part = undoPartOf(raw.undo_part);
+  if (part) tx.undo_part = part;
   // метаданные (author, title, command_author) — без управляющих и bidi-символов (круг 31)
   const author = cleanMeta(typeof raw.author === 'string' && raw.author ? raw.author : ctx.author);
   if (author) tx.author = cutText(String(author), MAX_NAME);

@@ -130,7 +130,8 @@ export function agentHealthNotice(prev, next, { hasProvider = false } = {}) {
   if (now === 'down') return { text: `Сервер агента не отвечает.${local || ' Правки руками сохраняются.'}`, kind: 'plain' };
   if (now === 'nodoc') {
     // K2: причина — база данных, а не сервис документа
-    const why = storageReason(next) ? 'база данных сервера недоступна' : 'сервер документа не отвечает';
+    // круг 32: 'schema' — база догоняет схему после восстановления из копии (обычно секунды)
+    const why = schemaReason(next) ? 'сервер обновляет базу данных' : storageReason(next) ? 'база данных сервера недоступна' : 'сервер документа не отвечает';
     return { text: `Сервер агента не видит документ — ${why}.${local}`, kind: 'plain' };
   }
   if (was === 'up') return { text: `Модель на сервере не отвечает — попробуйте позже.${local}`, kind: 'plain' };
@@ -881,6 +882,58 @@ export function partBase(title) {
   const t = cleanText(title || '');
   const m = /^(.*) · часть (\d+) из (\d+)$/.exec(t);
   return m ? { base: m[1], i: Number(m[2]) - 1, n: Number(m[3]) } : null;
+}
+
+/**
+ * Часть большой правки записи журнала — `undo_part {i, n}` (круг 32: сервер его хранит и отдаёт
+ * в рассылке и /history): i — номер с 0, n — частей (≥ 2). Негодное — null.
+ * @param {{undo_part?: any}} t
+ * @returns {{i: number, n: number}|null}
+ */
+export function undoPartOf(t) {
+  const p = t && t.undo_part;
+  if (!p || typeof p !== 'object') return null;
+  const { i, n } = p;
+  return Number.isInteger(i) && Number.isInteger(n) && n > 1 && i >= 0 && i < n ? { i, n } : null;
+}
+
+/**
+ * Части одной большой правки — одной строкой «Истории» (круг 31, K1; точно — с круга 32).
+ * Список — новые первыми; части одной правки ушли из одной вкладки подряд, так что в журнале
+ * идут i = n−1, n−2, …, 0 (между ними могут стоять чужие записи). Часть узнаётся по
+ * `undo_part {i, n}`, правка — по вкладке (`client`), общему `undo_of`/`redo_of` и `n`; следующая
+ * (более старая) часть той же правки — ровно i − 1. Подпись — без хвоста «· часть i из n»,
+ * операции и выпавшие — суммой, время и `tx_id` — новейшей части, `parts` — все tx_id.
+ * Записи без `undo_part` (сервер прежней версии его не хранил) остаются как есть.
+ * @param {object[]} list
+ * @param {{empty?: (t: object) => boolean}} [o]
+ * @returns {object[]}
+ */
+export function collapseParts(list, { empty = (t) => !!(t && t.empty) } = {}) {
+  const out = [];
+  const open = new Map();   // ключ правки → {row, next: какой i ждём}
+  for (const t of Array.isArray(list) ? list : []) {
+    const part = undoPartOf(t);
+    if (!part) { out.push(t); continue; }
+    const key = `${t.client || ''}|${t.undo_of || ''}|${t.redo_of || ''}|${part.n}`;
+    const g = open.get(key);
+    if (g && g.next === part.i) {
+      const row = g.row;
+      row.ops_count = (Number(row.ops_count) || 0) + (Number(t.ops_count) || 0);
+      row.dropped_count = (Number(row.dropped_count) || 0) + (Number(t.dropped_count) || 0);
+      row.empty = !!(row.empty && empty(t));
+      row.parts.push(t.tx_id);
+      g.next = part.i - 1;
+      if (g.next < 0) open.delete(key);
+      continue;
+    }
+    const p = partBase(t.title);
+    const row = { ...t, title: p && p.n === part.n ? p.base : cleanText(t.title || ''), partOf: key, parts: [t.tx_id], empty: empty(t) };
+    out.push(row);
+    if (part.i > 0) open.set(key, { row, next: part.i - 1 });
+    else open.delete(key);
+  }
+  return out;
 }
 
 /**

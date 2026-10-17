@@ -22,7 +22,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { toCommitted, txColumns, chainNext, newEpoch, jsonBytes, splitTombstones, joinTombstones, pgRejects, droppedCount } from './committed.js';
-import { PAGE_BYTES } from '../limits.js';
+import { PAGE_BYTES, undoPartOf } from '../limits.js';
 
 const clone = (v) => (v === undefined ? undefined : structuredClone(v));
 
@@ -229,6 +229,8 @@ export function createMemoryStorage() {
         out.push({
           seq: r.seq, tx_id: String(r.tx_id), author: r.author ?? null, author_kind: r.author_kind || 'human',
           title: r.title ?? null, created_at: r.created_at, client: r.client ?? null, command_id: r.command_id ?? null, command_author: r.command_author ?? null,
+          // круг 32: отмена/повтор и часть большой правки — «История» сводит части точно
+          undo_of: r.undo_of ?? null, redo_of: r.redo_of ?? null, undo_part: undoPartOf(r.undo_part),
           ops_count: typeof r.ops_count === 'number' ? r.ops_count : (Array.isArray(r.ops) ? r.ops.length : 0),
           dropped_count: droppedCount(r.dropped)
         });

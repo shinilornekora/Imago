@@ -1152,6 +1152,8 @@ export function createSync(o) {
           command_id: typeof it.command_id === 'string' ? it.command_id : '',
           // круг 30: кто дал команду агенту — «Агент · Аня» без памяти о присутствии
           command_author: typeof it.command_author === 'string' ? it.command_author : '',
+          // круг 32: отмена/повтор и часть большой правки — оболочка сводит части точно
+          ...rewindOf(it),
           ops_count: isNum(it.ops_count) ? it.ops_count : 0, dropped_count: isNum(it.dropped_count) ? it.dropped_count : 0,
           // круг 30: запись без операций (все выпали при слиянии, повтор) — оболочка не рисует пустую строку
           empty: it.empty === true || (isNum(it.ops_count) && it.ops_count === 0),
@@ -1430,6 +1432,20 @@ export function createSync(o) {
 
   /* ---- журнал в памяти: история и «кто помешал» ---- */
 
+  /**
+   * Круг 32: `undo_of`/`redo_of` и часть большой правки `undo_part {i, n}` записи журнала
+   * (из рассылки или /history) — пустые строки и null, если их нет.
+   */
+  function rewindOf(c) {
+    const part = c.undo_part;
+    const ok = part && typeof part === 'object' && Number.isInteger(part.i) && Number.isInteger(part.n) && part.n > 1 && part.i >= 0 && part.i < part.n;
+    return {
+      undo_of: typeof c.undo_of === 'string' ? c.undo_of : '',
+      redo_of: typeof c.redo_of === 'string' ? c.redo_of : '',
+      undo_part: ok ? { i: part.i, n: part.n } : null,
+    };
+  }
+
   function journalAdd(c, removedIds, own) {
     const pub = {
       seq: c.seq, tx_id: String(c.tx_id || ''), author: typeof c.author === 'string' ? c.author : '',
@@ -1437,6 +1453,7 @@ export function createSync(o) {
       created_at: typeof c.created_at === 'string' ? c.created_at : '', client: typeof c.client === 'string' ? c.client : '',
       command_id: typeof c.command_id === 'string' ? c.command_id : '',
       command_author: typeof c.command_author === 'string' ? c.command_author : '',
+      ...rewindOf(c),
       ops_count: Array.isArray(c.ops) ? c.ops.length : 0, dropped_count: droppedCount(c.dropped),
       empty: !Array.isArray(c.ops) || c.ops.length === 0, mine: !!own,
     };

@@ -199,8 +199,11 @@ export function createPipeline(deps) {
       needsModel ? llm.health() : Promise.resolve(null),
     ]);
     if (doc.document !== 'up') {
-      throw new OrchError(503, 'document_down', 'Сервис документов недоступен — команда не выполнена. Правки не потеряны; попробуйте через несколько секунд.',
-        { retryAfter: 5, detail: { document_reason: doc.reason || 'unreachable' } });
+      // круг 32: 'schema' — база сервиса догоняет схему после восстановления из копии (секунды)
+      const text = doc.reason === 'schema'
+        ? 'Сервер обновляет базу данных — команда не выполнена. Правки не потеряны; повторите через несколько секунд.'
+        : 'Сервис документов недоступен — команда не выполнена. Правки не потеряны; попробуйте через несколько секунд.';
+      throw new OrchError(503, 'document_down', text, { retryAfter: 5, detail: { document_reason: doc.reason || 'unreachable' } });
     }
     if (model && model.llm === 'unconfigured') { hintUnconfigured(); throw llmUnconfigured(); }
     if (model && model.llm === 'down') { hintDown(''); throw llmDown(); }
@@ -696,7 +699,8 @@ export function createPipeline(deps) {
       started_at: startedAt,
       llm: model.llm,
       document,
-      // круг 31 (K2): почему документ недоступен — 'storage' (база сервиса) | 'unreachable'
+      // круг 31 (K2): почему документ недоступен — 'storage' (база сервиса) | 'unreachable';
+      // круг 32 — ещё 'schema' (база догоняет схему после восстановления из копии)
       ...(document !== 'up' ? { document_reason: doc.reason || 'unreachable' } : {}),
       ...(model.model ? { model: model.model } : {}),
     };

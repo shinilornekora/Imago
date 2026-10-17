@@ -1482,6 +1482,9 @@ function noteJournal(tx, doc = state.doc) {
     seq: tx.seq, tx_id: tx.tx_id, author: tx.author || '', author_kind: tx.author_kind || 'human',
     title: tx.title || '', created_at: tx.created_at || new Date().toISOString(), client: tx.client || '',
     command_id: tx.command_id || null, command_author: typeof tx.command_author === 'string' ? tx.command_author : '',
+    // круг 32: части большой правки сводятся по undo_part и общему undo_of/redo_of
+    undo_of: typeof tx.undo_of === 'string' ? tx.undo_of : '', redo_of: typeof tx.redo_of === 'string' ? tx.redo_of : '',
+    undo_part: SHELL.undoPartOf(tx),
     ops_count: Array.isArray(tx.ops) ? tx.ops.length : 0,
     dropped_count: Array.isArray(tx.dropped) ? tx.dropped.length : 0, empty: !Array.isArray(tx.ops) || !tx.ops.length,
     mine: !!(server && server.sync && tx.client && tx.client === server.sync.clientId),
@@ -2152,7 +2155,9 @@ function docDownWhy(e) {
   const h = serverAgent.health;
   const storage = (h && SHELL.storageReason(h)) || !!(server && server.status && server.status.storage === 'down');
   if (!storage) return e;
-  return { code: e.code, message: e.message, retryable: e.retryable, retryAfterMs: e.retryAfterMs, detail: e.detail, document_reason: 'storage' };
+  // круг 32: health Orchestrator говорит 'schema' — база догоняет схему: «Сервер обновляет базу данных»
+  const why = h && SHELL.schemaReason(h) ? 'schema' : 'storage';
+  return { code: e.code, message: e.message, retryable: e.retryable, retryAfterMs: e.retryAfterMs, detail: e.detail, document_reason: why };
 }
 
 /** «агент: сервер» / «агент: в браузере» / «агент недоступен» — рядом с синхронизацией. */
@@ -10759,23 +10764,11 @@ function othersEdits() {
 /**
  * Круг 31 (K1): части одной большой правки («… · часть 2 из 3») — одной строкой ленты:
  * подпись без хвоста, операции и выпавшие — суммой, время — последней части.
+ * Круг 32: части узнаются точно — по `undo_part {i, n}` записи (сервер его хранит) и общему
+ * `undo_of`/`redo_of` от одной вкладки, а не по подписи (`SHELL.collapseParts`).
  */
 function collapseParts(list) {
-  const out = [];
-  for (const t of list) {
-    const p = SHELL.partBase(t.title);
-    const prev = out[out.length - 1];
-    if (p && prev && prev.partOf && prev.partOf === `${t.client || ''}|${t.author || ''}|${p.base}|${p.n}`) {
-      prev.ops_count = (Number(prev.ops_count) || 0) + (Number(t.ops_count) || 0);
-      prev.dropped_count = (Number(prev.dropped_count) || 0) + (Number(t.dropped_count) || 0);
-      prev.empty = !!(prev.empty && emptyTx(t));
-      prev.parts.push(t.tx_id);
-      continue;
-    }
-    if (p) out.push({ ...t, title: p.base, partOf: `${t.client || ''}|${t.author || ''}|${p.base}|${p.n}`, parts: [t.tx_id], empty: emptyTx(t) });
-    else out.push(t);
-  }
-  return out;
+  return SHELL.collapseParts(list, { empty: emptyTx });
 }
 
 /**

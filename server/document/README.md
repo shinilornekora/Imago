@@ -19,7 +19,8 @@ server/document/
   storage/migrations/   NNN_имя.sql|mjs: 001 схема · 002 chain и эпоха · 003 chain старого журнала пачками ·
                         004 traces · 005 надгробия снимка, command_id · 006 дозаполнение и CHECK chain ·
                         007 надгробия «неизвестно» (tombstones_meta, tombstones_chain) · 008 индекс страниц проектов ·
-                        009 вес записи (ops_bytes, ops_count) · 010 command_author
+                        009 вес записи (ops_bytes, ops_count) · 010 command_author ·
+                        011 undo_part (часть большой правки)
   storage/memory.js     тот же интерфейс в памяти (с уведомлениями и backup/restore) — тесты и соло-режим
   storage/committed.js  форма записи журнала, chain, выжимка dropped — общие для адаптеров
 ```
@@ -97,6 +98,7 @@ detail:{phase:'connect'|'lock'|'migrate'|'init', migration, progress}, retry_aft
 | 008 | индекс `projects_updated_id (updated_at DESC, id DESC)` — обычно `CONCURRENTLY`; если замок миграций ждёт экземпляр прежней версии — обычный `CREATE INDEX` | без замка / `SHARE` на миллисекунды |
 | 009 | `operations.ops_bytes`, `ops_count` (вес записи для окна страницы журнала и истории без чтения jsonb); триггер `operations_size` считает их за экземпляр прежней версии; старые записи — дозаполнение пачками ≤ 32 МБ по первичному ключу (~0,5 с на пачку), прерванная продолжает | миг; пачки — строки пачки |
 | 010 | `operations.command_author` (имя автора команды агента, круг 30); без умолчания и дозаполнения — экземпляр прежней версии её не пишет и не читает | миг |
+| 011 | `operations.undo_part jsonb` (часть большой правки `{i, n}`, круг 32); как 010 — без умолчания и дозаполнения, экземпляр прежней версии пишет `NULL` | миг |
 
 DDL ждёт замок не дольше `lock_timeout` (1 с) и повторяется (до 60 раз). Замок миграций
 этот круг берёт опросом (`pg_try_advisory_lock`), чтобы ждущий экземпляр не держал снимок
@@ -254,7 +256,8 @@ latin1, а `fetch` в браузере не-latin1 значение отверг
   detail:{storage:'down'}}` + `Retry-After: 1`.
 * `GET /api/projects/:id/history?limit=50&before=<seq>` (J2) — журнал «Истории» без операций,
   новые первыми: `{items:[{seq, tx_id, author, author_kind, title, created_at, client,
-  command_id, ops_count, dropped_count, empty?}], more}`; `limit` 1…200 (50), `before` ≥ 1 —
+  command_id, command_author, undo_of, redo_of, undo_part, ops_count, dropped_count, empty?}],
+  more}` (`command_author` — круг 30, `undo_of`/`redo_of`/`undo_part` — круг 32); `limit` 1…200 (50), `before` ≥ 1 —
   только `seq < before` (следующая страница — `before` = наименьший `seq` прежней). Источник —
   `storage.recentTxMeta` (без чтения jsonb); хранилище прежней версии — страницы `txsAfter`.
   `empty: true` — запись без операций (см. ниже).
@@ -329,8 +332,18 @@ latin1, а `fetch` в браузере не-latin1 значение отверг
   проекта чистят и записи, сделанные раньше. Содержимое документа (значения операций) так не
   чистится.
 * Части большой отмены (K1): несколько транзакций с одним `undo_of` допустимы; поле
-  `undo_part: {i, n}` — метаданные клиента, сервер его не хранит и не проверяет (любое
-  значение — не ошибка).
+  `undo_part: {i, n}` — метаданные клиента (с круга 32 — хранится, см. ниже).
+
+Круг 32:
+
+* `undo_part: {i, n}` — часть большой правки (отмена, повтор, импорт больше предела
+  транзакции): `i` — номер с 0, `n` — частей, целые, `2 ≤ n ≤ 10 000` (`MAX_UNDO_PARTS`),
+  `0 ≤ i < n` (`limits.undoPartOf`). Негодное значение правку не губит — поля нет. Хранится в
+  колонке `operations.undo_part jsonb` (миграция 011, как 010: `ADD COLUMN` без умолчания;
+  экземпляр прежней версии пишет `NULL`, схема без 011 — поле не пишется и не читается) и
+  отдаётся в `Committed`, рассылке, `ops?since`. `/history` отдаёт ещё `undo_of`, `redo_of`
+  и `undo_part` (`null`, если нет): оболочка сводит части одной правки в одну строку по ним,
+  а не по подписи.
 
 ## Тесты
 
@@ -386,4 +399,7 @@ DATABASE — своя схема (`search_path`) и свой канал NOTIFY. 
 txsAfter, recentTxMeta, open проходят, колонки возвращаются; health 503 `storage:'schema'`, пока
 замок миграций занят; сверка по переподключению слушателя; числовые параметры; метаданные без
 управляющих и bidi; исключение обработчика сообщения сокета; `undo_part`).
+Круг 32: `round32.test.mjs` (`undoPartOf`; `undo_part` в `Committed`, рассылке, догоне, `ops`,
+`/history` вместе с `undo_of`/`redo_of`, кривое — без поля; миграция 011 при живом экземпляре
+прежней версии).
 Нагрузочный самотест (не входит в `npm test`): `env -u NODE_OPTIONS node test/server/load.mjs`.
