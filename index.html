@@ -105,6 +105,16 @@
       <button class="btn ghost icon" id="btn-zoom-in" aria-label="Увеличить">+</button>
       <span class="sep"></span>
       <button class="btn ghost" id="btn-fit" title="Вписать в окно">Вписать</button>
+      <!-- Круг 36 (SPEC §11.3): режим «Просмотр» — наведение, нажатие и фокус на холсте
+           проигрывают состояния слоёв; выделение и правка на это время выключены. -->
+      <span class="sep"></span>
+      <button class="btn ghost with-icon" id="btn-preview" aria-pressed="false"
+              title="Просмотр: наведение и нажатие оживают (P)"><span class="i" data-icon="play"></span><span class="btn-label">Просмотр</span></button>
+    </div>
+    <div class="previewbar" id="previewbar" role="status" aria-live="polite" hidden>
+      <span class="i" data-icon="play" aria-hidden="true"></span>
+      <span class="previewbar-text">Просмотр — наведите на элементы</span>
+      <button type="button" class="previewbar-exit" id="btn-preview-exit" title="Вернуться к правке (Esc)">Выйти <kbd>Esc</kbd></button>
     </div>
 
     <div class="dock" id="dock">

@@ -523,6 +523,15 @@ function nodeScaleRefs(node) {
   }
   if (Array.isArray(node.radius)) node.radius.forEach((v, i) => take('radius.' + i, v, 'radii'));
   else take('radius', node.radius, 'radii');
+  // круг 36 (SPEC §11.1): подъём в состоянии — тоже шаг шкалы отступов. Мёртвый
+  // шаг здесь валидатор называет dead-motion-ref (warn), а не dead-scale-ref
+  const st = node.states;
+  if (st && typeof st === 'object' && !Array.isArray(st)) {
+    for (const s of STATE_NAMES) {
+      const p = st[s];
+      if (p && typeof p === 'object' && !Array.isArray(p)) take('states.' + s + '.lift', p.lift, 'spacing');
+    }
+  }
   return out;
 }
 
@@ -665,6 +674,8 @@ function bareWrapper(v, keys) {
  *   • ссылка поверх числа (`set layout.gap = 'spacing.6'` при 16) — настоящая
  *     правка: число становится ссылкой, это смена смысла при той же картинке;
  *   • ссылка поверх ссылки пишется буквально, даже если шаги равны по значению.
+ * Круг 36 (SPEC §11.1): то же для подъёма состояния — пути states, states.<s>,
+ * states.<s>.lift (шкала отступов).
  * Действует на путях radius, layout, layout.gap, layout.padding,
  * layout.padding.{t,r,b,l} (и покорнерном массиве radius) — для целого
  * объекта layout / padding правило применяется к каждому полю в отдельности.
@@ -695,7 +706,14 @@ function keepFieldForm(node, path, value, doc) {
     }
     if (field === 'radius') return keepRadiusForm(doc, node.radius, value);
     if (field === 'layout') return keepLayoutForm(doc, node.layout, value);
+    if (field === 'states') return keepStatesForm(doc, node.states, value);
     return value;
+  }
+  // круг 36 (SPEC §11.1): подъём состояния — на шкале отступов, правило то же (§6.4)
+  if (field === 'states' && isObj(node.states)) {
+    const patch = node.states[parts[1]];
+    if (parts.length === 2) return keepPatchForm(doc, patch, value);
+    if (parts.length === 3 && parts[2] === 'lift') return keepScaleForm(doc, isObj(patch) ? patch.lift : undefined, value, 'spacing');
   }
   if (field === 'layout' && node.layout && typeof node.layout === 'object') {
     const cur = node.layout;
@@ -707,6 +725,26 @@ function keepFieldForm(node, path, value, doc) {
     }
   }
   return value;
+}
+
+/** Патч состояния целиком: подъём — по правилу шкал, остальное как есть (круг 36). */
+function keepPatchForm(doc, cur, value) {
+  if (!isObj(value) || !isObj(cur) || value.lift === undefined) return value;
+  const lift = keepScaleForm(doc, cur.lift, value.lift, 'spacing');
+  return lift === value.lift ? value : { ...value, lift };
+}
+
+/** Поле states целиком: каждое состояние — как keepPatchForm. */
+function keepStatesForm(doc, cur, value) {
+  if (!isObj(value) || !isObj(cur)) return value;
+  let out = value;
+  for (const s of Object.keys(value)) {
+    const next = keepPatchForm(doc, cur[s], value[s]);
+    if (next === value[s]) continue;
+    if (out === value) out = { ...value };
+    out[s] = next;
+  }
+  return out;
 }
 
 /** Число, равное значению текущей ссылки, — «то же самое»: остаётся ссылка. */
@@ -890,6 +928,159 @@ function rawLayoutProblem(l) {
   return null;
 }
 
+/* ------------------------------------------------------------------ *
+ * 2.4a Микроанимации: состояния и движение (круг 36, SPEC §11)
+ *
+ * У узла (кроме страницы) — `states` {hover?, press?, focus?}: каждое состояние —
+ * патч ТОЛЬКО вида (fill, color, stroke, opacity, scale, lift, shadow); раскладку
+ * и геометрию состояние не меняет, поэтому решатель его не читает вовсе. `motion`
+ * — как узел переходит между состояниями (длительность, кривая, задержка, следует
+ * ли он за предком). `opacity` (было и раньше) и `shadow` — базовый вид.
+ *
+ * Ссылки — как шкалы §6: длительность 'motion.fast|base|slow', тень
+ * 'shadow.sm|md|lg', подъём 'spacing.N'. Число допустимо «мимо шкалы» (валидатор —
+ * off-scale, info). Шкалы движения и теней живут в tokens.motion / tokens.shadow;
+ * документ без них работает на умолчаниях ядра (DEFAULT_MOTION, DEFAULT_SHADOW) —
+ * миграции не нужно. Мёртвая ссылка (шкала есть, шага в ней нет; шага spacing нет)
+ * — dead-motion-ref (warn), отрисовка берёт умолчание.
+ * ------------------------------------------------------------------ */
+
+/** Имена состояний — в порядке наложения (как в CSS: :hover, :focus, :active). */
+const STATE_NAMES = Object.freeze(['hover', 'focus', 'press']);
+const STATE_NAME_SET = new Set(STATE_NAMES);
+/** Поля патча состояния: только вид. */
+const STATE_KEYS = Object.freeze(['fill', 'color', 'stroke', 'opacity', 'scale', 'lift', 'shadow']);
+const STATE_KEY_SET = new Set(STATE_KEYS);
+const MOTION_KEYS = new Set(['duration', 'easing', 'delay', 'follow']);
+/** Пределы (SPEC §11.1). */
+const STATE_LIMITS = Object.freeze({ scale: [0.8, 1.2], lift: [-24, 24], duration: [0, 2000], delay: [0, 1000] });
+/** Длительность, выше которой микроанимация уже не «микро» (motion-slow). */
+const MOTION_SLOW_MS = 600;
+/** Кривые: имя → CSS cubic-bezier. */
+const EASINGS = Object.freeze({
+  standard: 'cubic-bezier(0.2, 0, 0, 1)',
+  emphasized: 'cubic-bezier(0.05, 0.7, 0.1, 1)',
+  decelerate: 'cubic-bezier(0, 0, 0, 1)',
+  accelerate: 'cubic-bezier(0.3, 0, 1, 1)',
+  linear: 'cubic-bezier(0, 0, 1, 1)',
+  spring: 'cubic-bezier(0.34, 1.56, 0.64, 1)'
+});
+/** Умолчания ядра: шкала длительностей, мс. */
+const DEFAULT_MOTION = Object.freeze({ fast: 120, base: 200, slow: 320 });
+/** Умолчания ядра: тени — «dx dy blur цвет» (px), та же запись, что пишет setToken shadow.<k>. */
+const DEFAULT_SHADOW = Object.freeze({
+  sm: '0 1 2 rgba(20,22,28,0.12)',
+  md: '0 4 12 rgba(20,22,28,0.14)',
+  lg: '0 12 28 rgba(20,22,28,0.18)'
+});
+const MOTION_STEPS = Object.freeze(['fast', 'base', 'slow']);
+const SHADOW_STEPS = Object.freeze(['sm', 'md', 'lg']);
+const MOTION_REF_RE = /^motion\.(fast|base|slow)$/;
+const SHADOW_REF_RE = /^shadow\.(sm|md|lg)$/;
+/** Длина описания тени: длиннее — не тень, а мусор. */
+const SHADOW_DESC_MAX = 120;
+const SHADOW_LEN_RE = /^-?(\d+(\.\d+)?|\.\d+)(px)?$/;
+const SHADOW_COLOR_RE = /^(#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*(0|1|0?\.\d+|1\.0+)\s*)?\))$/;
+
+/**
+ * Разбор описания тени «dx dy blur цвет» (длины — px, «px» можно писать или нет;
+ * цвет — #hex или rgb()/rgba()). 'none' — тени нет.
+ * @param {any} v
+ * @returns {{dx:number,dy:number,blur:number,color:string}|'none'|null} null — не тень
+ */
+function parseShadow(v) {
+  if (typeof v !== 'string' || v.length > SHADOW_DESC_MAX) return null;
+  const s = v.trim();
+  if (s === 'none') return 'none';
+  // цвет может содержать пробелы внутри скобок — отрезаем его с конца
+  const m = /^(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/.exec(s);
+  if (!m) return null;
+  const lens = [m[1], m[2], m[3]];
+  if (!lens.every((x) => SHADOW_LEN_RE.test(x))) return null;
+  const [dx, dy, blur] = lens.map((x) => parseFloat(x));
+  if (Math.abs(dx) > 200 || Math.abs(dy) > 200 || blur < 0 || blur > 200) return null;
+  const color = m[4].trim();
+  if (!SHADOW_COLOR_RE.test(color)) return null;
+  return { dx, dy, blur, color };
+}
+
+/** Ссылка на тень (или 'none'). @returns {string|null} причина или null */
+function shadowRefProblem(v, what) {
+  if (v === 'none' || (typeof v === 'string' && SHADOW_REF_RE.test(v))) return null;
+  return `${what}: тень — 'none' или shadow.sm | shadow.md | shadow.lg`;
+}
+
+/** Один патч состояния. @returns {string|null} */
+function statePatchProblem(v, what) {
+  if (!isObj(v)) return `${what}: нужен объект`;
+  for (const k of Object.keys(v)) {
+    if (!STATE_KEY_SET.has(k)) return `${what}.${k}: состояние меняет только вид (${STATE_KEYS.join(', ')})`;
+    const x = v[k];
+    if (x === undefined) continue;
+    let err = null;
+    switch (k) {
+      case 'fill': case 'color': err = paintProblem(x, `${what}.${k}`); break;
+      case 'stroke': err = strokeProblem(x); if (err) err = `${what}.${err}`; break;
+      case 'opacity': err = isNum(x) && x >= 0 && x <= 1 ? null : `${what}.opacity вне 0..1`; break;
+      case 'scale':
+        err = isNum(x) && x >= STATE_LIMITS.scale[0] && x <= STATE_LIMITS.scale[1] ? null
+          : `${what}.scale вне ${STATE_LIMITS.scale[0]}..${STATE_LIMITS.scale[1]}`;
+        break;
+      case 'lift':
+        if (isNum(x)) err = x >= STATE_LIMITS.lift[0] && x <= STATE_LIMITS.lift[1] ? null : `${what}.lift вне ${STATE_LIMITS.lift[0]}..${STATE_LIMITS.lift[1]} px`;
+        else err = isScaleRef(x, 'spacing') ? null : `${what}.lift: число px или ссылка spacing.<шаг>`;
+        break;
+      case 'shadow': err = shadowRefProblem(x, `${what}.shadow`); break;
+      default: break;
+    }
+    if (err) return err;
+  }
+  const plain = plainProblem(v, 1);
+  return plain ? `${what}: ${plain}` : null;
+}
+
+/** Поле states узла. @returns {string|null} */
+function statesProblem(v) {
+  if (!isObj(v)) return 'states: нужен объект {hover?, press?, focus?}';
+  for (const s of Object.keys(v)) {
+    if (!STATE_NAME_SET.has(s)) return `states.${s}: состояния бывают hover, press, focus`;
+    if (v[s] === undefined) continue;
+    const err = statePatchProblem(v[s], 'states.' + s);
+    if (err) return err;
+  }
+  return null;
+}
+
+/** Поле motion узла. @returns {string|null} */
+function motionProblem(v) {
+  if (!isObj(v)) return 'motion: нужен объект {duration?, easing?, delay?, follow?}';
+  for (const k of Object.keys(v)) {
+    if (!MOTION_KEYS.has(k)) return `motion.${k}: поля движения — duration, easing, delay, follow`;
+  }
+  const d = v.duration;
+  if (d !== undefined && !(isNum(d) ? d >= STATE_LIMITS.duration[0] && d <= STATE_LIMITS.duration[1] : typeof d === 'string' && MOTION_REF_RE.test(d))) {
+    return `motion.duration: мс ${STATE_LIMITS.duration[0]}..${STATE_LIMITS.duration[1]} или motion.fast | motion.base | motion.slow`;
+  }
+  if (v.easing !== undefined && !(typeof v.easing === 'string' && hasOwnProp.call(EASINGS, v.easing))) {
+    return `motion.easing: одна из ${Object.keys(EASINGS).join(', ')}`;
+  }
+  if (!optNum(v, 'delay', STATE_LIMITS.delay[0], STATE_LIMITS.delay[1])) return `motion.delay: мс ${STATE_LIMITS.delay[0]}..${STATE_LIMITS.delay[1]}`;
+  if (v.follow !== undefined && v.follow !== 'self' && v.follow !== 'parent') return "motion.follow: 'self' или 'parent'";
+  return null;
+}
+
+/** Шаг шкалы длительностей: мс в пределах. */
+const motionStepOk = (x) => isNum(x) && x >= STATE_LIMITS.duration[0] && x <= STATE_LIMITS.duration[1];
+/** Шаг шкалы теней: описание тени («dx dy blur цвет») или 'none'. */
+const shadowStepOk = (x) => parseShadow(x) !== null;
+
+/** Есть ли у узла хоть одно состояние (непустой объект states). */
+function hasStates(node) {
+  if (!node || !isObj(node.states)) return false;
+  for (const s of STATE_NAMES) if (isObj(node.states[s])) return true;
+  return false;
+}
+
 /**
  * Форма ОДНОГО поля узла. Структурные поля (id, type, parent, children) — не
  * здесь: их проверяет checkNode. Обязательность поля (size у фрейма,
@@ -923,6 +1114,11 @@ function fieldProblem(node, k) {
         if (v !== null && !(isObj(v) && isNum(v.x) && isNum(v.y))) err = 'override: нужны числа x,y';
         else if (v && (!optNum(v, 'w', 0, MAX_SIZE) || !optNum(v, 'h', 0, MAX_SIZE))) err = 'override: w и h — числа';
         break;
+      // круг 36 (SPEC §11): состояния и движение; у страницы состояний нет
+      // (state-on-page: на импорт — отказ, create/set — bad-node)
+      case 'states': err = node.type === 'page' ? 'states: у страницы состояний не бывает' : statesProblem(v); break;
+      case 'motion': err = motionProblem(v); break;
+      case 'shadow': err = shadowRefProblem(v, 'shadow'); break;
       case 'props': err = isObj(v) ? null : 'props экземпляра: нужен объект'; break;
       case 'component': err = isObj(v) ? null : 'component должен быть объектом'; break;
       default: break;
@@ -1449,6 +1645,12 @@ function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps) {
       }
       if (inst.role !== undefined) sn.role = inst.role;
       if (inst.locked !== undefined) sn.locked = inst.locked;
+      /* Круг 36 (SPEC §11): состояния и движение мастера раскрываются в
+         экземпляр, свои у экземпляра — поверх (по полям каждого состояния);
+         базовая тень экземпляра заменяет тень мастера. */
+      if (isObj(inst.states)) sn.states = mergeStates(mn.states, inst.states);
+      if (isObj(inst.motion)) sn.motion = { ...(isObj(mn.motion) ? mn.motion : {}), ...inst.motion };
+      if (inst.shadow !== undefined) sn.shadow = inst.shadow;
     } else {
       sn.parent = synId(mn.parent);
     }
@@ -1462,6 +1664,22 @@ function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps) {
   for (const sn of nested) {
     expandOne(doc, sn, sn.id, ownerId, depth + 1, chain.concat(master.id), out, deps);
   }
+}
+
+/**
+ * Состояния мастера с состояниями экземпляра поверх: по каждому состоянию —
+ * поля экземпляра заменяют одноимённые поля мастера (круг 36, SPEC §11).
+ * @returns {object}
+ */
+function mergeStates(base, over) {
+  const out = {};
+  const a = isObj(base) ? base : {};
+  const b = isObj(over) ? over : {};
+  for (const s of STATE_NAMES) {
+    if (!isObj(a[s]) && !isObj(b[s])) continue;
+    out[s] = { ...(isObj(a[s]) ? a[s] : {}), ...(isObj(b[s]) ? b[s] : {}) };
+  }
+  return out;
 }
 
 /**
@@ -2303,6 +2521,31 @@ function tokenWriteProblem(parts, value, tokens) {
       : setPath(isObj(entryNow[parts[2]]) ? entryNow[parts[2]] : {}, parts.slice(3).join('.'), value);
     return typeEntryProblem({ [parts[2]]: field }, 'type.' + parts[1]);
   }
+  if (group === 'motion' || group === 'shadow') {
+    /* Круг 36 (SPEC §11.1): шкалы движения и теней — у них три именованных шага
+       (motion: fast/base/slow — мс; shadow: sm/md/lg — «dx dy blur цвет»). Пишут
+       шаг или группу целиком; снять можно и шаг (ссылка на него станет мёртвой —
+       dead-motion-ref, отрисовка возьмёт умолчание), и группу (документ вернётся
+       к умолчаниям ядра). */
+    const steps = group === 'motion' ? MOTION_STEPS : SHADOW_STEPS;
+    const ok = group === 'motion' ? motionStepOk : shadowStepOk;
+    const want = group === 'motion'
+      ? `мс ${STATE_LIMITS.duration[0]}..${STATE_LIMITS.duration[1]}`
+      : "описание тени «dx dy blur цвет» (px; цвет #hex или rgba()) или 'none'";
+    if (n === 1) {
+      if (del) return null;
+      if (!isObj(value)) return `${group}: нужен объект {${steps.join(', ')}}`;
+      for (const k of Object.keys(value)) {
+        if (steps.indexOf(k) < 0) return `${group}.${k}: шаги — ${steps.join(', ')}`;
+        if (!ok(value[k])) return `${group}.${k}: ${want}`;
+      }
+      return null;
+    }
+    if (steps.indexOf(parts[1]) < 0) return `${group}.${parts[1]}: шаги — ${steps.join(', ')}`;
+    if (n > 2) return `${group}.${parts[1]}: шаг пишут целиком`;
+    if (del) return null;
+    return ok(value) ? null : `${group}.${parts[1]}: ${want}`;
+  }
   if (group === 'spacing' || group === 'radii') {
     if (n === 1) {
       if (del) return null;
@@ -2562,7 +2805,8 @@ function applyOne(draft, op, j) {
          ним): мёртвая ссылка, уже лежащая в соседнем поле (файл, укороченная
          шкала), не должна запирать узел от правки заливки или имени — о ней
          скажет валидатор. Инверсия (exact) пишет то, что было, без проверки. */
-      if (!op.exact && (parts[0] === 'layout' || parts[0] === 'radius')) {
+      // круг 36: и подъём состояния (states.<s>.lift = 'spacing.N')
+      if (!op.exact && (parts[0] === 'layout' || parts[0] === 'radius' || parts[0] === 'states')) {
         const dead = deadScaleRefs(draft, next, path);
         if (dead.length) return opErr('bad-node', `set ${path}: ${dead[0].reason}`);
       }
@@ -4334,6 +4578,171 @@ function resolveColor(doc, value) {
   return null;
 }
 
+/* ------------------------------------------------------------------ *
+ * 7a. Движение и состояния: разрешение в значения для отрисовки (круг 36, SPEC §11)
+ *
+ * ЕДИНСТВЕННОЕ место, где ссылки motion.* / shadow.* и подъём состояния
+ * становятся числами и CSS: сцена, экспорт SVG, валидатор, мозг и оболочка
+ * читают их только через эти функции.
+ * ------------------------------------------------------------------ */
+
+/** Значение шага шкалы движения или теней; undefined — шаг мёртв (шкала есть, шага нет). */
+function scaleTokenStep(doc, group, step) {
+  const own = doc && doc.tokens && doc.tokens[group];
+  const ok = group === 'motion' ? motionStepOk : shadowStepOk;
+  const dflt = group === 'motion' ? DEFAULT_MOTION : DEFAULT_SHADOW;
+  if (own === undefined || own === null) return dflt[step];   // шкалы нет — умолчания ядра
+  if (!isObj(own)) return undefined;
+  const v = hasOwnProp.call(own, step) ? own[step] : undefined;
+  return ok(v) ? v : undefined;
+}
+
+/**
+ * Шкала длительностей документа: {fast, base, slow} в мс; мёртвый шаг — умолчание ядра.
+ * @returns {{fast:number, base:number, slow:number}}
+ */
+function motionScale(doc) {
+  const out = {};
+  for (const k of MOTION_STEPS) {
+    const v = scaleTokenStep(doc, 'motion', k);
+    out[k] = v === undefined ? DEFAULT_MOTION[k] : v;
+  }
+  return out;
+}
+
+/**
+ * Длительность в мс: число — как есть (в пределах), ссылка — шаг шкалы
+ * (мёртвый — умолчание ядра), прочее — undefined.
+ * @returns {number|undefined}
+ */
+function resolveDuration(doc, v) {
+  if (isNum(v)) return clamp(v, STATE_LIMITS.duration[0], STATE_LIMITS.duration[1]);
+  const m = typeof v === 'string' ? MOTION_REF_RE.exec(v) : null;
+  if (!m) return undefined;
+  const step = scaleTokenStep(doc, 'motion', m[1]);
+  return step === undefined ? DEFAULT_MOTION[m[1]] : step;
+}
+
+/**
+ * Движение узла для отрисовки (SPEC §11.1). Без motion — шаг 'motion.base',
+ * кривая 'standard', без задержки, follow 'self'.
+ * @param {object} doc
+ * @param {object} node
+ * @returns {{durationMs:number, easing:string, easingName:string, delayMs:number, follow:'self'|'parent'}}
+ *   easing — строка CSS cubic-bezier(…)
+ */
+function resolveMotion(doc, node) {
+  const m = node && isObj(node.motion) ? node.motion : {};
+  let durationMs = resolveDuration(doc, m.duration);
+  if (durationMs === undefined) durationMs = resolveDuration(doc, 'motion.base');
+  const easingName = typeof m.easing === 'string' && hasOwnProp.call(EASINGS, m.easing) ? m.easing : 'standard';
+  const delayMs = isNum(m.delay) ? clamp(m.delay, STATE_LIMITS.delay[0], STATE_LIMITS.delay[1]) : 0;
+  return { durationMs, easing: EASINGS[easingName], easingName, delayMs, follow: m.follow === 'parent' ? 'parent' : 'self' };
+}
+
+/**
+ * Тень для отрисовки: ссылка (или 'none') → CSS-фильтр drop-shadow(…).
+ * Мёртвый шаг — умолчание ядра (dead: true); мусор — без тени.
+ * @param {object} doc
+ * @param {any} ref 'none' | 'shadow.sm' | 'shadow.md' | 'shadow.lg'
+ * @returns {{ref:string, filter:string, dead:boolean, dx?:number, dy?:number, blur?:number, color?:string}}
+ *   filter — значение CSS-свойства filter ('none' либо 'drop-shadow(dx dy blur цвет)')
+ */
+function resolveShadow(doc, ref) {
+  const m = typeof ref === 'string' ? SHADOW_REF_RE.exec(ref) : null;
+  if (!m) return { ref: 'none', filter: 'none', dead: false };
+  let desc = scaleTokenStep(doc, 'shadow', m[1]);
+  const dead = desc === undefined;
+  if (dead) desc = DEFAULT_SHADOW[m[1]];
+  const sh = parseShadow(desc);
+  if (!sh || sh === 'none') return { ref, filter: 'none', dead };
+  return {
+    ref, dead, dx: sh.dx, dy: sh.dy, blur: sh.blur, color: sh.color,
+    filter: `drop-shadow(${r2(sh.dx)}px ${r2(sh.dy)}px ${r2(sh.blur)}px ${sh.color.replace(/\s+/g, '')})`
+  };
+}
+
+/** Подъём состояния в px: число — в пределах, ссылка на шаг spacing — его значение (мёртвая — 0). */
+function resolveLift(doc, v) {
+  const x = resolveScale(doc, v, 'spacing');
+  return isNum(x) ? clamp(x, STATE_LIMITS.lift[0], STATE_LIMITS.lift[1]) : 0;
+}
+
+/** Список состояний к наложению: null/'' — база; строка или массив; порядок — STATE_NAMES. */
+function stateList(state) {
+  const want = Array.isArray(state) ? state : state ? [state] : [];
+  return STATE_NAMES.filter((s) => want.indexOf(s) >= 0);
+}
+
+/**
+ * Итоговый вид узла в состоянии (SPEC §11.1, §11.3): база узла, поверх —
+ * патчи состояний в порядке hover → focus → press (как каскад CSS).
+ * Цвета — через resolveColor, подъём — через шкалу отступов, тень — CSS-фильтр.
+ * Решатель это не читает: геометрия от состояния не зависит.
+ * @param {object} doc
+ * @param {object} node узел (для экземпляра — раскрытый корень, см. geo.expanded)
+ * @param {'hover'|'press'|'focus'|Array<string>|null} [state] null — базовое состояние
+ * @returns {{states:string[], fill:string|null, stroke:string|null, strokeWidth:number,
+ *   color:string|null, opacity:number, scale:number, lift:number, shadow:string,
+ *   filter:string, transform:string, changed:string[]}}
+ *   transform — CSS ('none' либо 'translate(0px, -Npx) scale(k)', от центра узла);
+ *   changed — поля, которыми состояние отличается от базы (пусто — state-no-effect)
+ */
+function resolveState(doc, node, state) {
+  const n = node && typeof node === 'object' ? node : {};
+  const strokeOf = (v) => {
+    if (v === null || v === undefined) return { stroke: null, width: 1 };
+    const color = resolveColor(doc, isObj(v) && v.color !== undefined ? v.color : v);
+    return { stroke: color, width: isObj(v) && isNum(v.width) ? v.width : 1 };
+  };
+  const st0 = strokeOf(n.stroke);
+  const base = {
+    fill: resolveColor(doc, n.fill),
+    stroke: st0.stroke,
+    strokeWidth: st0.width,
+    color: n.type === 'text' ? (resolveColor(doc, n.color) || '#14161c') : resolveColor(doc, n.color),
+    opacity: isNum(n.opacity) ? clamp(n.opacity, 0, 1) : 1,
+    scale: 1,
+    lift: 0,
+    shadow: shadowRefProblem(n.shadow, '') ? 'none' : n.shadow
+  };
+  const out = { ...base };
+  const applied = [];
+  const states = isObj(n.states) ? n.states : {};
+  for (const s of stateList(state)) {
+    const p = states[s];
+    if (!isObj(p)) continue;
+    applied.push(s);
+    if (p.fill !== undefined) out.fill = resolveColor(doc, p.fill);
+    if (p.color !== undefined) out.color = resolveColor(doc, p.color) || base.color;
+    if (p.stroke !== undefined) { const t = strokeOf(p.stroke); out.stroke = t.stroke; out.strokeWidth = t.width; }
+    if (isNum(p.opacity)) out.opacity = clamp(p.opacity, 0, 1);
+    if (isNum(p.scale)) out.scale = clamp(p.scale, STATE_LIMITS.scale[0], STATE_LIMITS.scale[1]);
+    if (p.lift !== undefined) out.lift = resolveLift(doc, p.lift);
+    if (p.shadow !== undefined && !shadowRefProblem(p.shadow, '')) out.shadow = p.shadow;
+  }
+  const changed = [];
+  for (const k of ['fill', 'stroke', 'strokeWidth', 'color', 'opacity', 'scale', 'lift', 'shadow']) {
+    if (out[k] !== base[k]) changed.push(k);
+  }
+  out.filter = resolveShadow(doc, out.shadow).filter;
+  out.transform = out.lift === 0 && out.scale === 1 ? 'none'
+    : `translate(0px, ${r2(-out.lift)}px) scale(${r2(out.scale)})`;
+  out.states = applied;
+  out.changed = changed;
+  return out;
+}
+
+/**
+ * Строка CSS transition для узла (сцена и экспорт — одна запись).
+ * @param {{durationMs:number, easing:string, delayMs:number}} mo результат resolveMotion
+ * @param {string[]} props свойства
+ * @returns {string}
+ */
+function transitionCss(mo, props) {
+  return props.map((p) => `${p} ${r2(mo.durationMs)}ms ${mo.easing} ${r2(mo.delayMs)}ms`).join(', ');
+}
+
 function channelLum(c) {
   const s = c / 255;
   return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
@@ -4369,7 +4778,9 @@ function contrastRatio(hexA, hexB) {
 /* Круг 20 (SPEC §6.1): dead-scale-ref — ссылка на шаг, которого в шкале нет;
    блокирующая: решатель считает такой шаг нулём, и макет уже не тот, что задуман.
    off-scale для чисел остаётся как был — мягкое замечание. */
-const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'dead-scale-ref': 'error', 'bad-children': 'warn', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info' };
+const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'dead-scale-ref': 'error', 'bad-children': 'warn', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info',
+  /* Круг 36 (SPEC §11.2): состояния и движение */
+  'state-on-page': 'error', 'motion-slow': 'warn', 'dead-motion-ref': 'warn', 'state-no-effect': 'info', 'press-without-hover': 'info' };
 const SEV_RANK = { error: 0, warn: 1, info: 2 };
 
 function nearestFill(doc, node) {
@@ -4479,6 +4890,73 @@ function validateComponents(doc, add) {
 }
 
 /**
+ * Проверки состояний и движения одного узла (круг 36, SPEC §11.2):
+ * state-on-page (error), motion-slow (warn), dead-motion-ref (warn),
+ * state-no-effect (info), press-without-hover (info), off-scale (info) для
+ * длительности и подъёма числом мимо шкалы. По сырому документу, без геометрии.
+ * @param {object} doc @param {object} node
+ * @param {(code:string,nodeId:string,message:string)=>void} add
+ */
+function validateMotion(doc, node, add) {
+  if (!node || typeof node !== 'object') return;
+  const id = node.id;
+  const states = node.states;
+  if (node.type === 'page') {
+    if (states !== undefined) add('state-on-page', id, `«${displayName(doc, node)}»: у страницы состояний не бывает — states не применяются`);
+    return;
+  }
+  const own = isObj(states) ? states : {};
+  const animated = hasStates(node);
+  const motion = isObj(node.motion) ? node.motion : null;
+  const name = displayName(doc, node);
+  const dead = [];
+  const off = [];
+  // длительность
+  if (motion && typeof motion.duration === 'string' && MOTION_REF_RE.test(motion.duration)) {
+    const step = motion.duration.slice('motion.'.length);
+    if (scaleTokenStep(doc, 'motion', step) === undefined) dead.push(`motion.duration → «${motion.duration}»: шага нет в шкале движения, взято умолчание ${DEFAULT_MOTION[step]} мс`);
+  } else if (motion && isNum(motion.duration)) {
+    const sc = motionScale(doc);
+    if (!MOTION_STEPS.some((k) => sc[k] === motion.duration)) off.push(`длительность ${motion.duration} мс вне шкалы движения`);
+  }
+  // экземпляр — по раскрытому корню: база вида и движение у него от мастера
+  let look = node;
+  if (node.type === 'instance' && (animated || motion)) {
+    const ex = expandInstance(doc, node);
+    if (ex && ex.root) look = ex.root;
+  }
+  const mo = resolveMotion(doc, look);
+  if ((animated || motion) && mo.durationMs > MOTION_SLOW_MS) {
+    add('motion-slow', id, `«${name}»: переход ${mo.durationMs} мс — для микроанимации дольше ${MOTION_SLOW_MS} мс`);
+  }
+  // тени: базовая и в состояниях
+  const shadowDead = (ref, where) => {
+    const m = typeof ref === 'string' ? SHADOW_REF_RE.exec(ref) : null;
+    if (m && scaleTokenStep(doc, 'shadow', m[1]) === undefined) dead.push(`${where} → «${ref}»: шага нет в шкале теней, взята тень по умолчанию`);
+  };
+  shadowDead(node.shadow, 'shadow');
+  const spacing = scaleSteps(doc, 'spacing');
+  for (const s of STATE_NAMES) {
+    const p = own[s];
+    if (!isObj(p)) continue;
+    shadowDead(p.shadow, `states.${s}.shadow`);
+    if (isScaleRef(p.lift, 'spacing') && resolveScale(doc, p.lift, 'spacing') === undefined) {
+      dead.push(`states.${s}.lift → «${p.lift}»: шага нет в шкале отступов, подъём 0`);
+    } else if (isNum(p.lift) && p.lift !== 0 && spacing.indexOf(Math.abs(p.lift)) < 0) {
+      off.push(`подъём ${p.lift} px (${s}) вне шкалы отступов`);
+    }
+    if (!resolveState(doc, look, s).changed.length) {
+      add('state-no-effect', id, `«${name}»: состояние ${s} совпадает с базой — ничего не меняет`);
+    }
+  }
+  if (dead.length) add('dead-motion-ref', id, `«${name}»: ${dead.join('; ')}`);
+  if (off.length) add('off-scale', id, `«${name}»: ${off.join(', ')}`);
+  if (isObj(own.press) && !isObj(own.hover)) {
+    add('press-without-hover', id, `«${name}»: есть нажатие, но нет наведения — мышью отклик появится только по нажатию`);
+  }
+}
+
+/**
  * Проверки макета: overflow, out-of-parent, padding-eaten, overlap, low-contrast, off-scale,
  * empty-frame, zero-size, no-geometry.
  * @param {object} doc
@@ -4511,7 +4989,9 @@ function validate(doc, geo, opts) {
       && (!Array.isArray(node.children) || node.children.length)) {
       add('bad-children', id, `«${displayName(doc, node)}»: children ${Array.isArray(node.children) ? 'непустой, а дети бывают только у контейнера' : 'не массив'} — поле не читается`);
     }
-    const dead = deadScaleRefs(doc, node);
+    // круг 36: мёртвый шаг в подъёме состояния — dead-motion-ref (warn), см. validateMotion
+    const dead = deadScaleRefs(doc, node).filter((d) => d.path.indexOf('states.') !== 0);
+    validateMotion(doc, node, add);
     if (dead.length) {
       add('dead-scale-ref', id, `«${displayName(doc, node)}»: ${dead.map((d) => `${d.path} → ${d.reason}`).join('; ')}`);
     }
@@ -4644,7 +5124,8 @@ function emptyDoc(name) {
     version: 1,
     root: rootId,
     nodes: { [rootId]: { type: 'page', id: rootId, name: name || 'Страница', parent: null, children: [] } },
-    tokens: deepClone(DEFAULT_TOKENS),
+    // круг 36: новый документ несёт шкалы движения и теней явно (SPEC §11.1)
+    tokens: { ...deepClone(DEFAULT_TOKENS), motion: { ...DEFAULT_MOTION }, shadow: { ...DEFAULT_SHADOW } },
     meta: { name: name || 'Без названия', createdAt: new Date().toISOString() }
   };
 }
@@ -5076,8 +5557,37 @@ function repairNode(n, doc) {
     if (typeof v === 'object' && typeof v.token === 'string') continue;
     delete n[k]; mark(k);
   }
+  repairMotionFields(n, mark);
   repairShapes(n, mark);
   return fixed;
+}
+
+/**
+ * Круг 36: состояния и движение из чужого файла чиним по полям, а не снимаем
+ * целиком: негодное состояние или поле патча уходит, годные остаются. У
+ * страницы состояний не бывает — поле снимается.
+ */
+function repairMotionFields(n, mark) {
+  if (n.states !== undefined && fieldProblem(n, 'states')) {
+    if (n.type === 'page' || !isObj(n.states)) { delete n.states; mark('states'); }
+    else {
+      for (const s of Object.keys(n.states)) {
+        const p = n.states[s];
+        if (!STATE_NAME_SET.has(s) || !isObj(p)) { delete n.states[s]; mark('states.' + s); continue; }
+        for (const k of Object.keys(p)) {
+          if (statePatchProblem({ [k]: p[k] }, 'states.' + s)) { delete p[k]; mark(`states.${s}.${k}`); }
+        }
+      }
+    }
+  }
+  if (n.motion !== undefined && fieldProblem(n, 'motion')) {
+    if (!isObj(n.motion)) { delete n.motion; mark('motion'); }
+    else {
+      for (const k of Object.keys(n.motion)) {
+        if (motionProblem({ [k]: n.motion[k] })) { delete n.motion[k]; mark('motion.' + k); }
+      }
+    }
+  }
 }
 
 /**
@@ -5147,7 +5657,18 @@ function mergeTokens(raw) {
     return src && typeof src === 'object' && !Array.isArray(src) ? { ...base[name], ...src } : base[name];
   };
   const scale = (name) => (Array.isArray(got[name]) && got[name].length ? got[name].slice() : base[name]);
-  return { ...got, colors: group('colors'), type: group('type'), spacing: scale('spacing'), radii: scale('radii') };
+  const out = { ...got, colors: group('colors'), type: group('type'), spacing: scale('spacing'), radii: scale('radii') };
+  /* Круг 36: шкалы движения и теней необязательны (без них — умолчания ядра),
+     поэтому их не достраиваем; негодные шаги снимаем, негодную группу — целиком. */
+  for (const [name, steps, ok] of [['motion', MOTION_STEPS, motionStepOk], ['shadow', SHADOW_STEPS, shadowStepOk]]) {
+    if (!hasOwnProp.call(got, name)) continue;
+    const src = got[name];
+    if (!isObj(src)) { delete out[name]; continue; }
+    const clean = {};
+    for (const k of Object.keys(src)) if (steps.indexOf(k) >= 0 && ok(src[k])) clean[k] = src[k];
+    out[name] = clean;
+  }
+  return out;
 }
 
 /**
@@ -5430,6 +5951,10 @@ const STAGE_CSS = `
   :root:not([data-theme="dark"]) .imago-ab-label{fill:var(--imago-ab-label,#4A505C)}
 }
 .imago-node{transform-box:fill-box}
+/* Круг 36 (SPEC §11.3): режим «Просмотр» — выделения нет, курсор-рука над узлом,
+   у которого есть состояния (наведение, нажатие, фокус проигрываются на холсте). */
+.imago-stage.is-preview{cursor:default}
+.imago-stage.is-preview.is-live{cursor:pointer}
 .imago-pulse{animation:imago-pulse 900ms ease-out forwards}
 @keyframes imago-pulse{0%{opacity:.95}70%{opacity:.5}100%{opacity:0}}
 @media (prefers-reduced-motion: reduce){.imago-pulse{animation:none;opacity:0}}
@@ -6027,6 +6552,16 @@ class Stage {
     this._pulseTimer = null;
     this._dead = false;
     this._drawSeen = new Set();
+    /* круг 36 (SPEC §11.3): состояния на холсте. _previewOn — режим «Просмотр»;
+       _ix — что сейчас под рукой (наведение и нажатие — цепочки id от глубокого
+       к корню, фокус — один id); _forced — состояния, показанные playState;
+       _stList — id нарисованных узлов со states (пересчёт после отрисовки). */
+    this._previewOn = false;
+    this._ix = { hover: new Set(), press: new Set(), focus: null };
+    this._forced = new Map();
+    this._forcedTimers = new Map();
+    this._stList = null;
+    this._exportStates = null;
 
     this._vp = null;            // кеш размера вьюпорта, см. _viewport()
     this._vbBase = null;        // вид и размер вьюпорта, по которым записан viewBox (см. _keepsView)
@@ -6300,6 +6835,7 @@ class Stage {
       this._applyView();
       this._paintUI();
       this._flip(state.diff);
+      this._syncStates();   // круг 36: просмотр и «Проиграть» переживают перерисовку
       // Круг 16, п.6: прежнюю геометрию держим ССЫЛКОЙ. solve на каждый вызов
       // отдаёт новые прямоугольники и никто их не правит на месте, так что копия
       // была лишней: на 40 477 узлах это 40 тысяч объектов на каждый кадр.
@@ -6434,6 +6970,7 @@ class Stage {
    * сменились токены, список артбордов, состав детей, — и тогда собираем заново.
    */
   _renderSVG() {
+    this._stList = null;   // круг 36: состав узлов со states мог смениться
     if (this._patchSVG()) return;
     const doc = this.doc;
     const frag = document.createDocumentFragment();
@@ -6629,6 +7166,8 @@ class Stage {
     const opacity = isNum(node.opacity) ? node.opacity : 1;
     if (opacity !== 1) c.el.setAttribute('opacity', opacity);
     else c.el.removeAttribute('opacity');
+    this._baseShadow(c.el, node, shapes);
+    c.stKey = null;   // фигуры новые — состояние (если есть) накладываем заново
     if (c.clip) {
       const radius = resolveRadius(this.doc, node.radius);
       c.clip.rect.setAttribute('x', r2(rect.x));
@@ -6711,10 +7250,15 @@ class Stage {
     const strokeW = node.stroke && isNum(node.stroke.width) ? node.stroke.width : 1;
     const radius = resolveRadius(doc, node.radius);
 
+    /* Круг 36: у узла с состояниями фигура есть всегда, а пустая заливка —
+       прозрачная, а не 'none': переход к заливке наведения плавный, и в
+       экспортированном SVG наведение ловится по всей площади, а не по детям. */
+    const live = hasStates(node);
+    const noFill = live ? 'transparent' : 'none';
     if (node.type === 'ellipse') {
       out.push(svgEl('ellipse', {
         cx: r2(x + rect.w / 2), cy: r2(y + rect.h / 2), rx: r2(rect.w / 2), ry: r2(rect.h / 2),
-        fill: fill || 'none', stroke: stroke || undefined, 'stroke-width': stroke ? strokeW : undefined
+        fill: fill || noFill, stroke: stroke || undefined, 'stroke-width': stroke ? strokeW : undefined
       }));
     } else if (node.type === 'text') {
       const style = resolveTextStyle(doc, node);
@@ -6750,14 +7294,28 @@ class Stage {
         im.setAttribute('href', src);
         out.push(im);
       }
-    } else if (fill || stroke) {
+    } else if (fill || stroke || live) {
       // frame / rect / page
       out.push(svgEl('rect', {
         x, y, width: r2(rect.w), height: r2(rect.h), rx: radius,
-        fill: fill || 'none', stroke: stroke || undefined, 'stroke-width': stroke ? strokeW : undefined
+        fill: fill || noFill, stroke: stroke || undefined, 'stroke-width': stroke ? strokeW : undefined
       }));
     }
+    // главная фигура узла: на неё ложатся заливка/цвет/обводка состояний и тень
+    if (out.length) out[0].setAttribute('class', 'imago-shape');
     return out;
+  }
+
+  /**
+   * Базовая тень узла (круг 36, SPEC §11.1): CSS-фильтр drop-shadow на главной
+   * фигуре (у узла без фигур — на группе). Рисуется всегда, в правке и экспорте.
+   * @param {Element} g группа узла @param {object} node @param {Element[]} shapes
+   */
+  _baseShadow(g, node, shapes) {
+    const f = resolveShadow(this.doc, node.shadow).filter;
+    if (g.style) g.style.filter = '';
+    const target = shapes[0] || g;
+    if (target.style) target.style.filter = f === 'none' ? '' : f;
   }
 
   /** Рисует узел и его детей. dx/dy — сдвиг системы координат (для toSVG). */
@@ -6781,6 +7339,21 @@ class Stage {
     if (opacity !== 1) g.setAttribute('opacity', opacity);
     const shapes = this._nodeShapes(node, rect, dx, dy);
     for (const el of shapes) g.appendChild(el);
+    this._baseShadow(g, node, shapes);
+    // круг 36: экспорт SVG — узлы с состояниями получают свой класс, по нему
+    // toSVG пишет правила :hover / :active / :focus-visible (см. _exportStateCss)
+    if (collect && this._exportStates && hasStates(node)) {
+      // класс уникален на сборку (тот же случайный префикс, что у обрезок): превью
+      // вариантов встают инлайном в одну страницу, и правила одной разметки не
+      // должны цеплять узлы другой
+      const cls = String(this._clipPrefix || 'imago-clip-').replace(/^imago-clip-/, 'im-') + 's' + this._exportStates.length;
+      g.setAttribute('class', 'imago-node imago-anim ' + cls);
+      if (isObj(node.states.focus)) g.setAttribute('tabindex', '0');
+      this._exportStates.push({
+        node, cls, hasShape: shapes.length > 0,
+        cx: r2(rect.x + dx + rect.w / 2), cy: r2(rect.y + dy + rect.h / 2)
+      });
+    }
 
     const kids = kidsOf(node);
     let holder = g;
@@ -6969,6 +7542,7 @@ class Stage {
       this._drawSeen = new Set();
       this._defs = defs;
       this._clipSeq = 0;
+      this._exportStates = [];
       // гарнитуры — первыми: разметка должна нести шрифт с собой
       const want = opts && opts.fonts !== undefined ? !!opts.fonts : !docOverride;
       const fonts = want ? this._fontStyle(id) : { el: null, state: 'skipped', families: [], missing: [] };
@@ -6979,6 +7553,13 @@ class Stage {
         fill: resolveColor(this.doc, node.fill) || resolveColor(this.doc, 'canvas') || '#ffffff'
       }));
       this._drawNode(svg, node, -rect.x, -rect.y, true);
+      // круг 36 (SPEC §11.3): состояния — CSS в самом файле, он реагирует на мышь
+      const css = this._exportStateCss(this._exportStates);
+      if (css) {
+        const st = svgEl('style', { type: 'text/css' });
+        st.appendChild(document.createTextNode(css));
+        defs.appendChild(st);
+      }
       const head = '<?xml version="1.0" encoding="UTF-8"?>\n';
       const body = typeof XMLSerializer !== 'undefined'
         ? new XMLSerializer().serializeToString(svg)
@@ -6995,6 +7576,7 @@ class Stage {
       this._clipSeq = seqPrev;
       this._clipPrefix = prefixPrev;
       this._drawSeen = seenPrev;
+      this._exportStates = null;
     }
   }
 
@@ -7467,8 +8049,9 @@ class Stage {
         }));
       }
 
-      const selection = (this.state.selection || []).filter((id) => this.geo.rects[id]);
-      if (this._hover && !selection.includes(this._hover)) {
+      // круг 36: в просмотре выделения нет — ни рамок, ни ручек, ни бейджей
+      const selection = this._previewOn ? [] : (this.state.selection || []).filter((id) => this.geo.rects[id]);
+      if (!this._previewOn && this._hover && !selection.includes(this._hover)) {
         const sr = this._screenRect(this._hover);
         if (sr) this._box('is-hover', sr);
       }
@@ -7625,6 +8208,325 @@ class Stage {
       const r = p.id ? rects[p.id] : null;
       return r ? { id: p.id, rect: { ...r } } : p;
     });
+  }
+
+  /* ------------------- состояния и просмотр (круг 36, SPEC §11.3) ------------------- */
+
+  /**
+   * Режим «Просмотр». Включён — выделения и правки на холсте нет, наведение,
+   * нажатие и фокус на узлах со states проигрывают переходы (CSS transitions на
+   * группах SVG); выключен — холст в базовом состоянии, ввод как прежде.
+   * Панорама (пробел, средняя кнопка) и зум работают в обоих режимах.
+   * @param {boolean} on
+   * @returns {boolean} режим после вызова
+   */
+  setPreview(on) {
+    const next = !!on;
+    if (next === this._previewOn) return next;
+    this._previewOn = next;
+    this._ix = { hover: new Set(), press: new Set(), focus: null };
+    if (next) {
+      if (this._editing) this._commitEdit();
+      if (this._drag && this._drag.mode !== 'pan') this._cancelDrag('включён просмотр');
+      if (this._hover !== null) this._setHover(null);
+    }
+    if (this.el && this.el.classList) {
+      this.el.classList.toggle('is-preview', next);
+      this.el.classList.remove('is-live');
+    }
+    this._syncStates();
+    this._paintUI();
+    return next;
+  }
+
+  /** Включён ли режим «Просмотр». @returns {boolean} */
+  get previewMode() { return !!this._previewOn; }
+
+  /**
+   * Принудительно показать состояние узла (кнопка «Проиграть» инспектора) или
+   * снять его. Работает и в правке, и в просмотре; узлы с motion.follow 'parent'
+   * под ним следуют за ним. `playState(null)` снимает все показанные состояния.
+   * @param {string|null} nodeId
+   * @param {'hover'|'press'|'focus'|null} state null — вернуть базу
+   * @param {{holdMs?:number}} [opts] holdMs — снять само через столько мс
+   * @returns {boolean} true — узел нарисован и у него есть такое состояние
+   */
+  playState(nodeId, state, opts) {
+    if (nodeId === null || nodeId === undefined) {
+      this._forced.clear();
+      for (const t of this._forcedTimers.values()) this._cancelLater(t);
+      this._forcedTimers.clear();
+      this._syncStates();
+      return false;
+    }
+    if (state && !STATE_NAME_SET.has(state)) return false;
+    this._cancelLater(this._forcedTimers.get(nodeId));
+    this._forcedTimers.delete(nodeId);
+    if (state) this._forced.set(nodeId, state);
+    else this._forced.delete(nodeId);
+    const hold = opts && isNum(opts.holdMs) ? Math.max(0, opts.holdMs) : null;
+    if (state && hold !== null) {
+      this._forcedTimers.set(nodeId, this._later(() => {
+        this._forcedTimers.delete(nodeId);
+        if (this._forced.get(nodeId) !== state) return;
+        this._forced.delete(nodeId);
+        this._syncStates();
+      }, hold));
+    }
+    this._syncStates();
+    const c = this._drawn ? this._drawn.get(nodeId) : null;
+    return !!(state && c && hasStates(c.node) && isObj(c.node.states[state]));
+  }
+
+  /** Ближайший предок узла (по дереву отрисовки) со states. @returns {object|null} */
+  _leaderOf(node) {
+    let cur = node && typeof node.parent === 'string' ? this._rn(node.parent) : null;
+    for (let i = 0; cur && i <= MAX_DEPTH; i++) {
+      if (cur.id === (this.doc && this.doc.root)) return null;
+      if (hasStates(cur)) return cur;
+      cur = typeof cur.parent === 'string' ? this._rn(cur.parent) : null;
+    }
+    return null;
+  }
+
+  /** Какие состояния узла сейчас действуют (в порядке наложения). @returns {string[]} */
+  _activeStates(id, node, depth) {
+    if (this._forced.has(id)) return [this._forced.get(id)];
+    if (isObj(node.motion) && node.motion.follow === 'parent' && (depth || 0) < 64) {
+      const leader = this._leaderOf(node);
+      if (leader) return this._activeStates(leader.id, leader, (depth || 0) + 1);
+    }
+    if (!this._previewOn) return [];
+    const ix = this._ix;
+    const out = [];
+    if (ix.hover.has(id)) out.push('hover');
+    if (ix.focus === id) out.push('focus');
+    if (ix.press.has(id)) out.push('press');
+    return out;
+  }
+
+  /** Движение узла; ведомый (follow 'parent') без своих полей берёт их у ведущего. */
+  _motionFor(node) {
+    const own = resolveMotion(this.doc, node);
+    if (own.follow !== 'parent') return own;
+    const leader = this._leaderOf(node);
+    if (!leader) return own;
+    const lm = resolveMotion(this.doc, leader);
+    const m = node.motion;
+    return {
+      ...own,
+      durationMs: m.duration !== undefined ? own.durationMs : lm.durationMs,
+      easing: m.easing !== undefined ? own.easing : lm.easing,
+      easingName: m.easing !== undefined ? own.easingName : lm.easingName,
+      delayMs: m.delay !== undefined ? own.delayMs : lm.delayMs
+    };
+  }
+
+  /**
+   * Наложить действующие состояния на нарисованные узлы. Пишет только то, что
+   * изменилось (ключ на записи отрисовки), поэтому зовётся на каждое движение
+   * мыши в просмотре и после каждой отрисовки. Слушателей не заводит.
+   */
+  _syncStates() {
+    if (!this._drawn || this._dead || !this.doc) return;
+    if (!this._stList) {
+      this._stList = [];
+      for (const [id, c] of this._drawn) if (c && hasStates(c.node)) this._stList.push(id);
+    }
+    if (!this._stList.length) return;
+    const reduced = prefersReducedMotion();
+    for (const id of this._stList) {
+      const c = this._drawn.get(id);
+      if (c) this._applyState(id, c, reduced);
+    }
+  }
+
+  /** Вид одного узла в его действующем состоянии (база — пустые инлайн-стили). */
+  _applyState(id, c, reduced) {
+    const node = c.node;
+    const g = c.el;
+    if (!g || !g.style) return;
+    const list = this._activeStates(id, node, 0);
+    const r = resolveState(this.doc, node, list);
+    const mo = this._motionFor(node);
+    const trG = reduced ? 'none' : transitionCss(mo, ['transform', 'opacity', 'filter']);
+    const trS = reduced ? 'none' : transitionCss(mo, ['fill', 'stroke', 'stroke-width', 'filter']);
+    const rect = c.rect || { x: 0, y: 0, w: 0, h: 0 };
+    const key = list.join(',') + '|' + trG + '|' + rect.x + ',' + rect.y + ',' + rect.w + ',' + rect.h;
+    // FLIP снимает переход с группы по окончании — сверяемся и с ним
+    if (c.stKey === key && g.style.transition === trG) return;
+    c.stKey = key;
+    const sh = c.shapes && c.shapes[0] ? c.shapes[0] : null;
+    g.style.transition = trG;
+    g.style.transformBox = 'view-box';
+    g.style.transformOrigin = `${r2(rect.x + rect.w / 2)}px ${r2(rect.y + rect.h / 2)}px`;
+    g.style.transform = r.transform === 'none' ? '' : r.transform;
+    g.style.opacity = r.changed.indexOf('opacity') >= 0 ? String(r.opacity) : '';
+    const target = sh || g;
+    if (sh && sh.style) {
+      sh.style.transition = trS;
+      if (node.type === 'text') {
+        sh.style.fill = r.changed.indexOf('color') >= 0 ? (r.color || '') : '';
+      } else {
+        sh.style.fill = r.changed.indexOf('fill') >= 0 ? (r.fill || 'transparent') : '';
+        const strokeOn = r.changed.indexOf('stroke') >= 0 || r.changed.indexOf('strokeWidth') >= 0;
+        sh.style.stroke = strokeOn ? (r.stroke || 'none') : '';
+        sh.style.strokeWidth = strokeOn ? String(r.strokeWidth) : '';
+      }
+    }
+    if (target.style) target.style.filter = r.filter === 'none' ? (r.changed.indexOf('shadow') >= 0 ? 'none' : '') : r.filter;
+  }
+
+  /**
+   * Цепочка узлов под точкой — от самого глубокого (включая раскрытое
+   * содержимое экземпляра) до верха: так наведение ложится на узел и всех его
+   * предков, как :hover в браузере. Замок в просмотре не мешает.
+   * @returns {string[]}
+   */
+  _previewChain(world) {
+    const doc = this.doc;
+    if (!doc || !this.geo) return [];
+    const inside = (r) => r && world.x >= r.x && world.x <= r.x + r.w && world.y >= r.y && world.y <= r.y + r.h;
+    const order = this.geo.order || [];
+    let top = null;
+    for (let i = order.length - 1; i >= 0; i--) {
+      const n = doc.nodes[order[i]];
+      if (!n || n.visible === false) continue;
+      if (inside(this.geo.rects[order[i]])) { top = n; break; }
+    }
+    if (!top) return [];
+    const chain = [top.id];
+    for (const a of ancestors(doc, top.id)) chain.push(a.id);
+    // внутрь экземпляра: его содержимое — раскрытые узлы, в geo.order их нет
+    let cur = this._rn(top.id);
+    for (let guard = 0; cur && (cur.type === 'instance' || cur.synthetic) && guard <= MAX_DEPTH; guard++) {
+      const kids = kidsOf(cur);
+      let next = null;
+      for (let i = kids.length - 1; i >= 0; i--) {
+        const k = this._rn(kids[i]);
+        if (k && k.visible !== false && inside(this.geo.rects[kids[i]])) { next = k; break; }
+      }
+      if (!next) break;
+      chain.unshift(next.id);
+      cur = next;
+    }
+    return chain;
+  }
+
+  /** Наведение в просмотре. */
+  _previewMove(world) {
+    const chain = this._previewChain(world);
+    const prev = this._ix.hover;
+    if (chain.length === prev.size && chain.every((id) => prev.has(id))) return;
+    this._ix.hover = new Set(chain);
+    const live = chain.some((id) => hasStates(this._rn(id)));
+    if (this.el && this.el.classList) this.el.classList.toggle('is-live', live);
+    this._syncStates();
+  }
+
+  /** Нажатие в просмотре: нажата вся цепочка; фокус — самый глубокий узел с focus. */
+  _previewDown(world) {
+    const chain = this._previewChain(world);
+    this._ix.hover = new Set(chain);
+    this._ix.press = new Set(chain);
+    let focus = null;
+    for (const id of chain) {
+      const n = this._rn(id);
+      if (n && hasStates(n) && isObj(n.states.focus)) { focus = id; break; }
+    }
+    this._ix.focus = focus;
+    this._syncStates();
+  }
+
+  /** Указатель ушёл со сцены: наведения нет (нажатие держится до отпускания). */
+  _previewLeave() {
+    if (!this._ix.hover.size) return;
+    this._ix.hover = new Set();
+    if (this.el && this.el.classList) this.el.classList.remove('is-live');
+    this._syncStates();
+  }
+
+  /**
+   * Клавиши в просмотре: Tab / Shift+Tab — фокус по узлам с состоянием focus,
+   * Esc — снять фокус. Пробел (панорама) и Ctrl/Cmd+Z идут обычным путём, прочее
+   * (Delete, стрелки, дублирование) в просмотре не действует.
+   * @returns {boolean} true — клавиша обработана здесь
+   */
+  _previewKey(e) {
+    const meta = e.ctrlKey || e.metaKey;
+    if (e.code === 'Space' && !meta) return false;
+    if (meta && (e.key === 'z' || e.key === 'Z' || e.code === 'KeyZ')) return false;
+    if (e.key === 'Tab') {
+      if (!this._stList) this._syncStates();
+      const list = (this._stList || []).filter((id) => {
+        const c = this._drawn.get(id);
+        return c && isObj(c.node.states) && isObj(c.node.states.focus);
+      });
+      if (!list.length) return true;
+      e.preventDefault();
+      const at = list.indexOf(this._ix.focus);
+      const step = e.shiftKey ? -1 : 1;
+      this._ix.focus = list[(at < 0 ? (step > 0 ? 0 : list.length - 1) : (at + step + list.length) % list.length)];
+      this._syncStates();
+      return true;
+    }
+    if (e.key === 'Escape' && this._ix.focus !== null) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();   // первый Esc снимает фокус, второй — выводит из просмотра
+      this._ix.focus = null;
+      this._syncStates();
+    }
+    return true;
+  }
+
+  /**
+   * CSS состояний для экспорта SVG: на узел — переход и правила :hover,
+   * :focus-visible (группа с tabindex), :active; ведомый (follow 'parent')
+   * меняется по псевдоклассу ведущего. prefers-reduced-motion — без переходов.
+   * @param {Array<{node:object, cls:string, hasShape:boolean, cx:number, cy:number}>} list
+   * @returns {string}
+   */
+  _exportStateCss(list) {
+    if (!list || !list.length) return '';
+    const doc = this.doc;
+    const clsOf = new Map(list.map((e) => [e.node.id, e.cls]));
+    const rules = [];
+    const PSEUDO = [['hover', ':hover'], ['focus', ':focus-visible'], ['press', ':active']];
+    for (const e of list) {
+      const node = e.node;
+      const mo = this._motionFor(node);
+      rules.push(`.${e.cls}{transform-box:view-box;transform-origin:${e.cx}px ${e.cy}px;`
+        + `transition:${transitionCss(mo, ['transform', 'opacity', 'filter'])}}`);
+      rules.push(`.${e.cls}>.imago-shape{transition:${transitionCss(mo, ['fill', 'stroke', 'stroke-width', 'filter'])}}`);
+      let lead = null;
+      if (isObj(node.motion) && node.motion.follow === 'parent') {
+        const leader = this._leaderOf(node);
+        if (leader && clsOf.has(leader.id)) lead = clsOf.get(leader.id);
+      }
+      for (const [s, pseudo] of PSEUDO) {
+        if (!isObj(node.states[s])) continue;
+        // нажатие мышью идёт поверх наведения — как и на холсте
+        const r = resolveState(doc, node, s === 'press' ? ['hover', 'press'] : [s]);
+        if (!r.changed.length) continue;
+        const sel = lead ? `.${lead}${pseudo} .${e.cls}` : `.${e.cls}${pseudo}`;
+        const gp = [];
+        const sp = [];
+        if (r.transform !== 'none') gp.push(`transform:${r.transform}`);
+        if (r.changed.indexOf('opacity') >= 0) gp.push(`opacity:${r.opacity}`);
+        if (r.changed.indexOf('shadow') >= 0) (e.hasShape ? sp : gp).push(`filter:${r.filter}`);
+        if (node.type === 'text') {
+          if (r.changed.indexOf('color') >= 0 && r.color) sp.push(`fill:${r.color}`);
+        } else {
+          if (r.changed.indexOf('fill') >= 0) sp.push(`fill:${r.fill || 'transparent'}`);
+          if (r.changed.indexOf('stroke') >= 0 || r.changed.indexOf('strokeWidth') >= 0) {
+            sp.push(`stroke:${r.stroke || 'none'}`, `stroke-width:${r.strokeWidth}`);
+          }
+        }
+        if (gp.length) rules.push(`${sel}{${gp.join(';')}}`);
+        if (sp.length && e.hasShape) rules.push(`${sel}>.imago-shape{${sp.join(';')}}`);
+      }
+    }
+    rules.push('@media (prefers-reduced-motion: reduce){.imago-anim,.imago-anim>.imago-shape{transition:none!important}}');
+    return rules.join('\n');
   }
 
   /* ------------------------------ хит-тест ------------------------------ */
@@ -7864,7 +8766,10 @@ class Stage {
     el.addEventListener('pointermove', (e) => this._onPointerMove(e));
     el.addEventListener('pointerup', (e) => this._onPointerUp(e));
     el.addEventListener('pointercancel', (e) => this._onPointerUp(e));
-    el.addEventListener('pointerleave', () => { if (!this._drag) this._setHover(null); });
+    el.addEventListener('pointerleave', () => {
+      if (this._previewOn) this._previewLeave();
+      else if (!this._drag) this._setHover(null);
+    });
     el.addEventListener('dblclick', (e) => this._onDblClick(e));
     el.addEventListener('touchstart', (e) => this._onTouch(e), { passive: false });
     el.addEventListener('touchmove', (e) => this._onTouch(e), { passive: false });
@@ -7945,6 +8850,12 @@ class Stage {
         this._commitEdit();
       }
       if (!handle) this.el.focus({ preventScroll: true });
+      // круг 36: в просмотре нажатие — состояние press (и фокус), не выделение
+      if (this._previewOn && !(e.button === 1 || this._space)) {
+        this._previewDown(this.toWorld(e.clientX, e.clientY));
+        if (this.el.setPointerCapture) this.el.setPointerCapture(e.pointerId);
+        return;
+      }
       if (e.button === 1 || this._space) {
         this._drag = { mode: 'pan', sx: e.clientX, sy: e.clientY, pan: { ...this.view.pan } };
         this.el.classList.add('is-panning');
@@ -7993,6 +8904,7 @@ class Stage {
     try {
       const w = this.toWorld(e.clientX, e.clientY);
       const d = this._drag;
+      if (this._previewOn && (!d || d.mode !== 'pan')) { this._previewMove(w); return; }
       if (!d) {
         const hit = this._hitTest(w, e.altKey || e.metaKey || e.ctrlKey);
         this._setHover(hit ? hit.id : null);
@@ -8289,6 +9201,7 @@ class Stage {
   }
 
   _onPointerUp(e) {
+    if (this._previewOn && this._ix.press.size) { this._ix.press = new Set(); this._syncStates(); }
     const d = this._drag;
     this._drag = null;
     this._cancelPreview();
@@ -8532,6 +9445,7 @@ class Stage {
    * Cmd/Ctrl-кликом и за двойным кликом по нетекстовому узлу.
    */
   _onDblClick(e) {
+    if (this._previewOn) return;   // круг 36: в просмотре правки текста нет
     const w = this.toWorld(e.clientX, e.clientY);
     const deep = this._topUnder(w);
     const hit = (deep && deep.type === 'text') ? deep : this._hitTest(w, true);
@@ -8672,6 +9586,7 @@ class Stage {
     const inEditor = this._editing && (t === this._editing.el || (this._editing.el.contains && this._editing.el.contains(t)));
     if (!inEditor && t && t.closest && t.closest('input,textarea,select,[contenteditable="true"]')) return;
     if (inEditor) return; // редактор обрабатывает свои клавиши сам
+    if (this._previewOn && this._previewKey(e)) return;   // круг 36
     const meta = e.ctrlKey || e.metaKey;
     const sel = (this.state.selection || []).filter((id) => this.doc && this.doc.nodes[id]);
     if (e.code === 'Space' && !meta) {
@@ -8829,5 +9744,9 @@ export {
   /* «то же самое» — правило формы поля, которое мозг зеркалит (§6.4) — */
   keepFieldForm,
   /* миграция (§6.5), перечень ссылок и правки шкалы со сдвигом (§6.1) — */
-  ensureScaleRefs, ensureScaleRefsOps, scaleRefsIn, rewriteScaleRefsOps, insertScaleStep
+  ensureScaleRefs, ensureScaleRefsOps, scaleRefsIn, rewriteScaleRefsOps, insertScaleStep,
+  /* Круг 36 (SPEC §11): микроанимации — умолчания ядра, разрешение ссылок и
+     состояний в значения отрисовки (сцене, экспорту, мозгу, инспектору) — */
+  DEFAULT_MOTION, DEFAULT_SHADOW, EASINGS, STATE_NAMES, STATE_KEYS, STATE_LIMITS, MOTION_SLOW_MS,
+  resolveMotion, resolveState, resolveShadow, motionScale, parseShadow, hasStates, transitionCss
 };

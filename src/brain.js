@@ -35,7 +35,8 @@
  *                       Круг 9: сюда попадает ТОЛЬКО доказуемо невидимое — выключка текста
  *                       шириной по содержимому и пути, чьё действие целиком видно в геометрии.
  *   cannot            — круг 9, п.4: строка по-русски, «в этой модели документа так нельзя»
- *                       (поворот, тень, градиент, анимация, ссылка). Это ОТВЕТ агента, как
+ *                       (поворот, градиент, ссылка, анимация появления; круг 36: тень и
+ *                       микроанимации состояний уже ЕСТЬ, SPEC §11). Это ОТВЕТ агента, как
  *                       clarify: error нет, ops пуст, preview — прежний документ. Приходит
  *                       из plan.intent="refuse" либо из поля cannot патча/дерева. Если часть
  *                       просьбы выполнима, ops непусты, а cannot стоит рядом с ними.
@@ -785,7 +786,7 @@ function pickEnum(raw, field, { warn, what, fallback } = {}) {
 
 /** Путь токена: colors.<имя> | type.<стиль>[.поле] | spacing | radii. Точка как [.] — см. п.4. */
 export const TOKEN_PATH_RE =
-  /^(colors[.][A-Za-z0-9_-]+|type[.][A-Za-z0-9_-]+([.](fontSize|fontWeight|lineHeight|letterSpacing|font))?|spacing|radii)$/;
+  /^(colors[.][A-Za-z0-9_-]+|type[.][A-Za-z0-9_-]+([.](fontSize|fontWeight|lineHeight|letterSpacing|font))?|spacing|radii|motion[.](fast|base|slow)|shadow[.](sm|md|lg))$/;
 
 const sizeSpecSchema = () => ({
   anyOf: [
@@ -815,6 +816,39 @@ const paddingSchema = () => ({
 });
 
 const colorSchema = () => ({ type: 'string' }); // имя токена документа или #rrggbb
+
+/**
+ * Круг 36 (SPEC §11): состояния и движение в дереве. Значения — строки или числа: ссылки на
+ * шкалы («spacing.1», «motion.fast», «shadow.md») — строки, масштаб и прозрачность — числа.
+ * Перечисления у тени и кривой даны явно: строгой грамматике провайдера так проще не промахнуться.
+ */
+const SHADOW_ENUM = ['none', 'shadow.sm', 'shadow.md', 'shadow.lg'];
+const numOrStr = () => ({ anyOf: [{ type: 'number' }, { type: 'string' }] });
+function statePatchSchema() {
+  return {
+    type: 'object',
+    properties: {
+      fill: colorSchema(), color: colorSchema(), stroke: colorSchema(),
+      opacity: { type: 'number' }, scale: { type: 'number' },
+      lift: numOrStr(),
+      shadow: { type: 'string', enum: SHADOW_ENUM },
+    },
+  };
+}
+function statesSchema() {
+  return { type: 'object', properties: { hover: statePatchSchema(), press: statePatchSchema(), focus: statePatchSchema() } };
+}
+function motionSchema() {
+  return {
+    type: 'object',
+    properties: {
+      duration: numOrStr(),
+      easing: { type: 'string', enum: ['standard', 'emphasized', 'decelerate', 'accelerate', 'linear', 'spring'] },
+      delay: { type: 'number' },
+      follow: { type: 'string', enum: ['self', 'parent'] },
+    },
+  };
+}
 
 function layoutSchema() {
   return {
@@ -848,6 +882,11 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
       style: { type: 'string' },
       align: { type: 'string', enum: ['left', 'center', 'right'] },
       src: { type: 'string' },
+      // круг 36 (SPEC §11): тень, прозрачность, состояния и движение
+      shadow: { type: 'string', enum: SHADOW_ENUM },
+      opacity: { type: 'number' },
+      states: statesSchema(),
+      motion: motionSchema(),
       /**
        * Круг 19, п.2 (SPEC §5.5): экземпляр компонента — не новая ФОРМА правки, а новый ТИП
        * УЗЛА в том же дереве. Поэтому он сразу доступен и генерации целого экрана, и правке
@@ -893,6 +932,12 @@ const TREE_HINT = `{
   style?: string,                      // имя типографического токена, только для type:"text"
   align?: "left"|"center"|"right",   // выключка текста
   src?: string,                        // только для type:"image"
+  shadow?: "shadow.sm"|"shadow.md"|"shadow.lg"|"none", opacity?: number,   // тень и прозрачность в покое
+  states?: { hover?: State, press?: State, focus?: State },   // микроанимации: вид при наведении/нажатии/фокусе
+                                       // State = { fill?, color?, stroke?, opacity?: 0..1, scale?: 0.8..1.2,
+                                       //           lift?: "spacing.<шаг>" | px, shadow?: "shadow.md"|… }
+  motion?: { duration?: "motion.fast"|"motion.base"|"motion.slow", easing?: "standard"|"emphasized"|"decelerate"|"accelerate"|"linear"|"spring",
+             delay?: number, follow?: "self"|"parent" },
   children?: Node[]                    // только для type:"frame"
 }`;
 
@@ -966,7 +1011,7 @@ export const SCHEMAS = {
       type: 'object',
       properties: {
         summary: { type: 'string' },
-        // круг 9, п.4: «поверни на 15°», «добавь тень» — в модели документа этого НЕТ. Раньше
+        // круг 9, п.4: «поверни на 15°», «сделай градиент» — в модели документа этого НЕТ. Раньше
         // модели оставалось либо выдумать поле (и получить «Ни одну правку не удалось применить»),
         // либо вернуть пустой edits (и получить «Модель не вернула ни одной правки») — в обоих
         // случаях человек видел аварию вместо главного: просить бесполезно.
@@ -1010,8 +1055,10 @@ export const SCHEMAS = {
   target: string,        // id узла ("#f12"), точное имя слоя ("Кнопка оформить") или "selection";
                          // для op:"master" — ИМЯ компонента из библиотеки ("Кнопка")
   path?: string,         // для set: "characters" | "style" | "fill" | "size.w" | "layout.gap" | "layout.padding" | "radius" | "align" ...
+                         // микроанимации: "states.hover" | "states.hover.lift" | "states.press.scale" | "motion.duration" | "shadow" ...
                          // у экземпляра компонента — только "props.<имя свойства>"
-  value?: string,        // ВСЕГДА строка: "spacing.6", "radii.4", "fill", "hug", "#101418", "accent", "Купить".
+  value?: string,        // ВСЕГДА строка: "spacing.6", "radii.4", "fill", "hug", "#101418", "accent", "Купить",
+                         // "motion.fast", "shadow.md", "0.97", "{\"lift\":\"spacing.1\",\"shadow\":\"shadow.md\"}".
                          // зазор, отступы, скругление — ссылкой на шаг шкалы ("spacing.6"); число — только мимо шкалы
                          // value:"none" (или вовсе без value) = СНЯТЬ свойство: «без заливки»,
                          // «убери скругление». Снимаются fill, stroke, color, radius, opacity,
@@ -1069,12 +1116,33 @@ export const SCHEMAS = {
          * физически не могла соблюсти правило, и каждая тема укорачивала бы шкалу. */
         spacing: { type: 'array', items: { type: 'number' }, maxItems: 24 },
         radii: { type: 'array', items: { type: 'number' }, maxItems: 16 },
+        /* Круг 36 (SPEC §11): ступени скорости анимаций (мс) и тени (CSS-тень строкой). */
+        motion: {
+          type: 'array',
+          maxItems: 3,
+          items: {
+            type: 'object',
+            properties: { name: { type: 'string', enum: ['fast', 'base', 'slow'] }, value: { type: 'number' } },
+            required: ['name', 'value'],
+          },
+        },
+        shadow: {
+          type: 'array',
+          maxItems: 3,
+          items: {
+            type: 'object',
+            properties: { name: { type: 'string', enum: ['sm', 'md', 'lg'] }, value: { type: 'string' } },
+            required: ['name', 'value'],
+          },
+        },
       },
     },
     hint: `{ summary?: string,
   colors?: [{name: string, value: "#rrggbb"}],
   type?: [{name: string, fontSize?: number, fontWeight?: number, lineHeight?: number, letterSpacing?: number, font?: string}],
-  spacing?: number[], radii?: number[] }   // шкалы — массивы ТОЙ ЖЕ длины, что сейчас: узлы ссылаются на шаги по номеру`,
+  spacing?: number[], radii?: number[],   // шкалы — массивы ТОЙ ЖЕ длины, что сейчас: узлы ссылаются на шаги по номеру
+  motion?: [{name: "fast"|"base"|"slow", value: number /* мс */}],
+  shadow?: [{name: "sm"|"md"|"lg", value: string /* "dx dy blur цвет": "0 4px 12px rgba(0,0,0,.14)" */}] }`,
     example: {
       summary: 'Тёмная палитра',
       colors: [{ name: 'canvas', value: '#0D0E12' }, { name: 'text', value: '#E8EAF0' }],
@@ -1625,12 +1693,18 @@ const DSL_RULES = `ПРАВИЛА МОДЕЛИ ДОКУМЕНТА (DSL)
    а ручные сдвиги пользователя сохраняются сами. Чтобы что-то подвинуть, есть отдельная правка
    op:"nudge" со смещением dx/dy В ПИКСЕЛЯХ от текущего места (dx<0 — влево, dy<0 — вверх).
 10. name — короткое осмысленное имя по-русски: «Шапка», «Карточка тарифа», «Кнопка оформить». Имена полей и значения-перечисления — английские, как в схеме.
-11. ЧЕГО В ЭТОЙ МОДЕЛИ НЕТ ВООБЩЕ: поворота (rotation, angle), тени (shadow, elevation), градиента,
-    размытия, анимации и перехода, ссылки и обработчика нажатия, видимости (visible, hidden), блокировки,
-    z-порядка, маски, автослоёв поверх друг друга. Если просят это — НЕ выдумывай поле и не подменяй
-    просьбу похожим («вместо тени сделаю обводку»): верни cannot с объяснением по-русски, одним-двумя
+11. ЧЕГО В ЭТОЙ МОДЕЛИ НЕТ ВООБЩЕ: поворота (rotation, angle), градиента, размытия, ссылки и
+    обработчика нажатия (куда ведёт кнопка), видимости (visible, hidden), блокировки, z-порядка, маски,
+    автослоёв поверх друг друга, а из анимаций — появления и исчезновения, бесконечных (циклических)
+    анимаций, загрузчиков и переходов между экранами. Если просят это — НЕ выдумывай поле и не подменяй
+    просьбу похожим («вместо градиента сделаю заливку»): верни cannot с объяснением по-русски, одним-двумя
     предложениями — чего именно в редакторе нет и что вместо этого можно попросить. Отказ — это
-    нормальный ответ; выдуманное поле будет отброшено, и человек останется без ответа.`;
+    нормальный ответ; выдуманное поле будет отброшено, и человек останется без ответа.
+12. ЧТО ЕСТЬ (круг 36): тень слоя (shadow: "shadow.sm" | "shadow.md" | "shadow.lg" | "none"), прозрачность
+    (opacity 0…1) и МИКРОАНИМАЦИИ — состояния слоя states.hover / states.press / states.focus (наведение,
+    нажатие, фокус: заливка, цвет текста, обводка, прозрачность, масштаб, подъём, тень) и motion — скорость
+    и характер перехода между ними. «Оживи кнопки», «добавь микроанимации», «при наведении карточка
+    приподнимается» — выполнимые просьбы, на них НЕ отказывают.`;
 
 const CONTENT_RULES = `СОДЕРЖИМОЕ
 - Текст, числа, названия, которые дал пользователь, переноси ДОСЛОВНО. Ничего не выдумывай на месте заданного и не «улучшай» формулировки.
@@ -1655,6 +1729,7 @@ function header(ctx, role) {
   lines.push(DIGEST_LEGEND);
   // Круг 20 (SPEC §6.6): как читать «gap=spacing.6(16)» — только если шкалы в документе есть
   if (ctx.scales) lines.push(SCALE_LEGEND);
+  if (ctx.motion) lines.push(MOTION_LEGEND);
   lines.push(ctx.digest);
   if (ctx.checks) {
     // Круг 3, п.5: валидатор звался только ПОСЛЕ применения, и на «проверь макет, что не так?»
@@ -1698,11 +1773,14 @@ export const PROMPTS = {
     три разных слоя; если непонятно, что с ним делать, — три разных правки;
   • до 60 знаков, без кавычек по краям, строчными, как человек сказал бы вслух.
   Лучше переспросить, чем угадать и построить лишнее: команда пришла голосом и могла недослышаться.
-- refuse — команда ПОНЯТНА, но в этой модели документа невыполнима: просят поворот, тень, градиент,
-  размытие, анимацию, ссылку, видимость, z-порядок — ничего такого у узлов нет. Тогда положи в cannot
-  одно-два русских предложения: чего именно в редакторе нет и что можно попросить вместо этого.
-  Это не clarify (переспрашивать нечего) и не повод угадывать похожую правку.`,
+- refuse — команда ПОНЯТНА, но в этой модели документа невыполнима: просят поворот, градиент,
+  размытие, ссылку, видимость, z-порядок, анимацию появления, бесконечную анимацию, загрузчик или переход
+  между экранами — ничего такого у узлов нет. Тогда положи в cannot одно-два русских предложения: чего
+  именно в редакторе нет и что можно попросить вместо этого (например, состояния наведения и нажатия).
+  Это не clarify (переспрашивать нечего) и не повод угадывать похожую правку.
+  ТЕНЬ, СОСТОЯНИЯ (наведение, нажатие, фокус) и МИКРОАНИМАЦИИ между ними В РЕДАКТОРЕ ЕСТЬ — это edit, не refuse.`,
       '',
+      `${motionRules('plan')}\n`,
       ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'plan')}\n` : '',
       ctx.scales ? `${scaleRules(ctx.scales, 'plan')}\n` : '',
       `Локальный классификатор предполагает: ${ctx.guess}. Согласись, если он прав, иначе поставь свой intent.`,
@@ -1750,6 +1828,7 @@ export const PROMPTS = {
       ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'tree')}\n` : '',
       CONTENT_RULES,
       '',
+      `${motionRules('tree')}\n`,
       ctx.personaHint ? `ХАРАКТЕР — ТВОЙ И ТОЛЬКО ТВОЙ\n${ctx.personaHint}\n` : '',
       ctx.variantHint ? `${ctx.variantHint}\n` : '',
       `КУДА ВСТАВЛЯЕМ\n${ctx.placement}`,
@@ -1785,13 +1864,17 @@ export const PROMPTS = {
 - target — id из выжимки выше (вида #f3), точное имя слоя или "selection" (ВСЕ выделенные узлы: правка повторится для каждого).
 - Цель ищется сначала внутри выделенной области, потом по всему документу. Имя из выжимки надёжнее описания.
 - path — ТОЛЬКО эти корни: characters, style, align, color, fill, stroke, radius, size.w, size.h,
-  layout.mode, layout.gap, layout.padding, layout.align, layout.justify, layout.wrap, name, opacity, src, clip.
-  Ничего другого не существует: visible, locked, hidden, onclick, z, shadow, pos и подобное будет отброшено.
+  layout.mode, layout.gap, layout.padding, layout.align, layout.justify, layout.wrap, name, opacity, src, clip,
+  shadow, states (states.hover / states.press / states.focus и их поля), motion (motion.duration, motion.easing,
+  motion.delay, motion.follow).
+  Ничего другого не существует: visible, locked, hidden, onclick, z, rotation, pos и подобное будет отброшено.
 - СНЯТЬ свойство («убери фон», «без заливки», «сними обводку», «убери скругление», «сделай
   непрозрачным») — это value:"none": {op:"set", target:"Карточка", path:"fill", value:"none"}.
   Так же понимаются "", "нет", "прозрачный", "убрать" и правка вовсе без поля value. Снимаются:
   fill, stroke, color, radius, opacity, src, clip, style, align, layout (и layout.*), override
-  (override снять — значит вернуть узел в поток раскладки после ручного перетаскивания).
+  (override снять — значит вернуть узел в поток раскладки после ручного перетаскивания), states (и
+  states.*), motion (и motion.*), shadow. Исключение: у тени value:"none" — это «без тени» (в состоянии
+  наведения — убрать тень покоя), а снять тень — правка без value.
   НЕ снимаются characters, name и size: у текста всегда есть содержимое, у узла всегда есть
   размер. «Убери текст» — это characters:"" (пустая строка) или удаление самого слоя;
   «убери ширину» — это size.w "hug" (по содержимому) или "fill" (во всю ширину).
@@ -1820,10 +1903,13 @@ export const PROMPTS = {
 - Чтобы размножить существующее, НЕ пересказывай его поддерево: {op:"duplicate", target:"Карточка встречи"}
   (можно указать parent и index) — копия делается движком со всем оформлением.
 - Размеры из выжимки («→ 350×52») — посчитанные. «На 20 пикселей шире» = size.w в "370", а не "+20".
-- Если просят то, чего в модели документа НЕТ (поворот, тень, градиент, размытие, анимация, ссылка,
-  видимость, z-порядок), не выдумывай поле и не подменяй просьбу похожим: верни {cannot: "<почему>"}
-  с пустым edits. Одно-два предложения по-русски: чего в редакторе нет и что можно попросить вместо.
+- Если просят то, чего в модели документа НЕТ (поворот, градиент, размытие, ссылка, видимость,
+  z-порядок, анимация появления, бесконечная анимация, переход между экранами), не выдумывай поле и не
+  подменяй просьбу похожим: верни {cannot: "<почему>"} с пустым edits. Одно-два предложения по-русски:
+  чего в редакторе нет и что можно попросить вместо. Тень, состояния и микроанимации — ЕСТЬ (ниже).
   Частично выполнимую просьбу делай наполовину: выполнимые правки — в edits, невыполнимую часть — в cannot.`,
+      '',
+      motionRules('patch'),
       '',
       JSON_RULE,
     ].filter(Boolean).join('\n');
@@ -1848,7 +1934,10 @@ export const PROMPTS = {
 - fontSize и lineHeight — в пикселях, ровно как в выжимке токенов выше (body 15/400/22 —
   это кегль 15 px, насыщенность 400, интерлиньяж 22 px). Интерлиньяж держи примерно в
   1.2-1.6 кегля и пиши числом пикселей, а не множителем.
-- spacing и radii — возрастающие ряды; не ломай существующий ритм без нужды.`,
+- spacing и radii — возрастающие ряды; не ломай существующий ритм без нужды.
+- motion — ступени скорости анимаций в мс (fast < base < slow; микроанимации — до 600 мс):
+  «сделай все анимации медленнее» в оформлении — увеличь все три ступени. shadow — ступени тени sm < md < lg
+  (значение — «сдвиг-x сдвиг-y размытие цвет», например "0 4px 12px rgba(16,20,24,.12)").`,
       ctx.scales ? `\n${scaleRules(ctx.scales, 'theme')}` : '',
       '',
       JSON_RULE,
@@ -1878,8 +1967,10 @@ export const PROMPTS = {
       'Исправь ИМЕННО эти нарушения и верни полный JSON по той же схеме заново. Не меняй то, что было верно.',
       // круг 9, п.4: если поле было выдумано, вторая попытка должна уметь сказать «нельзя»,
       // а не выдумывать второе такое же — иначе человек получает аварию вместо ответа
-      'Если просимого в модели документа нет вообще (поворот, тень, градиент, анимация, ссылка,'
-      + ' видимость, z-порядок), не подбирай другое поле: верни {cannot: "<почему, по-русски>"} с пустым edits.',
+      'Если просимого в модели документа нет вообще (поворот, градиент, размытие, ссылка, видимость,'
+      + ' z-порядок, анимация появления, бесконечная анимация, переход между экранами), не подбирай другое поле:'
+      + ' верни {cannot: "<почему, по-русски>"} с пустым edits. Тень, состояния (states.hover/press/focus) и'
+      + ' движение (motion) в модели ЕСТЬ — для микроанимаций используй их, а не отказ.',
       entry && entry.hint ? `Схема "${entry.name}":\n${entry.hint}` : '',
       JSON_RULE,
     ].filter(Boolean).join('\n');
@@ -2006,6 +2097,8 @@ const RE = {
     rx('оформлени'), rx('стилистик'), rx('контраст'), rx('шрифт'), rx('типографик'),
     // круг 20 (SPEC §6): «сделай шкалу отступов просторнее» — правка ТОКЕНОВ, а не узла
     rx('шкал\\p{L}*\\s+(отступ|скруглен|радиус)'),
+    // круг 36 (SPEC §11): «сделай шкалу движения медленнее» — ступени motion.* в токенах
+    rx('шкал\\p{L}*\\s+(движени|скорост|анимаци|тен)'),
   ],
   create: [
     rx('созда(й|ть|йте)'), rx('св[её]рстай'), rx('собери'), rx('построй'),
@@ -2549,13 +2642,18 @@ export function classifyUtterance(utterance, { hasSelection = false, doc = null,
   // «добавь новый экран» — всё-таки create; «добавь в шапку кнопку» — правка
   const addsScreen = RE_NEW_ARTBOARD.test(s) || RE_ARTBOARD_WORD.test(s) || RE_WHOLE_SCREEN.test(s);
   const addsInto = isAdd && !addsScreen && RE_ADD_PLACE.test(s);
-  const isCreate = anyMatch(RE.create, s) || (isAdd && !addsInto);
-  const isEdit = anyMatch(RE.edit, s) || addsInto;
+  /* Круг 36 (SPEC §11): «добавь микроанимации», «оживи кнопки», «при наведении карточка
+   * приподнимается» — правка существующих слоёв (states/motion), а не новый блок: «добавь»
+   * здесь не создаёт слоёв. Новый экран, названный прямо, остаётся созданием. */
+  const micro = !addsScreen && looksMicroAnimation(s);
+  const isCreate = !micro && (anyMatch(RE.create, s) || (isAdd && !addsInto));
+  const isEdit = micro || anyMatch(RE.edit, s) || addsInto;
 
   if (isAsk && !isCreate && !isEdit && !isTheme) return { intent: 'ask', confidence: 0.9, reason: 'вопросительная форма' };
   if (isAsk && !isCreate && !isEdit) return { intent: 'ask', confidence: 0.6, reason: 'вопрос об оформлении' };
   if (isTheme && !isCreate) return { intent: 'theme', confidence: isEdit ? 0.7 : 0.85, reason: 'слова про оформление и токены' };
   if (isCreate && !isEdit) return { intent: 'create', confidence: hasSelection ? 0.75 : 0.9, reason: 'глагол создания' };
+  if (micro && !isCreate) return { intent: 'edit', confidence: hasSelection ? 0.9 : 0.7, reason: 'микроанимации — состояния и движение существующих слоёв' };
   if (isEdit && !isCreate) return { intent: 'edit', confidence: hasSelection ? 0.9 : 0.6, reason: 'глагол изменения' };
   if (isCreate && isEdit) {
     return hasSelection
@@ -2870,6 +2968,8 @@ export function describeTokens(doc) {
   if (!has('spacing')) out.push('spacing: (нет)');
   if (!has('radii')) out.push('radii: (нет)');
   out.push(...scaled);
+  // круг 36 (SPEC §11): ступени скорости анимации и тени — модель отвечает ссылками на них
+  out.push(...motionTokenLines(doc));
   return out.join('\n');
 }
 
@@ -3465,6 +3565,853 @@ function scalesOf(doc, engine) {
   return spacing.length || radii.length ? { spacing, radii } : null;
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * 6c. Микроанимации: состояния и движение (круг 36, SPEC §11)
+ *
+ * До этого круга модель честно отвечала «в редакторе нет анимаций»: так ей велели правила
+ * промпта (DSL_RULES п.11, планировщик, правила правок, починка), и мозг отбрасывал путь
+ * `states`/`shadow` как выдуманный. Теперь в документе есть состояния узла (наведение,
+ * нажатие, фокус) — только визуальная надстройка, раскладку не трогает, — и движение между
+ * ними. Здесь всё, что мозгу нужно о них знать: пути, значения, слова для человека.
+ *
+ * Длительность — ССЫЛКОЙ на ступень шкалы движения («motion.fast»), как отступы — ссылкой
+ * на шаг (§6.6): число, равное ступени, становится ссылкой; число, которого человек не
+ * называл, — ближайшей ступенью; названное человеком — остаётся числом.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Состояния узла (§11.1) — порядок важен: так их перечисляют выжимка и описание правки. */
+export const STATE_NAMES = ['hover', 'press', 'focus'];
+/** Поля состояния: только визуальное (раскладку состояние не меняет). */
+export const STATE_FIELDS = ['fill', 'color', 'stroke', 'opacity', 'scale', 'lift', 'shadow'];
+/** Поля движения. */
+export const MOTION_FIELDS = ['duration', 'easing', 'delay', 'follow'];
+/** Кривые движения (§11.1). */
+export const EASINGS = ['standard', 'emphasized', 'decelerate', 'accelerate', 'linear', 'spring'];
+/** Ступени шкалы движения и тени — в порядке возрастания. */
+export const MOTION_STEPS = ['fast', 'base', 'slow'];
+export const SHADOW_STEPS = ['sm', 'md', 'lg'];
+/** Умолчания ядра (§11.1): документ без tokens.motion работает на них. */
+export const MOTION_DEFAULTS = { fast: 120, base: 200, slow: 320 };
+/** Микроанимация дольше этого — вязкая (валидатор: motion-slow, §11.2). */
+export const MICRO_MAX_MS = 600;
+const MOTION_MAX_MS = 2000;
+const DELAY_MAX_MS = 1000;
+const LIFT_MAX = 24;
+const SCALE_MIN = 0.8;
+const SCALE_MAX = 1.2;
+
+const MOTION_REF_RE = /^motion\.(fast|base|slow)$/;
+const SHADOW_REF_RE = /^shadow\.(sm|md|lg)$/;
+
+/** Состояния словами (как вкладки инспектора §11.3). */
+export const STATE_RU = {
+  hover: { nom: 'наведение', at: 'при наведении', cap: 'Наведение' },
+  press: { nom: 'нажатие', at: 'при нажатии', cap: 'Нажатие' },
+  focus: { nom: 'фокус', at: 'в фокусе', cap: 'Фокус' },
+};
+const STATE_FIELD_RU = {
+  fill: 'заливка', color: 'цвет текста', stroke: 'обводка', opacity: 'непрозрачность',
+  scale: 'масштаб', lift: 'подъём', shadow: 'тень',
+};
+const STATE_FIELD_RU_GEN = {
+  fill: 'заливки', color: 'цвета текста', stroke: 'обводки', opacity: 'непрозрачности',
+  scale: 'масштаба', lift: 'подъёма', shadow: 'тени',
+};
+const MOTION_FIELD_RU = { duration: 'скорость анимации', easing: 'характер движения', delay: 'задержка анимации', follow: 'анимация вместе с родителем' };
+const MOTION_FIELD_RU_GEN = { duration: 'скорости анимации', easing: 'характера движения', delay: 'задержки анимации', follow: 'следования за родителем' };
+export const SHADOW_RU = { none: 'без тени', 'shadow.sm': 'лёгкая', 'shadow.md': 'средняя', 'shadow.lg': 'сильная' };
+export const EASING_RU = {
+  standard: 'обычное', emphasized: 'выразительное', decelerate: 'с замедлением в конце',
+  accelerate: 'с разгоном', linear: 'равномерное', spring: 'пружинистое',
+};
+const MOTION_STEP_RU = { fast: 'быстро', base: 'обычно', slow: 'медленно' };
+
+/** Синонимы имён состояний: так их называют CSS и дизайнерские инструменты. */
+const STATE_ALIASES = {
+  hover: 'hover', hovered: 'hover', ':hover': 'hover', onhover: 'hover', mouseover: 'hover', over: 'hover',
+  наведение: 'hover', ховер: 'hover',
+  press: 'press', pressed: 'press', active: 'press', ':active': 'press', down: 'press', tap: 'press',
+  onpress: 'press', click: 'press', нажатие: 'press',
+  focus: 'focus', focused: 'focus', ':focus': 'focus', 'focus-visible': 'focus', ':focus-visible': 'focus', фокус: 'focus',
+};
+/** Синонимы полей состояния. */
+const STATE_FIELD_ALIASES = {
+  fill: 'fill', background: 'fill', bg: 'fill', backgroundcolor: 'fill', 'background-color': 'fill',
+  color: 'color', textcolor: 'color', 'text-color': 'color', foreground: 'color',
+  stroke: 'stroke', border: 'stroke', bordercolor: 'stroke', outline: 'stroke',
+  opacity: 'opacity', alpha: 'opacity',
+  scale: 'scale', zoom: 'scale', 'transform.scale': 'scale',
+  lift: 'lift', translatey: 'lift', y: 'lift', raise: 'lift', elevate: 'lift', offset: 'lift', rise: 'lift',
+  shadow: 'shadow', boxshadow: 'shadow', 'box-shadow': 'shadow', elevation: 'shadow', dropshadow: 'shadow',
+};
+/** Синонимы полей движения. */
+const MOTION_FIELD_ALIASES = {
+  duration: 'duration', time: 'duration', speed: 'duration', transitionduration: 'duration', ms: 'duration',
+  easing: 'easing', ease: 'easing', curve: 'easing', timing: 'easing', timingfunction: 'easing',
+  'timing-function': 'easing', transitiontimingfunction: 'easing',
+  delay: 'delay', transitiondelay: 'delay',
+  follow: 'follow', follows: 'follow', trigger: 'follow',
+};
+/** Головы путей, которыми модель зовёт состояния и движение по-вебовски. */
+const MOTION_HEAD_ALIASES = {
+  transition: 'motion', animation: 'motion', animate: 'motion', anim: 'motion', motion: 'motion',
+  state: 'states', states: 'states', interactions: 'states', interaction: 'states',
+  boxshadow: 'shadow', 'box-shadow': 'shadow', elevation: 'shadow', dropshadow: 'shadow', shadow: 'shadow',
+  duration: 'motion.duration', transitionduration: 'motion.duration',
+  easing: 'motion.easing', timingfunction: 'motion.easing', transitiontimingfunction: 'motion.easing',
+  delay: 'motion.delay', transitiondelay: 'motion.delay',
+};
+
+/**
+ * Путь состояний/движения от модели → путь документа: «hover.lift» → «states.hover.lift»,
+ * «states.active.background» → «states.press.fill», «transition.duration» → «motion.duration»,
+ * «boxShadow» → «shadow». Чужой путь возвращается как есть. Длительность внутри состояния
+ * («states.hover.duration») — это движение узла: у состояния своей длительности нет.
+ */
+export function normalizeMotionPath(path) {
+  const p = String(path == null ? '' : path).trim();
+  if (!p) return p;
+  const parts = p.split('.');
+  const low = (s) => String(s).toLowerCase();
+  let head = low(parts[0]);
+  if (STATE_ALIASES[head] && parts.length <= 2) return ['states', STATE_ALIASES[head], ...parts.slice(1)].map((s, i) => (i === 2 ? (STATE_FIELD_ALIASES[low(s)] || s) : s)).join('.');
+  if (MOTION_HEAD_ALIASES[head] === undefined) return p;
+  head = MOTION_HEAD_ALIASES[head];
+  if (head === 'shadow') return parts.length === 1 ? 'shadow' : p;
+  if (head.indexOf('motion.') === 0) return parts.length === 1 ? head : p;
+  if (head === 'motion') {
+    if (parts.length === 1) return 'motion';
+    const f = MOTION_FIELD_ALIASES[low(parts[1])];
+    return f && parts.length === 2 ? `motion.${f}` : ['motion', ...parts.slice(1)].join('.');
+  }
+  // states
+  if (parts.length === 1) return 'states';
+  const st = STATE_ALIASES[low(parts[1])] || parts[1];
+  if (parts.length === 2) return `states.${st}`;
+  const rest = parts.slice(2).join('.');
+  const lowRest = low(rest);
+  if (MOTION_FIELD_ALIASES[lowRest] && !STATE_FIELD_ALIASES[lowRest]) return `motion.${MOTION_FIELD_ALIASES[lowRest]}`;
+  const f = STATE_FIELD_ALIASES[lowRest] || STATE_FIELD_ALIASES[low(parts[2])] || parts[2];
+  return parts.length === 3 || STATE_FIELD_ALIASES[lowRest] ? `states.${st}.${f}` : `states.${st}.${parts.slice(2).join('.')}`;
+}
+
+/**
+ * Разбор пути состояний/движения. null — путь не про них.
+ * {kind:'states'} | {kind:'state', state} | {kind:'stateField', state, field}
+ * | {kind:'motion'} | {kind:'motionField', field} | {kind:'shadow'} | {bad: 'почему по-русски'}
+ */
+export function motionPathInfo(path) {
+  const p = String(path == null ? '' : path);
+  const parts = p.split('.');
+  const head = parts[0];
+  if (head === 'shadow') return parts.length === 1 ? { kind: 'shadow' } : { bad: 'тень задаётся одним значением — ступенью «мягкая», «средняя» или «сильная»' };
+  if (head === 'states') {
+    if (parts.length === 1) return { kind: 'states' };
+    const state = parts[1];
+    if (!STATE_NAMES.includes(state)) {
+      return { bad: `состояния «${state}» нет — есть наведение, нажатие и фокус` };
+    }
+    if (parts.length === 2) return { kind: 'state', state };
+    const field = parts[2];
+    if (parts.length > 3 || !STATE_FIELDS.includes(field)) {
+      return { bad: `в состоянии «${STATE_RU[state].nom}» нет поля «${parts.slice(2).join('.')}» — есть заливка,`
+        + ' цвет текста, обводка, прозрачность, масштаб, подъём и тень; размеры и отступы состояние не меняет' };
+    }
+    return { kind: 'stateField', state, field };
+  }
+  if (head === 'motion') {
+    if (parts.length === 1) return { kind: 'motion' };
+    const field = parts[1];
+    if (parts.length > 2 || !MOTION_FIELDS.includes(field)) {
+      return { bad: `у движения нет поля «${parts.slice(1).join('.')}» — есть скорость, характер движения, задержка и следование за родителем` };
+    }
+    return { kind: 'motionField', field };
+  }
+  return null;
+}
+
+/** Путь про состояния, движение или тень? */
+export function isMotionPath(path) {
+  const head = String(path == null ? '' : path).split('.')[0];
+  return head === 'states' || head === 'motion' || head === 'shadow';
+}
+
+/** Все пути состояний и движения — для белого списка «снять» (CLEARABLE_PATHS). */
+function motionClearablePaths() {
+  const out = ['states', 'motion', 'shadow'];
+  for (const st of STATE_NAMES) {
+    out.push(`states.${st}`);
+    for (const f of STATE_FIELDS) out.push(`states.${st}.${f}`);
+  }
+  for (const f of MOTION_FIELDS) out.push(`motion.${f}`);
+  return out;
+}
+
+/** Путь словами человека (именительный) — или null, если путь не про состояния. */
+function motionPathRu(path, gen = false) {
+  const info = motionPathInfo(path);
+  if (!info || info.bad) return null;
+  if (info.kind === 'shadow') return gen ? 'тени' : 'тень';
+  if (info.kind === 'states') return gen ? 'состояний' : 'состояния';
+  if (info.kind === 'state') return gen ? `состояния «${STATE_RU[info.state].nom}»` : STATE_RU[info.state].nom;
+  if (info.kind === 'stateField') return `${(gen ? STATE_FIELD_RU_GEN : STATE_FIELD_RU)[info.field]} ${STATE_RU[info.state].at}`;
+  if (info.kind === 'motion') return gen ? 'анимации' : 'анимация';
+  if (info.kind === 'motionField') return (gen ? MOTION_FIELD_RU_GEN : MOTION_FIELD_RU)[info.field];
+  return null;
+}
+
+/** Ступени шкалы движения документа (умолчания ядра — где своих нет). */
+export function motionSteps(doc) {
+  const own = doc && doc.tokens && doc.tokens.motion;
+  const out = {};
+  for (const k of MOTION_STEPS) {
+    const v = own && typeof own === 'object' ? own[k] : undefined;
+    out[k] = typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : MOTION_DEFAULTS[k];
+  }
+  return out;
+}
+
+/** Длительность → мс: число как есть, ссылка — значением ступени (мёртвая — undefined). */
+export function motionMs(doc, v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
+  const m = MOTION_REF_RE.exec(String(v == null ? '' : v).trim());
+  if (!m) return undefined;
+  return motionSteps(doc)[m[1]];
+}
+
+/** Длительность узла с учётом умолчания (motion.duration не задана → ступень «base»). */
+function nodeMotionMs(doc, node) {
+  const d = node && node.motion && typeof node.motion === 'object' ? node.motion.duration : undefined;
+  const ms = d === undefined ? motionSteps(doc).base : motionMs(doc, d);
+  return ms === undefined ? motionSteps(doc).base : ms;
+}
+
+/** Длительность в миллисекундах из того, как её пишут: 200, «200ms», «0.2s», «0,2 с», «200 мс». */
+function parseMs(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  const s = String(raw == null ? '' : raw).trim().toLowerCase().replace(/\s+/g, ' ');
+  const m = /^(-?\d+(?:[.,]\d+)?)\s*(ms|мс|миллисекунд\p{L}*|s|с|сек\p{L}*|секунд\p{L}*)?$/u.exec(s);
+  if (!m) return null;
+  const n = Number(m[1].replace(',', '.'));
+  if (!Number.isFinite(n)) return null;
+  const unit = m[2] || '';
+  return /^(s|с|сек)/u.test(unit) ? Math.round(n * 1000) : n;
+}
+
+/** Слово-ступень → ссылка: «быстро», «fast», «motion.fast» → 'motion.fast'. */
+function motionRefOf(raw) {
+  const s = String(raw == null ? '' : raw).trim().toLowerCase().replace(/ё/g, 'е');
+  const m = /^motion\s*[.\-_ ]\s*(fast|base|slow)(?:\s*\(\s*\d+\s*(?:ms|мс)?\s*\))?$/.exec(s);
+  if (m) return `motion.${m[1]}`;
+  if (/^(fast|quick|short|быстр\p{L}*|коротк\p{L}*|шустр\p{L}*)$/u.test(s)) return 'motion.fast';
+  if (/^(base|normal|default|medium|regular|standard|обычн\p{L}*|средн\p{L}*|нормальн\p{L}*)$/u.test(s)) return 'motion.base';
+  if (/^(slow|long|медлен\p{L}*|долг\p{L}*|неспешн\p{L}*|плавн\p{L}*)$/u.test(s)) return 'motion.slow';
+  return null;
+}
+
+/** Слово-тень → ссылка: «средняя», «md», «shadow.md» → 'shadow.md'; «нет» → 'none'. */
+function shadowRefOf(raw) {
+  const s = String(raw == null ? '' : raw).trim().toLowerCase().replace(/ё/g, 'е');
+  if (!s) return null;
+  const m = /^shadow\s*[.\-_ ]\s*(sm|md|lg|xs|xl|small|medium|large)$/.exec(s);
+  const key = m ? m[1] : s;
+  if (/^(none|no|нет|без\s+тени|0|off|flat|плоск\p{L}*)$/u.test(key)) return 'none';
+  if (/^(sm|xs|s|small|soft|light|subtle|мягк\p{L}*|легк\p{L}*|слаб\p{L}*|маленьк\p{L}*|тонк\p{L}*|небольш\p{L}*)$/u.test(key)) return 'shadow.sm';
+  if (/^(md|m|medium|base|normal|default|средн\p{L}*|обычн\p{L}*|нормальн\p{L}*)$/u.test(key)) return 'shadow.md';
+  if (/^(lg|xl|l|large|strong|deep|heavy|сильн\p{L}*|глубок\p{L}*|больш\p{L}*|крупн\p{L}*|густ\p{L}*)$/u.test(key)) return 'shadow.lg';
+  return null;
+}
+
+/**
+ * Описание тени для шкалы теней: «dx dy blur цвет» (px можно писать или нет; цвет — #hex или
+ * rgb()/rgba()) или 'none'. Через движок (core.parseShadow), иначе — зеркало его правила:
+ * отвергнутое ядром значение уронило бы всю тему одной транзакцией.
+ */
+function shadowDescOk(v, engine) {
+  if (engine && typeof engine.parseShadow === 'function') {
+    try { return engine.parseShadow(v) !== null; } catch { /* зеркало ниже */ }
+  }
+  if (typeof v !== 'string' || v.length > 120) return false;
+  const s = v.trim();
+  if (s === 'none') return true;
+  const m = /^(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/.exec(s);
+  if (!m) return false;
+  const len = /^-?(\d+(\.\d+)?|\.\d+)(px)?$/;
+  if (![m[1], m[2], m[3]].every((x) => len.test(x))) return false;
+  const [dx, dy, blur] = [m[1], m[2], m[3]].map((x) => parseFloat(x));
+  if (Math.abs(dx) > 200 || Math.abs(dy) > 200 || blur < 0 || blur > 200) return false;
+  return /^(#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*(0|1|0?\.\d+|1\.0+)\s*)?\))$/.test(m[4].trim());
+}
+
+/** Кривая движения: своё имя или очевидный синоним (о подстановке говорим). */
+function easingOf(raw, note, what) {
+  const s = String(raw == null ? '' : raw).trim().toLowerCase().replace(/[_\s]+/g, '-').replace(/ё/g, 'е');
+  if (EASINGS.includes(s)) return s;
+  const syn = /^(ease|ease-in-out|in-out|smooth|standard-curve|cubic-bezier.*|плавн\p{L}*|обычн\p{L}*)$/u.test(s) ? 'standard'
+    : /^(ease-out|out|decel\p{L}*|замедл\p{L}*|тормож\p{L}*)$/u.test(s) ? 'decelerate'
+      : /^(ease-in|in|accel\p{L}*|ускор\p{L}*|разгон\p{L}*)$/u.test(s) ? 'accelerate'
+        : /^(linear|линейн\p{L}*|равномерн\p{L}*)$/u.test(s) ? 'linear'
+          : /^(spring|bounce|bouncy|elastic|пружин\p{L}*|упруг\p{L}*)$/u.test(s) ? 'spring'
+            : /^(emphasi[sz]ed?|expressive|выразит\p{L}*|акцентн\p{L}*)$/u.test(s) ? 'emphasized' : null;
+  if (syn) {
+    if (note) note(`«${String(raw)}» — так кривую движения зовут в CSS: понял как «${EASING_RU[syn]}»`);
+    return syn;
+  }
+  if (note) {
+    note(`${what}: кривой движения «${String(raw)}» нет — есть ${EASINGS.map((e) => `«${EASING_RU[e]}»`).join(', ')};`
+      + ' правка пропущена');
+  }
+  return undefined;
+}
+
+/** Прозрачность: 0…1, «60%» и «60» — это 0.6 (общая для узла и состояния). */
+function opacityValue(v, note, what) {
+  const pct = typeof v === 'string' && /^-?\d+(?:[.,]\d+)?\s*%$/.test(v.trim());
+  const n = pct ? Number(v.trim().replace('%', '').replace(',', '.').trim()) / 100 : Number(typeof v === 'string' ? v.replace(',', '.') : v);
+  if (!Number.isFinite(n)) { note(`${what}: «${v}» — не число: правка пропущена`); return undefined; }
+  if (n >= 0 && n <= 1) return n;
+  if (n > 1 && n <= 100) {
+    const got = Math.round(n) / 100;
+    note(`${what}: ${n} понял как ${Math.round(n)}% — поставил ${got}`);
+    return got;
+  }
+  note(`${what}: ${n} — прозрачность задаётся числом от 0 до 1: правка пропущена`);
+  return undefined;
+}
+
+/** Масштаб в состоянии: 0.8…1.2; «97%» и «97» — это 0.97. */
+function scaleFactor(v, note, what) {
+  const s = typeof v === 'string' ? v.trim().replace(',', '.') : v;
+  const pct = typeof s === 'string' && /%$/.test(s);
+  let n = Number(typeof s === 'string' ? s.replace(/%$/, '').replace(/^x|x$/i, '').trim() : s);
+  if (!Number.isFinite(n)) { note(`${what}: «${v}» — не число: правка пропущена`); return undefined; }
+  if (pct || (n > 2 && n <= 200)) n = Math.round(n) / 100;
+  if (n < SCALE_MIN || n > SCALE_MAX) {
+    const got = Math.min(SCALE_MAX, Math.max(SCALE_MIN, n));
+    note(`${what}: ${n} — для микроанимации слишком сильно (масштаб от ${SCALE_MIN} до ${SCALE_MAX}), поставил ${got}`);
+    return got;
+  }
+  return Math.round(n * 1000) / 1000;
+}
+
+/**
+ * Подъём: шаг шкалы отступов («spacing.1») или px от −24 до 24. Число вверх — по правилу шкал
+ * (§6.6, scaleValue): на шаге — ссылка, мимо шкалы и не названо человеком — ближайший шаг.
+ * Вниз (отрицательное) шкалы нет — остаётся числом.
+ */
+function liftValue(raw, doc, note, what, opts = {}) {
+  const bare = raw && typeof raw === 'object' && !Array.isArray(raw) && raw.value !== undefined ? raw.value : raw;
+  const ref = parseRef(bare);
+  if (ref) {
+    const got = scaleValue(ref.ref, 'spacing', doc, note, what, opts);
+    if (got === undefined) return undefined;
+    const px = scaleNum(doc, got, 'spacing', opts.engine);
+    if (px !== undefined && px > LIFT_MAX) {
+      const steps = stepsOf(doc, 'spacing', opts.engine);
+      let best = -1;
+      steps.forEach((v, i) => { if (typeof v === 'number' && v <= LIFT_MAX && (best < 0 || v > steps[best])) best = i; });
+      if (best < 0) { note(`${what}: подъём больше ${LIFT_MAX} px — для микроанимации слишком сильно; правка пропущена`); return undefined; }
+      note(`${what}: подъём ${px} px — для микроанимации слишком сильно, взял ${steps[best]} px`);
+      return `spacing.${best}`;
+    }
+    return got;
+  }
+  const px = parsePx(bare);
+  if (!px) { note(`${what}: «${typeof bare === 'object' ? JSON.stringify(bare) : bare}» — не число пикселей: правка пропущена`); return undefined; }
+  let n = Math.round(px.n * 100) / 100;
+  if (Math.abs(n) > LIFT_MAX) {
+    const got = n > 0 ? LIFT_MAX : -LIFT_MAX;
+    note(`${what}: ${n} px — для микроанимации слишком сильно (сдвиг от −${LIFT_MAX} до ${LIFT_MAX} px), поставил ${got}`);
+    n = got;
+  }
+  if (n < 0) return n;
+  return scaleValue(n, 'spacing', doc, note, what, opts);
+}
+
+/**
+ * Длительность: ссылка на ступень или мс 0…2000. Число на ступени → ссылка; число, названное
+ * человеком, — числом; придуманное моделью — ближайшей ступенью (как шаги шкал, §6.6).
+ */
+function durationValue(raw, doc, note, what, opts = {}) {
+  const bare = raw && typeof raw === 'object' && !Array.isArray(raw) && raw.value !== undefined ? raw.value : raw;
+  const ref = typeof bare === 'string' ? motionRefOf(bare) : null;
+  if (ref) return ref;
+  let n = parseMs(bare);
+  if (n == null) {
+    note(`${what}: «${typeof bare === 'object' ? JSON.stringify(bare) : bare}» — не длительность:`
+      + ' скажите «быстро», «обычно», «медленно» или число миллисекунд; правка пропущена');
+    return undefined;
+  }
+  if (n < 0 || n > MOTION_MAX_MS) {
+    const got = n < 0 ? 0 : MOTION_MAX_MS;
+    note(`${what}: ${n} мс — длительность бывает от 0 до ${MOTION_MAX_MS} мс, поставил ${got}`);
+    n = got;
+  }
+  const steps = motionSteps(doc);
+  const exact = MOTION_STEPS.find((k) => steps[k] === n);
+  if (exact) return `motion.${exact}`;
+  if (n === 0 || opts.quiet) return n;
+  const said = String(opts.said == null ? '' : opts.said);
+  const named = saidNumber(said, n) || saidNumber(said, n / 1000);
+  if (named || n > MICRO_MAX_MS) {
+    // больше 600 мс — уже не микроанимация; если так вышло, пусть будет видно числом (предупредим ниже)
+    return n;
+  }
+  const near = MOTION_STEPS.reduce((best, k) => (Math.abs(steps[k] - n) < Math.abs(steps[best] - n) ? k : best), 'fast');
+  note(`${what}: ${n} мс — мимо шкалы движения, взял ближайшую ступень «${MOTION_STEP_RU[near]}» (${steps[near]} мс).`
+    + ` Скажите «ровно ${n} мс», если нужно именно это число`);
+  return `motion.${near}`;
+}
+
+/** Задержка: мс 0…1000. */
+function delayValue(raw, note, what) {
+  let n = parseMs(raw);
+  if (n == null) { note(`${what}: «${raw}» — не число миллисекунд: правка пропущена`); return undefined; }
+  if (n < 0 || n > DELAY_MAX_MS) {
+    const got = n < 0 ? 0 : DELAY_MAX_MS;
+    note(`${what}: ${n} мс — задержка бывает от 0 до ${DELAY_MAX_MS} мс, поставил ${got}`);
+    n = got;
+  }
+  return n;
+}
+
+/** Следование: 'self' | 'parent'. */
+function followValue(raw, note, what) {
+  if (raw === true) return 'parent';
+  if (raw === false) return 'self';
+  const s = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (/^(parent|group|ancestor|родител\p{L}*|предок|вместе.*|группа)$/u.test(s)) return 'parent';
+  if (/^(self|own|сам\p{L}*|свое|своё)$/u.test(s)) return 'self';
+  note(`${what}: «${raw}» — нужно «сам» или «вместе с родителем»; правка пропущена`);
+  return undefined;
+}
+
+/** Тень: ступень или 'none'. */
+function shadowValue(raw, note, what) {
+  const bare = raw && typeof raw === 'object' && !Array.isArray(raw) && raw.value !== undefined ? raw.value : raw;
+  if (bare && typeof bare === 'object') {
+    note(`${what}: тень задаётся ступенью — «мягкая», «средняя» или «сильная», а не размерами; правка пропущена`);
+    return undefined;
+  }
+  const got = shadowRefOf(bare);
+  if (got) return got;
+  note(`${what}: тени «${bare}» нет — есть «мягкая», «средняя», «сильная» и «без тени»; правка пропущена`);
+  return undefined;
+}
+
+/** Поле состояния → значение документа (или undefined с объяснением). */
+function stateFieldValue(field, raw, doc, note, what, opts = {}) {
+  if (field === 'fill' || field === 'color' || field === 'stroke') return normColor(raw, doc, note, what);
+  if (field === 'opacity') return opacityValue(raw, note, what);
+  if (field === 'scale') return scaleFactor(raw, note, what);
+  if (field === 'lift') return liftValue(raw, doc, note, what, opts);
+  if (field === 'shadow') return shadowValue(raw, note, what);
+  return undefined;
+}
+
+/** Поле движения → значение документа. */
+function motionFieldValue(field, raw, doc, note, what, opts = {}) {
+  if (field === 'duration') return durationValue(raw, doc, note, what, opts);
+  if (field === 'easing') return easingOf(raw, note, what);
+  if (field === 'delay') return delayValue(raw, note, what);
+  if (field === 'follow') return followValue(raw, note, what);
+  return undefined;
+}
+
+/** Объект из строки-JSON или как есть. */
+function objOf(v) {
+  if (typeof v === 'string' && /^\s*\{/.test(v)) { const p = tryParse(v.trim()); if (p !== undefined) return p; }
+  return v;
+}
+
+/** Состояние целиком: {fill?, color?, …}. Незнакомые поля отбрасываются со словами. */
+function statePatchValue(raw, state, doc, note, opts = {}) {
+  const v = objOf(raw);
+  const who = `${STATE_RU[state].cap}`;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) {
+    note(`${who}: состояние задаётся набором полей (заливка, цвет текста, тень, подъём, масштаб…), а пришло «${String(raw)}»; правка пропущена`);
+    return undefined;
+  }
+  const out = {};
+  for (const [k0, val] of Object.entries(v)) {
+    if (UNSAFE_KEYS.has(k0)) continue;
+    const key = STATE_FIELD_ALIASES[String(k0).toLowerCase()] || k0;
+    if (!STATE_FIELDS.includes(key)) {
+      if (MOTION_FIELD_ALIASES[String(k0).toLowerCase()]) {
+        note(`${who}: «${k0}» — это про движение слоя, а не про состояние: скорость задаётся одна на все состояния`);
+      } else {
+        note(`${who}: поля «${k0}» у состояния нет — состояние меняет только вид (заливку, цвет текста, обводку,`
+          + ' прозрачность, масштаб, подъём, тень), а не размеры и раскладку; поле пропущено');
+      }
+      continue;
+    }
+    if (val == null || (typeof val === 'string' && !val.trim())) continue;
+    const got = stateFieldValue(key, val, doc, note, `${who}, ${STATE_FIELD_RU[key]}`, opts);
+    if (got !== undefined) out[key] = got;
+  }
+  if (!Object.keys(out).length) {
+    note(`${who}: ни одного годного поля — правка пропущена`);
+    return undefined;
+  }
+  return out;
+}
+
+/** Все состояния: {hover?, press?, focus?}. */
+function statesValue(raw, doc, note, opts = {}) {
+  const v = objOf(raw);
+  if (!v || typeof v !== 'object' || Array.isArray(v)) {
+    note(`Состояния задаются как {наведение, нажатие, фокус}, а пришло «${String(raw)}»; правка пропущена`);
+    return undefined;
+  }
+  const out = {};
+  for (const [k0, val] of Object.entries(v)) {
+    if (UNSAFE_KEYS.has(k0)) continue;
+    const st = STATE_ALIASES[String(k0).toLowerCase()];
+    if (!st) { note(`Состояния «${k0}» нет — есть наведение, нажатие и фокус; пропущено`); continue; }
+    if (val == null) continue;
+    const got = statePatchValue(val, st, doc, note, opts);
+    if (got) out[st] = got;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Движение целиком: {duration?, easing?, delay?, follow?}. Строка-ступень — это длительность. */
+function motionValue(raw, doc, note, opts = {}) {
+  let v = objOf(raw);
+  if (typeof v === 'string' || typeof v === 'number') v = { duration: v };
+  if (!v || typeof v !== 'object' || Array.isArray(v)) {
+    note(`Движение задаётся скоростью и характером, а пришло «${String(raw)}»; правка пропущена`);
+    return undefined;
+  }
+  const out = {};
+  for (const [k0, val] of Object.entries(v)) {
+    if (UNSAFE_KEYS.has(k0)) continue;
+    const key = MOTION_FIELD_ALIASES[String(k0).toLowerCase()] || k0;
+    if (!MOTION_FIELDS.includes(key)) { note(`У движения нет поля «${k0}» — пропущено`); continue; }
+    if (val == null || (typeof val === 'string' && !val.trim())) continue;
+    const got = motionFieldValue(key, val, doc, note, `Анимация, ${MOTION_FIELD_RU[key]}`, opts);
+    if (got !== undefined) out[key] = got;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Значение правки по пути состояний/движения/тени (вызывается из coerceValue).
+ * @returns {*} значение | undefined (пропуск, причина сказана)
+ */
+function motionCoerce(raw, path, doc, note, opts = {}) {
+  const info = motionPathInfo(path);
+  if (!info) return raw;
+  if (info.bad) { note(`Правка «${path}»: ${info.bad}; правка пропущена`); return undefined; }
+  const what = `Правка «${motionPathRu(path) || path}»`;
+  if (info.kind === 'shadow') return shadowValue(raw, note, what);
+  if (info.kind === 'states') return statesValue(raw, doc, note, opts);
+  if (info.kind === 'state') return statePatchValue(raw, info.state, doc, note, opts);
+  if (info.kind === 'stateField') return stateFieldValue(info.field, raw, doc, note, what, opts);
+  if (info.kind === 'motion') return motionValue(raw, doc, note, opts);
+  if (info.kind === 'motionField') return motionFieldValue(info.field, raw, doc, note, what, opts);
+  return undefined;
+}
+
+/** Кому принадлежит поле состояния (как у одноимённого поля узла, §11.1). */
+const STATE_FIELD_OWNERS = {
+  fill: ['frame', 'rect', 'ellipse', 'image', 'instance'],
+  stroke: ['frame', 'rect', 'ellipse', 'image', 'instance'],
+  color: ['text'],
+};
+
+/**
+ * Сверка пути состояний с типом цели (зовётся из adjustSetPath).
+ *   • у страницы состояний и тени нет (§11.1, state-on-page) — пропуск со словами;
+ *   • «цвет текста при наведении» у кнопки-фрейма → у её единственного текста, и этот
+ *     текст следует за кнопкой (motion.follow = 'parent'): наводят на кнопку, а не на букву;
+ *   • заливка/обводка при наведении у текста — пропуск с подсказкой про цвет текста.
+ * @returns {{id, path, follow?:boolean}|null}
+ */
+function adjustMotionPath(doc, id, path, note) {
+  const node = nodeOf(doc, id);
+  if (!node) return { id, path };
+  const who = nameOrId(doc, id);
+  if (node.type === 'page' || id === doc.root) {
+    note(`${who} — страница: у страницы нет ${motionPathRu(path, true) || 'состояний'} — правка пропущена. Назовите слой на ней`);
+    return null;
+  }
+  const info = motionPathInfo(path);
+  if (!info || info.kind !== 'stateField') return { id, path };
+  const owners = STATE_FIELD_OWNERS[info.field];
+  if (!owners || owners.includes(node.type)) return { id, path };
+  if (info.field === 'color' && node.type !== 'text') {
+    const kids = textDescendants(doc, id);
+    if (kids.length === 1) {
+      const kid = nodeOf(doc, kids[0]);
+      note(`${who} — ${node.type === 'instance' ? 'экземпляр' : 'фрейм'}, ${motionPathRu(path, true)} у него нет:`
+        + ` правка ушла в его текст «${(kid && kid.name) || kids[0]}», и он меняется вместе с ${who}`);
+      return { id: kids[0], path, follow: true };
+    }
+    note(kids.length
+      ? `Внутри ${who} текстовых слоёв — ${kids.length}, непонятно, какому задать «${motionPathRu(path)}»: правка пропущена, назовите слой`
+      : `Внутри ${who} нет текста — «${motionPathRu(path)}» задать некому; правка пропущена`);
+    return null;
+  }
+  if (node.type === 'text') {
+    note(`У текста ${who} нет ${motionPathRu(path, true)} — правка пропущена. У текста при наведении меняется цвет текста`);
+    return null;
+  }
+  note(`У ${RU_TYPE[node.type] || node.type} ${who} нет ${motionPathRu(path, true)} — правка пропущена`);
+  return null;
+}
+
+/**
+ * Состояние целиком у кнопки-фрейма с «цветом текста» внутри: цвет уходит её тексту
+ * (states.<st>.color + follow:'parent'), остальное остаётся фрейму. Возвращает
+ * {value, more:[{id, path, value}]}. Для прочих случаев — {value, more:[]}.
+ */
+function spreadStateColor(doc, id, path, value, note) {
+  const node = nodeOf(doc, id);
+  const info = motionPathInfo(path);
+  if (!node || node.type === 'text' || !info || !value || typeof value !== 'object') return { value, more: [] };
+  const take = (st, patch) => (patch && typeof patch === 'object' && patch.color !== undefined ? { st, color: patch.color } : null);
+  const found = info.kind === 'state' ? [take(info.state, value)]
+    : info.kind === 'states' ? STATE_NAMES.map((st) => take(st, value[st])) : [];
+  const hits = found.filter(Boolean);
+  if (!hits.length) return { value, more: [] };
+  const kids = textDescendants(doc, id);
+  const who = nameOrId(doc, id);
+  const strip = (patch) => { const { color: _c, ...rest } = patch; return rest; };
+  let rest;
+  if (info.kind === 'state') rest = strip(value);
+  else { rest = {}; for (const st of Object.keys(value)) { const r = strip(value[st]); if (Object.keys(r).length) rest[st] = r; } }
+  if (kids.length !== 1) {
+    note(kids.length
+      ? `Внутри ${who} текстовых слоёв — ${kids.length}: цвет текста ${STATE_RU[hits[0].st].at} непонятно кому — эта часть пропущена, назовите слой`
+      : `Внутри ${who} нет текста — цвет текста ${STATE_RU[hits[0].st].at} задать некому; эта часть пропущена`);
+    return { value: Object.keys(rest).length ? rest : undefined, more: [] };
+  }
+  const kid = nodeOf(doc, kids[0]);
+  note(`${who}: цвет текста ${STATE_RU[hits[0].st].at} ушёл в его текст «${(kid && kid.name) || kids[0]}», и он меняется вместе с ${who}`);
+  return {
+    value: Object.keys(rest).length ? rest : undefined,
+    more: hits.map((h) => ({ id: kids[0], path: `states.${h.st}.color`, value: h.color, follow: true })),
+  };
+}
+
+/** Длительность словами: «120 мс», «обычно (200 мс)». */
+function durationWords(doc, v) {
+  const ms = motionMs(doc, v);
+  if (ms === undefined) return typeof v === 'string' && /^motion\./.test(v) ? 'ступень шкалы движения, которой нет' : `«${wordOf(v)}»`;
+  return `${Math.round(ms)} мс`;
+}
+
+/** Подъём словами: «подъём 2 px», «опускание 2 px». */
+function liftWords(doc, v, engine) {
+  const n = scaleNum(doc, v, 'spacing', engine);
+  if (n === undefined) return 'подъём на шаг шкалы, которого нет';
+  return n < 0 ? `сдвиг вниз ${Math.abs(Math.round(n))} px` : `подъём ${Math.round(n * 10) / 10} px`;
+}
+
+/** Одно поле состояния словами — для описания правки: «тень средняя», «масштаб 97 %». */
+function stateFieldWords(field, v, doc, engine) {
+  if (field === 'lift') return liftWords(doc, v, engine);
+  if (field === 'shadow') return v === 'none' ? 'без тени' : `тень ${SHADOW_RU[v] || wordOf(v)}`;
+  if (field === 'scale') return `масштаб ${Math.round(Number(v) * 100)} %`;
+  if (field === 'opacity') return `прозрачность ${Math.round(Number(v) * 100)} %`;
+  const ref = colorRef(v);
+  const color = ref ? (ref[0] === '#' ? ref : `«${ruToken('colors', ref)}»`) : `«${wordOf(v)}»`;
+  return `${STATE_FIELD_RU[field]} ${color}`;
+}
+
+/** Состояние целиком словами: «подъём 2 px, тень средняя». */
+function statePatchWords(patch, doc, engine) {
+  if (!patch || typeof patch !== 'object') return '';
+  return STATE_FIELDS.filter((f) => patch[f] !== undefined).map((f) => stateFieldWords(f, patch[f], doc, engine)).join(', ');
+}
+
+/** Движение словами: «120 мс», «200 мс, пружинистое». */
+function motionWords(m, doc) {
+  if (!m || typeof m !== 'object') return '';
+  const bits = [];
+  if (m.duration !== undefined) bits.push(durationWords(doc, m.duration));
+  if (m.easing !== undefined) bits.push(EASING_RU[m.easing] || wordOf(m.easing));
+  if (m.delay !== undefined) bits.push(`задержка ${Math.round(Number(m.delay) || 0)} мс`);
+  if (m.follow === 'parent') bits.push('вместе с родителем');
+  return bits.join(', ');
+}
+
+/** Значение по пути состояний/движения словами (для valueWords) — или null. */
+function motionValueWords(v, path, doc, engine) {
+  const info = motionPathInfo(path);
+  if (!info || info.bad) return null;
+  if (info.kind === 'shadow') return `«${SHADOW_RU[v] || wordOf(v)}»`;
+  if (info.kind === 'stateField') {
+    if (info.field === 'lift') { const n = scaleNum(doc, v, 'spacing', engine); return n === undefined ? '«?»' : `${n} px`; }
+    if (info.field === 'shadow') return `«${SHADOW_RU[v] || wordOf(v)}»`;
+    if (info.field === 'scale' || info.field === 'opacity') return `${Math.round(Number(v) * 100)} %`;
+    const ref = colorRef(v);
+    return ref ? (ref[0] === '#' ? ref : `«${ruToken('colors', ref)}»`) : `«${wordOf(v)}»`;
+  }
+  if (info.kind === 'state') return `«${statePatchWords(v, doc, engine) || 'пусто'}»`;
+  if (info.kind === 'states') {
+    const parts = STATE_NAMES.filter((st) => v && v[st]).map((st) => `${STATE_RU[st].nom}: ${statePatchWords(v[st], doc, engine)}`);
+    return `«${parts.join('; ') || 'пусто'}»`;
+  }
+  if (info.kind === 'motion') return `«${motionWords(v, doc) || 'пусто'}»`;
+  if (info.field === 'duration') return durationWords(doc, v);
+  if (info.field === 'easing') return `«${EASING_RU[v] || wordOf(v)}»`;
+  if (info.field === 'delay') return `${Math.round(Number(v) || 0)} мс`;
+  if (info.field === 'follow') return v === 'parent' ? '«вместе с родителем»' : '«сам по себе»';
+  return null;
+}
+
+/** Ссылка в выжимке: «spacing.1(2)», «motion.fast(120)». */
+function motionDigestValue(field, v, doc, engine) {
+  if (field === 'lift') return typeof v === 'number' ? String(v) : scaleWord(doc, v, 'spacing', engine);
+  if (field === 'duration') {
+    if (typeof v === 'number') return `${v}ms`;
+    const ms = motionMs(doc, v);
+    return ms === undefined ? `${wordOf(v)}(нет такой ступени)` : `${v}(${ms}ms)`;
+  }
+  if (field === 'fill' || field === 'color' || field === 'stroke') return refWord(v);
+  return wordOf(v);
+}
+
+/**
+ * Состояния и движение узла в выжимке — коротко, в той же записи, какой модель отвечает:
+ * «hover{lift=spacing.1(2) shadow=shadow.md} press{scale=0.97} motion{duration=motion.fast(120ms)}».
+ * Пустая строка, если у узла их нет.
+ */
+function motionDigest(doc, n, engine) {
+  if (!n || typeof n !== 'object') return '';
+  const bits = [];
+  if (n.shadow !== undefined && n.shadow !== null) bits.push(`shadow=${wordOf(n.shadow)}`);
+  if (typeof n.opacity === 'number' && n.opacity !== 1) bits.push(`opacity=${n.opacity}`);
+  const states = n.states && typeof n.states === 'object' ? n.states : null;
+  if (states) {
+    for (const st of STATE_NAMES) {
+      const p = states[st];
+      if (!p || typeof p !== 'object') continue;
+      const fields = STATE_FIELDS.filter((f) => p[f] !== undefined).map((f) => `${f}=${motionDigestValue(f, p[f], doc, engine)}`);
+      if (fields.length) bits.push(`${st}{${fields.join(' ')}}`);
+    }
+  }
+  const m = n.motion && typeof n.motion === 'object' ? n.motion : null;
+  if (m) {
+    const fields = MOTION_FIELDS.filter((f) => m[f] !== undefined).map((f) => `${f}=${motionDigestValue(f, m[f], doc, engine)}`);
+    if (fields.length) bits.push(`motion{${fields.join(' ')}}`);
+  }
+  return bits.join(' ');
+}
+
+/** Есть ли у узла состояния или движение (то, что снимает «убери анимации»). */
+export function hasMotion(n) {
+  if (!n || typeof n !== 'object') return false;
+  const states = n.states && typeof n.states === 'object' ? Object.keys(n.states).length : 0;
+  const motion = n.motion && typeof n.motion === 'object' ? Object.keys(n.motion).length : 0;
+  return states > 0 || motion > 0 || n.states !== undefined || n.motion !== undefined;
+}
+
+/** Строка шкал движения и тени для «ТОКЕНЫ ДОКУМЕНТА» (§11.1, умолчания ядра — если своих нет). */
+function motionTokenLines(doc) {
+  const t = (doc && doc.tokens) || {};
+  const steps = motionSteps(doc);
+  const ownMotion = t.motion && typeof t.motion === 'object';
+  const ownShadow = t.shadow && typeof t.shadow === 'object';
+  return [
+    `motion (ступени скорости анимации, мс${ownMotion ? '' : ', умолчания'}): ${MOTION_STEPS.map((k) => `motion.${k}=${steps[k]}`).join(' ')}`,
+    `shadow (ступени тени${ownShadow ? '' : ', умолчания'}): ${SHADOW_STEPS.map((k) => `shadow.${k}`).join(' ')} (и none — без тени)`,
+  ];
+}
+
+/** Правила микроанимаций для промптов (§11.4). */
+function motionRules(role) {
+  if (role === 'plan') {
+    return `СОСТОЯНИЯ И МИКРОАНИМАЦИИ (это ЕСТЬ в редакторе)
+- «Оживи кнопки», «добавь микроанимации», «при наведении карточка приподнимается», «кнопка темнеет
+  при нажатии», «убери анимации», «сделай анимации медленнее» — это edit: у слоёв меняются states
+  (наведение/нажатие/фокус) и motion (скорость и характер перехода). Это не refuse.
+- «Сделай шкалу движения медленнее во всём документе» — theme (токены motion.fast/base/slow).
+- Нет и сейчас: анимации появления и исчезновения, бесконечных (циклических) анимаций, загрузчиков,
+  переходов между экранами, прокрутки и параллакса — на такое refuse с объяснением, что есть только
+  состояния наведения, нажатия и фокуса.`;
+  }
+  const lines = [
+    'СОСТОЯНИЯ И МИКРОАНИМАЦИИ (это ЕСТЬ в редакторе — не отказывай)',
+    '- У любого слоя, кроме страницы, есть states.hover (наведение), states.press (нажатие), states.focus (фокус).'
+    + ' Состояние меняет ТОЛЬКО вид: fill, color (только у текста), stroke, opacity (0…1), scale (0.8…1.2),'
+    + ' lift (подъём вверх: ссылка на шаг шкалы отступов "spacing.1"/"spacing.2" или px −24…24),'
+    + ' shadow ("shadow.sm" | "shadow.md" | "shadow.lg" | "none"). Размеры, отступы и раскладку состояние не меняет.',
+    '- motion — как слой переходит между состояниями: duration — ССЫЛКОЙ на ступень "motion.fast" | "motion.base" |'
+    + ' "motion.slow" (значения в мс — в «ТОКЕНЫ ДОКУМЕНТА»), число мс — только если человек назвал его сам;'
+    + ` easing: ${EASINGS.map((e) => `"${e}"`).join(' | ')}; delay — мс 0…1000;`
+    + ' follow: "parent" — слой меняется вместе с ближайшим предком, у которого есть states (заголовок карточки при наведении на карточку).',
+    `- Микроанимация короткая: fast или base. Длиннее ${MICRO_MAX_MS} мс — уже вязко, так не делай без прямой просьбы.`,
+    '- Базовые поля слоя для этого: shadow (тень в покое, та же ступень) и opacity.',
+  ];
+  if (role === 'patch') {
+    lines.push(
+      '- Правка: {op:"set", target:"Кнопка оплаты", path:"states.hover.lift", value:"spacing.1"} — по одному полю,'
+      + ' или целиком: path:"states.hover", value:"{\\"lift\\":\\"spacing.2\\",\\"shadow\\":\\"shadow.md\\"}";'
+      + ' path:"motion.duration", value:"motion.fast".',
+      '- Типовые просьбы:'
+      + '\n  «оживи кнопки», «добавь микроанимации» → наведение: lift "spacing.1" или "spacing.2", shadow "shadow.md";'
+      + ' нажатие: scale "0.97", shadow "shadow.sm"; motion.duration "motion.fast", easing "standard";'
+      + '\n  «при наведении карточка приподнимается» → states.hover.lift "spacing.2" и states.hover.shadow "shadow.md" у карточки, motion.duration "motion.base";'
+      + '\n  «кнопка темнеет при нажатии» → states.press.fill — более тёмный цвет (токен вроде accentInk или #rrggbb);'
+      + '\n  «текст кнопки светлеет при наведении» → states.hover.color у ТЕКСТА кнопки и его motion.follow "parent";'
+      + '\n  «сделай анимации медленнее» → motion.duration на ступень выше (fast → base → slow), «быстрее» — ниже;'
+      + '\n  «убери анимации» → {op:"set", path:"states", value:"none"} и {op:"set", path:"motion", value:"none"};'
+      + ' «убери подъём при наведении» → path:"states.hover.lift", value:"none".',
+      '- «Для всех кнопок», «у каждой карточки» — отдельная правка на каждый слой, либо target — общее имя'
+      + ' или роль (кнопка, карточка): приложение раздаст правку всем однотипным слоям.',
+    );
+  }
+  if (role === 'tree') {
+    lines.push('- В дереве у узла можно указать states и motion той же формы: кнопкам — наведение и нажатие, если'
+      + ' просят «живой» интерфейс; без просьбы не добавляй.');
+  }
+  return lines.join('\n');
+}
+
+/** «Убери анимации», «сними все микроанимации», «отключи эффекты наведения» — локально, без модели. */
+const RE_MOTION_CLEAR = new RegExp(
+  '^(?:пожалуйста\\s+)?(?:убери(?:те)?|убрать|сними(?:те)?|снять|удали(?:те)?|удалить|выключи(?:те)?|выключить|отключи(?:те)?|отключить|сотри|стереть)'
+  + '\\s+(?:(?:все|всё|вообще)\\s+)?(?:(?:эти|любые|лишние)\\s+)?'
+  + '(?:(?:микро)?анимаци\\p{L}*|(?:микро)?-анимаци\\p{L}*|состояни\\p{L}*(?:\\s+(?:наведения|нажатия|фокуса))?|эффект\\p{L}*\\s+(?:наведения|нажатия)|ховер\\p{L}*|hover\\p{L}*|переход\\p{L}*\\s+состояний)'
+  + '(?:\\s+(везде|во\\s+вс[её]м\\s+документе|по\\s+всему\\s+документу|на\\s+всех\\s+(?:экранах|досках)|(?:на|в)\\s+(?:этом|текущем)\\s+(?:экране|доске|макете)|здесь|тут|у\\s+выделенн\\p{L}*))?'
+  + '\\s*[.!]*$', 'iu');
+
+/**
+ * «Убери анимации» распознаётся без модели (как «сделай компонентом», круг 19): что делать —
+ * сказано в самой фразе, с чем — показано выделением или активной доской. «везде» — весь документ.
+ * @returns {{where:'scope'|'document'}|null}
+ */
+export function recognizeMotionClear(utterance) {
+  const s = String(utterance == null ? '' : utterance).trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+  const m = RE_MOTION_CLEAR.exec(s);
+  if (!m) return null;
+  const tail = m[1] || '';
+  return { where: /везде|вс[её]м|всех/.test(tail) ? 'document' : 'scope' };
+}
+
+/**
+ * Просьба про микроанимации (для классификатора и для защиты от устаревшего отказа модели):
+ * «оживи кнопки», «добавь микроанимации», «при наведении карточка приподнимается»,
+ * «кнопка темнеет при нажатии», «сделай анимации медленнее».
+ */
+const RE_MICRO_ASK = rx('(микро-?анимаци|анимаци|наведени|навед(у|ешь|ёшь)|ховер|hover|нажати|при\\s+клике|оживи|ожив(ить|ляй)|приподнима(ется|лась|лся|ются|ть\\s+при)|подним(ается|алась|ался|аются)|приподнят|состояни\\p{L}*\\s+(кнопк|карточ|наведен|нажати)|отклик\\p{L}*\\s+на\\s+(навед|нажат|клик)|фокус\\p{L}*\\s+(кнопк|пол)|transition|переход\\p{L}*\\s+(цвета|состояни|при))');
+/** Чего и сейчас нет (§11): появление, циклы, загрузчики, переходы между экранами, скролл. */
+const RE_MOTION_UNSUPPORTED = rx('(появлени|исчезновени|въезжа|выезжа|бесконечн|циклическ|зациклен|loop|загрузк\\p{L}*|спиннер|лоадер|loader|крутит|вращени|вращает|пульсир|мигает|мигани|переход\\p{L}*\\s+(между|на\\s+друг|к\\s+друг)\\s*(экран|доск|страниц)?|между\\s+экранами|параллакс|прокрутк|скролл|scroll|lottie|гифк|видео)');
+
+/** Просьба о микроанимации, которую модель документа умеет (§11). */
+export function looksMicroAnimation(utterance) {
+  const s = String(utterance == null ? '' : utterance);
+  return RE_MICRO_ASK.test(s) && !RE_MOTION_UNSUPPORTED.test(s);
+}
+
+/** Отказ модели — устаревший «в редакторе нет анимаций / состояний / тени»? */
+function staleMotionRefusal(text) {
+  return /анимац|наведени|ховер|hover|состояни|переход|тен[иья]|shadow|transition|нажати/iu.test(String(text == null ? '' : text));
+}
+
 const sizeWord = (spec) => {
   if (!spec || typeof spec !== 'object') return '?';
   if (spec.mode === 'fixed') return wordOf(spec.value);
@@ -3508,6 +4455,11 @@ export const SCALE_LEGEND = 'Отступы и скругления: «gap=spaci
   + ' «r=radii.4(16)» — то же для шкалы скруглений; «pad=A/B» — поля [верт, гориз], «pad=A» — со всех сторон,'
   + ' нулевые поля не печатаются. Голое число с пометкой «(мимо шкалы)» задано числом, не шагом.'
   + ' Новые значения задавай ссылкой на шаг — шкалы с номерами шагов даны в «ТОКЕНЫ ДОКУМЕНТА».';
+
+/** Круг 36 (SPEC §11): как читать состояния и движение в строках выжимки. */
+export const MOTION_LEGEND = 'Состояния: «hover{lift=spacing.1(2) shadow=shadow.md}» — как слой выглядит при наведении'
+  + ' (press — при нажатии, focus — в фокусе), поля — только вид; «motion{duration=motion.fast(120ms)}» —'
+  + ' скорость и характер перехода; «shadow=…» и «opacity=…» без скобок — тень и прозрачность в покое.';
 
 /** Геометрия бывает {rects,…} (core.solve) или плоской картой id → прямоугольник. */
 function rectsOf(geo) {
@@ -3560,6 +4512,7 @@ function digestLine(doc, id, depth, rects, engine) {
     // оси размера необязательны по отдельности (§5.5): незаданную экземпляр берёт у мастера
     if (n.size && n.size.w) one.push(`w=${sizeWord(n.size.w)}`);
     if (n.size && n.size.h) one.push(`h=${sizeWord(n.size.h)}`);
+    { const mo = motionDigest(doc, n, engine); if (mo) one.push(mo); }
     if (n.override) one.push('override');
     const own = rects && rects[id];
     if (own && Number.isFinite(Number(own.w))) one.push(`→ ${rnd(own.w)}×${rnd(own.h)} @${rnd(own.x)},${rnd(own.y)}`);
@@ -3609,6 +4562,9 @@ function digestLine(doc, id, depth, rects, engine) {
     const rv = scaleNum(doc, n.radius, 'radii', engine);
     if (rv !== 0) bits.push(`r=${scaleWord(doc, n.radius, 'radii', engine)}`);
   }
+  /* Круг 36 (SPEC §11): состояния и движение — коротко и ссылками, как модель их и пишет:
+   * «hover{lift=spacing.1(2) shadow=shadow.md} motion{duration=motion.fast(120ms)}». */
+  { const mo = motionDigest(doc, n, engine); if (mo) bits.push(mo); }
   if (n.override) bits.push('override');
   const rect = rects && rects[id];
   if (rect && Number.isFinite(Number(rect.w))) {
@@ -4007,6 +4963,8 @@ function buildContext({ doc, scope, engine, guess, persona, placement, geo, hist
     variantsAhead: Number(variantsAhead) > 1 ? Number(variantsAhead) : 0,
     // «собери новый экран» замечаниями по старому макету только собьёт с толку
     checks: intent && !CHECKS_INTENTS.has(intent) ? '' : (checks || ''),
+    // круг 36: как читать «hover{…} motion{…}» — только если в документе это есть
+    motion: Object.keys((doc && doc.nodes) || {}).some((id) => hasMotion(nodeOf(doc, id))),
   };
 }
 
@@ -4684,6 +5642,7 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
       note(`${who}: у экземпляра компонента детей не бывает — его содержимое задаёт сам компонент.`
         + ` Вложенные слои (${raw.children.length}) пропущены`);
     }
+    treeMotion(spec, raw, doc, note, who, { engine, said });
     if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
     return spec;
   }
@@ -4779,6 +5738,8 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     }
   }
 
+  // круг 36 (SPEC §11): тень, прозрачность, состояния и движение нового слоя
+  treeMotion(spec, raw, doc, note, `Слой «${name || type}»`, { engine, said });
   if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
 
   if (type === 'frame') {
@@ -4796,9 +5757,67 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
       const norm = normalizeTree(kid, { doc, warn: note, persona, depth: depth + 1, budget: bud, engine, said });
       if (norm) spec.children.push(norm);
     }
+    treeStateColor(spec, note, name || type);
   }
 
   return spec;
+}
+
+/** Круг 36: тень, прозрачность, состояния и движение из дерева модели → в спецификацию слоя. */
+function treeMotion(spec, raw, doc, note, who, opts) {
+  if (raw.shadow != null && raw.shadow !== '') {
+    const v = shadowValue(raw.shadow, note, `${who}, тень`);
+    if (v !== undefined) spec.shadow = v;
+  }
+  if (raw.opacity != null && raw.opacity !== '') {
+    const v = opacityValue(raw.opacity, note, `${who}, прозрачность`);
+    if (v !== undefined && v !== 1) spec.opacity = v;
+  }
+  if (raw.states != null && typeof raw.states === 'object') {
+    const v = statesValue(raw.states, doc, note, opts);
+    if (v) {
+      for (const st of Object.keys(v)) {
+        const p = v[st];
+        if (spec.type === 'text') {
+          for (const f of ['fill', 'stroke']) {
+            if (p[f] !== undefined) { note(`${who}: у текста нет ${STATE_FIELD_RU_GEN[f]} ${STATE_RU[st].at} — пропущено, у текста меняется цвет текста`); delete p[f]; }
+          }
+        } else if (spec.type !== 'frame' && p.color !== undefined) {
+          note(`${who}: цвета текста ${STATE_RU[st].at} у этого слоя нет — пропущено`);
+          delete p.color;
+        }
+        if (!Object.keys(p).length) delete v[st];
+      }
+      if (Object.keys(v).length) spec.states = v;
+    }
+  }
+  if (raw.motion != null && raw.motion !== '') {
+    const v = motionValue(raw.motion, doc, note, opts);
+    if (v) spec.motion = v;
+  }
+}
+
+/** Круг 36: «цвет текста при наведении» у нового фрейма-кнопки уходит её единственному тексту. */
+function treeStateColor(spec, note, who) {
+  if (!spec.states) return;
+  const hits = STATE_NAMES.filter((st) => spec.states[st] && spec.states[st].color !== undefined);
+  if (!hits.length) return;
+  const texts = [];
+  const walk = (k) => { if (k.type === 'text') texts.push(k); for (const c of k.children || []) walk(c); };
+  for (const c of spec.children || []) walk(c);
+  for (const st of hits) {
+    const color = spec.states[st].color;
+    delete spec.states[st].color;
+    if (!Object.keys(spec.states[st]).length) delete spec.states[st];
+    if (texts.length !== 1) {
+      note(`Слой «${who}»: цвет текста ${STATE_RU[st].at} — ${texts.length ? 'текстов внутри несколько' : 'текста внутри нет'}, пропущено`);
+      continue;
+    }
+    const t = texts[0];
+    t.states = { ...(t.states || {}), [st]: { ...((t.states && t.states[st]) || {}), color } };
+    t.motion = { ...(t.motion || {}), follow: 'parent' };
+  }
+  if (!Object.keys(spec.states).length) delete spec.states;
 }
 
 function specToNodes(spec, parentId, ids, out) {
@@ -4829,6 +5848,11 @@ function specToNodes(spec, parentId, ids, out) {
     if (spec.stroke) node.stroke = spec.stroke;
     if (spec.src) node.src = spec.src;
   }
+  // круг 36 (SPEC §11): у любого слоя, кроме страницы
+  if (spec.shadow !== undefined) node.shadow = spec.shadow;
+  if (spec.opacity !== undefined) node.opacity = spec.opacity;
+  if (spec.states) node.states = spec.states;
+  if (spec.motion) node.motion = spec.motion;
   out.push(node);
   // Дети создаются собственными операциями: узел рождается с пустым children,
   // а порядок задаётся порядком операций (родитель раньше детей). Так create не
@@ -5512,6 +6536,8 @@ const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 export const ALLOWED_PATH_HEADS = new Set([
   'characters', 'style', 'align', 'color', 'fill', 'stroke', 'radius',
   'size', 'layout', 'name', 'opacity', 'src', 'clip',
+  // круг 36 (SPEC §11): состояния (наведение, нажатие, фокус), движение между ними и тень
+  'states', 'motion', 'shadow',
   // круг 19, п.3 (SPEC §5.5): «props.<имя>» — ОБЪЯВЛЕННОЕ свойство экземпляра компонента.
   // Единственный законный путь внутрь экземпляра: всё остальное у него задаёт компонент.
   'props',
@@ -5525,7 +6551,9 @@ const MOVE_PATHS = new Set(['pos', 'override', 'x', 'y', 'left', 'top', 'positio
  * «Сделай статусы серыми» — про все пять статусов. А characters, name и src — это содержимое,
  * у каждого элемента списка своё, и оптом его переписывать нельзя (круг 5, п.1).
  */
-const UNIFORM_PATHS = new Set(['style', 'align', 'color', 'fill', 'stroke', 'radius', 'size', 'layout', 'opacity', 'clip']);
+const UNIFORM_PATHS = new Set(['style', 'align', 'color', 'fill', 'stroke', 'radius', 'size', 'layout', 'opacity', 'clip',
+  // круг 36: «оживи кнопки» — про все кнопки колонки так же, как «сделай кнопки темнее»
+  'states', 'motion', 'shadow']);
 
 /** Русские названия типов в родительном падеже: «поля нет у эллипса «Аватар»». */
 const RU_TYPE = {
@@ -5583,6 +6611,8 @@ export function adjustSetPath(doc, id, path, warn) {
   const note = warn || (() => {});
   const node = nodeOf(doc, id);
   if (!node) return { id, path };                  // узел создан этим же патчем — сверять нечем
+  // круг 36 (SPEC §11): состояния и движение — своя сверка (страница, цвет текста у кнопки)
+  if (isMotionPath(path)) return adjustMotionPath(doc, id, String(path), note);
   const head = String(path).split('.')[0];
   const owners = PATH_OWNERS[head];
   const who = nameOrId(doc, id);
@@ -5652,7 +6682,8 @@ export function normalizePath(path) {
   if (PATH_ALIASES[p]) return PATH_ALIASES[p];
   p = p.replace(/^node\./, '');
   if (PATH_ALIASES[p]) return PATH_ALIASES[p];
-  return p;
+  // круг 36: «hover.lift», «transition.duration», «boxShadow» → пути §11
+  return normalizeMotionPath(p);
 }
 
 /**
@@ -5813,6 +6844,8 @@ const CLEAR_PHRASE = /^без\s+(заливк\p{L}*|фона|обводк\p{L}*|
 export const CLEARABLE_PATHS = new Set([
   'fill', 'stroke', 'color', 'radius', 'opacity', 'src', 'clip', 'style', 'align', 'override',
   'layout', 'layout.mode', 'layout.gap', 'layout.padding', 'layout.align', 'layout.justify', 'layout.wrap',
+  // круг 36 (SPEC §11): «убери анимации» — снять states и motion целиком или по полю, тень — тоже
+  ...motionClearablePaths(),
 ]);
 
 /** Пути, где «0» — не число, а «ничего»: цвета и адрес картинки числом не задаются. */
@@ -5896,6 +6929,8 @@ export const PATH_RU = {
   gap: 'зазор', padding: 'отступ', mode: 'поток', justify: 'распределение', wrap: 'перенос',
   w: 'ширина', h: 'высота', fontSize: 'кегль', fontWeight: 'жирность',
   lineHeight: 'интерлиньяж', letterSpacing: 'трекинг', font: 'гарнитура', token: 'стиль текста',
+  // круг 36 (SPEC §11); вложенные пути состояний переводит motionPathRu
+  states: 'состояния', motion: 'анимация', shadow: 'тень',
 };
 
 /** Тот же словарь в родительном падеже: «и так нет заливки», «нет адреса картинки». */
@@ -5914,6 +6949,7 @@ const PATH_RU_GEN = {
   gap: 'зазора', padding: 'отступа', mode: 'потока', justify: 'распределения', wrap: 'переноса',
   w: 'ширины', h: 'высоты', fontSize: 'кегля', fontWeight: 'жирности',
   lineHeight: 'интерлиньяжа', letterSpacing: 'трекинга', font: 'гарнитуры', token: 'стиля текста',
+  states: 'состояний', motion: 'анимации', shadow: 'тени',
 };
 
 /** Сторона отступа словами: «padding.t» — это «отступ сверху». */
@@ -5949,6 +6985,9 @@ export function ruPath(path) {
     const nm = p.slice('props.'.length).trim();
     return nm ? `свойство «${nm}»` : 'свойство компонента';
   }
+  // круг 36: «подъём при наведении», «скорость анимации»
+  const motion = motionPathRu(p);
+  if (motion) return motion;
   return lookupPath(PATH_RU, path) || p || 'свойство';
 }
 /** То же в родительном падеже — для «и так нет …». */
@@ -5958,6 +6997,8 @@ export function ruPathGen(path) {
     const nm = p.slice('props.'.length).trim();
     return nm ? `свойства «${nm}»` : 'свойства компонента';
   }
+  const motion = motionPathRu(p, true);
+  if (motion) return motion;
   return lookupPath(PATH_RU_GEN, path) || `«${p}»`;
 }
 
@@ -6006,6 +7047,8 @@ function valueWords(v, path, doc = null, engine = null) {
   if (v === UNSET || v === undefined || v === null) return '«не задано»';
   const p = String(path == null ? '' : path);
   if (typeof v === 'boolean') return v ? '«да»' : '«нет»';
+  // круг 36: «подъём 2 px», «тень «средняя»», «120 мс» — без motion.fast и shadow.md
+  if (isMotionPath(p)) { const w = motionValueWords(v, p, doc, engine); if (w) return w; }
   /* Круг 20 (SPEC §6.7): ссылка на шаг человеку показывается ЧИСЛОМ с пометкой «шаг шкалы» —
    * слов spacing и radii в его строках нет. Отступы — одним числом, если стороны равны. */
   const scale = scaleOfPath(p);
@@ -6070,6 +7113,9 @@ export function coerceValue(raw, path, doc, warn, ctx = null) {
       : p === 'style' ? ((doc && doc.tokens && doc.tokens.type) || null) : null;
     return !!box && Object.prototype.hasOwnProperty.call(box, key);
   })();
+  /* Круг 36: у тени «none» — значение («без тени» в состоянии поверх тени в покое), а не «снять»:
+   * снять тень состояния значит вернуть тень покоя, и это другая картинка. */
+  if ((p === 'shadow' || /^states\.[a-z]+\.shadow$/.test(p)) && typeof raw === 'string' && /^\s*(none|без тени)\s*$/i.test(raw)) return 'none';
   if (!tokenNamed && !STRING_CONTENT_PATHS.has(p) && looksCleared(raw, p)) {
     if (CLEARABLE_PATHS.has(p)) {
       /* Значение могли и просто забыть. Снять свойство — правка видимая и отменяемая, но сказать
@@ -6082,6 +7128,8 @@ export function coerceValue(raw, path, doc, warn, ctx = null) {
     // остальные пути (например, несуществующие) разбираем как раньше
   }
   if (p === 'size.w' || p === 'size.h') return sizeValue(v, p, doc, note, ctx);
+  // круг 36 (SPEC §11): состояния, движение, тень — ссылки на шкалы движения/тени/отступов
+  if (isMotionPath(p)) return motionCoerce(v, p, doc, note, { engine: ctx && ctx.engine, said: ctx && ctx.said });
   if (p === 'size') {
     const w = v && v.w !== undefined ? sizeValue(v.w, 'size.w', doc, note, ctx) : undefined;
     const h = v && v.h !== undefined ? sizeValue(v.h, 'size.h', doc, note, ctx) : undefined;
@@ -6845,6 +7893,17 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
   // круг 16, п.7: реплика человека нужна разрешению цели — он мог назвать вмещающий слой
   const refOpts = { created, said: utterance };
   const setSeen = new Set();                       // одинаковые set не дублируем
+  /** Круг 36: текст, получивший «цвет при наведении» вместо кнопки, следует за ней (motion.follow). */
+  const pushFollow = (list) => {
+    for (const fid of list) {
+      const n = nodeOf(doc, fid);
+      if (n && n.motion && typeof n.motion === 'object' && n.motion.follow === 'parent') continue;
+      const k = `${fid}|motion.follow|"parent"`;
+      if (setSeen.has(k)) continue;
+      setSeen.add(k);
+      ops.push(mkOp(engine, 'set', { id: fid, path: 'motion.follow', value: 'parent' }));
+    }
+  };
 
   for (const edit of work) {
     if (!edit || typeof edit !== 'object') { note('Правка не объект — пропущена'); continue; }
@@ -6898,8 +7957,24 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
           }
           continue;
         }
-        const clearing = value === UNSET;            // круг 13, п.1: set БЕЗ value — «снять свойство»
-        const key = `${aimed.id}|${aimed.path}|${clearing ? '∅' : JSON.stringify(value)}`;
+        /* Круг 36: «цвет текста при наведении» у кнопки-фрейма уходит её тексту — и текст следует
+         * за кнопкой (motion.follow = parent), иначе он менялся бы, только когда мышь на буквах. */
+        let setValue = value;
+        const followIds = aimed.follow ? [aimed.id] : [];
+        if (value !== UNSET && isMotionPath(aimed.path)) {
+          const spread = spreadStateColor(doc, aimed.id, aimed.path, value, note);
+          for (const more of spread.more) {
+            const k = `${more.id}|${more.path}|${JSON.stringify(more.value)}`;
+            if (setSeen.has(k)) continue;
+            setSeen.add(k);
+            ops.push(mkOp(engine, 'set', { id: more.id, path: more.path, value: more.value }));
+            if (more.follow) followIds.push(more.id);
+          }
+          if (spread.value === undefined) { pushFollow(followIds); continue; }
+          setValue = spread.value;
+        }
+        const clearing = setValue === UNSET;            // круг 13, п.1: set БЕЗ value — «снять свойство»
+        const key = `${aimed.id}|${aimed.path}|${clearing ? '∅' : JSON.stringify(setValue)}`;
         if (setSeen.has(key)) continue;              // групповая правка могла свести две цели к одной
         setSeen.add(key);
         const target = nodeOf(doc, aimed.id);
@@ -6926,13 +8001,14 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         }
         if (target && clearing && cur === undefined) {
           note(`У ${nameOrId(doc, aimed.id)} и так нет ${ruPathGen(aimed.path)} — эта правка ничего не меняет`);
-        } else if (target && !clearing && sameAsNow(cur, value, aimed.path, doc, engine)) {
-          note(`${nameOrId(doc, aimed.id)}: ${ruPath(aimed.path)} уже ${valueWords(value, aimed.path, doc, engine)}`
+        } else if (target && !clearing && sameAsNow(cur, setValue, aimed.path, doc, engine)) {
+          note(`${nameOrId(doc, aimed.id)}: ${ruPath(aimed.path)} уже ${valueWords(setValue, aimed.path, doc, engine)}`
             + ' — эта правка ничего не меняет');
         }
         ops.push(mkOp(engine, 'set', clearing
           ? { id: aimed.id, path: aimed.path }
-          : { id: aimed.id, path: aimed.path, value }));
+          : { id: aimed.id, path: aimed.path, value: setValue }));
+        pushFollow(followIds);
       }
     } else if (op === 'nudge') {
       const targets = resolveRefs(engine, doc, edit.target, scope, note, { ...refOpts, group });
@@ -7394,7 +8470,8 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
     if (bad) { note(`Имя токена «${bad}» служебное — правка пропущена`); return; }
     if (!TOKEN_PATH_RE.test(path)) { note(`Путь токена «${path}» недопустим — пропущен`); return; }
     const head = String(path).split('.')[0];
-    touched.add(head === 'colors' ? 'colors' : head === 'type' ? 'type' : head === 'spacing' ? 'spacing' : head === 'radii' ? 'radii' : 'other');
+    touched.add(head === 'colors' ? 'colors' : head === 'type' ? 'type' : head === 'spacing' ? 'spacing' : head === 'radii' ? 'radii'
+      : head === 'motion' || head === 'shadow' ? head : 'other');
     ops.push(mkOp(engine, 'setToken', { path, value }));
   };
 
@@ -7469,6 +8546,45 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
   scaleOps('spacing', theme && theme.spacing);
   scaleOps('radii', theme && theme.radii);
 
+  /* Круг 36 (SPEC §11): ступени скорости анимаций и тени. Порядок ступеней обязан сохраниться
+   * (fast ≤ base ≤ slow): узлы ссылаются на ИМЯ ступени, и «быстро» медленнее «обычно» — ложь. */
+  const motionIn = asArray(theme && theme.motion).filter((m) => m && MOTION_STEPS.includes(String(m.name)));
+  if (motionIn.length) {
+    const next = { ...motionSteps(doc) };
+    const got = {};
+    for (const m of motionIn) {
+      const ms = parseMs(m.value);
+      if (ms == null || ms < 0 || ms > MOTION_MAX_MS) {
+        note(`Скорость анимаций «${MOTION_STEP_RU[m.name]}»: «${m.value}» — не длительность от 0 до ${MOTION_MAX_MS} мс, пропущено`);
+        continue;
+      }
+      next[m.name] = Math.round(ms);
+      got[m.name] = Math.round(ms);
+    }
+    if (!(next.fast <= next.base && next.base <= next.slow)) {
+      note('Скорость анимаций: ступени перепутаны (быстро должно быть не дольше, чем обычно, а обычно — не дольше,'
+        + ` чем медленно): ${next.fast}/${next.base}/${next.slow} мс — правка пропущена`);
+    } else {
+      for (const k of MOTION_STEPS) if (got[k] !== undefined) { touched.add('motion'); push(`motion.${k}`, got[k]); }
+      const slow = MOTION_STEPS.filter((k) => got[k] !== undefined && got[k] > MICRO_MAX_MS);
+      if (slow.length) {
+        note(`Скорость анимаций: ступень «${MOTION_STEP_RU[slow[0]]}» — ${got[slow[0]]} мс, больше ${MICRO_MAX_MS} мс:`
+          + ' для микроанимаций это вязко. Скажите «быстрее», если так не задумано');
+      }
+    }
+  }
+  for (const sh of asArray(theme && theme.shadow)) {
+    if (!sh || !SHADOW_STEPS.includes(String(sh.name))) continue;
+    const value = String(sh.value == null ? '' : sh.value).trim().replace(/\s+/g, ' ');
+    if (!shadowDescOk(value, engine)) {
+      note(`Тень «${SHADOW_RU[`shadow.${sh.name}`]}»: «${cutText(value, 40)}» — не похоже на тень`
+        + ' (нужно «сдвиг-x сдвиг-y размытие цвет», например «0 4px 12px rgba(0,0,0,.14)»), пропущено');
+      continue;
+    }
+    touched.add('shadow');
+    push(`shadow.${sh.name}`, value);
+  }
+
   if (!ops.length) throw ERR('schema', 'Модель не предложила ни одного корректного изменения токенов');
 
   /* Круг 11, п.3: сказать вслух, что правка легла на ВЕСЬ документ. Говорим только когда
@@ -7478,17 +8594,19 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
     const here = scope ? artboardOf(doc, (scope.ids && scope.ids[0]) || scope.containerId) : null;
     const others = boards.filter((id) => id !== here).map((id) => nameOrId(doc, id));
     const list = others.slice(0, 3).join(', ') + (others.length > 3 ? ` и ещё ${others.length - 3}` : '');
-    const WHAT = { colors: 'цвета', type: 'шрифты и кегли', spacing: 'шкала отступов', radii: 'шкала скруглений', other: 'оформление' };
+    const WHAT = { colors: 'цвета', type: 'шрифты и кегли', spacing: 'шкала отступов', radii: 'шкала скруглений', motion: 'скорость анимаций', shadow: 'тени', other: 'оформление' };
     const what = [...touched].map((k) => WHAT[k] || WHAT.other);
     const HOW = {
       colors: 'Перекрасить один экран отдельно так нельзя: для этого надо менять заливку и цвет его слоёв',
       type: 'Поменять шрифт или кегль на одном экране отдельно так нельзя: для этого надо задать стиль его текстам',
       spacing: 'Своя шкала у одного экрана невозможна: отступы и зазоры надо задавать его слоям поимённо',
       radii: 'Своя шкала у одного экрана невозможна: скругления надо задавать его слоям поимённо',
+      motion: 'Своя скорость у одного экрана невозможна: скорость анимации надо задавать его слоям поимённо',
+      shadow: 'Свои тени у одного экрана невозможны: тень надо задавать его слоям поимённо',
       other: 'Отдельно для одного экрана так нельзя: значения надо задавать его слоям поимённо',
     };
     // совет — по тому, что и правда поменялось; если поменялось разное, ведёт самое заметное
-    const lead = ['colors', 'type', 'spacing', 'radii', 'other'].find((k) => touched.has(k)) || 'other';
+    const lead = ['colors', 'type', 'spacing', 'radii', 'motion', 'shadow', 'other'].find((k) => touched.has(k)) || 'other';
     /* Порядок слов такой, чтобы фраза была согласована при ЛЮБОМ наборе видов: «цвета»,
      * «шрифты и кегли» и «шкала отступов» стоят в скобках, а не подлежащим. */
     note('Оформление документа общее: поменялось то, что принадлежит документу, а не экрану'
@@ -7684,6 +8802,25 @@ function formatViolation(v, doc) {
     }
     return `${who ? `${who}: ` : ''}ссылка на шаг шкалы, которого нет — считается нулём. Задайте значение заново или добавьте шаг в шкалу`;
   }
+  /* Круг 36 (SPEC §11.2): коды состояний и движения — словами, без motion.fast и states.hover. */
+  if (v.code === 'motion-slow') {
+    // число — из сообщения ядра (оно посчитано с раскрытием экземпляра), иначе — по узлу
+    const said = /(\d+(?:[.,]\d+)?)\s*мс/.exec(text);
+    const ms = said ? Number(said[1].replace(',', '.')) : node ? nodeMotionMs(doc, node) : null;
+    return `${who || 'Слой'}: микроанимация длится ${ms != null ? `${Math.round(ms)} мс` : 'долго'} — дольше ${MICRO_MAX_MS} мс,`
+      + ' отклик будет казаться вязким';
+  }
+  if (v.code === 'dead-motion-ref') {
+    return `${who || 'Слой'}: ссылка на ступень скорости или тени, которой нет в оформлении — взято значение по умолчанию`;
+  }
+  if (v.code === 'state-no-effect') {
+    const st = STATE_NAMES.find((x) => new RegExp(`(^|[^a-z])${x}([^a-z]|$)`).test(text));
+    return `${who || 'Слой'}: ${st ? `${STATE_RU[st].nom} ничем не отличается` : 'состояние ничем не отличается'} от вида в покое`;
+  }
+  if (v.code === 'press-without-hover') {
+    return `${who || 'Слой'}: есть нажатие, но нет наведения — мышь над ним ничего не меняет, пока не нажмут`;
+  }
+  if (v.code === 'state-on-page') return 'У страницы состояний не бывает — наведение и нажатие задаются слоям на ней';
   if (v.code === 'off-scale') {
     // ядро: «вне шкалы отступов: gap 24, padding.t 10» → «зазор 24, отступ сверху 10»
     const fields = [];
@@ -7691,6 +8828,11 @@ function formatViolation(v, doc) {
     let m;
     while ((m = re.exec(text))) fields.push(`${ruPath(m[1] === 'gap' ? 'layout.gap' : m[1] === 'radius' ? 'radius' : `layout.${m[1]}`)} ${m[2]}`);
     if (fields.length) return `${who || 'Слой'}: мимо шкалы отступов — ${fields.join(', ')}`;
+    // круг 36: длительность и подъём состояния числом мимо шкалы — их словами, не «отступы»
+    if (/длительност|подъ[её]м/.test(text)) {
+      const said = text.replace(/\((hover|press|focus)\)/g, (_, st) => `(${STATE_RU[st].at})`);
+      return `${who || 'Слой'}: ${said}`;
+    }
     return `Отступы ${who} мимо шкалы документа: ${text.replace(/\bgap\b/g, 'зазор').replace(/\bpadding\.([trbl])\b/g, (_, k) => `отступ ${SIDE_RU[k]}`)}`;
   }
   return who ? `${who}: ${text}` : text;
@@ -7714,6 +8856,12 @@ const VIOLATION_KIND = {
   'instance-too-deep': 'слишком глубокая вложенность экземпляров',
   // круг 32: children не массив или непустой у не-контейнера (документ до круга 31, SPEC §9.15)
   'bad-children': 'слои с негодным списком детей',
+  // круг 36 (SPEC §11.2)
+  'motion-slow': 'слишком медленные микроанимации',
+  'dead-motion-ref': 'ссылки на ступени скорости или тени, которых нет',
+  'state-no-effect': 'состояния, не отличающиеся от покоя',
+  'press-without-hover': 'нажатие без наведения',
+  'state-on-page': 'состояния у страницы',
 };
 
 /**
@@ -7784,6 +8932,67 @@ function instancesOf(doc, masterId) {
  * Отказ здесь — это `cannot` (честный ответ), а не ошибка с кнопкой «Повторить»: повтор той же
  * фразы над тем же документом заведомо даст то же самое.
  */
+/**
+ * Круг 36 (SPEC §11): «убери анимации» без модели. Снимает states и motion у слоёв области
+ * (выделение с потомками, иначе активная доска; «везде» — весь документ). Компоненты библиотеки
+ * не трогаются: это правка компонента, о ней говорится отдельно.
+ */
+function motionClearIntent({ engine, doc, scope, where, utterance, geo, emit }) {
+  const warnings = [];
+  const note = (m) => { if (m && !warnings.includes(m)) warnings.push(m); };
+  const preview = { doc, geo: geo || safeSolve(engine, doc) };
+  const planOf = (title, summary) => ({ intent: 'edit', title, summary, steps: [title], targets: [] });
+  const everywhere = where === 'document';
+  const area = everywhere ? collectSubtree(doc, [doc.root]) : collectSubtree(doc, asArray(scope && scope.ids));
+  const lib = area.filter((id) => inLibrary(doc, engine, id) && hasMotion(nodeOf(doc, id)));
+  const ids = area.filter((id) => id !== doc.root && !inLibrary(doc, engine, id) && hasMotion(nodeOf(doc, id)));
+  emit('classify', `снять анимации — распознано локально, без модели (слоёв с анимацией: ${ids.length})`);
+  if (lib.length) {
+    note(`У ${lib.length} ${plural(lib.length, 'слоя', 'слоёв', 'слоёв')} в библиотеке компонентов анимации остались:`
+      + ' это правка самого компонента — скажите «убери анимации у компонента …»');
+  }
+  if (!ids.length) {
+    const elsewhere = everywhere ? 0 : Object.keys(doc.nodes || {})
+      .filter((id) => !inLibrary(doc, engine, id) && hasMotion(nodeOf(doc, id))).length;
+    const where_ = scope && scope.kind === 'selection' ? 'В выделенном' : scope && scope.kind === 'artboard' ? 'На этой доске' : 'В документе';
+    const why = `${where_} анимаций нет — снимать нечего.`
+      + (elsewhere ? ` На других досках они есть у ${elsewhere} ${plural(elsewhere, 'слоя', 'слоёв', 'слоёв')}: скажите «убери анимации везде»` : '');
+    note(why);
+    emit('validate', 'Менять нечего');
+    emit('done', 'Менять нечего');
+    return { ops: [], preview, plan: planOf('Анимаций нет', why), local: 'motion-clear', nothingChanged: true, nothingToChange: true, warnings };
+  }
+  const ops = [];
+  for (const id of ids) {
+    const n = nodeOf(doc, id);
+    if (n.states !== undefined) ops.push(mkOp(engine, 'set', { id, path: 'states' }));
+    if (n.motion !== undefined) ops.push(mkOp(engine, 'set', { id, path: 'motion' }));
+  }
+  let applied;
+  try { applied = engine.applyOps(doc, ops); } catch (e) { applied = { error: e && e.message ? e.message : String(e) }; }
+  if (!applied || applied.error || !applied.doc) {
+    const err = applied && applied.error;
+    const why = `Снять анимации не вышло: ${typeof err === 'string' ? err : (err && err.message) || 'операции не применились'}`;
+    emit('cannot', why);
+    emit('done', 'Так нельзя');
+    return { ops: [], preview, plan: planOf('Снятие анимаций', why), cannot: why, warnings };
+  }
+  const names = listNames(doc, ids.slice(0, 3)).join(', ') + (ids.length > 3 ? ` и ещё ${ids.length - 3}` : '');
+  const title = ids.length === 1 ? `Без анимации: ${names}` : `Без анимаций: ${ids.length} ${plural(ids.length, 'слой', 'слоя', 'слоёв')}`;
+  const summary = `Снял состояния наведения, нажатия и фокуса и движение: ${names}.`;
+  const plan = planOf(title, summary);
+  emit('materialize', summary, { title });
+  emit('validate', 'Нарушений нет');
+  emit('done', summary, { title });
+  let changeSummary = '';
+  try { changeSummary = describeChange(ops, doc, applied.doc, engine); } catch { changeSummary = ''; }
+  return {
+    ops, preview: { doc: applied.doc, geo: safeSolve(engine, applied.doc) }, plan, local: 'motion-clear',
+    ...(changeSummary ? { changeSummary } : {}),
+    warnings,
+  };
+}
+
 function componentIntent({ engine, doc, scope, utterance, ask, geo, emit }) {
   const warnings = [];
   const note = (m) => { if (m && !warnings.includes(m)) warnings.push(m); };
@@ -8444,6 +9653,20 @@ async function runCommandCore(options = {}) {
       }
     }
 
+    /* — 0d. «Убери анимации» (круг 36, SPEC §11) — тоже без модели: что делать, сказано во фразе,
+     * а где — выделением, активной доской или словом «везде». Снимаются states и motion целиком. */
+    const wantMotionClear = insideVariants ? null : recognizeMotionClear(utterance);
+    if (wantMotionClear) {
+      const localScope = resolveScope(doc, selection, engine, { activeArtboardId, selectionBy });
+      const got = motionClearIntent({
+        engine, doc, scope: localScope, where: wantMotionClear.where, utterance,
+        geo: geoIn || safeSolve(engine, doc), emit,
+      });
+      for (const w of got.warnings || []) warn(w);
+      const { warnings: _drop, ...rest } = got;
+      return { ...rest, warnings: sortWarnings(warnings), usage, stages };
+    }
+
     if (!provider || typeof provider.complete !== 'function') throw ERR('model', 'Провайдер модели не настроен');
 
     const ask = async (schemaEntry, messages, o = {}) => {
@@ -8507,6 +9730,14 @@ async function runCommandCore(options = {}) {
       plan = normalizePlan(plan, guess);
     }
     intent = arbitrateIntent(plan, guess, warn);
+    /* Круг 36 (SPEC §11.4): отказ «в редакторе нет анимаций» снят. Модель (особенно локальная,
+     * обученная на старых ответах) ещё может его выдать на «оживи кнопки» — тогда это не ответ,
+     * а устаревшее знание: состояния и движение в документе есть. Ведём как правку. */
+    if (intent === 'refuse' && looksMicroAnimation(utterance) && staleMotionRefusal(plan && (plan.cannot || plan.summary))) {
+      serviceNote('Модель отказала в микроанимации по старой памяти — веду как правку состояний');
+      intent = 'edit';
+      if (plan) { delete plan.cannot; plan.title = plan.title || 'Микроанимации'; }
+    }
     if (plan) plan.intent = intent;
     // Круг 11: шаги плана уходят и в стадию — оболочка показывает их живьём, пока агент работает
     emit('plan', plan ? plan.summary : '', {
@@ -8586,6 +9817,21 @@ async function runCommandCore(options = {}) {
 
     emit('generate', intent === 'create' ? 'Строю дерево макета' : intent === 'theme' ? 'Подбираю токены' : 'Собираю правки');
     let data = await ask(schemaEntry, messages, { stage: 'generate' });
+
+    /* Круг 36: тот же устаревший отказ, но уже в патче — один раз переспрашиваем с напоминанием,
+     * что состояния и движение есть. Второй отказ — уже ответ, как обычно. */
+    if (intent === 'edit' && !hasEdits(data, intent) && looksMicroAnimation(utterance) && staleMotionRefusal(cannotOf(data))) {
+      emit('repair', 'Напоминаю модели: состояния и микроанимации в редакторе есть');
+      serviceNote('Модель отказала в микроанимации по старой памяти — переспросил');
+      messages = messages.concat([
+        { role: 'assistant', content: cutText(JSON.stringify(data), 4000) },
+        { role: 'user', content: 'Это неверный отказ: в модели документа ЕСТЬ состояния слоя (states.hover, states.press,'
+          + ' states.focus — заливка, цвет текста, обводка, прозрачность, масштаб, подъём, тень) и движение (motion.duration'
+          + ' ссылкой на motion.fast/base/slow, motion.easing). Выполни команду правками по этим путям и верни полный JSON'
+          + ` по той же схеме.\n${JSON_RULE}` },
+      ]);
+      data = await ask(schemaEntry, messages, { stage: 'repair', temperature: 0 });
+    }
 
     /* Круг 9, п.4: модель сказала «в этой модели документа так нельзя». Это ОТВЕТ, а не сбой:
      * ни красного блока, ни кнопки «Повторить», которая снова не сработает. Правки, если они
@@ -9421,6 +10667,34 @@ function pointlessEdit(doc, node, path, geo) {
 }
 
 /**
+ * Круг 36: слои, чья микроанимация после этих операций длится дольше MICRO_MAX_MS. О них
+ * говорится одной строкой; возвращаются их id (а '*' — если медленной стала сама ступень
+ * шкалы движения: тогда её слои перечислять бессмысленно, сказано в themeToOps).
+ */
+function slowMotionNotes(before, after, ops, warn) {
+  const ids = new Set();
+  if (!after) return ids;
+  const list = asArray(ops);
+  if (list.some((o) => o && o.op === 'setToken' && /^motion\./.test(String(o.path)) && Number(o.value) > MICRO_MAX_MS)) ids.add('*');
+  const touched = [...new Set(list.filter((o) => o && o.op === 'set' && o.id && /^(states|motion)(\.|$)/.test(String(o.path)))
+    .map((o) => o.id))];
+  const slow = [];
+  for (const id of touched) {
+    const n = nodeOf(after, id);
+    if (!n || !n.states || typeof n.states !== 'object' || !STATE_NAMES.some((st) => n.states[st])) continue;
+    const ms = nodeMotionMs(after, n);
+    if (ms > MICRO_MAX_MS) { slow.push({ id, ms }); ids.add(id); }
+  }
+  if (slow.length && warn) {
+    const first = slow[0];
+    warn(`${nameOrId(after, first.id)}: микроанимация длится ${Math.round(first.ms)} мс — дольше ${MICRO_MAX_MS} мс,`
+      + ` отклик будет казаться вязким${slow.length > 1 ? ` (и ещё у ${slow.length - 1} ${plural(slow.length - 1, 'слоя', 'слоёв', 'слоёв')})` : ''}.`
+      + ' Скажите «быстрее», если так не задумано');
+  }
+  return ids;
+}
+
+/**
  * Круг 7, п.5: почему правка легла в документ, а на экране ничего не сдвинулось. Раньше это
  * состояние было невидимым: «Зазор 12 → 8 в «Шапка»» при justify="between" — зазор раскладка
  * не использует, геометрия до и после совпадает, предупреждений ноль, и человек ищет разницу
@@ -9775,6 +11049,11 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
     }
   }
 
+  /* Круг 36 (SPEC §11.2): микроанимация дольше 600 мс — вязкая. Говорим об этом сами, словами про
+   * слой и его скорость (и на движке без этого кода валидатора); дубль валидатора тогда не нужен. */
+  const slowIds = slowMotionNotes(doc, applied.doc, out.ops, warn);
+  if (slowIds.size) fresh = fresh.filter((v) => !(v && v.code === 'motion-slow' && (slowIds.has(v.nodeId || v.id) || slowIds.has('*'))));
+
   out.preview = { doc: applied.doc, geo };
   out.violations = fresh;
   out.problems = fresh.map((v) => formatViolation(v, applied.doc));
@@ -9930,6 +11209,29 @@ export function checkOutcome({ doc, after, ops, utterance = '', placement = null
         + ' Назовите стиль или кегль сами');
     }
   }
+  /* Круг 36: «сделай анимации медленнее/быстрее» — скорость по факту против просьбы. */
+  const RE_SLOWER = /(?:^|[^\p{L}])(?:по)?(?:медленнее|неспешнее|плавнее|дольше)(?![\p{L}])/iu;
+  const RE_FASTER = /(?:^|[^\p{L}])(?:по)?(?:быстрее|шустрее|резче|короче)(?![\p{L}])/iu;
+  const aboutMotion = /анимац|наведени|нажати|переход|ховер|hover|скорост/iu.test(said);
+  const slower = aboutMotion && RE_SLOWER.test(said) && !RE_FASTER.test(said);
+  const faster = aboutMotion && RE_FASTER.test(said) && !RE_SLOWER.test(said);
+  if ((slower || faster) && after) {
+    const ids = [...new Set(list.filter((o) => o && o.op === 'set' && o.id && /^motion(\.|$)/.test(String(o.path))).map((o) => o.id))];
+    const rows = ids.map((id) => ({ id, a: nodeMotionMs(doc, nodeOf(doc, id)), b: nodeMotionMs(after, nodeOf(after, id)) }))
+      .filter((r) => nodeOf(after, r.id));
+    const wrong = rows.filter((r) => (slower ? r.b < r.a : r.b > r.a));
+    const same = rows.filter((r) => r.b === r.a);
+    const word = slower ? 'медленнее' : 'быстрее';
+    if (wrong.length) {
+      const r = wrong[0];
+      out.push(`Проверка макета: просили ${word}, а анимация ${nameOrId(after, r.id)} стала ${slower ? 'быстрее' : 'медленнее'}:`
+        + ` ${Math.round(r.a)} → ${Math.round(r.b)} мс. Отмените правку или назовите скорость сами`);
+    } else if (rows.length && same.length === rows.length) {
+      const r = same[0];
+      out.push(`Проверка макета: просили ${word}, а скорость анимации ${nameOrId(after, r.id)} не изменилась (${Math.round(r.a)} мс).`
+        + ' Назовите скорость сами: «быстро», «обычно» или «медленно»');
+    }
+  }
   if (placement && placement.asArtboard && doc) {
     const born = new Set(list.filter((o) => o && o.op === 'create' && o.node && o.node.id).map((o) => o.node.id));
     const tops = list.filter((o) => o && o.op === 'create' && o.node && !born.has(o.node.parent));
@@ -9985,11 +11287,15 @@ export function describeChange(ops, doc, after = null, engine = null) {
   } else if (moves.length) {
     phrases.push(`перенёс ${moves.length} ${plural(moves.length, 'слой', 'слоя', 'слоёв')}`);
   }
+  // круг 36 (SPEC §11): состояния и движение — по слою одной фразой, «Наведение «X»: подъём 2 px, тень средняя, 120 мс»
+  phrases.push(...motionChangePhrases(list.filter((o) => o.op === 'set' && o.id && !born.has(o.id)
+    && /^(states|motion)(\.|$)/.test(String(o.path || ''))), doc, after, engine, born));
   // одинаковая правка у нескольких слоёв — одной строкой
   const groups = new Map();
   for (const op of list) {
     if (op.op !== 'set' || !op.id || born.has(op.id)) continue;
     const path = String(op.path || '');
+    if (/^(states|motion)(\.|$)/.test(path)) continue;
     const node = nodeOf(doc, op.id);
     const cleared = !Object.prototype.hasOwnProperty.call(op, 'value') || op.value === undefined;
     let to;
@@ -10014,7 +11320,9 @@ export function describeChange(ops, doc, after = null, engine = null) {
     const word = kinds.size === 1 && kinds.has('colors') ? 'палитра'
       : kinds.size === 1 && kinds.has('type') ? 'типографика'
         : kinds.size === 1 && (kinds.has('spacing') || kinds.has('radii')) ? (kinds.has('spacing') ? 'шкала отступов' : 'шкала скруглений')
-          : 'оформление документа';
+          : kinds.size === 1 && kinds.has('motion') ? 'скорость анимаций'
+            : kinds.size === 1 && kinds.has('shadow') ? 'тени'
+              : 'оформление документа';
     phrases.push(`${word}: ${tokens.length} ${plural(tokens.length, 'правка', 'правки', 'правок')}`);
   }
   if (!phrases.length) return '';
@@ -10023,6 +11331,90 @@ export function describeChange(ops, doc, after = null, engine = null) {
     ? `${phrases.slice(0, 2).join('; ')} и ещё ${rest} ${plural(rest, 'правка', 'правки', 'правок')}`
     : phrases.join('; ');
   return cutText(text.charAt(0).toUpperCase() + text.slice(1), 200);
+}
+
+/**
+ * Круг 36 (SPEC §11.4): правки состояний и движения словами — по слою, а не по пути:
+ * «наведение «Кнопка оплаты»: подъём 2 px, тень средняя, 120 мс», «нажатие у 3 слоёв: масштаб 97 %»,
+ * «скорость анимации «Карточка»: 120 → 200 мс», «анимации «Кнопка»: сняты». Одинаковое у разных
+ * слоёв — одной фразой, как и прочие правки.
+ */
+function motionChangePhrases(ops, doc, after, engine, born) {
+  if (!ops.length) return [];
+  const per = new Map();
+  const rec = (id) => {
+    if (!per.has(id)) per.set(id, { states: {}, clearedStates: false, clearedState: new Set(), motion: false, clearedMotion: false });
+    return per.get(id);
+  };
+  const has = (o) => Object.prototype.hasOwnProperty.call(o, 'value') && o.value !== undefined;
+  for (const o of ops) {
+    const info = motionPathInfo(String(o.path));
+    if (!info || info.bad) continue;
+    const r = rec(o.id);
+    if (info.kind === 'states') {
+      if (!has(o)) { r.clearedStates = true; continue; }
+      for (const st of STATE_NAMES) if (o.value && o.value[st]) r.states[st] = { ...(r.states[st] || {}), ...o.value[st] };
+    } else if (info.kind === 'state') {
+      if (!has(o)) { r.clearedState.add(info.state); continue; }
+      r.states[info.state] = { ...(r.states[info.state] || {}), ...(o.value || {}) };
+    } else if (info.kind === 'stateField') {
+      const box = r.states[info.state] || (r.states[info.state] = {});
+      box[info.field] = has(o) ? o.value : UNSET;
+    } else if (info.kind === 'motion' || info.kind === 'motionField') {
+      if (!has(o) && info.kind === 'motion') r.clearedMotion = true;
+      else r.motion = true;
+    }
+  }
+  const out = [];
+  const groups = new Map();
+  const add = (label, content, id) => {
+    const key = `${label}|${content}`;
+    const g = groups.get(key) || { label, content, ids: [] };
+    if (!g.ids.includes(id)) g.ids.push(id);
+    groups.set(key, g);
+  };
+  const final = after || doc;
+  for (const [id, r] of per) {
+    const nodeBefore = nodeOf(doc, id);
+    const nodeAfter = nodeOf(final, id) || nodeBefore;
+    if (r.clearedStates && !Object.keys(r.states).length) {
+      add('анимации', r.clearedMotion || !hasMotion(nodeAfter) ? 'сняты' : 'состояния сняты', id);
+      continue;
+    }
+    let msShown = false;
+    const ms = () => {
+      if (msShown) return '';
+      msShown = true;
+      const m = nodeAfter && nodeAfter.motion && typeof nodeAfter.motion === 'object' ? nodeAfter.motion : {};
+      const bits = [durationWords(final, m.duration === undefined ? 'motion.base' : m.duration)];
+      if (r.motion && m.easing !== undefined && m.easing !== 'standard') bits.push(EASING_RU[m.easing] || wordOf(m.easing));
+      if (r.motion && m.follow === 'parent') bits.push('вместе с родителем');
+      return bits.join(', ');
+    };
+    for (const st of STATE_NAMES) {
+      if (r.clearedState.has(st) && !r.states[st]) { add(STATE_RU[st].nom, 'снято', id); continue; }
+      const patch = r.states[st];
+      if (!patch) continue;
+      const parts = STATE_FIELDS.filter((f) => patch[f] !== undefined)
+        .map((f) => (patch[f] === UNSET ? `без ${STATE_FIELD_RU_GEN[f]}` : stateFieldWords(f, patch[f], final, engine)));
+      const tail = ms();
+      add(STATE_RU[st].nom, [...parts, tail].filter(Boolean).join(', '), id);
+    }
+    if (!msShown && (r.motion || r.clearedMotion)) {
+      const was = nodeMotionMs(doc, nodeBefore);
+      const now = nodeMotionMs(final, nodeAfter);
+      const m = nodeAfter && nodeAfter.motion && typeof nodeAfter.motion === 'object' ? nodeAfter.motion : {};
+      if (was !== now) add('скорость анимации', `${Math.round(was)} → ${Math.round(now)} мс`, id);
+      else if (r.clearedMotion) add('движение', 'по умолчанию', id);
+      else add('анимация', motionWords(m, final) || `${Math.round(now)} мс`, id);
+    }
+  }
+  for (const g of groups.values()) {
+    out.push(g.ids.length === 1
+      ? `${g.label} ${changeName(doc, born, g.ids[0])}: ${g.content}`
+      : `${g.label} у ${g.ids.length} ${plural(g.ids.length, 'слоя', 'слоёв', 'слоёв')}: ${g.content}`);
+  }
+  return out;
 }
 
 /** Ключ нарушения: чтобы не вменять агенту то, что было в документе до него. */

@@ -357,6 +357,10 @@ const ICONS = {
   scale: '<rect x="2" y="5.25" width="12" height="5.5" rx="1.25"/><path d="M5 5.25v2.25"/><path d="M8 5.25v3.25"/><path d="M11 5.25v2.25"/>',
   // круг 22: папка — проекты на сервере (кнопка рядом с именем документа)
   folder: '<path d="M2.25 4.25h4l1.5 1.75h6v7h-11.5z"/><path d="M2.25 7.5h11.5"/>',
+  /* Круг 36 (SPEC §11.3): «Просмотр» — треугольник проигрывания; «состояния» у слоя —
+     указатель с дугой движения (значок в «Слоях» и заголовок раздела инспектора). */
+  play: '<path d="M5.25 3.25v9.5L12.75 8z"/>',
+  motion: '<path d="M4.5 3.5 11 8.25l-2.9.6-1.35 2.7z"/><path d="M11.5 3.25a4.5 4.5 0 0 1 1.75 3.5"/>',
 };
 
 function iconMarkup(name) {
@@ -388,7 +392,7 @@ function cacheDom() {
     'commandbar', 'command', 'btn-run', 'btn-variants', 'btn-mic', 'mic-live', 'worklog',
     'work-label', 'work-detail', 'work-steps', 'btn-work-stop', 'variants', 'hints', 'toasts',
     'artboard-tabs', 'docname', 'sheet', 'sheet-body', 'sheet-title', 'sheet-tabs',
-    'btn-zoom', 'btn-zoom-in', 'btn-zoom-out', 'btn-fit', 'btn-rail', 'btn-rail-close', 'scrim',
+    'btn-zoom', 'btn-zoom-in', 'btn-zoom-out', 'btn-fit', 'btn-preview', 'previewbar', 'btn-preview-exit', 'btn-rail', 'btn-rail-close', 'scrim',
     'btn-history', 'btn-export', 'btn-scales', 'btn-theme', 'btn-settings', 'rail-grip',
     'btn-insp-close', 'btn-sheet-close', 'btn-empty-artboard',
     'voicebar', 'voice-said', 'btn-voice-off',
@@ -4540,7 +4544,9 @@ function describeOps(opsList, doc) {
   }
   // одинаковую правку у нескольких узлов сводим в одну строку
   const groups = new Map();
+  const stateSets = [];   // круг 36: правки состояний и движения — своими фразами ниже
   for (const op of sets) {
+    if (SHELL.isStatePath(op.path)) { stateSets.push(op); continue; }
     /* Круг 27, п.7: переименование — одним глаголом. «Имя Шапка → Шапка 1 Ани в «Шапка»»
        было тремя именами подряд без кавычек, и место правки повторяло старое имя. */
     if (op.path === 'name' && doc && doc.nodes && doc.nodes[op.id] && !born.has(op.id)) {
@@ -4558,6 +4564,21 @@ function describeOps(opsList, doc) {
     if (uniq.length === 1) phrases.push(`${g.label} ${g.value} в «${uniq[0]}»`);
     else if (uniq.length > 1) phrases.push(`${g.label} ${g.value} у ${uniq.length} ${plural(uniq.length, 'слоя', 'слоёв', 'слоёв')}`);
     else phrases.push(`${g.label} ${g.value}`);
+  }
+  /* Круг 36 (SPEC §11.4): «Наведение «Кнопка»: подъём 2 px, тень средняя, 120 мс» — по слою
+     до и после, а не по путям: одинаково звучат правка поля и запись состояния целиком. */
+  if (stateSets.length) {
+    const byId = new Map();
+    for (const op of stateSets) { if (!byId.has(op.id)) byId.set(op.id, []); byId.get(op.id).push(op); }
+    for (const [id, list] of byId) {
+      const before = nodeById(doc, id) || born.get(id) || null;
+      let after = before || {};
+      for (const op of list) after = SHELL.setLocal(after, op.path, op.value);
+      const said = SHELL.stateEditPhrases(before, after, titleOf(id), {
+        tokens: (afterDoc && afterDoc.tokens) || doc.tokens, colorWord: (v) => humanValue(v),
+      });
+      for (const p of said) phrases.push(p);
+    }
   }
   for (const p of describeTokenOps(tokens, doc)) phrases.push(p);
 
@@ -5499,6 +5520,12 @@ function setSelection(ids, opts = {}) {
      не перехватывает панель: иначе поле сменялось полем другого слоя посреди слова, и
      остаток набора уходил в имя новой доски. Рамки правки на холсте агент покажет и так. */
   if (opts.agent === true && inspFocused()) return;
+  /* Круг 36: в просмотре выделения нет. Итог правки агента выделения не ставит (просмотр
+     остаётся), а выбор слоя человеком (рельс, «выдели …») — это возврат к правке. */
+  if (previewOn() && Array.isArray(ids) && ids.length) {
+    if (opts.agent === true) return;
+    setPreview(false, { restore: false });
+  }
   state.selection = Array.isArray(ids) ? ids.slice() : [];
   /* Кто выделил: агент после своей же правки (selectTouched) или человек. brain по этому
      полю решает, говорить ли «правка ушла туда» — на каждой второй команде это звучало
@@ -5941,6 +5968,18 @@ function renderLayers() {
       g.className = 'glyph';
       g.textContent = glyphFor(n);
       row.append(tw, g, nm);
+    }
+    // круг 36: у слоя есть состояния — маленькая метка, по ней видно, что он «живой»
+    if (!r.lib && SHELL.hasStates(n)) {
+      const t = document.createElement('span');
+      t.className = 'tagpill motion';
+      t.appendChild(iconEl('motion'));
+      const words = SHELL.statesOf(n).map((k) => SHELL.STATE_TITLES[k].toLowerCase()).join(', ');
+      t.title = `Состояния: ${words} — видно в режиме «Просмотр» (P)`;
+      t.setAttribute('role', 'img');
+      t.setAttribute('aria-label', `Есть состояния: ${words}`);
+      row.dataset.states = 'on';
+      row.appendChild(t);
     }
     /* Круг 19, п.4. Список компонентов должен быть ВИДЕН, а не спрятан за меню: он и есть
        половина смысла работы. Поэтому вставка экземпляра живёт прямо в строке компонента —
@@ -7148,6 +7187,8 @@ function renderInspector() {
         noteEl(own ? 'Незаданная ось берётся у компонента.' : 'Размер сейчас целиком от компонента.'),
       ]));
     }
+    // круг 36 (SPEC §11.1): у экземпляра состояния свои — как размер и место
+    if (statesAllowed(node)) body.appendChild(statesGroup(node));
     if (node.override) body.appendChild(overrideGroup(node));
     const del = document.createElement('button');
     del.className = 'btn danger small';
@@ -7241,6 +7282,9 @@ function renderInspector() {
     ]));
   }
 
+  // круг 36 (SPEC §11.3): как слой ведёт себя под рукой — после того, как он выглядит
+  if (statesAllowed(node)) body.appendChild(statesGroup(node));
+
   if (node.override) body.appendChild(overrideGroup(node));
 
   const del = document.createElement('button');
@@ -7302,6 +7346,196 @@ function makeComponentGroup(body, node) {
   if (/компонент|библиотек/i.test(why)) {
     body.appendChild(group('Компонент', [noteEl(`Компонентом не станет: ${why}.`)]));
   }
+}
+
+/* --------------------- круг 36 (SPEC §11.3): раздел «Состояния» --------------------- */
+
+/** У каких узлов раздел есть: §11.1 (не страница) и не доска — доску наводкой не трогают. */
+function statesAllowed(node) {
+  return SHELL.canHaveStates(node) && !isArtboard(state.doc, node.id);
+}
+
+/** Шаги подъёма: шаги шкалы отступов до 24 px (§11.1: подъём −24…24). */
+function liftSteps() {
+  return scaleSteps(state.doc, 'spacing')
+    .map((v, i) => ({ v, i }))
+    .filter((x) => x.v > 0 && x.v <= 24);
+}
+
+const SCALE_CHOICES = [0.95, 0.97, 0.98, 1.02, 1.03, 1.05, 1.1];
+const OPACITY_CHOICES = [1, 0.9, 0.8, 0.7, 0.6, 0.5];
+const SPEED_REFS = ['motion.fast', 'motion.base', 'motion.slow'];
+const EASINGS = ['standard', 'emphasized', 'decelerate', 'accelerate', 'linear', 'spring'];
+
+/** Записать поле состояния одной транзакцией (`set`, отмена — та же). */
+function writeState(node, key, field, value) {
+  const list = SHELL.stateWriteOps(node, key, field, value);
+  if (!list.length) return;
+  commit(list.map((o) => OPS.set(node.id, o.path, o.value)), 'Состояние');
+}
+
+function writeMotion(node, field, value) {
+  const list = SHELL.motionWriteOps(node, field, value);
+  if (!list.length) return;
+  commit(list.map((o) => OPS.set(node.id, o.path, o.value)), 'Движение');
+}
+
+/** Выбор из списка, где «—» значит «как в покое» (поле не задано). */
+function optField(choices, current, onChange, word, label) {
+  const sel = document.createElement('select');
+  sel.className = 'field';
+  if (label) sel.setAttribute('aria-label', label);
+  const add = (value, text) => {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = text;
+    sel.appendChild(o);
+    return o;
+  };
+  add('', 'как в покое');
+  const keys = choices.map((c) => JSON.stringify(c));
+  choices.forEach((c, i) => add(keys[i], word(c)));
+  if (current !== undefined && !keys.includes(JSON.stringify(current))) add(JSON.stringify(current), word(current));
+  sel.value = current === undefined ? '' : JSON.stringify(current);
+  sel.addEventListener('change', () => onChange(sel.value === '' ? undefined : JSON.parse(sel.value)));
+  return sel;
+}
+
+/** Цвет состояния: та же палитра токенов, свёрнутая под строку «Заливка: акцент». */
+function stateColorField(node, key, field, cur, title) {
+  const d = document.createElement('details');
+  d.className = 'state-color';
+  const sum = document.createElement('summary');
+  const dot = document.createElement('span');
+  dot.className = 'swatch-dot';
+  const tok = colorToken(cur);
+  const hex = tok ? (state.doc.tokens.colors || {})[tok] : null;
+  // «как в покое» — пунктирное кольцо, а не перечёркнутый кружок «без заливки»: это не цвет
+  if (cur !== undefined && hex) dot.style.background = hex; else dot.classList.add(cur === undefined ? 'same' : 'none');
+  const txt = document.createElement('span');
+  txt.textContent = `${title}: ${cur === undefined ? 'как в покое' : humanValue(cur)}`;
+  sum.append(dot, txt);
+  d.appendChild(sum);
+  d.appendChild(swatches(node, field, `${title} при состоянии`, {
+    value: cur, noneLabel: 'Как в покое', onPick: (v) => writeState(node, key, field, v),
+  }));
+  return d;
+}
+
+function statesGroup(node) {
+  const has = SHELL.statesOf(node);
+  // вкладка помнится для слоя, на котором её выбрали; у другого слоя — первое заданное
+  let key = state.stateTabFor === node.id && SHELL.STATE_KEYS.includes(state.stateTab) ? state.stateTab : null;
+  if (!key) key = has[0] || 'hover';
+  const st = (node.states && node.states[key]) || null;
+  const motion = node.motion || {};
+  const kids = [];
+
+  // вкладки: «Наведение / Нажатие / Фокус», у заданных — точка
+  const tabs = document.createElement('div');
+  tabs.className = 'seg state-tabs';
+  tabs.setAttribute('role', 'tablist');
+  tabs.setAttribute('aria-label', 'Состояние');
+  for (const k of SHELL.STATE_KEYS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(k === key));
+    b.setAttribute('aria-pressed', String(k === key));
+    b.dataset.state = k;
+    b.textContent = SHELL.STATE_TITLES[k];
+    if (has.includes(k)) {
+      b.dataset.set = 'on';
+      b.title = `${SHELL.STATE_TITLES[k]} задано`;
+    }
+    b.addEventListener('click', () => { state.stateTab = k; state.stateTabFor = node.id; renderInspector(); });
+    tabs.appendChild(b);
+  }
+  kids.push(tabs);
+
+  const title = SHELL.STATE_TITLES[key];
+  if (!st) {
+    kids.push(noteEl(`${title} не задано — слой не меняется. Любое поле ниже его задаст.`));
+    if (key === 'hover') {
+      const quick = document.createElement('button');
+      quick.type = 'button';
+      quick.className = 'btn subtle small';
+      quick.textContent = 'Подъём и тень';
+      quick.title = 'Приподнять на 2 px и дать среднюю тень при наведении — одной правкой';
+      const lift = liftSteps()[0];
+      quick.addEventListener('click', () => {
+        const value = { lift: lift ? scaleRef('spacing', lift.i) : 2, shadow: 'shadow.md' };
+        const list = node.states && typeof node.states === 'object'
+          ? [OPS.set(node.id, 'states.hover', value)]
+          : [OPS.set(node.id, 'states', { hover: value })];
+        if (!node.motion) list.push(OPS.set(node.id, 'motion', { duration: 'motion.fast' }));
+        commit(list, 'Состояние');
+      });
+      kids.push(quick);
+    }
+  }
+  const cur = st || {};
+  if ('fill' in node || ['frame', 'rect', 'ellipse', 'instance'].includes(node.type)) {
+    kids.push(stateColorField(node, key, 'fill', cur.fill, 'Заливка'));
+  }
+  if (node.type === 'text') kids.push(stateColorField(node, key, 'color', cur.color, 'Цвет текста'));
+
+  // тень: нет / лёгкая / средняя / сильная (незаданная читается как «нет», если у слоя её нет)
+  const baseShadow = node.shadow && node.shadow !== 'none' ? node.shadow : null;
+  const shadowNow = cur.shadow !== undefined ? cur.shadow : (baseShadow || 'none');
+  const shadowKeys = Object.keys(SHELL.SHADOW_WORDS);
+  // списком, а не переключателем: четыре слова в узкой колонке (1024 px) слипались
+  kids.push(row('Тень', selectField(shadowKeys, shadowNow, (v) => {
+    const write = v === 'none' && !baseShadow ? undefined : (v === baseShadow ? undefined : v);
+    writeState(node, key, 'shadow', write);
+  }, SHELL.SHADOW_WORDS)));
+
+  const lifts = liftSteps().map((x) => scaleRef('spacing', x.i));
+  kids.push(row('Подъём', optField(lifts, cur.lift, (v) => writeState(node, key, 'lift', v),
+    (v) => SHELL.stateValueWord('lift', v, { tokens: state.doc.tokens }), 'Подъём')));
+  kids.push(row('Масштаб', optField(SCALE_CHOICES, cur.scale, (v) => writeState(node, key, 'scale', v),
+    (v) => SHELL.stateValueWord('scale', v), 'Масштаб')));
+  kids.push(row('Непрозр.', optField(OPACITY_CHOICES, cur.opacity, (v) => writeState(node, key, 'opacity', v),
+    (v) => SHELL.stateValueWord('opacity', v), 'Непрозрачность')));
+
+  // движение — одно на слой, общее для всех состояний
+  const dur = motion.duration;
+  const speedNow = typeof dur === 'string' && SPEED_REFS.includes(dur) ? dur : (dur === undefined ? 'motion.base' : null);
+  kids.push(row('Скорость', segField(SPEED_REFS, speedNow, (v) => writeMotion(node, 'duration', v),
+    SPEED_REFS.map((r) => SHELL.SPEED_WORDS[r]))));
+  if (typeof dur === 'number') kids.push(noteEl(`Сейчас ${numText(dur)} мс — мимо шкалы движения; выбор выше поставит шаг шкалы.`));
+  kids.push(row('Кривая', selectField(EASINGS, motion.easing || 'standard',
+    (v) => writeMotion(node, 'easing', v), SHELL.EASING_WORDS)));
+  if (motion.follow === 'parent') kids.push(noteEl('Следует за родителем: состояние включается, когда наводят на родителя с состояниями.'));
+
+  const acts = document.createElement('div');
+  acts.className = 'state-acts';
+  const play = document.createElement('button');
+  play.type = 'button';
+  play.className = 'btn subtle small with-icon';
+  play.append(iconEl('play'));
+  const pl = document.createElement('span');
+  pl.textContent = 'Проиграть';
+  play.appendChild(pl);
+  play.disabled = !st;
+  play.title = st ? `Показать «${title.toLowerCase()}» на холсте на 1,5 с` : `${title} не задано — проигрывать нечего`;
+  play.addEventListener('click', () => playStateNow(node.id, key));
+  acts.appendChild(play);
+  if (st) {
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'btn ghost small state-remove';
+    rm.textContent = 'Убрать состояние';
+    rm.title = `Убрать «${title.toLowerCase()}» у слоя — вернуть можно отменой`;
+    rm.addEventListener('click', () => {
+      const list = SHELL.stateRemoveOps(node, key);
+      if (list.length) commit(list.map((o) => OPS.set(node.id, o.path, o.value)), 'Убрать состояние');
+    });
+    acts.appendChild(rm);
+  }
+  kids.push(acts);
+  const g = group('Состояния', kids);
+  g.classList.add('states-group');
+  return g;
 }
 
 /** Ручное положение узла: одна и та же группа у обычного узла и у экземпляра (круг 19, п.5). */
@@ -7768,10 +8002,10 @@ function swatches(node, prop, label, opts = {}) {
   none.className = 'swatch';
   none.setAttribute('aria-pressed', String(!cur));
   const dot = document.createElement('span');
-  dot.className = 'swatch-dot none';
+  dot.className = opts.noneLabel ? 'swatch-dot same' : 'swatch-dot none';
   const cap = document.createElement('span');
   cap.className = 'swatch-name';
-  cap.textContent = prop === 'color' ? 'Без цвета' : 'Без заливки';
+  cap.textContent = opts.noneLabel || (prop === 'color' ? 'Без цвета' : 'Без заливки');
   none.append(dot, cap);
   none.title = cap.textContent;
   none.addEventListener('click', () => pick(undefined));
@@ -7818,7 +8052,7 @@ function submitCommand(opts = {}) {
  * подвинуть вид, открыть шторку. Документ и область работы агента при этом не трогаем —
  * «отмени» и «покажи второй экран» по-прежнему спрашивают, доделать или заменить.
  */
-const SHELL_WHILE_BUSY = new Set(['stop', 'variants-close', 'fit', 'zoom', 'sheet', 'rail', 'theme', 'export']);
+const SHELL_WHILE_BUSY = new Set(['stop', 'variants-close', 'fit', 'zoom', 'sheet', 'rail', 'theme', 'export', 'preview']);
 
 /** Вернуть текст в строку — но только если человек не набрал туда своё (п.8). */
 function restoreCommand(text, { focus = false } = {}) {
@@ -10006,6 +10240,10 @@ function applyShellIntent(intent, said) {
       else showMsg('plain', 'Агент сейчас ничего не делает.', { ms: 5000 });
       return true;
     }
+    case 'preview': {
+      setPreview(intent.on !== false, { say: true });
+      return true;
+    }
     case 'new-board': {
       const r = addArtboard();
       if (r && r.ok) showMsg('result', 'Новая доска готова', { note: 'Скажите, что на ней построить.', ms: 7000 });
@@ -10584,6 +10822,9 @@ function bindUi() {
     updateFitButton();
   });
 
+  // круг 36: «Просмотр» в панели масштаба и «Выйти» на плашке
+  if (dom['btn-preview']) dom['btn-preview'].addEventListener('click', () => setPreview(!previewOn()));
+  if (dom['btn-preview-exit']) dom['btn-preview-exit'].addEventListener('click', () => setPreview(false));
   dom['btn-rail-close'].addEventListener('click', () => setRail('off', true));
   dom['btn-rail'].addEventListener('click', () => setRail(dom.app.dataset.rail === 'off' ? 'on' : 'off', true));
   dom.scrim.addEventListener('click', () => {
@@ -10683,6 +10924,9 @@ function bindUi() {
       return;
     }
     if (e.key === 'Escape' && !dom.sheet.hidden) { e.preventDefault(); closeSheet(); return; }
+    /* Круг 36: из просмотра Esc выводит первым — это режим холста, а не всплывашка. Если
+       сцена забрала Esc себе (снимала фокус с узла, defaultPrevented), выходит второй Esc. */
+    if (e.key === 'Escape' && previewOn() && !typing && !e.defaultPrevented) { e.preventDefault(); setPreview(false); return; }
     // шторка слоёв закрывалась только кликом по затемнению (п.17)
     if (e.key === 'Escape' && railIsDrawer() && dom.app.dataset.rail === 'on') {
       e.preventDefault();
@@ -10724,6 +10968,11 @@ function bindUi() {
       keyUndo(e.shiftKey);
     }
     if (e.key.toLowerCase() === 'h' && bare) { e.preventDefault(); openHistory(); }
+    // круг 36 (SPEC §11.3): P — просмотр туда и обратно
+    if (e.key.toLowerCase() === 'p' && bare && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      setPreview(!previewOn());
+    }
     if (e.key.toLowerCase() === 'l' && bare && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       setRail(dom.app.dataset.rail === 'off' ? 'on' : 'off', true);
@@ -10759,6 +11008,96 @@ function bareKeyOk() {
   if (!a || a === document.body || a === document.documentElement) return true;
   if (dom.canvas && (a === dom.canvas || dom.canvas.contains(a))) return true;
   return false;
+}
+
+/* ---------------------- круг 36 (SPEC §11.3): режим «Просмотр» ---------------------- */
+
+/** Выделение до просмотра: выйдя, человек возвращается к тому, что правил. */
+let previewMemo = null;
+
+function previewOn() { return !!(dom.app && dom.app.dataset.preview === 'on'); }
+
+/** Есть ли в документе хоть одно состояние — иначе в просмотре нечему оживать. */
+function docHasStates() {
+  const nodes = (state.doc && state.doc.nodes) || {};
+  for (const id in nodes) if (SHELL.hasStates(nodes[id])) return true;
+  return false;
+}
+
+/**
+ * Включить или выключить просмотр. В просмотре выделение и правка выключены (это делает
+ * сцена — `stage.setPreview`), а наведение, нажатие и фокус проигрывают состояния.
+ * @param {boolean} on
+ * @param {{say?: boolean, restore?: boolean}} [o] say — ответить словами (команда голосом
+ *   или строкой); restore — вернуть выделение, бывшее до просмотра (по умолчанию да)
+ * @returns {boolean} режим переключился
+ */
+function setPreview(on, { say = false, restore = true } = {}) {
+  const want = !!on;
+  if (want === previewOn()) {
+    if (say) showMsg('plain', want ? 'Просмотр уже включён — наведите на элементы.' : 'Просмотр и так выключен — можно править.', { ms: 5000 });
+    return false;
+  }
+  if (want && (!stage || typeof stage.setPreview !== 'function')) {
+    toast('Просмотр недоступен: холст этой версии его не умеет. Обновите страницу.', 'error', 7000);
+    return false;
+  }
+  if (want) {
+    unpeekVariant();
+    stopPlayState();
+    previewMemo = state.selection.slice();
+    // выделение гаснет вместе с инспектором: в просмотре правки нет
+    if (state.selection.length) setSelection([], { quiet: true });
+  }
+  dom.app.dataset.preview = want ? 'on' : 'off';
+  try { if (stage && typeof stage.setPreview === 'function') stage.setPreview(want); }
+  catch (e) { console.warn('[imago] setPreview', e); }
+  const b = dom['btn-preview'];
+  if (b) {
+    b.setAttribute('aria-pressed', String(want));
+    b.title = want ? 'Выйти из просмотра и вернуться к правке (P или Esc)' : 'Просмотр: наведение и нажатие оживают (P)';
+  }
+  if (dom.previewbar) dom.previewbar.hidden = !want;
+  if (!want) {
+    const back = restore ? (previewMemo || []).filter((id) => nodeById(state.doc, id)) : [];
+    previewMemo = null;
+    if (back.length) setSelection(back, { quiet: true });
+  }
+  if (want && !docHasStates()) {
+    toast('В макете пока нет состояний: задайте их в инспекторе («Состояния») или скажите «оживи кнопки».', 'plain', 8000);
+  } else if (say) {
+    showMsg('plain', want ? 'Просмотр: наведите на элементы' : 'Просмотр выключен — можно править.', {
+      note: want ? 'Выделение и правка выключены. Выйти — P, Esc или «выйди из просмотра».' : '', ms: 6000,
+    });
+  }
+  renderHints();
+  return true;
+}
+
+/* «Проиграть» в инспекторе: состояние выделенного узла показывается на холсте 1,5 с. */
+const PLAY_STATE_MS = 1500;
+let playTimer = null;
+let playing = null;   // {id, key}
+
+function playStateNow(id, key) {
+  if (!stage || typeof stage.playState !== 'function') {
+    toast('Проиграть не выйдет: холст этой версии не умеет состояния. Обновите страницу.', 'error', 7000);
+    return;
+  }
+  stopPlayState();
+  try { stage.playState(id, key); } catch (e) { console.warn('[imago] playState', e); return; }
+  playing = { id, key };
+  playTimer = setTimeout(() => stopPlayState(), PLAY_STATE_MS);
+}
+
+function stopPlayState() {
+  clearTimeout(playTimer);
+  playTimer = null;
+  if (!playing) return;
+  const was = playing;
+  playing = null;
+  try { if (stage && typeof stage.playState === 'function') stage.playState(was.id, null); }
+  catch { /* сцена уже перерисована — проигрывать нечего */ }
 }
 
 let zoomRepairing = false;
@@ -11624,6 +11963,19 @@ function fillExport(body) {
     hasBoard ? '' : 'Вектор снимают с доски, а её в документе нет');
   mk('JSON', `Весь документ — ${exportName('json', null)}, его можно вернуть импортом`, () => exportJson());
   body.appendChild(rest);
+  /* Круг 36 (SPEC §11.3): SVG несёт состояния как CSS — в браузере файл реагирует на мышь.
+     Об этом сказано только там, где это правда: в доске есть слои с состояниями. */
+  if (hasBoard && SHELL.subtreeHasStates(state.doc, abId)) {
+    const mo = document.createElement('div');
+    mo.className = 'note export-motion';
+    mo.appendChild(iconEl('motion'));
+    const t = document.createElement('span');
+    t.textContent = 'SVG — с микроанимациями (откройте в браузере): наведение и нажатие оживают.';
+    mo.appendChild(t);
+    body.appendChild(mo);
+    const svgBtn = rest.firstElementChild;
+    if (svgBtn) svgBtn.title = `${svgBtn.title} — с микроанимациями: откройте файл в браузере`;
+  }
 
   const hint = document.createElement('div');
   hint.className = 'note';
@@ -12100,9 +12452,10 @@ function renderHints() {
   } else if (node && isArtboard(state.doc, node.id)) {
     list = ['добавь нижнюю панель с тремя кнопками', 'сделай тёмную тему', 'добавь шапку с аватаром и датой'];
   } else if (node) {
-    list = ['добавь сюда кнопку «Оплатить»', 'увеличь отступы и скругления', 'разложи в строку с равными долями'];
+    list = ['добавь сюда кнопку «Оплатить»', 'увеличь отступы и скругления', 'оживи при наведении: подъём и тень'];
   } else {
-    list = ['экран оплаты с полем карты и итогом', 'добавь блок отзывов из трёх карточек', 'собери дашборд из четырёх плиток'];
+    // круг 36 (SPEC §11.4): микроанимации — тоже работа агента, и это надо показать
+    list = ['экран оплаты с полем карты и итогом', 'добавь блок отзывов из трёх карточек', 'оживи кнопки: подъём и тень при наведении'];
   }
   dom.hints.textContent = '';
   // на пустом документе и пустом артборде примеры уже показаны на холсте

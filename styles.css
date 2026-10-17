@@ -1400,6 +1400,88 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   color: var(--text); background: var(--panel-2); border-color: var(--line-strong);
 }
 
+/* ---------------- круг 36 (SPEC §11): микроанимации в оболочке ---------------- */
+
+/* «Просмотр» в панели масштаба: нажатая кнопка — акцентом интерфейса, как выбранное. */
+#btn-preview .i { display: inline-flex; }
+#btn-preview[aria-pressed="true"] {
+  background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+}
+#btn-preview[aria-pressed="true"]:hover { filter: brightness(1.06); }
+/* Плашка просмотра — родня подписи предпросмотра варианта (.peekbar): то же место под
+   панелью вида, но цвет интерфейса, а не агента — это режим холста, а не работа агента.
+   Подпись нажатий не перехватывает; «Выйти» — кнопка. */
+.previewbar {
+  position: absolute; top: 54px; left: 50%; transform: translateX(-50%); z-index: 12;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 4px 4px 12px; border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink);
+  font-size: var(--t-sm); box-shadow: var(--shadow-soft);
+  max-width: min(92%, 520px); white-space: nowrap; pointer-events: none;
+}
+.previewbar .i { flex: none; display: inline-flex; }
+.previewbar-text { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.previewbar-exit {
+  pointer-events: auto; flex: none; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--accent-ink) 35%, transparent);
+  background: color-mix(in srgb, var(--accent-ink) 12%, transparent);
+  color: var(--accent-ink); border-radius: 999px; padding: 2px 6px 2px 10px; font: inherit;
+}
+.previewbar-exit:hover { background: color-mix(in srgb, var(--accent-ink) 20%, transparent); }
+.previewbar-exit:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 1px; }
+.previewbar-exit kbd {
+  font-family: var(--mono); font-size: 10px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--accent-ink) 35%, transparent);
+}
+/* в просмотре холст — витрина: курсор указывает, а не правит; рамки правок не нужны */
+.app[data-preview="on"] .canvas { cursor: default; }
+.app[data-preview="on"] .empty-state { display: none; }
+
+/* Метка «есть состояния» у слоя: тот же язык пилюль, что «вручную», но тише — значок. */
+.layer .tagpill.motion {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 3px; height: 16px; color: var(--accent); border-color: var(--accent);
+}
+.layer .tagpill.motion .i, .layer .tagpill.motion svg { width: 11px; height: 11px; display: inline-flex; }
+/* стрелка 16 + значок 13 + метка 19 и три зазора по 6 */
+.layer[data-states="on"] .name { max-width: calc(100% - 72px); }
+.layer[data-states="on"][data-kind="master"] .name { max-width: calc(100% - 100px); }
+.layer[data-states="on"][data-kind="master"][data-used="on"] .name { max-width: calc(100% - 126px); }
+
+/* Раздел «Состояния» в инспекторе. */
+.state-tabs { flex: none; }
+.state-tabs button { position: relative; }
+/* заданное состояние — точкой у подписи: какие вкладки не пусты, видно сразу */
+.state-tabs button[data-set="on"]::after {
+  content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent); margin-left: 5px; vertical-align: middle; transform: translateY(-1px);
+}
+.state-color { border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
+.state-color > summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center; gap: 7px;
+  padding: 5px 8px; font-size: var(--t-sm); color: var(--text);
+}
+.state-color > summary::-webkit-details-marker { display: none; }
+.state-color > summary::after {
+  content: ""; margin-left: auto; width: 6px; height: 6px; flex: none;
+  border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg) translateY(-2px);
+}
+.state-color[open] > summary::after { transform: rotate(-135deg) translateY(-1px); }
+.state-color > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 8px; }
+.state-color > .swatch-groups { padding: 2px 8px 9px; }
+.swatch-dot.same { background: transparent; border: 1.5px dashed var(--muted); box-shadow: none; }
+.state-acts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.state-acts .btn.with-icon .i { display: inline-flex; }
+.state-acts .btn.with-icon svg { width: 13px; height: 13px; }
+.state-acts .state-remove { margin-left: auto; }
+.state-acts .state-remove:hover { color: var(--danger); }
+
+/* Пометка в «Экспорте»: SVG с микроанимациями. */
+.export-motion { display: flex; align-items: flex-start; gap: 6px; color: var(--text); }
+.export-motion .i { flex: none; display: inline-flex; color: var(--accent); margin-top: 1px; }
+
 /* ---------------------------- адаптивность ---------------------------- */
 
 /* Рельс шторкой и инспектор нижним листом — один набор правил на два случая: узкий
@@ -1446,6 +1528,9 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
      и «Вписать» — то, без чего вид не вернуть. */
   .viewbar #btn-zoom-in, .viewbar #btn-zoom-out, .viewbar .sep { display: none; }
   .viewbar .btn.zoom { min-width: 46px; }
+  /* круг 36: «Просмотр» остаётся значком — слово в title */
+  #btn-preview .btn-label { display: none; }
+  #btn-preview { width: 30px; padding: 6px 0; justify-content: center; }
 }
 @container canvas (max-width: 420px) {
   .hints { display: none; }
@@ -1531,6 +1616,9 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   }
   .viewbar #btn-zoom-in, .viewbar #btn-zoom-out, .viewbar .sep { display: none; }
   .viewbar .btn.zoom { min-width: 46px; }
+  #btn-preview .btn-label { display: none; }
+  #btn-preview { width: 30px; padding: 6px 0; justify-content: center; }
+  .previewbar { top: 50px; }
   .hints { display: none; }
   /* Варианты на узком экране — нижний лист, как инспектор: колонки тут нет. */
   .app { --vars-h: min(46vh, 380px); }

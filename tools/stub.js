@@ -27,6 +27,8 @@
       if (/сколько|что за|почему|какой|\?/.test(low)) intent = 'ask';
       else if (/тёмн|темн|палитр|тему|цвета/.test(low)) intent = 'theme';
       else if (/крупнее|меньше|замени|убери|поменяй|сделай .* больше|отступ/.test(low)) intent = 'edit';
+      // круг 36: микроанимации — правка состояний (SPEC §11.4)
+      else if (/оживи|наведени|анимац/.test(low)) intent = 'edit';
       return {
         intent,
         title: 'Заглушка: ' + intent,
@@ -54,7 +56,19 @@
         ],
       };
     },
-    patch() {
+    patch(u) {
+      /* Круг 36 (SPEC §11.4): «оживи кнопки» — подъём шагом шкалы, средняя тень и быстрое
+         движение ссылками на шкалы, как просит раздел об агенте. Цель — кнопка демо. */
+      if (/оживи|наведени|анимац/.test(String(u || '').toLowerCase())) {
+        const target = 'Кнопка «Добавить пункт»';
+        return {
+          summary: 'Кнопка приподнимается при наведении',
+          edits: [
+            { op: 'set', target, path: 'states.hover', value: { lift: 'spacing.1', shadow: 'shadow.md' } },
+            { op: 'set', target, path: 'motion', value: { duration: 'motion.fast', easing: 'standard' } },
+          ],
+        };
+      }
       return { summary: 'Заглушка правок', edits: [{ op: 'set', target: 'selection', path: 'layout.gap', value: '24' }] };
     },
     theme() {

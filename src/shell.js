@@ -280,6 +280,9 @@ export function shellIntentFromServer(shell) {
     case 'new-board':
     case 'new-artboard':
       return { kind: 'new-board' };
+    // круг 36 (SPEC §11.3): режим «Просмотр»; без on — включить
+    case 'preview':
+      return { kind: 'preview', on: a.on == null ? true : !(a.on === false || a.on === 'false' || a.on === 0) };
     case 'export':
       // what: '' — «экспорт» без формата: открыть окно экспорта
       if (typeof a.what === 'string' || typeof a.format === 'string') return { kind: 'export', what: String(a.what ?? a.format).toLowerCase() };
@@ -1417,6 +1420,13 @@ const RE_PICK = /^(?:выдели|выделить|выделите|выбери
    пустую доску делает сама оболочка — как она уже делает отмену, масштаб и экспорт
    (SPEC §4). Форма только целиковая: «собери доску оплаты» — работа для агента. */
 const RE_NEW_BOARD = /^(?:нов(?:ая|ую) доск[ау]|пуст(?:ая|ую) доск[ау]|созда(?:й|ть) доску|добав(?:ь|ить) доску|ещ[ёе] одн(?:а доска|у доску)|новый артборд|пустой артборд)$/;
+/* Круг 36 (SPEC §11.3): «Просмотр» — режим холста, в котором наведение и нажатие проигрывают
+   состояния. Формы только целиковые: «добавь просмотр» и «сделай экран просмотра» — работа
+   для модели. «просмотр» и «режим просмотра» — включить; выйти — явными словами. */
+const PV_LEAD = '(?:включи |включить |открой |открыть |покажи |показать |запусти |запустить |перейди в |перейти в |войди в |войти в |давай |в )?';
+const RE_PREVIEW_ON = new RegExp(`^${PV_LEAD}(?:режим просмотра|режим предпросмотра|просмотр|предпросмотр)$`
+  + '|^посмотреть вживую$|^покажи вживую$|^проверить анимации$|^проверь анимации$');
+const RE_PREVIEW_OFF = /^(?:выйди|выйти|выход|выходи) из (?:режима )?(?:пред)?просмотра$|^(?:выключи|выключить|закрой|закрыть|заверши|завершить|останови|остановить) (?:режим (?:пред)?просмотра|(?:пред)?просмотр)$|^(?:хватит|конец) (?:пред)?просмотра$|^(?:вернись|вернуться|назад) к правке$|^режим правки$/;
 
 /**
  * Намерение, которое выполняет сама оболочка. null — значит это команда агенту.
@@ -1447,6 +1457,11 @@ export function shellIntent(said, ctx = {}) {
 
   // пустая доска — дело оболочки, модель для этого не нужна (круг 18, п.5)
   if (RE_NEW_BOARD.test(t)) return { kind: 'new-board' };
+
+  /* Круг 36 (SPEC §11.3): режим «Просмотр» — дело оболочки, как масштаб и тема. Раньше
+     RE_SHOW: «покажи просмотр» иначе искал бы доску с именем «просмотр». */
+  if (RE_PREVIEW_OFF.test(t)) return { kind: 'preview', on: false };
+  if (RE_PREVIEW_ON.test(t)) return { kind: 'preview', on: true };
 
   // варианты — дело brain: он один умеет отличить «два варианта шапки» от команды (п.2)
   if (/вариант/.test(t) && !RE_VARIANTS_BARE.test(t)) return null;
@@ -1575,4 +1590,261 @@ export function shellEventOf(intent) {
   if (!intent || typeof intent !== 'object' || !intent.kind) return null;
   const { kind, ...args } = intent;
   return { action: kind, args };
+}
+
+/* ---------------- круг 36 (SPEC §11): состояния и движение словами ---------------- */
+
+/** Состояния узла по порядку вкладок инспектора. */
+export const STATE_KEYS = Object.freeze(['hover', 'press', 'focus']);
+/** Имя состояния — заголовок вкладки и начало фразы в «Истории»: «Наведение «Кнопка»: …». */
+export const STATE_TITLES = Object.freeze({ hover: 'Наведение', press: 'Нажатие', focus: 'Фокус' });
+/** Где состояния допустимы (§11.1): у страницы — нет. Доски оболочка отсекает сама. */
+export const STATE_NODE_TYPES = Object.freeze(['frame', 'text', 'rect', 'ellipse', 'image', 'instance']);
+/** Шкала теней (§11.1): ссылка → слово инспектора. */
+export const SHADOW_WORDS = Object.freeze({ none: 'нет', 'shadow.sm': 'лёгкая', 'shadow.md': 'средняя', 'shadow.lg': 'сильная' });
+/** Шкала движения: ссылка → «Скорость» инспектора. */
+export const SPEED_WORDS = Object.freeze({ 'motion.fast': 'быстро', 'motion.base': 'обычно', 'motion.slow': 'медленно' });
+/** Кривые движения словами. */
+export const EASING_WORDS = Object.freeze({
+  standard: 'обычная', emphasized: 'выразительная', decelerate: 'с торможением',
+  accelerate: 'с разгоном', linear: 'ровная', spring: 'пружина',
+});
+/** Умолчания ядра для шкалы движения (§11.1), мс — пока документ своих не задал. */
+export const MOTION_DEFAULTS = Object.freeze({ fast: 120, base: 200, slow: 320 });
+
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** Может ли у узла быть состояние (§11.1). */
+export function canHaveStates(node) {
+  return !!(node && STATE_NODE_TYPES.includes(node.type));
+}
+
+/** Есть ли у узла хоть одно непустое состояние — значок в «Слоях» и пометка экспорта. */
+export function hasStates(node) {
+  const s = node && isObj(node.states) ? node.states : null;
+  if (!s) return false;
+  return STATE_KEYS.some((k) => isObj(s[k]) && Object.keys(s[k]).length > 0);
+}
+
+/** Какие состояния у узла заданы: ['hover', 'press']. */
+export function statesOf(node) {
+  const s = node && isObj(node.states) ? node.states : null;
+  return s ? STATE_KEYS.filter((k) => isObj(s[k]) && Object.keys(s[k]).length > 0) : [];
+}
+
+/** Длительность в мс: число как есть, ссылка — по токенам документа или умолчаниям ядра. */
+export function motionMs(value, tokens) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const m = /^motion\.(fast|base|slow)$/.exec(String(value || ''));
+  if (!m) return undefined;
+  const own = tokens && isObj(tokens.motion) ? tokens.motion[m[1]] : undefined;
+  return typeof own === 'number' && Number.isFinite(own) ? own : MOTION_DEFAULTS[m[1]];
+}
+
+/** Подъём в px: число как есть, 'spacing.N' — шаг шкалы отступов. */
+export function liftPx(value, tokens) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const m = /^spacing\.(\d+)$/.exec(String(value || ''));
+  if (!m) return undefined;
+  const steps = tokens && Array.isArray(tokens.spacing) ? tokens.spacing : [];
+  const v = steps[Number(m[1])];
+  return typeof v === 'number' ? v : undefined;
+}
+
+/**
+ * Запись поля состояния наименьшей правкой (`set`, §11.1): есть `states.hover` — пишем его
+ * поле; нет — пишем `states.hover` целиком; нет и `states` — его. Тогда отмена возвращает
+ * узел ровно к прежнему виду, без пустых `states: {hover: {}}`. Снятие последнего поля
+ * снимает всё состояние, последнего состояния — и `states`.
+ * @returns {{path: string, value?: any}[]} пути и значения для `ops.set(node.id, …)`
+ */
+export function stateWriteOps(node, key, field, value) {
+  if (!node || !STATE_KEYS.includes(key) || !field) return [];
+  const states = isObj(node.states) ? node.states : null;
+  const cur = states && isObj(states[key]) ? states[key] : null;
+  if (value === undefined) {
+    if (!cur || !(field in cur)) return [];
+    if (Object.keys(cur).some((k) => k !== field)) return [{ path: `states.${key}.${field}`, value: undefined }];
+    return stateRemoveOps(node, key);
+  }
+  if (cur) return [{ path: `states.${key}.${field}`, value }];
+  if (states) return [{ path: `states.${key}`, value: { [field]: value } }];
+  return [{ path: 'states', value: { [key]: { [field]: value } } }];
+}
+
+/** «Убрать состояние»: последнее состояние уносит и `states` (движение остаётся как было). */
+export function stateRemoveOps(node, key) {
+  const states = node && isObj(node.states) ? node.states : null;
+  if (!states || !(key in states)) return [];
+  const others = Object.keys(states).filter((k) => k !== key);
+  return others.length ? [{ path: `states.${key}`, value: undefined }] : [{ path: 'states', value: undefined }];
+}
+
+/** Поле движения той же дисциплиной, что `stateWriteOps`. */
+export function motionWriteOps(node, field, value) {
+  if (!node || !field) return [];
+  const m = isObj(node.motion) ? node.motion : null;
+  if (value === undefined) {
+    if (!m || !(field in m)) return [];
+    return Object.keys(m).some((k) => k !== field) ? [{ path: `motion.${field}`, value: undefined }] : [{ path: 'motion', value: undefined }];
+  }
+  if (m) return [{ path: `motion.${field}`, value }];
+  return [{ path: 'motion', value: { [field]: value } }];
+}
+
+/** Путь правки — про состояния или движение (§11.1). */
+export function isStatePath(path) {
+  return /^(states|motion)(\.|$)/.test(String(path || ''));
+}
+
+/** Иммутабельная запись по пути — как у ядра: undefined снимает ключ. */
+export function setLocal(obj, path, value) {
+  const parts = String(path).split('.');
+  const root = { ...(isObj(obj) ? obj : {}) };
+  let cur = root;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const next = cur[parts[i]];
+    cur[parts[i]] = isObj(next) ? { ...next } : {};
+    cur = cur[parts[i]];
+  }
+  const last = parts[parts.length - 1];
+  if (value === undefined) delete cur[last];
+  else cur[last] = value;
+  return root;
+}
+
+const STATE_FIELD_WORDS = {
+  fill: ['заливка', 'f'], color: ['цвет текста', 'm'], stroke: ['обводка', 'f'],
+  opacity: ['непрозрачность', 'f'], scale: ['масштаб', 'm'], lift: ['подъём', 'm'], shadow: ['тень', 'f'],
+};
+const STATE_FIELD_ORDER = ['lift', 'shadow', 'scale', 'opacity', 'fill', 'color', 'stroke'];
+const MOTION_FIELD_ORDER = ['duration', 'easing', 'delay', 'follow'];
+const pct = (v) => `${Math.round(Number(v) * 100)} %`;
+const num = (v) => String(Math.round(Number(v) * 100) / 100).replace('.', ',');
+
+/** Значение поля состояния словами («2 px», «средняя», «95 %», «акцент»). */
+export function stateValueWord(field, v, ctx = {}) {
+  if (v === undefined || v === null) return '';
+  const tokens = ctx.tokens || null;
+  switch (field) {
+    case 'lift': {
+      const px = liftPx(v, tokens);
+      return px === undefined ? String(v) : `${num(px)} px`;
+    }
+    case 'shadow': return SHADOW_WORDS[v] || String(v);
+    case 'scale':
+    case 'opacity': return typeof v === 'number' ? pct(v) : String(v);
+    case 'fill':
+    case 'color':
+    case 'stroke': {
+      const w = typeof ctx.colorWord === 'function' ? ctx.colorWord(v) : '';
+      return w || (isObj(v) ? String(v.token || v.color || '') : String(v));
+    }
+    default: return typeof v === 'number' ? num(v) : String(v);
+  }
+}
+
+function stateFieldPhrase(field, from, to, ctx) {
+  const [label, g] = STATE_FIELD_WORDS[field] || [field, 'n'];
+  if (to === undefined) return `${label} ${g === 'f' ? 'убрана' : g === 'm' ? 'убран' : 'убрано'}`;
+  if (field === 'shadow' && to === 'none') return 'без тени';
+  const t = stateValueWord(field, to, ctx);
+  const f = from === undefined ? '' : (field === 'shadow' && from === 'none' ? 'нет' : stateValueWord(field, from, ctx));
+  return f && f !== t ? `${label} ${f} → ${t}` : `${label} ${t}`;
+}
+
+function motionValueWord(field, v, ctx) {
+  if (field === 'duration' || field === 'delay') {
+    const ms = field === 'duration' ? motionMs(v, ctx.tokens) : (typeof v === 'number' ? v : undefined);
+    return ms === undefined ? String(v) : `${num(ms)} мс`;
+  }
+  if (field === 'easing') return EASING_WORDS[v] || String(v);
+  if (field === 'follow') return v === 'parent' ? 'вслед за родителем' : 'само по себе';
+  return String(v);
+}
+
+function motionFieldPhrase(field, from, to, ctx) {
+  if (field === 'follow') return to === undefined ? 'само по себе' : motionValueWord('follow', to, ctx);
+  const label = field === 'duration' ? '' : field === 'easing' ? 'кривая ' : field === 'delay' ? 'задержка ' : `${field} `;
+  if (to === undefined) {
+    return field === 'duration' ? 'скорость обычная' : field === 'easing' ? 'кривая обычная' : field === 'delay' ? 'без задержки' : `${field} убрано`;
+  }
+  const t = motionValueWord(field, to, ctx);
+  const f = from === undefined ? '' : motionValueWord(field, from, ctx);
+  const val = f && f !== t ? `${f} → ${t}` : t;
+  return field === 'easing' ? `${label}«${val}»` : `${label}${val}`;
+}
+
+const changed = (a, b) => {
+  if (a === b) return false;
+  try { return JSON.stringify(a) !== JSON.stringify(b); } catch { return true; }
+};
+
+/**
+ * Правка состояний одного слоя словами (§11.4): «Наведение «Кнопка»: подъём 2 px, тень
+ * средняя, 120 мс». Сравнивает слой до и после, а не пути операций, — одинаково звучат
+ * и `set states.hover.lift`, и `set states` целиком, и правка агента.
+ * @param {object|null} before узел до правки
+ * @param {object|null} after узел после
+ * @param {string} name имя слоя для «…»
+ * @param {{tokens?: object, colorWord?: (v:any)=>string}} [ctx]
+ * @returns {string[]} фразы (пусто — состояния и движение не изменились)
+ */
+export function stateEditPhrases(before, after, name, ctx = {}) {
+  const b = before || {};
+  const a = after || {};
+  const bs = isObj(b.states) ? b.states : {};
+  const as = isObj(a.states) ? a.states : {};
+  const q = `«${name || 'слой'}»`;
+  const out = [];
+  for (const key of STATE_KEYS) {
+    const was = isObj(bs[key]) ? bs[key] : null;
+    const now = isObj(as[key]) ? as[key] : null;
+    if (!was && !now) continue;
+    const title = STATE_TITLES[key];
+    if (was && Object.keys(was).length && (!now || !Object.keys(now).length)) { out.push(`${title} ${q}: убрано`); continue; }
+    const fields = [...new Set([...STATE_FIELD_ORDER, ...Object.keys(was || {}), ...Object.keys(now || {})])];
+    const bits = [];
+    for (const f of fields) {
+      const x = was ? was[f] : undefined;
+      const y = now ? now[f] : undefined;
+      if (!changed(x, y)) continue;
+      bits.push(stateFieldPhrase(f, x, y, ctx));
+    }
+    if (bits.length) out.push(`${title} ${q}: ${bits.join(', ')}`);
+  }
+  const bm = isObj(b.motion) ? b.motion : {};
+  const am = isObj(a.motion) ? a.motion : {};
+  const mbits = [];
+  for (const f of [...new Set([...MOTION_FIELD_ORDER, ...Object.keys(bm), ...Object.keys(am)])]) {
+    if (!changed(bm[f], am[f])) continue;
+    // «обычная» кривая — умолчание: явная запись того же самого видимой разницы не даёт
+    if (f === 'easing' && (bm[f] || 'standard') === (am[f] || 'standard')) continue;
+    if (f === 'follow' && (bm[f] || 'self') === (am[f] || 'self')) continue;
+    mbits.push(motionFieldPhrase(f, bm[f], am[f], ctx));
+  }
+  if (mbits.length) {
+    // движение досказывает единственную фразу о состоянии: «…: подъём 2 px, 120 мс»
+    if (out.length === 1 && !/: убрано$/.test(out[0])) out[0] = `${out[0]}, ${mbits.join(', ')}`;
+    else out.push(`Движение ${q}: ${mbits.join(', ')}`);
+  }
+  return out;
+}
+
+/** В доске (поддереве) есть узлы с состояниями — для пометки экспорта SVG. */
+export function subtreeHasStates(doc, rootId) {
+  if (!doc || !doc.nodes || !rootId) return false;
+  const seen = new Set();
+  const stack = [rootId];
+  while (stack.length) {
+    const id = stack.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const n = doc.nodes[id];
+    if (!n) continue;
+    if (hasStates(n)) return true;
+    if (n.type === 'instance' && n.of && doc.nodes[n.of]) stack.push(n.of);
+    for (const c of (n.children || [])) stack.push(c);
+  }
+  return false;
 }

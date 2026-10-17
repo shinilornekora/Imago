@@ -120,14 +120,19 @@ test('круг33: пустой сегмент пути в set и setToken — ba
 const SEG = ['name', 'characters', 'layout', 'mode', 'gap', 'padding', 'top', 't', 'size', 'w', 'h', 'value', 'fill', 'token', 'color', 'stroke',
   'radius', 'opacity', 'props', 'label', 'component', 'style', 'fontSize', 'font', 'fontWeight', 'lineHeight', 'letterSpacing', 'x', '0', '1', '2', '',
   'meta', 'children', 'parent', 'type', 'id', 'visible', 'of', 'align', 'clip', 'src', 'fit', 'list', 'role', 'overrides', 'shadow',
-  'colors', 'spacing', 'radii', 'body', 'accent', 'caption', 'fresh', 'misc', 'k', 'a', '13', '5', 'cross', 'wrap', 'min', 'max'];
+  'colors', 'spacing', 'radii', 'body', 'accent', 'caption', 'fresh', 'misc', 'k', 'a', '13', '5', 'cross', 'wrap', 'min', 'max',
+  /* круг 36 (SPEC §11): состояния, движение, шкалы движения и теней */
+  'states', 'hover', 'press', 'focus', 'motion', 'duration', 'easing', 'delay', 'follow', 'lift', 'scale', 'fast', 'base', 'slow', 'sm', 'md', 'lg'];
 const NODE_TOP = ['name', 'characters', 'layout', 'size', 'fill', 'color', 'stroke', 'radius', 'opacity', 'props', 'component', 'style', 'meta',
-  'visible', 'clip', 'src', 'fit', 'overrides', 'of', 'role', 'shadow', 'list', 'align'];
-const TOKEN_TOP = ['colors', 'type', 'spacing', 'radii', 'misc', 'other'];
+  'visible', 'clip', 'src', 'fit', 'overrides', 'of', 'role', 'shadow', 'list', 'align', 'states', 'motion'];
+const TOKEN_TOP = ['colors', 'type', 'spacing', 'radii', 'misc', 'other', 'motion', 'shadow'];
 const VALS = [null, 0, -1, 1, 16, 1e9, NaN, '', 'x', 'auto', true, false, [], [1, 2], ['a'], {}, { x: 1 }, { a: { b: 1 } }, '#ff0000', 'fill', 'hug',
   'fixed', { mode: 'fill' }, { mode: 'fixed', value: 40 }, { token: 'spacing.2' }, { token: 'accent' }, 'accent', '$spacing.2', 4, 8, 24,
   undefined, undefined, { font: 'IBM Plex Sans', fontSize: 15, lineHeight: 20 }, [0, 4, 8], { top: 1 }, 'body', 'row', 'column', 0.5,
-  [{ name: 'p', type: 'text' }]];
+  [{ name: 'p', type: 'text' }],
+  /* круг 36 */
+  'shadow.md', 'shadow.xl', 'none', 'motion.fast', 'spacing.1', 'spring', 'parent', 1.05, 120, '0 2 6 rgba(0,0,0,0.2)',
+  { hover: { lift: 2, scale: 1.02 } }, { press: { scale: 0.98 }, size: 1 }, { duration: 'motion.base', easing: 'linear' }, { fast: 90 }, { md: '0 1 2 #000' }];
 
 function existingPaths(obj) {
   const out = [];
