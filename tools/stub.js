@@ -15,6 +15,94 @@
     return '';
   }
 
+  /* Круг 37 (SPEC §12.2): «нарисуй …», «монстр», «печенька» — иллюстрация. Монстрика берём
+     у ядра (core.sampleIllustration — та же картинка, что в его тестах), печеньку рисуем тут.
+     Ядро грузится сразу: заглушка — классический скрипт, модуль — динамическим импортом. */
+  const RE_ART = /нарису|монстр|печень|иллюстрац|маскот|персонаж|картинк/;
+  const coreUrl = (() => { try { return new URL('../src/core.js', document.currentScript.src).href; } catch (_) { return './src/core.js'; } })();
+  let corePromise = null;
+  const loadCore = () => (corePromise = corePromise || import(coreUrl).catch((e) => { log('core', String(e && e.message)); return null; }));
+  loadCore();
+
+  /** Краска ядра → строка ответа модели (#hex | "none"); градиент — первый стоп. */
+  function paintStr(p) {
+    if (p === undefined) return undefined;
+    if (p === null) return 'none';
+    if (typeof p === 'string') return p;
+    if (p.gradient) { const st = p.gradient.stops || []; return st.length ? (st[0].color || st[0].token) : undefined; }
+    return p.color || p.token || p.value;
+  }
+
+  /** Монстрик ядра → спецификация иллюстрации (холст 1:1 с рамкой, детали снизу вверх). */
+  function monsterFromCore(core) {
+    if (!core || typeof core.sampleIllustration !== 'function') return null;
+    let ops;
+    try { ops = core.sampleIllustration({ parent: 'stub' }); } catch (_) { return null; }
+    if (!Array.isArray(ops) || !ops.length) return null;
+    const frame = ops[0].node;
+    const w = frame.size && frame.size.w && frame.size.w.value || 240;
+    const h = frame.size && frame.size.h && frame.size.h.value || 240;
+    const parts = [];
+    for (const o of ops.slice(1)) {
+      const v = o.node;
+      if (!v || v.type !== 'vector' || !Array.isArray(v.paths)) continue;
+      const vb = v.viewBox || {};
+      // детали ядра лежат 1:1 — viewBox в координатах холста; иначе пропускаем
+      if (!v.pos || Math.abs((vb.x || 0) - v.pos.x) > 0.01 || Math.abs((vb.y || 0) - v.pos.y) > 0.01) continue;
+      for (const p of v.paths) {
+        const fill = p.fill !== undefined ? p.fill : v.fill;
+        const part = { name: p.name || v.name, kind: 'path', d: p.d };
+        if (v.paths.length > 1) part.group = v.name;
+        if (fill && fill.gradient) part.gradient = fill.gradient;
+        else if (fill !== undefined) part.fill = paintStr(fill);
+        const stroke = p.stroke !== undefined ? p.stroke : (v.stroke && (v.stroke.color || v.stroke));
+        if (stroke !== undefined) { part.stroke = paintStr(stroke); part.strokeWidth = p.strokeWidth != null ? p.strokeWidth : 2; }
+        if (p.opacity != null) part.opacity = p.opacity;
+        if (v.rotate) part.rotate = v.rotate;
+        parts.push(part);
+      }
+    }
+    if (!parts.length) return null;
+    const bg = frame.fill && frame.fill.gradient ? (frame.fill.gradient.stops || [])[0] : null;
+    return { name: 'Монстрик', canvas: { w, h }, background: bg ? bg.color : paintStr(frame.fill) || 'none', outline: { color: 'none', width: 0 }, parts };
+  }
+
+  /** Печенька: тесто с градиентом, тень, кромка, шоколадная крошка (одной группой), блик. */
+  function cookie() {
+    const chips = [[132, 120, 13], [196, 112, 11], [238, 150, 12], [150, 196, 12], [214, 206, 14], [178, 160, 9], [252, 236, 10], [118, 248, 9]];
+    return {
+      name: 'Печенька',
+      canvas: { w: 400, h: 400 },
+      background: 'none',
+      palette: [{ name: 'тесто', color: '#E3A85F' }, { name: 'шоколад', color: '#5B3A29' }],
+      parts: [
+        { name: 'Тень', kind: 'ellipse', x: 92, y: 318, w: 236, h: 30, fill: '#2b1d10', opacity: 0.18 },
+        { name: 'Печенька', kind: 'path', d: 'M200 64C268 60 330 104 338 176C346 250 300 318 222 330C148 342 74 300 62 224C50 146 120 68 200 64Z',
+          gradient: { kind: 'radial', stops: [{ at: 0, color: '#F2C27F' }, { at: 1, color: '#C98A43' }] }, stroke: '#8A5523', strokeWidth: 4 },
+        { name: 'Кромка', kind: 'path', d: 'M96 246C118 296 170 318 226 312C280 306 318 268 326 222C306 270 262 296 214 298C164 300 118 282 96 246Z', fill: '#B5772F', opacity: 0.7 },
+        ...chips.map(([cx, cy, r], i) => ({ name: `Крошка ${i + 1}`, kind: 'path', d: `M${cx - r} ${cy}C${cx - r} ${cy - r * 0.9} ${cx + r * 0.9} ${cy - r} ${cx + r} ${cy - r * 0.2}C${cx + r} ${cy + r * 0.8} ${cx} ${cy + r} ${cx - r * 0.6} ${cy + r * 0.7}C${cx - r} ${cy + r * 0.5} ${cx - r} ${cy + r * 0.2} ${cx - r} ${cy}Z`, fill: '#5B3A29', group: 'Шоколадная крошка' })),
+        { name: 'Блик', kind: 'path', d: 'M132 104C160 88 196 82 224 88C192 96 164 110 144 132C136 124 130 114 132 104Z', fill: '#FFF3DC', opacity: 0.75 },
+      ],
+    };
+  }
+
+  /** Запасной монстрик, если ядро ещё не умеет образец: силуэт, живот, глаза, рот. */
+  function monsterFallback() {
+    return {
+      name: 'Монстрик', canvas: { w: 240, h: 240 }, background: '#FFE9D6',
+      outline: { color: '#2B1D5C', width: 4 },
+      parts: [
+        { name: 'Тень', kind: 'ellipse', x: 62, y: 206, w: 116, h: 16, fill: '#2B1D5C', opacity: 0.2, stroke: 'none' },
+        { name: 'Тело', kind: 'path', d: 'M120 36C170 36 200 78 200 130C200 182 166 210 120 210C74 210 40 182 40 130C40 78 70 36 120 36Z',
+          gradient: { kind: 'linear', angle: 180, stops: [{ at: 0, color: '#8F7BFF' }, { at: 1, color: '#5B47D6' }] } },
+        { name: 'Животик', kind: 'ellipse', x: 76, y: 112, w: 88, h: 84, fill: '#C9BFFF', stroke: 'none' },
+        { name: 'Левый глаз', kind: 'ellipse', x: 82, y: 82, w: 36, h: 36, fill: '#FFFFFF', group: 'Глаза' },
+        { name: 'Правый глаз', kind: 'ellipse', x: 122, y: 82, w: 36, h: 36, fill: '#FFFFFF', group: 'Глаза' },
+        { name: 'Рот', kind: 'path', d: 'M100 142C108 156 132 156 140 142C132 148 108 148 100 142Z', fill: '#2B1D5C' },
+      ],
+    };
+  }
+
   function allText(turns) {
     if (typeof turns === 'string') return turns;
     return (Array.isArray(turns) ? turns : []).map((t) => String(t.content || '')).join('\n');
@@ -25,15 +113,20 @@
       const low = u.toLowerCase();
       let intent = 'create';
       if (/сколько|что за|почему|какой|\?/.test(low)) intent = 'ask';
+      // круг 37 (SPEC §12.2): нарисовать картинку — иллюстрация
+      else if (RE_ART.test(low)) intent = 'illustration';
       else if (/тёмн|темн|палитр|тему|цвета/.test(low)) intent = 'theme';
       else if (/крупнее|меньше|замени|убери|поменяй|сделай .* больше|отступ/.test(low)) intent = 'edit';
       // круг 36: микроанимации — правка состояний (SPEC §11.4)
       else if (/оживи|наведени|анимац/.test(low)) intent = 'edit';
+      // круг 37: перекраска выделенной детали (подсказка «перекрась в тёплые тона»)
+      else if (/перекрас/.test(low)) intent = 'edit';
       return {
         intent,
         title: 'Заглушка: ' + intent,
         summary: 'Детерминированный ответ тестовой заглушки.',
-        steps: ['шаг один', 'шаг два'],
+        // круг 37: у рисунка — шаги иллюстратора (SPEC §12.2: снизу вверх)
+        steps: intent === 'illustration' ? ['Силуэт и крупные формы', 'Тени, блики и мелочи'] : ['шаг один', 'шаг два'],
         targets: [],
       };
     },
@@ -69,6 +162,13 @@
           ],
         };
       }
+      /* Круг 37 (SPEC §12.2): «перекрась …» — заливка выделенного слоя (у детали иллюстрации —
+         её контуров): тёплые — персиковый, пастельные — лавандовый, иначе — мятный. */
+      const low = String(u || '').toLowerCase();
+      if (/перекрас/.test(low)) {
+        const value = /т[её]пл/.test(low) ? '#F4A261' : /пастел/.test(low) ? '#C8B6FF' : '#3FBF8F';
+        return { summary: 'Перекрасил выделенное', edits: [{ op: 'set', target: 'selection', path: 'fill', value }] };
+      }
       return { summary: 'Заглушка правок', edits: [{ op: 'set', target: 'selection', path: 'layout.gap', value: '24' }] };
     },
     theme() {
@@ -91,6 +191,13 @@
         ],
       };
     },
+    /** Круг 37: иллюстрация — монстрик ядра или печенька (async: ядро может догружаться). */
+    async illustration(u) {
+      const low = String(u || '').toLowerCase();
+      if (/печень/.test(low)) return cookie();
+      const core = await loadCore();
+      return monsterFromCore(core) || monsterFallback();
+    },
     answer() {
       return { answer: 'Это тестовая заглушка: настоящая модель тут не вызывается.', followups: [] };
     },
@@ -100,7 +207,7 @@
   async function sampleFn(input, opts = {}) {
     const text = allText(input);
     const name = schemaNameOf(text);
-    const data = (answers[name] || answers.unknown)(lastUser(input));
+    const data = await (answers[name] || answers.unknown)(lastUser(input));
     calls.push({ schema: name, chars: text.length });
     log('sample', name);
     if (opts.onText) { try { opts.onText({ text: JSON.stringify(data), delta: '' }); } catch (_) {} }

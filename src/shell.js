@@ -1599,7 +1599,7 @@ export const STATE_KEYS = Object.freeze(['hover', 'press', 'focus']);
 /** Имя состояния — заголовок вкладки и начало фразы в «Истории»: «Наведение «Кнопка»: …». */
 export const STATE_TITLES = Object.freeze({ hover: 'Наведение', press: 'Нажатие', focus: 'Фокус' });
 /** Где состояния допустимы (§11.1): у страницы — нет. Доски оболочка отсекает сама. */
-export const STATE_NODE_TYPES = Object.freeze(['frame', 'text', 'rect', 'ellipse', 'image', 'instance']);
+export const STATE_NODE_TYPES = Object.freeze(['frame', 'text', 'rect', 'ellipse', 'image', 'instance', 'vector']);   // круг 37: и вектор (§12.1)
 /** Шкала теней (§11.1): ссылка → слово инспектора. */
 export const SHADOW_WORDS = Object.freeze({ none: 'нет', 'shadow.sm': 'лёгкая', 'shadow.md': 'средняя', 'shadow.lg': 'сильная' });
 /** Шкала движения: ссылка → «Скорость» инспектора. */
@@ -1697,14 +1697,15 @@ export function isStatePath(path) {
   return /^(states|motion)(\.|$)/.test(String(path || ''));
 }
 
-/** Иммутабельная запись по пути — как у ядра: undefined снимает ключ. */
+/** Иммутабельная запись по пути — как у ядра: undefined снимает ключ; массивы (круг 37:
+ *  `paths.3.fill`) копируются массивами, а не превращаются в объекты. */
 export function setLocal(obj, path, value) {
   const parts = String(path).split('.');
-  const root = { ...(isObj(obj) ? obj : {}) };
+  const root = Array.isArray(obj) ? obj.slice() : { ...(isObj(obj) ? obj : {}) };
   let cur = root;
   for (let i = 0; i < parts.length - 1; i++) {
     const next = cur[parts[i]];
-    cur[parts[i]] = isObj(next) ? { ...next } : {};
+    cur[parts[i]] = Array.isArray(next) ? next.slice() : isObj(next) ? { ...next } : {};
     cur = cur[parts[i]];
   }
   const last = parts[parts.length - 1];
@@ -1847,4 +1848,439 @@ export function subtreeHasStates(doc, rootId) {
     for (const c of (n.children || [])) stack.push(c);
   }
   return false;
+}
+
+/* ---------------- круг 37 (SPEC §12): векторы и иллюстрации в оболочке ---------------- */
+
+/** Режим раскладки рамки, как его понимает решатель: без `layout` (или без режима) — 'none'. */
+export function layoutModeOf(node) {
+  const m = node && isObj(node.layout) ? node.layout.mode : undefined;
+  return m === 'row' || m === 'column' || m === 'none' ? m : 'none';
+}
+
+/** Свободная рамка (§12.1): дети стоят по своему `pos`, авто-раскладки нет. */
+export function isFreeFrame(node) {
+  if (typeof CORE_NS.isFreeFrame === 'function') return !!CORE_NS.isFreeFrame(node);
+  return !!(node && node.type === 'frame' && layoutModeOf(node) === 'none');
+}
+
+/** Иллюстрация — свободная рамка, в которой есть хотя бы один вектор (§12.1). */
+export function isIllustration(doc, node) {
+  if (!isFreeFrame(node) || !doc || !doc.nodes) return false;
+  if (node.role === 'illustration') return true;   // так помечает рамку образец ядра
+  return (node.children || []).some((id) => doc.nodes[id] && doc.nodes[id].type === 'vector');
+}
+
+/**
+ * Сколько в иллюстрации деталей и слоёв. Деталь — контур (как считает агент в «Нарисовал
+ * «Монстрик»: 19 деталей»): вектор из трёх контуров — три детали; не-вектор — одна.
+ * @returns {{parts:number, layers:number}}
+ */
+export function illustrationCounts(doc, node) {
+  const kids = node && Array.isArray(node.children) ? node.children : [];
+  let parts = 0;
+  for (const id of kids) {
+    const n = doc && doc.nodes ? doc.nodes[id] : null;
+    if (!n) continue;
+    parts += n.type === 'vector' ? Math.max(1, vectorPaths(n).length) : 1;
+  }
+  return { parts, layers: kids.length };
+}
+
+/** Родитель-свободная рамка узла (не корень, не страница) — или null. */
+export function freeParentOf(doc, node) {
+  if (!doc || !doc.nodes || !node || !node.parent || node.parent === doc.root) return null;
+  const p = doc.nodes[node.parent];
+  return isFreeFrame(p) ? p : null;
+}
+
+/** Поворот есть у всех узлов, кроме страницы (§12.1: «визуальное поле, как scale в §11»). */
+export function canRotate(node) {
+  return !!(node && typeof node.type === 'string' && node.type !== 'page');
+}
+
+/** Контуры вектора — массив (пустой, если их нет). */
+export function vectorPaths(node) {
+  return node && node.type === 'vector' && Array.isArray(node.paths) ? node.paths : [];
+}
+
+/** Путь правки — про контуры вектора. */
+export function isVectorPath(path) {
+  return /^(paths|viewBox)(\.|$)/.test(String(path || ''));
+}
+
+const HEX_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+/** Цвет для `<input type=color>`: '#abc' → '#aabbcc'; не hex — null. */
+export function toHex6(c) {
+  const s = String(c || '').trim();
+  if (!HEX_RE.test(s)) return null;
+  let h = s.slice(1);
+  if (h.length === 3 || h.length === 4) h = h.slice(0, 3).split('').map((x) => x + x).join('');
+  return `#${h.slice(0, 6).toLowerCase()}`;
+}
+
+/** Градиент краски (§12.1) — или null. */
+export function gradientOf(p) {
+  return isObj(p) && isObj(p.gradient) ? p.gradient : null;
+}
+
+/** Вид краски: 'none' | 'token' | 'color' | 'gradient'. */
+export function paintKind(p) {
+  if (p === undefined || p === null || p === '') return 'none';
+  if (gradientOf(p)) return 'gradient';
+  if (typeof p === 'string') return HEX_RE.test(p) || /^(rgb|hsl)a?\(/i.test(p) ? 'color' : 'token';
+  if (isObj(p)) {
+    if (typeof p.token === 'string') return 'token';
+    const c = typeof p.color === 'string' ? p.color : typeof p.value === 'string' ? p.value : '';
+    if (c) return paintKind(c);
+  }
+  return 'none';
+}
+
+/** Имя токена краски — или null. */
+export function paintToken(p) {
+  if (typeof p === 'string' && paintKind(p) === 'token') return p;
+  if (isObj(p) && typeof p.token === 'string') return p.token;
+  if (isObj(p) && !gradientOf(p)) {
+    const c = typeof p.color === 'string' ? p.color : typeof p.value === 'string' ? p.value : '';
+    if (c && paintKind(c) === 'token') return c;
+  }
+  return null;
+}
+
+/** Цвет стопа: свой цвет или токен по палитре. */
+export function stopColor(stop, colors) {
+  if (!isObj(stop)) return null;
+  if (typeof stop.color === 'string' && stop.color) return stop.color;
+  if (typeof stop.token === 'string' && colors && typeof colors[stop.token] === 'string') return colors[stop.token];
+  return null;
+}
+
+/** Один цвет, которым краску показать в кружке (у градиента — первый стоп). */
+export function paintHex(p, colors) {
+  const k = paintKind(p);
+  if (k === 'none') return null;
+  if (k === 'gradient') {
+    const stops = Array.isArray(gradientOf(p).stops) ? gradientOf(p).stops : [];
+    return stops.length ? stopColor(stops[0], colors) : null;
+  }
+  const tok = paintToken(p);
+  if (tok) return colors && typeof colors[tok] === 'string' ? colors[tok] : null;
+  if (typeof p === 'string') return p;
+  return (isObj(p) && (p.color || p.value)) || null;
+}
+
+/** Угол линейного градиента — как в CSS (0 — снизу вверх, 90 — слева направо); без угла
+ *  ядро рисует 180° — сверху вниз (notes-r37-CORE). */
+export const GRADIENT_ANGLE_DEFAULT = 180;
+
+/** CSS-фон для кружка-образца: сплошной цвет или `linear-/radial-gradient(...)`. */
+export function paintCss(p, colors) {
+  const g = gradientOf(p);
+  if (!g) return paintHex(p, colors) || '';
+  const stops = (Array.isArray(g.stops) ? g.stops : [])
+    .map((s) => {
+      const c = stopColor(s, colors);
+      if (!c) return null;
+      const at = Number.isFinite(Number(s.at)) ? Math.round(Number(s.at) * 100) : null;
+      return at === null ? c : `${c} ${at}%`;
+    })
+    .filter(Boolean);
+  if (!stops.length) return '';
+  if (stops.length === 1) stops.push(stops[0]);
+  if (g.kind === 'radial') {
+    const cx = Number.isFinite(Number(g.cx)) ? Number(g.cx) : 0.5;
+    const cy = Number.isFinite(Number(g.cy)) ? Number(g.cy) : 0.5;
+    return `radial-gradient(circle at ${Math.round(cx * 100)}% ${Math.round(cy * 100)}%, ${stops.join(', ')})`;
+  }
+  const angle = Number.isFinite(Number(g.angle)) ? Number(g.angle) : GRADIENT_ANGLE_DEFAULT;
+  return `linear-gradient(${angle}deg, ${stops.join(', ')})`;
+}
+
+/** Двухцветный градиент: {gradient:{kind, angle?, stops:[{at:0,color},{at:1,color}]}}. */
+export function makeGradient(kind, from, to, angle = GRADIENT_ANGLE_DEFAULT) {
+  const g = { kind: kind === 'radial' ? 'radial' : 'linear' };
+  if (g.kind === 'linear') g.angle = clampAngle(angle);
+  g.stops = [{ at: 0, color: from }, { at: 1, color: to }];
+  return { gradient: g };
+}
+
+function clampAngle(a) {
+  const n = Math.round(Number(a));
+  if (!Number.isFinite(n)) return GRADIENT_ANGLE_DEFAULT;
+  return Math.min(360, Math.max(0, n));
+}
+
+/**
+ * Градиент с правкой редактора: вид, угол, цвет первого/последнего стопа. Средние стопы и
+ * центр радиального градиента остаются как были. Из сплошного цвета — градиент от него.
+ * @param {*} p краска до правки
+ * @param {{kind?:'linear'|'radial', angle?:number, from?:string, to?:string}} change
+ * @param {object} [colors] палитра — цвет из токена в стоп пишется значением
+ */
+export function gradientWith(p, change = {}, colors = null) {
+  const g0 = gradientOf(p);
+  if (!g0) {
+    const base = paintHex(p, colors) || '#ffffff';
+    const out = makeGradient(change.kind || 'linear', change.from || base, change.to || shade(base),
+      change.angle ?? GRADIENT_ANGLE_DEFAULT);
+    return out;
+  }
+  const g = { ...g0 };
+  const stops = (Array.isArray(g0.stops) ? g0.stops : []).map((s) => ({ ...s }));
+  while (stops.length < 2) stops.push({ at: stops.length ? 1 : 0, color: '#ffffff' });
+  if (change.kind) {
+    g.kind = change.kind === 'radial' ? 'radial' : 'linear';
+    if (g.kind === 'linear' && g.angle === undefined) g.angle = GRADIENT_ANGLE_DEFAULT;
+    if (g.kind === 'radial') delete g.angle;
+  }
+  if (change.angle !== undefined && g.kind !== 'radial') g.angle = clampAngle(change.angle);
+  const put = (s, c) => { const n = { ...s, color: c }; delete n.token; return n; };
+  if (change.from) stops[0] = put(stops[0], change.from);
+  if (change.to) stops[stops.length - 1] = put(stops[stops.length - 1], change.to);
+  g.stops = stops;
+  return { gradient: g };
+}
+
+/** Тон темнее — второй цвет нового градиента, чтобы переход было видно сразу. */
+function shade(hex) {
+  const h = toHex6(hex);
+  if (!h) return '#000000';
+  const k = 0.72;
+  const ch = (i) => Math.round(parseInt(h.slice(i, i + 2), 16) * k).toString(16).padStart(2, '0');
+  return `#${ch(1)}${ch(3)}${ch(5)}`;
+}
+
+/** Краска словами: «акцент», «#F4A261», «градиент #F4A261–#E76F51, 90°», «нет». */
+export function paintWord(p, ctx = {}) {
+  const k = paintKind(p);
+  if (k === 'none') return 'нет';
+  const colors = ctx.colors || (ctx.tokens && ctx.tokens.colors) || null;
+  const one = (c, tok) => {
+    if (tok) {
+      const w = typeof ctx.colorWord === 'function' ? ctx.colorWord({ token: tok }) : '';
+      return w || tok;
+    }
+    return String(c || '').toUpperCase();
+  };
+  if (k === 'gradient') {
+    const g = gradientOf(p);
+    const stops = Array.isArray(g.stops) ? g.stops : [];
+    const ends = stops.length ? [stops[0], stops[stops.length - 1]] : [];
+    const words = ends.map((s) => one(s.color || stopColor(s, colors), !s.color && s.token ? s.token : null));
+    const body = words.length ? ` ${words[0]}–${words[1]}` : '';
+    if (g.kind === 'radial') return `радиальный градиент${body}`;
+    const angle = Number.isFinite(Number(g.angle)) ? Number(g.angle) : GRADIENT_ANGLE_DEFAULT;
+    return `градиент${body}, ${angle}°`;
+  }
+  const tok = paintToken(p);
+  if (tok) return one(null, tok);
+  return one(typeof p === 'string' ? p : (p.color || p.value));
+}
+
+/** Поворот словами: «15°», «−30°». */
+export function rotateWord(v) {
+  const n = Math.round(Number(v) * 10) / 10;
+  if (!Number.isFinite(n)) return '0°';
+  return `${String(n).replace('-', '−').replace('.', ',')}°`;
+}
+
+/** Подпись контура: его имя (`paths[i].name`) или номер с единицы — «Контур 3». */
+export function pathLabel(i, p) {
+  const own = p && typeof p.name === 'string' ? cleanText(p.name) : '';
+  return own ? cutText(own, 40, { ellipsis: true }) : `Контур ${Number(i) + 1}`;
+}
+
+/** Краска обводки узла-вектора (Stroke: строка или {color, width}) — умолчание контуров. */
+function nodeStrokePaint(node) {
+  const s = node ? node.stroke : undefined;
+  if (s === undefined || s === null) return undefined;
+  if (typeof s === 'string') return s;
+  if (isObj(s) && !gradientOf(s)) return s.color !== undefined ? s.color : (s.token ? { token: s.token } : undefined);
+  return s;
+}
+
+/**
+ * Что контур показывает на деле (notes-r37-CORE): нет своей заливки/обводки — берётся узла;
+ * нет своей толщины — `stroke.width` узла, иначе 1.
+ * @param {object} node вектор @param {object} p контур
+ * @param {'fill'|'stroke'|'strokeWidth'|'opacity'} field
+ */
+export function effectivePathValue(node, p, field) {
+  const own = isObj(p) ? p[field] : undefined;
+  if (own !== undefined) return own;
+  if (field === 'fill') return node ? node.fill : undefined;
+  if (field === 'stroke') return nodeStrokePaint(node);
+  if (field === 'strokeWidth') {
+    const w = node && isObj(node.stroke) ? node.stroke.width : undefined;
+    return typeof w === 'number' ? w : 1;
+  }
+  return undefined;
+}
+
+/**
+ * Общее значение поля у всех контуров: {value, mixed}. Пустой вектор — {value: undefined}.
+ * @param {object} node вектор
+ * @param {'fill'|'stroke'|'strokeWidth'|'opacity'} field
+ */
+export function commonPathValue(node, field) {
+  const list = vectorPaths(node);
+  if (!list.length) return { value: undefined, mixed: false };
+  const first = effectivePathValue(node, list[0], field);
+  const mixed = list.some((p) => changed(effectivePathValue(node, p, field), first));
+  return { value: mixed ? undefined : first, mixed };
+}
+
+/**
+ * Правка поля контура наименьшими `set` (§12.3): `paths.<i>.<field>` — по контуру, которому
+ * она что-то меняет; `which === 'all'` — у всех контуров разом (одна транзакция, точная
+ * отмена). Снятие (value undefined) — только там, где поле было.
+ * @returns {{path:string, value?:any}[]}
+ */
+export function pathsWriteOps(node, which, field, value) {
+  const list = vectorPaths(node);
+  if (!list.length || !field) return [];
+  const idx = which === 'all' ? list.map((_, i) => i) : [Number(which)];
+  const out = [];
+  for (const i of idx) {
+    if (!Number.isInteger(i) || i < 0 || i >= list.length) continue;
+    const p = isObj(list[i]) ? list[i] : {};
+    if (value === undefined ? !(field in p) : !changed(p[field], value)) continue;
+    out.push({ path: `paths.${i}.${field}`, value });
+  }
+  return out;
+}
+
+const PATH_FIELD_WORDS = {
+  fill: 'заливка', stroke: 'обводка', strokeWidth: 'толщина обводки', opacity: 'непрозрачность',
+  d: 'форма', fillRule: 'правило заливки', lineCap: 'концы линий', lineJoin: 'стыки линий',
+};
+const PATH_FIELD_ORDER = ['d', 'fill', 'stroke', 'strokeWidth', 'opacity', 'fillRule', 'lineCap', 'lineJoin'];
+
+function pathValueWord(field, v, ctx) {
+  if (field === 'fill' || field === 'stroke') return paintWord(v, ctx);
+  if (field === 'opacity') return v === undefined ? '100 %' : pct(v);
+  if (field === 'strokeWidth') return v === undefined ? 'нет' : num(v);
+  if (field === 'd') return 'изменена';
+  return v === undefined ? 'нет' : String(v);
+}
+
+const UNKNOWN = Symbol('разное «до»');
+
+function pathFieldPhrase(field, from, to, ctx) {
+  const label = PATH_FIELD_WORDS[field] || field;
+  if (field === 'd') return 'форма изменена';
+  const t = pathValueWord(field, to, ctx);
+  const f = from === UNKNOWN ? ''
+    : from === undefined && (field === 'fill' || field === 'stroke') ? 'нет'
+    : from === undefined ? '' : pathValueWord(field, from, ctx);
+  return f && f !== t ? `${label} ${f} → ${t}` : `${label} ${t}`;
+}
+
+/**
+ * Правка контуров одного вектора словами (§12.3, «История»): «Заливка всех контуров
+ * «Тело»: #8BD3C7 → #F4A261», «Контур 3 «Глаз»: обводка нет → #14161C, толщина обводки 2»,
+ * «3 контура «Монстр»: заливка акцент». Сравнивает узел до и после — одинаково звучат
+ * правка по одному полю, всех контуров разом и перерисовка агента.
+ * @param {object|null} before @param {object|null} after @param {string} name
+ * @param {{colorWord?: Function, colors?: object, tokens?: object}} [ctx]
+ * @returns {string[]}
+ */
+export function vectorEditPhrases(before, after, name, ctx = {}) {
+  const bp = Array.isArray(before && before.paths) ? before.paths : [];
+  const ap = Array.isArray(after && after.paths) ? after.paths : [];
+  const q = `«${name || 'вектор'}»`;
+  const out = [];
+  if (!changed(bp, ap) && !changed(before && before.viewBox, after && after.viewBox)) return out;
+  if (bp.length !== ap.length) {
+    const n = ap.length;
+    out.push(`Контуры ${q} перерисованы: ${bp.length} → ${n}`);
+    return out;
+  }
+  if (changed(before && before.viewBox, after && after.viewBox) && !changed(bp, ap)) {
+    out.push(`Холст контуров ${q} изменён`);
+    return out;
+  }
+  // поле → значение «после» → список номеров контуров (и было ли у них одно «до»)
+  const groups = new Map();
+  for (let i = 0; i < ap.length; i++) {
+    const b = isObj(bp[i]) ? bp[i] : {};
+    const a = isObj(ap[i]) ? ap[i] : {};
+    const fields = [...new Set([...PATH_FIELD_ORDER, ...Object.keys(b), ...Object.keys(a)])];
+    const bits = [];
+    for (const f of fields) {
+      if (!changed(b[f], a[f])) continue;
+      bits.push({ f, from: b[f], to: a[f] });
+    }
+    if (!bits.length) continue;
+    const key = JSON.stringify(bits.map((x) => [x.f, x.to === undefined ? null : x.to]));
+    const g = groups.get(key) || { bits, idx: [], froms: new Set() };
+    g.idx.push(i);
+    g.froms.add(JSON.stringify(bits.map((x) => (x.from === undefined ? null : x.from))));
+    groups.set(key, g);
+  }
+  for (const g of groups.values()) {
+    const sameFrom = g.froms.size === 1;
+    const words = g.bits.map((x) => pathFieldPhrase(x.f, sameFrom ? x.from : UNKNOWN, x.to, ctx));
+    let who;
+    if (ap.length === 1) {
+      // у вектора один контур — говорим о самом слое: «Заливка в «Животик»: #A → #B»
+      const one = words.map((w, i) => (i ? w : `${w.charAt(0).toUpperCase()}${w.slice(1)}`));
+      const first = one[0];
+      const label = PATH_FIELD_WORDS[g.bits[0].f] || g.bits[0].f;
+      const rest = first.slice(label.length + 1);
+      out.push(g.bits[0].f === 'd' ? `Форма ${q} изменена${one.length > 1 ? `, ${one.slice(1).join(', ')}` : ''}`
+        : `${first.slice(0, label.length)} в ${q}: ${[rest, ...one.slice(1)].join(', ')}`);
+      continue;
+    }
+    if (g.idx.length === ap.length && ap.length > 1) {
+      who = g.bits.length === 1 ? null : `Все контуры в ${q}`;
+      if (!who) {
+        const label = PATH_FIELD_WORDS[g.bits[0].f] || g.bits[0].f;
+        const w = words[0].slice(label.length + 1);
+        out.push(`${label.charAt(0).toUpperCase()}${label.slice(1)} всех контуров в ${q}: ${w}`);
+        continue;
+      }
+    } else if (g.idx.length === 1) {
+      const p = ap[g.idx[0]];
+      const own = p && typeof p.name === 'string' && cleanText(p.name);
+      who = own ? `Контур «${pathLabel(g.idx[0], p)}» в ${q}` : `${pathLabel(g.idx[0], p)} в ${q}`;
+    } else who = `${g.idx.length} ${plural(g.idx.length, 'контур', 'контура', 'контуров')} в ${q}`;
+    out.push(`${who}: ${words.join(', ')}`);
+  }
+  return out;
+}
+
+/**
+ * Смена раскладки рамки на «свободно» и обратно без прыжков (§12.1): входя в свободную
+ * рамку, дети получают `pos` там, где стояли в потоке; уходя из неё — `pos` снимается
+ * (в потоке он ничего не значит). Всё — одной транзакцией вместе с `layout.mode`.
+ * @param {object} frame рамка
+ * @param {object} doc документ (дети)
+ * @param {Record<string,{x:number,y:number}>} rects прямоугольники решателя
+ * @param {{l:number,t:number}} pad разрешённый отступ рамки (pos — от края содержимого)
+ * @param {'row'|'column'|'none'} mode новый режим
+ * @returns {{id:string, path:string, value?:any}[]}
+ */
+export function freeModeOps(frame, doc, rects, pad, mode) {
+  if (!frame || !doc || !doc.nodes) return [];
+  const was = layoutModeOf(frame);
+  if (was === mode) return [];
+  const out = [{ id: frame.id, path: 'layout.mode', value: mode }];
+  const fr = rects && rects[frame.id];
+  const kids = (frame.children || []).map((id) => doc.nodes[id]).filter(Boolean);
+  const r2 = (v) => Math.round(v * 100) / 100;
+  if (mode === 'none' && fr) {
+    for (const k of kids) {
+      const r = rects[k.id];
+      if (!r) continue;
+      const pos = { x: r2(r.x - fr.x - ((pad && pad.l) || 0)), y: r2(r.y - fr.y - ((pad && pad.t) || 0)) };
+      if (!changed(k.pos, pos)) continue;
+      out.push({ id: k.id, path: 'pos', value: pos });
+    }
+  } else if (was === 'none') {
+    for (const k of kids) if (k.pos !== undefined) out.push({ id: k.id, path: 'pos', value: undefined });
+  }
+  return out;
 }

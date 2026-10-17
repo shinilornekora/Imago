@@ -185,7 +185,8 @@ async function boot() {
 
   stage = new Stage(dom.canvas, {
     onSelect: (ids) => setSelection(ids),
-    onCommit: ({ ops, label }) => commit(ops, label || 'Правка', 'human'),
+    // круг 37: сдвиг детали с Shift — по одной оси (stageOps)
+    onCommit: ({ ops, label }) => commit(stageOps(ops), label || 'Правка', 'human'),
     onUndo: () => keyUndo(false),
     onRedo: () => keyUndo(true),
     onView: (view) => {
@@ -255,6 +256,7 @@ async function boot() {
   bindUi();
   initRailGrip();
   initLiveSize();
+  initDetailGestures();
   watchTabsRow();
   initToastAnchor();
   applyCompact();
@@ -361,6 +363,10 @@ const ICONS = {
      указатель с дугой движения (значок в «Слоях» и заголовок раздела инспектора). */
   play: '<path d="M5.25 3.25v9.5L12.75 8z"/>',
   motion: '<path d="M4.5 3.5 11 8.25l-2.9.6-1.35 2.7z"/><path d="M11.5 3.25a4.5 4.5 0 0 1 1.75 3.5"/>',
+  /* Круг 37 (SPEC §12.3): вектор — кривая Безье с узлами; иллюстрация — картинка в рамке
+     (значки в «Слоях» и на заголовке раздела «Контуры»). */
+  vector: '<path d="M3 12.5C4.5 6 11.5 10 13 3.5"/><circle cx="3" cy="12.5" r="1.5"/><circle cx="13" cy="3.5" r="1.5"/>',
+  illustration: '<rect x="2" y="2.5" width="12" height="11" rx="2"/><circle cx="6" cy="6.25" r="1.25"/><path d="M2.5 12 6.4 8.4 9 10.8l2-1.8 2.5 2.3"/>',
 };
 
 function iconMarkup(name) {
@@ -4036,7 +4042,9 @@ const PROP_NAMES = {
   'style.token': 'Стиль текста', 'style.fontSize': 'Кегль', 'style.fontWeight': 'Жирность',
   'size.w': 'Ширина', 'size.h': 'Высота',
   characters: 'Текст', name: 'Имя', align: 'Выключка', fill: 'Заливка', color: 'Цвет текста',
-  radius: 'Скругление', opacity: 'Прозрачность', visible: 'Видимость', locked: 'Замок',
+  // круг 37: слово инспектора — «непрозрачность» (поле «Непрозр.», §11 и §12.3)
+  radius: 'Скругление', opacity: 'Непрозрачность', visible: 'Видимость', locked: 'Замок',
+  rotate: 'Поворот', paths: 'Контуры', viewBox: 'Холст контуров',
   override: 'Положение', pos: 'Положение', style: 'Стиль текста', layout: 'Раскладка', size: 'Размер',
   /* Круг 16, п.5. Из 13 полей, которые brain вообще разрешает модели (ALLOWED_PATH_HEADS),
      трёх в словаре не было вовсе — и propName() отдавал путь как есть, а describeOps ставил
@@ -4148,6 +4156,8 @@ const TECH_PATHS = [
      в «text«стиль текста»». */
   'stroke', 'clip', 'src', 'fill', 'color', 'align', 'style', 'name',
   'letterSpacing', 'lineHeight', 'visible', 'locked', 'layout', 'size',
+  // круг 37 (SPEC §12): поворот и контуры вектора — в предупреждениях агента тоже словами
+  'rotate', 'paths', 'viewBox',
 ];
 const TECH_PATH_RE = new RegExp(`(?<![\\w.])(?:${TECH_PATHS.map((p) => p.replace(/\./g, '\\.')).join('|')})(?![\\w.])`, 'g');
 
@@ -4271,6 +4281,10 @@ function humanValue(value, axis, doc) {
        ядро приводит одно к другому. Слово человеку обязано быть одним и тем же, иначе
        describeSet печатает «display → крупный» как разницу там, где разницы нет. */
     if (value.token) return SWATCH_NAMES[value.token] || TYPE_LABELS[value.token] || String(value.token);
+    // круг 37 (SPEC §12.1): градиент — «градиент #F4A261–#E76F51, 90°»
+    if (value.gradient) {
+      return SHELL.paintWord(value, { colors: ((doc || state.doc).tokens || {}).colors, colorWord: (v) => humanValue(v) });
+    }
     /* Обводка: «line» и {color:'line', width:1} — одна и та же обводка. Толщину называем
        только тогда, когда она не единичная, иначе формы опять разойдутся словами. */
     if (value.color !== undefined) {
@@ -4291,7 +4305,10 @@ function humanValue(value, axis, doc) {
     }
     // положение: без этой ветки первая правка pos печаталась без значения вовсе (п.31)
     if (typeof value.x === 'number' || typeof value.y === 'number') {
-      return `${Math.round(Number(value.x) || 0)}, ${Math.round(Number(value.y) || 0)}`;
+      // круг 37: до десятой — стрелка с Shift двигает на 10, без него на 1, и полпикселя
+      // от магнита не должны прятать сдвиг округлением
+      const c = (v) => String(Math.round((Number(v) || 0) * 10) / 10).replace('.', ',');
+      return `x ${c(value.x)} · y ${c(value.y)}`;
     }
   }
   return '';
@@ -4305,7 +4322,8 @@ function sameValue(a, b) {
 /* Круг 16, п.5. Род названия свойства: без него выходит «Обводка не задано» и
    «Обрезка да». Значение по умолчанию — средний род, как было раньше. */
 const PROP_GENDER = {
-  Обводка: 'f', Обрезка: 'f', Заливка: 'f', Ширина: 'f', Высота: 'f', Прозрачность: 'f',
+  Обводка: 'f', Обрезка: 'f', Заливка: 'f', Ширина: 'f', Высота: 'f', Прозрачность: 'f', Непрозрачность: 'f',
+  Поворот: 'm',
   Видимость: 'f', Жирность: 'f', Гарнитура: 'f', Выключка: 'f', Раскладка: 'f',
   'Толщина обводки': 'f',
   Отступ: 'm', Зазор: 'm', Поток: 'm', Замок: 'm', 'Цвет текста': 'm', 'Цвет обводки': 'm',
@@ -4337,7 +4355,8 @@ function describeSet(op, doc, born, afterDoc) {
   let before = readPath(node, path);
   let after = op.value;
   const nextDoc = afterDoc || doc;
-  if (before && after && typeof before === 'object' && typeof after === 'object'
+  // круг 37: положение — парой «x, y»: сдвиг по одной оси иначе читался одним числом без оси
+  if (path !== 'pos' && before && after && typeof before === 'object' && typeof after === 'object'
       && !Array.isArray(before) && !Array.isArray(after)) {
     const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])]
       .filter((k) => !sameValue(before[k], after[k]));
@@ -4354,6 +4373,9 @@ function describeSet(op, doc, born, afterDoc) {
   const head = path.split('.').slice(0, 2).join('.');
   const table = VALUE_TABLES[path] || VALUE_TABLES[head] || null;
   const word = (v, d) => {
+    // круг 37: поворот — градусами, непрозрачность — процентами; снятое поле — его умолчание
+    if (path === 'rotate') return SHELL.rotateWord(v ?? 0);
+    if (path === 'opacity') return `${Math.round((typeof v === 'number' ? v : 1) * 100)} %`;
     if (v === undefined || v === null) return notSetWord(label);
     if (table && table[v] !== undefined) return table[v];
     // круг 31: текст — в кавычках: «Текст Привет → Пока» читалось как три слова подряд
@@ -4545,8 +4567,10 @@ function describeOps(opsList, doc) {
   // одинаковую правку у нескольких узлов сводим в одну строку
   const groups = new Map();
   const stateSets = [];   // круг 36: правки состояний и движения — своими фразами ниже
+  const vectorSets = [];  // круг 37: правки контуров — по вектору до/после, своими фразами
   for (const op of sets) {
     if (SHELL.isStatePath(op.path)) { stateSets.push(op); continue; }
+    if (SHELL.isVectorPath(op.path)) { vectorSets.push(op); continue; }
     /* Круг 27, п.7: переименование — одним глаголом. «Имя Шапка → Шапка 1 Ани в «Шапка»»
        было тремя именами подряд без кавычек, и место правки повторяло старое имя. */
     if (op.path === 'name' && doc && doc.nodes && doc.nodes[op.id] && !born.has(op.id)) {
@@ -4576,6 +4600,21 @@ function describeOps(opsList, doc) {
       for (const op of list) after = SHELL.setLocal(after, op.path, op.value);
       const said = SHELL.stateEditPhrases(before, after, titleOf(id), {
         tokens: (afterDoc && afterDoc.tokens) || doc.tokens, colorWord: (v) => humanValue(v),
+      });
+      for (const p of said) phrases.push(p);
+    }
+  }
+  /* Круг 37 (SPEC §12.3): «Заливка всех контуров «Тело»: #8BD3C7 → #F4A261», «Контур 3
+     «Глаз»: обводка нет → #14161C» — по вектору до и после, как состояния выше. */
+  if (vectorSets.length) {
+    const byId = new Map();
+    for (const op of vectorSets) { if (!byId.has(op.id)) byId.set(op.id, []); byId.get(op.id).push(op); }
+    for (const [id, list] of byId) {
+      const before = nodeById(doc, id) || born.get(id) || null;
+      let after = before || {};
+      for (const op of list) after = SHELL.setLocal(after, op.path, op.value);
+      const said = SHELL.vectorEditPhrases(before, after, titleOf(id), {
+        colors: ((afterDoc && afterDoc.tokens) || doc.tokens || {}).colors, colorWord: (v) => humanValue(v),
       });
       for (const p of said) phrases.push(p);
     }
@@ -5576,15 +5615,17 @@ function ensureVisible(ids) {
 
 /* ------------------------------ пустое состояние ----------------------------- */
 
+/* Круг 37 (SPEC §12.2): агент рисует иллюстрации — это надо показать там, где человек
+   решает, с чего начать. */
 const EMPTY_EXAMPLES = [
   'экран оплаты с полем карты и итогом',
-  'дашборд из четырёх плиток с цифрами',
   'карточка товара с фото и кнопкой',
+  'нарисуй милого монстра',
 ];
 const ARTBOARD_EXAMPLES = [
   'добавь шапку с заголовком и датой',
   'список из трёх карточек',
-  'нижняя панель с двумя кнопками',
+  'нарисуй милого монстра',
 ];
 
 function docIsEmpty() { return artboards(state.doc).length === 0; }
@@ -5966,8 +6007,14 @@ function renderLayers() {
     } else {
       const g = document.createElement('span');
       g.className = 'glyph';
-      g.textContent = glyphFor(n);
+      /* Круг 37 (SPEC §12.3): у вектора и иллюстрации — значки, а не буква: «•» вектора
+         ничем не отличался от неизвестного узла. Детали иллюстрации подписаны своими
+         именами; в подсказке — что это и чем залито. */
+      const icon = layerIconFor(n);
+      if (icon) { g.appendChild(iconEl(icon)); g.dataset.icon = icon; } else g.textContent = glyphFor(n);
       row.append(tw, g, nm);
+      const tip = layerTipFor(n);
+      if (tip) nm.title = tip;
     }
     // круг 36: у слоя есть состояния — маленькая метка, по ней видно, что он «живой»
     if (!r.lib && SHELL.hasStates(n)) {
@@ -6234,6 +6281,37 @@ function revealLayerRow() {
 const GLYPH_INSTANCE = '◇';
 const GLYPH_MASTER = '◆';
 
+/** Значок строки слоя вместо буквы (круг 37): вектор, иллюстрация — или пусто. */
+function layerIconFor(n) {
+  if (!n || isArtboard(state.doc, n.id)) return '';
+  if (n.type === 'vector') return 'vector';
+  if (SHELL.isIllustration(state.doc, n)) return 'illustration';
+  return '';
+}
+
+/** Подсказка строки слоя у вектора и иллюстрации: что это и сколько в нём деталей. */
+function layerTipFor(n) {
+  const name = n.name || defaultName(n);
+  if (n.type === 'vector') {
+    const paths = SHELL.vectorPaths(n);
+    const fill = paths.length ? SHELL.paintWord(paths[0].fill, { colors: state.doc.tokens.colors, colorWord: (v) => humanValue(v) }) : '';
+    const inIll = SHELL.isIllustration(state.doc, nodeById(state.doc, n.parent));
+    return `${name} — ${inIll ? 'деталь иллюстрации' : 'вектор'}, ${paths.length} ${plural(paths.length, 'контур', 'контура', 'контуров')}`
+      + `${fill && fill !== 'нет' ? `, заливка ${fill}` : ''}`;
+  }
+  if (SHELL.isIllustration(state.doc, n)) {
+    return `${name} — ${illustrationWords(n).toLowerCase()}. Выделяйте, двигайте и перекрашивайте их по одной`;
+  }
+  return '';
+}
+
+/** «Иллюстрация: 19 деталей в 14 слоях» — детали считаются контурами, как у агента. */
+function illustrationWords(n) {
+  const { parts, layers } = SHELL.illustrationCounts(state.doc, n);
+  const tail = layers && layers !== parts ? ` в ${layers} ${plural(layers, 'слое', 'слоях', 'слоях')}` : '';
+  return `Иллюстрация: ${parts} ${plural(parts, 'деталь', 'детали', 'деталей')}${tail}`;
+}
+
 function glyphFor(n) {
   if (isArtboard(state.doc, n.id)) return '▣';
   if (n.type === 'instance') return GLYPH_INSTANCE;
@@ -6246,7 +6324,9 @@ function glyphFor(n) {
  * узла теперь одно (круг 13, п.11).
  */
 function defaultName(n) {
-  return placeholderName(state.doc, n);
+  const name = placeholderName(state.doc, n);
+  // круг 37: пока ядро не знает вектора, заглушкой было бы «Узел»
+  return n && n.type === 'vector' && name === 'Узел' ? 'Вектор' : name;
 }
 
 /* ------------------------------- компоненты ---------------------------------- */
@@ -7187,6 +7267,10 @@ function renderInspector() {
         noteEl(own ? 'Незаданная ось берётся у компонента.' : 'Размер сейчас целиком от компонента.'),
       ]));
     }
+    // круг 37: место в свободной рамке и поворот — свои у экземпляра, как размер
+    const freeParentI = SHELL.freeParentOf(state.doc, node);
+    if (freeParentI && !node.override) body.appendChild(freePosGroup(node, freeParentI));
+    body.appendChild(lookGroup(node));
     // круг 36 (SPEC §11.1): у экземпляра состояния свои — как размер и место
     if (statesAllowed(node)) body.appendChild(statesGroup(node));
     if (node.override) body.appendChild(overrideGroup(node));
@@ -7241,10 +7325,37 @@ function renderInspector() {
     const padNote = sidesDiffer
       ? `стороны разные: ${R.padding.t}/${R.padding.r}/${R.padding.b}/${R.padding.l} — новое значение встанет на все четыре`
       : '';
-    body.appendChild(group('Раскладка', [
-      row('Поток', segField(['column', 'row', 'none'], L.mode || 'column',
-        (v) => setProp(node.id, 'layout.mode', v),
-        ['column', 'row', 'none'].map((v) => MODE_LABELS[v]))),
+    /* Круг 37 (SPEC §12.1): «свободно» — рамка без авто-раскладки, дети стоят по своим X/Y
+       (так собрана иллюстрация). Смена потока не двигает детей: входя в свободную рамку, они
+       получают X/Y там, где стояли, уходя — теряют их (setLayoutMode, одна транзакция).
+       Зазор и выравнивание в свободной рамке ничего не значат — вместо них подпись. */
+    const modeNow = SHELL.layoutModeOf(node);   // без режима решатель ставит 'none'
+    const modeSeg = segField(['column', 'row', 'none'], modeNow,
+      (v) => setLayoutMode(node, v), ['column', 'row', 'none'].map((v) => MODE_LABELS[v]));
+    modeSeg.classList.add('mode-seg');
+    const MODE_TIPS = {
+      column: 'Столбец: дети друг под другом, место считает раскладка',
+      row: 'Строка: дети в ряд, место считает раскладка',
+      none: 'Свободно: каждый слой стоит где поставлен (X/Y) — как детали иллюстрации',
+    };
+    ['column', 'row', 'none'].forEach((m, i) => { const b = modeSeg.children[i]; if (b) { b.title = MODE_TIPS[m]; b.dataset.mode = m; } });
+    if (modeNow === 'none') {
+      body.appendChild(group('Раскладка', [
+        row('Поток', modeSeg),
+        noteEl(SHELL.isIllustration(state.doc, node)
+          ? `${illustrationWords(node)}. `
+            // доска выделяет своих детей щелчком, рамка внутри доски — шагом вглубь (двойным)
+            + (isArtboard(state.doc, node.id) ? 'Щелчок по детали на холсте выделяет её. '
+              : 'Двойной щелчок по детали на холсте выделяет её, дальше щелчок по соседней — сразу. ')
+            + 'Тащите детали мышью (Shift — по одной оси) или стрелками; выше рисуется та, что ниже в «Слоях».'
+          : 'Свободно: слои стоят по своим X и Y — тащите их на холсте или двигайте стрелками. '
+            + 'Выше рисуется тот, кто ниже в «Слоях».'),
+        row('Отступ', scaleField(pad.t, 'spacing', (v) => {
+          setProp(node.id, 'layout.padding', { t: v, r: v, b: v, l: v });
+        }, { label: 'Отступ', note: padNote })),
+      ]));
+    } else body.appendChild(group('Раскладка', [
+      row('Поток', modeSeg),
       row('Зазор', scaleField(L.gap, 'spacing', (v) => setProp(node.id, 'layout.gap', v), { label: 'Зазор' })),
       row('Отступ', scaleField(pad.t, 'spacing', (v) => {
         setProp(node.id, 'layout.padding', { t: v, r: v, b: v, l: v });
@@ -7263,9 +7374,14 @@ function renderInspector() {
       row('Высота', sizeField(node, 'h')),
     ]));
   }
+  // круг 37 (SPEC §12.3): деталь свободной рамки — своё место; поворот и непрозрачность — у всех
+  const freeParent = SHELL.freeParentOf(state.doc, node);
+  if (freeParent && !node.override) body.appendChild(freePosGroup(node, freeParent));
+  if (SHELL.canRotate(node) && !isArtboard(state.doc, node.id)) body.appendChild(lookGroup(node));
+  if (node.type === 'vector') body.appendChild(vectorGroup(node));
 
   if ('fill' in node || node.type === 'frame' || node.type === 'rect' || node.type === 'ellipse') {
-    body.appendChild(group('Заливка', [swatches(node, 'fill', 'Заливка')]));
+    body.appendChild(fillGroup(node));
   }
   if (node.type === 'text') {
     body.appendChild(group('Цвет текста', [swatches(node, 'color', 'Цвет текста')]));
@@ -7536,6 +7652,402 @@ function statesGroup(node) {
   const g = group('Состояния', kids);
   g.classList.add('states-group');
   return g;
+}
+
+/* ----------------- круг 37 (SPEC §12.3): векторы, иллюстрации, поворот ----------------- */
+
+/** Открытые редакторы краски: перерисовка инспектора после правки их не захлопывает. */
+const paintOpen = new Set();
+/** Выбранный контур вектора: {node, i} — список контуров помнит выбор для слоя. */
+let pathPick = null;
+
+/** Фон кружка-образца краски: ядро знает градиенты точнее (resolvePaint), без него — словарь. */
+function paintBg(p) {
+  if (p === undefined || p === null) return '';
+  if (typeof CORE.paintCss === 'function') {
+    try { const css = CORE.paintCss(state.doc, p); if (css) return css; } catch { /* ниже — своё */ }
+  }
+  return SHELL.paintCss(p, state.doc.tokens.colors || {});
+}
+
+/** Записать поле контура (или всех контуров) одной транзакцией. */
+function writePaths(node, which, field, value) {
+  // «без заливки» у контура, который унаследовал бы краску вектора, — явное «нет» (null)
+  if (value === undefined && (field === 'fill' || field === 'stroke') && node[field] !== undefined && node[field] !== null) value = null;
+  const list = SHELL.pathsWriteOps(node, which, field, value);
+  if (!list.length) return;
+  commit(list.map((o) => OPS.set(node.id, o.path, o.value)), which === 'all' ? 'Контуры' : 'Контур');
+}
+
+/** Поле, которое пишет значение по умолчанию снятием (поворот 0, непрозрачность 100 %). */
+function writeVisual(node, path, value, neutral) {
+  const v = value === neutral ? undefined : value;
+  if (v === undefined && node[path] === undefined) return;
+  if (v !== undefined && node[path] === v) return;
+  commit([OPS.set(node.id, path, v)], path === 'rotate' ? 'Поворот' : 'Непрозрачность');
+}
+
+/** Цветовое поле: кружок-образец и hex рядом; правка — по «change» (одна транзакция). */
+function colorInput(hex, onPick, label) {
+  const w = document.createElement('div');
+  w.className = 'paint-color';
+  const inp = document.createElement('input');
+  inp.type = 'color';
+  inp.className = 'paint-color-input';
+  inp.value = SHELL.toHex6(hex) || '#000000';
+  inp.setAttribute('aria-label', label);
+  inp.title = label;
+  const code = field('input', (SHELL.toHex6(hex) || '').toUpperCase(), (v) => {
+    const h = SHELL.toHex6(String(v).trim().startsWith('#') ? String(v).trim() : `#${String(v).trim()}`);
+    if (!h) { toast('Цвет пишется шестнадцатеричным кодом: #F4A261.', 'plain', 5000); return; }
+    onPick(h);
+  }, `${label}: код`);
+  code.classList.add('paint-hex');
+  code.spellcheck = false;
+  inp.addEventListener('change', () => onPick(inp.value));
+  w.append(inp, code);
+  return w;
+}
+
+/**
+ * Редактор краски (§12.1 Paint): сплошной цвет (код, палитра документа) или градиент —
+ * два цвета, вид (линейный / радиальный) и угол. Свёрнут в строку «Заливка: #F4A261»,
+ * как цвет состояния; кружок показывает краску как есть, градиент — градиентом.
+ * @param {*} cur краска сейчас (undefined — нет; при mixed — «разные»)
+ * @param {{key:string, title:string, mixed?:boolean, onPick:(v:any)=>void, node:object, noneLabel?:string}} o
+ */
+function paintField(cur, o) {
+  const colors = state.doc.tokens.colors || {};
+  const d = document.createElement('details');
+  d.className = 'state-color paint-field';
+  d.dataset.paint = o.key;
+  if (paintOpen.has(o.key)) d.open = true;
+  d.addEventListener('toggle', () => { if (d.open) paintOpen.add(o.key); else paintOpen.delete(o.key); });
+  const sum = document.createElement('summary');
+  const dot = document.createElement('span');
+  dot.className = 'swatch-dot';
+  const css = o.mixed ? '' : paintBg(cur);
+  if (css) dot.style.background = css; else dot.classList.add(o.mixed ? 'same' : 'none');
+  const txt = document.createElement('span');
+  txt.className = 'paint-word';
+  const word = o.mixed ? 'разные' : SHELL.paintWord(cur, { colors, colorWord: (v) => humanValue(v) });
+  txt.textContent = `${o.title}: ${word}`;
+  txt.title = txt.textContent;
+  sum.append(dot, txt);
+  d.appendChild(sum);
+
+  const body = document.createElement('div');
+  body.className = 'paint-body';
+  const kind = o.mixed ? 'color' : SHELL.paintKind(cur);
+  const isGrad = kind === 'gradient';
+  const base = (!o.mixed && SHELL.paintHex(cur, colors)) || '#F4A261';
+  const modeSeg = segField(['solid', 'gradient'], isGrad ? 'gradient' : 'solid', (v) => {
+    if (v === 'gradient' && !isGrad) o.onPick(SHELL.gradientWith(o.mixed ? base : (cur ?? base), {}, colors));
+    else if (v === 'solid' && isGrad) o.onPick(SHELL.paintHex(cur, colors) || base);
+  }, ['Цвет', 'Градиент']);
+  nameControl(modeSeg, `${o.title}: цвет или градиент`);
+  body.appendChild(modeSeg);
+
+  if (!isGrad) {
+    body.appendChild(row('Код', colorInput(kind === 'none' ? '' : base, (h) => o.onPick(h), `${o.title}: цвет`)));
+    body.appendChild(swatches(o.node, 'fill', `${o.title}: палитра`, {
+      // «разные» — ни один образец не нажат, и «без заливки» тоже
+      value: o.mixed ? '\u0000mixed' : cur, noneLabel: o.noneLabel || 'Без заливки', onPick: (v) => o.onPick(v),
+    }));
+    // «Без заливки» в swatches — пунктирное кольцо при noneLabel; здесь это настоящее «нет»
+    const none = body.querySelector('.swatch-dot.same');
+    if (none) { none.classList.remove('same'); none.classList.add('none'); }
+  } else {
+    const g = SHELL.gradientOf(cur);
+    const stops = Array.isArray(g.stops) ? g.stops : [];
+    const first = SHELL.stopColor(stops[0], colors) || base;
+    const last = SHELL.stopColor(stops[stops.length - 1], colors) || base;
+    const radial = g.kind === 'radial';
+    // на всю ширину: в узкой колонке (1024 px) «Радиальный» рядом с подписью не помещался
+    const kindSeg = segField(['linear', 'radial'], radial ? 'radial' : 'linear',
+      (v) => o.onPick(SHELL.gradientWith(cur, { kind: v }, colors)), ['Линейный', 'Радиальный']);
+    nameControl(kindSeg, `${o.title}: вид градиента`);
+    body.appendChild(kindSeg);
+    body.appendChild(row(radial ? 'Центр' : 'Начало', colorInput(first, (h) => o.onPick(SHELL.gradientWith(cur, { from: h }, colors)), `${o.title}: ${radial ? 'цвет в центре' : 'цвет в начале'}`)));
+    body.appendChild(row(radial ? 'Край' : 'Конец', colorInput(last, (h) => o.onPick(SHELL.gradientWith(cur, { to: h }, colors)), `${o.title}: ${radial ? 'цвет у края' : 'цвет в конце'}`)));
+    if (!radial) {
+      body.appendChild(row('Угол', numberField(Number.isFinite(Number(g.angle)) ? Number(g.angle) : SHELL.GRADIENT_ANGLE_DEFAULT,
+        (v) => o.onPick(SHELL.gradientWith(cur, { angle: v }, colors)), { min: 0, max: 360, label: `${o.title}: угол градиента` })));
+    }
+    if (stops.length > 2) body.appendChild(noteEl(`Промежуточных цветов: ${stops.length - 2} — они остаются как есть.`));
+    const off = document.createElement('button');
+    off.type = 'button';
+    off.className = 'btn ghost small';
+    off.textContent = o.noneLabel || 'Без заливки';
+    off.addEventListener('click', () => o.onPick(undefined));
+    body.appendChild(off);
+  }
+  d.appendChild(body);
+  return d;
+}
+
+/** «Вид»: поворот (у всех, кроме страницы и доски) и непрозрачность — визуальные поля §11–12. */
+function lookGroup(node) {
+  const kids = [];
+  const rot = numberField(Number(node.rotate) || 0, (v) => writeVisual(node, 'rotate', v, 0),
+    { min: -360, max: 360, label: 'Поворот, градусы' });
+  const unit = (el, u) => {
+    const w = document.createElement('div');
+    w.className = 'unit-field';
+    const s = document.createElement('span');
+    s.className = 'unit';
+    s.textContent = u;
+    s.setAttribute('aria-hidden', 'true');
+    w.append(el, s);
+    return w;
+  };
+  kids.push(row('Поворот', unit(rot, '°')));
+  const op = numberField(Math.round((node.opacity ?? 1) * 100), (v) => writeVisual(node, 'opacity', Math.round(v) / 100, 1),
+    { min: 0, max: 100, label: 'Непрозрачность, проценты' });
+  kids.push(row('Непрозр.', unit(op, '%')));
+  return group('Вид', kids);
+}
+
+/** У ребёнка свободной рамки — X и Y от её края (§12.3); тащить можно и мышью. */
+function freePosGroup(node, parent) {
+  const pos = node.pos && typeof node.pos === 'object' ? node.pos : { x: 0, y: 0 };
+  const put = (axis, v) => {
+    const next = { x: Number(pos.x) || 0, y: Number(pos.y) || 0, [axis]: v };
+    if (node.pos && next.x === node.pos.x && next.y === node.pos.y) return;
+    commit([OPS.set(node.id, 'pos', next)], 'Положение');
+  };
+  const x = numberField(Number(pos.x) || 0, (v) => put('x', v), { min: -100000, max: 100000, label: 'X' });
+  const y = numberField(Number(pos.y) || 0, (v) => put('y', v), { min: -100000, max: 100000, label: 'Y' });
+  const pair = document.createElement('div');
+  pair.className = 'xy-pair';
+  const lx = document.createElement('label'); lx.textContent = 'X'; nameControl(x, 'X', lx);
+  const ly = document.createElement('label'); ly.textContent = 'Y'; nameControl(y, 'Y', ly);
+  pair.append(lx, x, ly, y);
+  const r = document.createElement('div');
+  r.className = 'row';
+  const l = document.createElement('label');
+  l.textContent = 'Место';
+  r.append(l, pair);
+  return group('Положение', [
+    r,
+    noteEl(`От левого верхнего угла «${displayName(state.doc, parent)}». Тащите на холсте или стрелками: 1 px, с Shift — 10 px.`),
+  ]);
+}
+
+/** Контуры вектора: краска всех разом, список с цветом и правка выбранного (§12.3). */
+function vectorGroup(node) {
+  const paths = SHELL.vectorPaths(node);
+  const kids = [];
+  if (!paths.length) {
+    kids.push(noteEl('Контуров нет — вектор пустой. Попросите агента дорисовать.'));
+    return group('Контуры', kids);
+  }
+  const all = paths.length > 1 ? 'всех' : '';
+  const fillC = SHELL.commonPathValue(node, 'fill');
+  const strokeC = SHELL.commonPathValue(node, 'stroke');
+  const widthC = SHELL.commonPathValue(node, 'strokeWidth');
+  kids.push(paintField(fillC.value, {
+    key: `${node.id}|all|fill`, title: all ? 'Заливка всех' : 'Заливка', mixed: fillC.mixed, node,
+    onPick: (v) => writePaths(node, 'all', 'fill', v),
+  }));
+  kids.push(paintField(strokeC.value, {
+    key: `${node.id}|all|stroke`, title: all ? 'Обводка всех' : 'Обводка', mixed: strokeC.mixed, node, noneLabel: 'Без обводки',
+    onPick: (v) => writePaths(node, 'all', 'stroke', v),
+  }));
+  // толщина без обводки ничего не значит — поле появляется, когда обводка есть
+  if (strokeC.mixed || SHELL.paintKind(strokeC.value) !== 'none') kids.push(row('Толщина', numberField(widthC.mixed ? 0 : (Number(widthC.value) || 0),
+    (v) => writePaths(node, 'all', 'strokeWidth', v),
+    { min: 0, max: 64, label: widthC.mixed ? 'Толщина обводки всех контуров (сейчас разная)' : 'Толщина обводки всех контуров' })));
+  if (widthC.mixed && (strokeC.mixed || SHELL.paintKind(strokeC.value) !== 'none')) kids.push(noteEl('Толщина у контуров разная — новое число встанет всем.'));
+
+  if (paths.length > 1) {
+    const colors = state.doc.tokens.colors || {};
+    const pick = pathPick && pathPick.node === node.id && pathPick.i < paths.length ? pathPick.i : -1;
+    const list = document.createElement('div');
+    list.className = 'path-list';
+    list.setAttribute('role', 'group');
+    list.setAttribute('aria-label', `Контуры: ${paths.length}`);
+    paths.forEach((p, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'path-row';
+      b.dataset.path = String(i);
+      b.setAttribute('aria-pressed', String(i === pick));
+      const dot = document.createElement('span');
+      dot.className = 'swatch-dot';
+      // что контур показывает на деле: своя краска или унаследованная от вектора
+      const fillNow = SHELL.effectivePathValue(node, p, 'fill');
+      const strokeNow = SHELL.effectivePathValue(node, p, 'stroke');
+      const css = paintBg(fillNow);
+      if (css) dot.style.background = css; else dot.classList.add('none');
+      const sc = SHELL.paintHex(strokeNow, colors);
+      if (sc && Number(SHELL.effectivePathValue(node, p, 'strokeWidth')) > 0) dot.style.boxShadow = `0 0 0 2px var(--panel-2), 0 0 0 3.5px ${sc}`;
+      const nm = document.createElement('span');
+      nm.className = 'path-name';
+      nm.textContent = SHELL.pathLabel(i, p);
+      const wd = document.createElement('span');
+      wd.className = 'path-val';
+      const say = (v) => SHELL.paintWord(v, { colors, colorWord: (x) => humanValue(x) });
+      wd.textContent = say(fillNow);
+      b.title = `${SHELL.pathLabel(i, p)}: заливка ${say(fillNow)}${sc ? `, обводка ${say(strokeNow)}` : ''}`;
+      b.append(dot, nm, wd);
+      b.addEventListener('click', () => {
+        pathPick = i === pick ? null : { node: node.id, i };
+        renderInspector();
+        const again = dom['insp-body'].querySelector(`.path-row[data-path="${i}"]`);
+        if (again) again.focus();
+      });
+      list.appendChild(b);
+    });
+    kids.push(list);
+    if (pick >= 0) {
+      const p = paths[pick] || {};
+      const sub = document.createElement('div');
+      sub.className = 'path-edit';
+      const h = document.createElement('div');
+      h.className = 'path-edit-title';
+      h.textContent = SHELL.pathLabel(pick, p);
+      sub.appendChild(h);
+      sub.appendChild(paintField(SHELL.effectivePathValue(node, p, 'fill'), {
+        key: `${node.id}|${pick}|fill`, title: 'Заливка', node, onPick: (v) => writePaths(node, pick, 'fill', v),
+      }));
+      sub.appendChild(paintField(SHELL.effectivePathValue(node, p, 'stroke'), {
+        key: `${node.id}|${pick}|stroke`, title: 'Обводка', node, noneLabel: 'Без обводки',
+        onPick: (v) => writePaths(node, pick, 'stroke', v),
+      }));
+      if (SHELL.paintKind(SHELL.effectivePathValue(node, p, 'stroke')) !== 'none') sub.appendChild(row('Толщина', numberField(Number(SHELL.effectivePathValue(node, p, 'strokeWidth')) || 0,
+        (v) => writePaths(node, pick, 'strokeWidth', v), { min: 0, max: 64, label: `Толщина обводки, ${SHELL.pathLabel(pick, p)}` })));
+      kids.push(sub);
+    } else {
+      kids.push(noteEl('Выберите контур — у него своя заливка и обводка.'));
+    }
+  }
+  return group('Контуры', kids);
+}
+
+/**
+ * Заливка рамки, прямоугольника, эллипса (§12.1: тоже Paint). Токен палитры — прежние
+ * образцы; свой цвет или градиент — редактор краски (в нём та же палитра). Перейти к
+ * градиенту можно и из образцов — кнопкой под ними.
+ */
+function fillGroup(node) {
+  const kind = SHELL.paintKind(node.fill);
+  const pick = (v) => setProp(node.id, 'fill', v);
+  if (kind === 'gradient' || kind === 'color') {
+    return group('Заливка', [paintField(node.fill, { key: `${node.id}|fill`, title: 'Заливка', node, onPick: pick })]);
+  }
+  const grad = document.createElement('button');
+  grad.type = 'button';
+  grad.className = 'linkish';
+  grad.textContent = 'Градиент или свой цвет…';
+  grad.title = 'Залить градиентом из текущего цвета — вернуть можно отменой';
+  grad.addEventListener('click', () => pick(SHELL.gradientWith(node.fill, {}, state.doc.tokens.colors || {})));
+  return group('Заливка', [swatches(node, 'fill', 'Заливка'), grad]);
+}
+
+/* ---- круг 37 (§12.3): детали свободной рамки под рукой на холсте ---- */
+
+/** Shift зажат прямо сейчас (по последнему событию указателя или клавиатуры). */
+let shiftNow = false;
+/** Жест сдвига детали с замком оси: {id, axis:'x'|'y', pos:{x,y}} — для поправки коммита. */
+let axisLock = null;
+
+/** Деталь — ребёнок свободной рамки (не доски и не холста). */
+function detailParent(id) {
+  const n = id ? nodeById(state.doc, id) : null;
+  return n ? SHELL.freeParentOf(state.doc, n) : null;
+}
+
+/** Верхняя деталь рамки под точкой мира: сцена знает контуры, без неё — по рамкам. */
+function detailUnder(frame, w) {
+  if (stage && typeof stage._topUnder === 'function') {
+    try {
+      let n = stage._topUnder(w);
+      while (n && n.parent && n.parent !== frame.id) n = nodeById(state.doc, n.parent);
+      if (n && n.parent === frame.id) return n;
+    } catch { /* ниже — по рамкам */ }
+  }
+  const rects = (state.geo && state.geo.rects) || {};
+  const kids = (frame.children || []).slice().reverse();
+  for (const id of kids) {
+    const n = nodeById(state.doc, id);
+    const r = rects[id];
+    if (!n || !r || n.visible === false || n.locked) continue;
+    if (w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h) return n;
+  }
+  return null;
+}
+
+/**
+ * Сцена выделяет щелчком верхний уровень доски (иллюстрацию целиком), вглубь — двойным
+ * щелчком или с Ctrl/Alt. Внутри иллюстрации это значило бы двойной щелчок на КАЖДУЮ деталь.
+ * Поэтому, когда выделена деталь, щелчок по соседней детали той же рамки выделяет её сразу
+ * — и её же можно тут же тащить (сцена берёт выделенный узел под курсором). Щелчок мимо
+ * рамки — обычный выбор сцены.
+ *
+ * Shift во время сдвига детали держит ось (больший из сдвигов): точку мира для жеста
+ * сцена берёт через toWorld — её мы и проецируем, поэтому призрак и итог совпадают.
+ */
+function initDetailGestures() {
+  if (!stage || !stage.el) return;
+  const host = stage.el;
+  const track = (e) => { shiftNow = !!e.shiftKey; };
+  host.addEventListener('pointerdown', (e) => {
+    track(e);
+    axisLock = null;
+    if (e.button !== 0 || e.shiftKey || e.altKey || e.metaKey || e.ctrlKey || previewOn()) return;
+    if (e.target && e.target.dataset && e.target.dataset.handle) return;
+    if (state.selection.length !== 1) return;
+    const frame = detailParent(state.selection[0]);
+    if (!frame) return;
+    const w = stage.toWorld(e.clientX, e.clientY);
+    const fr = state.geo && state.geo.rects && state.geo.rects[frame.id];
+    if (!fr || w.x < fr.x || w.x > fr.x + fr.w || w.y < fr.y || w.y > fr.y + fr.h) return;
+    const hit = detailUnder(frame, w);
+    if (hit && hit.id !== state.selection[0]) setSelection([hit.id], { quiet: true });
+  }, true);
+  host.addEventListener('pointermove', track, true);
+  host.addEventListener('pointerup', track, true);
+  window.addEventListener('keydown', (e) => { if (e.key === 'Shift') shiftNow = true; }, true);
+  window.addEventListener('keyup', (e) => { if (e.key === 'Shift') shiftNow = false; }, true);
+  window.addEventListener('blur', () => { shiftNow = false; });
+
+  const baseToWorld = stage.toWorld;
+  stage.toWorld = function (clientX, clientY) {
+    const w = baseToWorld.call(this, clientX, clientY);
+    const d = this._drag;
+    if (!d || (d.mode !== 'move' && d.mode !== 'maybe-move') || !d.start || !d.id) return w;
+    if (!shiftNow || !detailParent(d.id)) { if (axisLock && axisLock.id === d.id) axisLock = null; return w; }
+    const dx = w.x - d.start.x;
+    const dy = w.y - d.start.y;
+    const axis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
+    const n = nodeById(state.doc, d.id);
+    const pos = n && n.pos ? n.pos : { x: 0, y: 0 };
+    axisLock = { id: d.id, axis, pos: { x: Number(pos.x) || 0, y: Number(pos.y) || 0 } };
+    return axis === 'x' ? { x: w.x, y: d.start.y } : { x: d.start.x, y: w.y };
+  };
+}
+
+/**
+ * Итог жеста сцены перед записью: сдвиг детали с Shift держит ось и после магнитов (они
+ * могли сместить другую ось на пару пикселей). Остальные правки сцены — как есть.
+ */
+function stageOps(ops) {
+  const lock = axisLock;
+  axisLock = null;
+  if (!lock || !Array.isArray(ops) || ops.length !== 1) return ops;
+  const op = ops[0];
+  if (!op || op.op !== 'set' || op.id !== lock.id || op.path !== 'pos' || !op.value) return ops;
+  const keep = lock.axis === 'x' ? 'y' : 'x';
+  return [{ ...op, value: { ...op.value, [keep]: lock.pos[keep] } }];
+}
+
+/** Смена потока рамки: в «свободно» и обратно — без прыжков детей (§12.1). */
+function setLayoutMode(node, mode) {
+  const R = resolveLayout(state.doc, node.layout);
+  const list = SHELL.freeModeOps(node, state.doc, state.geo.rects, R.padding, mode);
+  if (!list.length) return;
+  commit(list.map((o) => OPS.set(o.id, o.path, o.value)), 'Поток');
 }
 
 /** Ручное положение узла: одна и та же группа у обычного узла и у экземпляра (круг 19, п.5). */
@@ -12447,7 +12959,15 @@ function renderHints() {
   const sel = state.selection.filter((id) => state.doc.nodes[id]);
   const node = sel.length === 1 ? state.doc.nodes[sel[0]] : null;
   let list;
-  if (node && node.type === 'text') {
+  // круг 37: у иллюстрации и её деталей — то, что с ними делают словами
+  const ill = node && SHELL.isIllustration(state.doc, node);
+  const detail = node && !ill && SHELL.isIllustration(state.doc, nodeById(state.doc, node.parent));
+  if (ill) {
+    // не про конкретного монстра: иллюстрацией бывает и печенька
+    list = ['добавь мелких деталей и бликов', 'перекрась в пастельные тона', 'сделай тени мягче'];
+  } else if (detail || (node && node.type === 'vector')) {
+    list = ['перекрась в тёплые тона', 'добавь блик и мягкую тень', 'сделай крупнее и чуть поверни'];
+  } else if (node && node.type === 'text') {
     list = ['сделай крупнее и добавь подзаголовок', 'перепиши короче и строже', 'выровняй по центру'];
   } else if (node && isArtboard(state.doc, node.id)) {
     list = ['добавь нижнюю панель с тремя кнопками', 'сделай тёмную тему', 'добавь шапку с аватаром и датой'];
@@ -12455,7 +12975,8 @@ function renderHints() {
     list = ['добавь сюда кнопку «Оплатить»', 'увеличь отступы и скругления', 'оживи при наведении: подъём и тень'];
   } else {
     // круг 36 (SPEC §11.4): микроанимации — тоже работа агента, и это надо показать
-    list = ['экран оплаты с полем карты и итогом', 'добавь блок отзывов из трёх карточек', 'оживи кнопки: подъём и тень при наведении'];
+    // круг 37 (SPEC §12.2): и иллюстрации
+    list = ['экран оплаты с полем карты и итогом', 'нарисуй милого монстра', 'оживи кнопки: подъём и тень при наведении'];
   }
   dom.hints.textContent = '';
   // на пустом документе и пустом артборде примеры уже показаны на холсте

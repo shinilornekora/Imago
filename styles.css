@@ -1718,3 +1718,58 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 .mic[data-unavailable="on"]:focus-visible {
   opacity: .7;
 }
+
+/* ---------------- круг 37 (SPEC §12.3): векторы и иллюстрации ---------------- */
+
+/* Значок вместо буквы в строке слоя: вектор, иллюстрация. */
+.layer .glyph .i, .layer .glyph svg { width: 12px; height: 12px; display: inline-flex; }
+.layer .glyph[data-icon] { display: inline-flex; align-items: center; justify-content: center; }
+.layer[aria-selected="true"] .glyph[data-icon] { color: var(--text); }
+
+/* Редактор краски: та же свёрнутая строка, что у цвета состояния. */
+.paint-field > summary .paint-word { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.paint-body { display: flex; flex-direction: column; gap: 8px; padding: 2px 8px 9px; }
+.paint-body > .swatch-groups { padding: 0; }
+.paint-color { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+.paint-color-input {
+  flex: none; width: 30px; height: 28px; padding: 2px; border: 1px solid var(--line-strong);
+  border-radius: 7px; background: var(--panel-2); cursor: pointer;
+}
+.paint-color-input::-webkit-color-swatch-wrapper { padding: 0; }
+.paint-color-input::-webkit-color-swatch { border: none; border-radius: 4px; }
+.paint-color-input::-moz-color-swatch { border: none; border-radius: 4px; }
+.paint-color-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.paint-hex { font-family: var(--mono); text-transform: uppercase; }
+
+/* Единица у числа: «°», «%». */
+.unit-field { display: flex; align-items: center; gap: 5px; flex: 1 1 auto; min-width: 0; }
+.unit-field .unit { flex: none; color: var(--muted); font-size: var(--t-sm); min-width: 12px; }
+
+/* X и Y детали свободной рамки — парой в одной строке. */
+.xy-pair { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 5px 6px; flex: 1 1 auto; min-width: 0; }
+.xy-pair > label { color: var(--muted); font-size: var(--t-sm); }
+
+/* Список контуров вектора: кружок цвета, номер, краска словами. */
+.path-list {
+  display: flex; flex-direction: column; gap: 1px; max-height: 216px; overflow: auto;
+  border: 1px solid var(--line); border-radius: 9px; padding: 3px; background: var(--panel-2);
+}
+.path-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; cursor: pointer;
+  border: none; background: transparent; color: var(--text); border-radius: 6px; padding: 4px 6px;
+  font-size: var(--t-sm); min-height: 26px;
+}
+.path-row:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.path-row[aria-pressed="true"] { background: var(--seg-on); box-shadow: var(--shadow-soft); }
+.path-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.path-row .swatch-dot { flex: none; }
+.path-row .path-name { flex: none; }
+.path-row .path-val {
+  margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-family: var(--mono); font-size: var(--t-xs);
+}
+.path-edit {
+  display: flex; flex-direction: column; gap: 7px; padding: 8px 0 0 10px;
+  border-left: 2px solid var(--accent);
+}
+.path-edit-title { font-size: var(--t-sm); font-weight: 600; color: var(--text); }

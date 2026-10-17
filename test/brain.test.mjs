@@ -3335,16 +3335,17 @@ test('круг9 п.4: план с intent "refuse" не зовёт модель �
 test('круг9 п.4: cannot можно вернуть и на починке, вместо выдуманного поля', async () => {
   const doc = makeDoc9();
   const engine = makeStubEngine();
+  // круг 37: поворот (rotate) в модели документа ЕСТЬ — выдуманное поле теперь «blur»
   const provider = makeFakeProvider({
     plan: PLAN_EDIT3,
     patch: [
-      { edits: [{ op: 'set', target: 'Аватар', path: 'rotation', value: '15' }] },
-      { cannot: 'Поворота у узлов нет — просить бесполезно.', edits: [] },
+      { edits: [{ op: 'set', target: 'Аватар', path: 'blur', value: '8' }] },
+      { cannot: 'Размытия у узлов нет — просить бесполезно.', edits: [] },
     ],
   });
-  const res = await runCommand({ doc, selection: [], utterance: 'поверни аватар на 15 градусов', provider, engine, activeArtboardId: 'screen' });
+  const res = await runCommand({ doc, selection: [], utterance: 'размой аватар', provider, engine, activeArtboardId: 'screen' });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
-  assert.match(res.cannot, /Поворота/, res.cannot);
+  assert.match(res.cannot, /Размытия/, res.cannot);
   assert.deepEqual(res.ops, []);
 });
 
@@ -4990,9 +4991,10 @@ test('круг16 п.8: цели, которой в документе нет, п
 test('круг16 п.8: выдуманное ПОЛЕ у существующего слоя — повтор может и помочь', async () => {
   const doc = makeDoc16();
   const engine = makeStubEngine();
-  const patch = { edits: [{ op: 'set', target: 'Аватар', path: 'rotation', value: 15 }] };
+  // круг 37: rotation — уже не выдумка (это rotate), выдуманное поле — «blur»
+  const patch = { edits: [{ op: 'set', target: 'Аватар', path: 'blur', value: 15 }] };
   const provider = makeFakeProvider({ plan: PLAN_EDIT3, patch: [patch, patch] });
-  const res = await runCommand({ doc, selection: [], utterance: 'поверни аватар', provider, engine, activeArtboardId: 'screen' });
+  const res = await runCommand({ doc, selection: [], utterance: 'размой аватар', provider, engine, activeArtboardId: 'screen' });
   assert.ok(res.error, 'правок не собралось');
   assert.equal(res.error.retryable, undefined, JSON.stringify(res.error));
 });

@@ -14,7 +14,11 @@
  *   runVariants({doc, selection, utterance, provider, n, onStage, signal,
  *                engine?, history?, geo?, activeArtboardId?, selectionBy?})
  *     -> [{key, label, description, ops, preview, plan, warnings, error?}]
- *   SCHEMAS = {plan, tree, patch, theme, answer}
+ *   SCHEMAS = {plan, tree, patch, theme, answer, illustration}
+ *   Круг 37 (SPEC §12): вид задачи 'illustration' — иллюстратор отвечает спецификацией рисунка
+ *   (холст, палитра, детали снизу вверх), compileIllustration превращает её в свободную рамку
+ *   (role 'illustration', layout.mode 'none', clip) с детьми-векторами; в дереве и правке картинка —
+ *   узел {type:"illustration", name, size, draw}, её рисует тот же иллюстратор отдельным вызовом.
  *   Круг 24: у runCommand и runVariants есть library — внешний словарь компонентов
  *   (DUIL, SPEC §10.6): [{doc, name?, id?}]; имена документа главнее, использованные
  *   мастера переносятся в библиотеку документа (libraryAdded). id новых узлов — core.uid.
@@ -35,8 +39,9 @@
  *                       Круг 9: сюда попадает ТОЛЬКО доказуемо невидимое — выключка текста
  *                       шириной по содержимому и пути, чьё действие целиком видно в геометрии.
  *   cannot            — круг 9, п.4: строка по-русски, «в этой модели документа так нельзя»
- *                       (поворот, градиент, ссылка, анимация появления; круг 36: тень и
- *                       микроанимации состояний уже ЕСТЬ, SPEC §11). Это ОТВЕТ агента, как
+ *                       (ссылка, размытие, анимация появления; круг 36: тень и микроанимации
+ *                       состояний уже ЕСТЬ, SPEC §11; круг 37: поворот, градиент и векторные
+ *                       иллюстрации тоже ЕСТЬ, SPEC §12). Это ОТВЕТ агента, как
  *                       clarify: error нет, ops пуст, preview — прежний документ. Приходит
  *                       из plan.intent="refuse" либо из поля cannot патча/дерева. Если часть
  *                       просьбы выполнима, ops непусты, а cannot стоит рядом с ними.
@@ -870,7 +875,9 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
   const node = {
     type: 'object',
     properties: {
-      type: { type: 'string', enum: NODE_TYPES.concat(['instance']) },
+      // круг 37 (SPEC §12): vector — деталь иллюстрации (контур d в координатах свободной рамки),
+      // illustration — место под картинку: её нарисует иллюстратор по описанию draw
+      type: { type: 'string', enum: NODE_TYPES.concat(['instance', 'vector', 'illustration']) },
       name: { type: 'string' },
       layout: layoutSchema(),
       size: { type: 'object', properties: { w: sizeSpecSchema(), h: sizeSpecSchema() } },
@@ -885,6 +892,12 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
       // круг 36 (SPEC §11): тень, прозрачность, состояния и движение
       shadow: { type: 'string', enum: SHADOW_ENUM },
       opacity: { type: 'number' },
+      // круг 37 (SPEC §12): поворот, картинка-иллюстрация и деталь иллюстрации
+      rotate: { type: 'number' },
+      draw: { type: 'string' },
+      d: { type: 'string' },
+      x: { type: 'number' },
+      y: { type: 'number' },
       states: statesSchema(),
       motion: motionSchema(),
       /**
@@ -918,7 +931,8 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
 }
 
 const TREE_HINT = `{
-  type: "frame" | "text" | "rect" | "ellipse" | "image" | "instance",
+  type: "frame" | "text" | "rect" | "ellipse" | "image" | "instance" | "illustration" | "vector",
+                                       // illustration — картинка (персонаж, предмет, иконка): {type:"illustration", name, size:{w,h}, draw}
   of?: string,                         // ТОЛЬКО для type:"instance": ИМЯ компонента из библиотеки
   props?: [{name: string, value: string}],  // ТОЛЬКО для type:"instance": объявленные свойства компонента
   name?: string,                       // короткое русское имя слоя
@@ -933,6 +947,9 @@ const TREE_HINT = `{
   align?: "left"|"center"|"right",   // выключка текста
   src?: string,                        // только для type:"image"
   shadow?: "shadow.sm"|"shadow.md"|"shadow.lg"|"none", opacity?: number,   // тень и прозрачность в покое
+  rotate?: number,                     // поворот слоя в градусах (по часовой), вокруг центра
+  draw?: string,                       // ТОЛЬКО для type:"illustration": что нарисовать («печенька с шоколадной крошкой»)
+  d?: string, x?: number, y?: number,  // ТОЛЬКО для деталей ВНУТРИ иллюстрации: контур vector / угол ellipse и rect
   states?: { hover?: State, press?: State, focus?: State },   // микроанимации: вид при наведении/нажатии/фокусе
                                        // State = { fill?, color?, stroke?, opacity?: 0..1, scale?: 0.8..1.2,
                                        //           lift?: "spacing.<шаг>" | px, shadow?: "shadow.md"|… }
@@ -953,6 +970,76 @@ const TREE_EXAMPLE = {
   ],
 };
 
+/**
+ * Круг 37 (SPEC §12): образец ответа иллюстратора. Он же — главный few-shot: компактные
+ * пути (целые числа, 3–6 кривых на форму), детали снизу вверх, тона материала через палитру
+ * («body», «body-shade», «body-light»), один тёмный контур, глаз из белка, зрачка и блика с
+ * общей group. Проверен отрисовкой: читаемый силуэт, перекрытие форм, мягкая тень.
+ */
+const ART_EXAMPLE = {
+  name: "Монстрик",
+  canvas: { w: 400, h: 400 },
+  background: "#f3f0ff",
+  palette: [{"name": "body", "color": "#8b5cf6"}, {"name": "horn", "color": "#fcd34d"}, {"name": "mouth", "color": "#4c1d95"}, {"name": "tongue", "color": "#fb7185"}, {"name": "ink", "color": "#1e1b4b"}],
+  outline: { color: '#2e1065', width: 5 },
+  parts: [
+    {"name": "Тень", "kind": "ellipse", "x": 112, "y": 336, "w": 176, "h": 28, "fill": "ink", "opacity": 0.18},
+    {"name": "Левый рожок", "kind": "path", "d": "M150 122 C134 92 132 62 148 40 C164 66 176 92 182 114 Z", "fill": "horn"},
+    {"name": "Правый рожок", "kind": "path", "d": "M250 122 C266 92 268 62 252 40 C236 66 224 92 218 114 Z", "fill": "horn"},
+    {"name": "Левая нога", "kind": "path", "d": "M142 296 C136 328 142 350 170 350 C196 350 200 328 192 300 Z", "fill": "body-shade"},
+    {"name": "Правая нога", "kind": "path", "d": "M258 296 C264 328 258 350 230 350 C204 350 200 328 208 300 Z", "fill": "body-shade"},
+    {"name": "Тело", "kind": "path", "d": "M200 90 C272 90 318 150 320 228 C322 300 272 336 200 336 C128 336 78 300 80 228 C82 150 128 90 200 90 Z", "fill": "body"},
+    {"name": "Тень на теле", "kind": "path", "d": "M290 170 C314 214 312 278 274 306 C244 328 200 332 164 324 C232 316 284 268 290 170 Z", "fill": "body-shade"},
+    {"name": "Пузико", "kind": "ellipse", "x": 142, "y": 214, "w": 116, "h": 100, "fill": "body-light", "stroke": "none"},
+    {"name": "Блик на теле", "kind": "path", "d": "M126 152 C138 124 166 106 196 104 C176 120 156 138 146 162 C140 174 122 168 126 152 Z", "fill": "body-light", "opacity": 0.9},
+    {"name": "Левая лапка", "kind": "path", "d": "M92 222 C64 232 54 258 70 270 C86 280 102 262 110 246 Z", "fill": "body"},
+    {"name": "Правая лапка", "kind": "path", "d": "M308 222 C336 232 346 258 330 270 C314 280 298 262 290 246 Z", "fill": "body"},
+    {"name": "Рот", "kind": "path", "d": "M162 238 C178 270 222 270 238 238 C224 246 176 246 162 238 Z", "fill": "mouth"},
+    {"name": "Язык", "kind": "path", "d": "M184 254 C190 266 210 266 216 254 C206 258 194 258 184 254 Z", "fill": "tongue", "stroke": "none"},
+    {"name": "Клык", "kind": "path", "d": "M178 243 L186 256 L193 245 Z", "fill": "#ffffff", "strokeWidth": 2},
+    {"name": "Белок левого глаза", "kind": "ellipse", "x": 134, "y": 152, "w": 58, "h": 64, "fill": "#ffffff", "group": "Левый глаз"},
+    {"name": "Зрачок левого глаза", "kind": "ellipse", "x": 156, "y": 172, "w": 28, "h": 34, "fill": "ink", "stroke": "none", "group": "Левый глаз"},
+    {"name": "Блик левого глаза", "kind": "ellipse", "x": 162, "y": 177, "w": 10, "h": 10, "fill": "#ffffff", "group": "Левый глаз"},
+    {"name": "Белок правого глаза", "kind": "ellipse", "x": 208, "y": 152, "w": 58, "h": 64, "fill": "#ffffff", "group": "Правый глаз"},
+    {"name": "Зрачок правого глаза", "kind": "ellipse", "x": 226, "y": 172, "w": 28, "h": 34, "fill": "ink", "stroke": "none", "group": "Правый глаз"},
+    {"name": "Блик правого глаза", "kind": "ellipse", "x": 232, "y": 177, "w": 10, "h": 10, "fill": "#ffffff", "group": "Правый глаз"},
+    {"name": "Румянец левый", "kind": "ellipse", "x": 116, "y": 224, "w": 30, "h": 16, "fill": "tongue", "opacity": 0.45, "group": "Румянец"},
+    {"name": "Румянец правый", "kind": "ellipse", "x": 254, "y": 224, "w": 30, "h": 16, "fill": "tongue", "opacity": 0.45, "group": "Румянец"},
+  ],
+};
+
+/** Деталь иллюстрации в схеме: плоский объект без вложенных объединений (см. п.2 выше). */
+function artPartSchema() {
+  return {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      kind: { type: 'string', enum: ['path', 'ellipse', 'rect'] },
+      d: { type: 'string' },
+      x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' }, rx: { type: 'number' },
+      fill: { type: 'string' },
+      gradient: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['linear', 'radial'] },
+          angle: { type: 'number' }, cx: { type: 'number' }, cy: { type: 'number' }, r: { type: 'number' },
+          stops: {
+            type: 'array', maxItems: 6,
+            items: { type: 'object', properties: { at: { type: 'number' }, color: { type: 'string' } }, required: ['at', 'color'] },
+          },
+        },
+        required: ['kind', 'stops'],
+      },
+      stroke: { type: 'string' },
+      strokeWidth: { type: 'number' },
+      rotate: { type: 'number' },
+      opacity: { type: 'number' },
+      group: { type: 'string' },
+    },
+    required: ['name', 'kind'],
+  };
+}
+
 export const SCHEMAS = {
   /** Что агент собирается сделать. */
   plan: {
@@ -960,7 +1047,7 @@ export const SCHEMAS = {
     schema: {
       type: 'object',
       properties: {
-        intent: { type: 'string', enum: ['create', 'edit', 'theme', 'ask', 'clarify', 'refuse'] },
+        intent: { type: 'string', enum: ['create', 'edit', 'theme', 'ask', 'clarify', 'refuse', 'illustration'] },
         title: { type: 'string' },
         summary: { type: 'string' },
         // круг 11, п.10: шаги не «для отчёта» — buildUserTurn кладёт их в реплику ВТОРОЙ стадии
@@ -977,7 +1064,7 @@ export const SCHEMAS = {
       },
       required: ['intent', 'title', 'summary', 'steps'],
     },
-    hint: `{ intent: "create"|"edit"|"theme"|"ask"|"clarify"|"refuse", title: string (название работы, БЕЗ прошедшего времени), summary: string, steps: string[] (1-5), targets: string[], clarify?: string (русский переспрос, если intent="clarify"), clarifyOptions?: string[] (РОВНО 3 готовые команды-ответа, если intent="clarify"), cannot?: string (почему просьба невыполнима, если intent="refuse") }`,
+    hint: `{ intent: "create"|"edit"|"theme"|"ask"|"clarify"|"refuse"|"illustration", title: string (название работы, БЕЗ прошедшего времени), summary: string, steps: string[] (1-5), targets: string[], clarify?: string (русский переспрос, если intent="clarify"), clarifyOptions?: string[] (РОВНО 3 готовые команды-ответа, если intent="clarify"), cannot?: string (почему просьба невыполнима, если intent="refuse") }`,
     example: {
       intent: 'edit',
       title: 'Крупный заголовок карточки',
@@ -1162,6 +1249,49 @@ export const SCHEMAS = {
     },
     hint: `{ answer: string (русский текст, 1-6 предложений), followups?: string[] }`,
     example: { answer: 'В карточке три текстовых слоя и одна кнопка; ширина карточки фиксирована — 320.' },
+  },
+
+  /**
+   * Круг 37 (SPEC §12): иллюстрация — холст, палитра, детали СНИЗУ ВВЕРХ. Схема плоская и
+   * прощающая (локальная модель): цвет — строкой (#hex, имя из палитры с тоном «-shade»/«-light»,
+   * токен документа), градиент — отдельным полем детали; компилятор доделывает остальное.
+   */
+  illustration: {
+    name: 'illustration',
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        canvas: { type: 'object', properties: { w: { type: 'number' }, h: { type: 'number' } }, required: ['w', 'h'] },
+        background: { type: 'string' },
+        palette: {
+          type: 'array', maxItems: 8,
+          items: { type: 'object', properties: { name: { type: 'string' }, color: { type: 'string' } }, required: ['name', 'color'] },
+        },
+        outline: { type: 'object', properties: { color: { type: 'string' }, width: { type: 'number' } } },
+        parts: { type: 'array', maxItems: 80, items: artPartSchema() },   // = ART_LIMITS.parts (объявлен ниже)
+        cannot: { type: 'string' },
+      },
+      required: ['name', 'canvas', 'parts'],
+    },
+    hint: `{ name: string,                       // имя картинки по-русски: «Монстрик», «Печенька»
+  canvas: { w: number, h: number },     // холст в px; координаты деталей — в нём, ось y вниз
+  background?: string,                  // фон холста: #rrggbb или "none"
+  palette?: [{ name: string, color: "#rrggbb" }],   // 4–6 основ; тона пиши как "<имя>-shade" (тень) и "<имя>-light" (блик)
+  outline?: { color: string, width: number },      // один тёмный контур для всех крупных форм (тени и блики — без него)
+  parts: [{                             // детали СНИЗУ ВВЕРХ: первая окажется под всеми
+    name: string,                       // «Тело», «Левый глаз», «Блик на теле», «Тень»
+    kind: "path" | "ellipse" | "rect",
+    d?: string,                         // для path: "M x y C x1 y1 x2 y2 x y … Z" — абсолютные M L C Q A Z, целые числа
+    x?: number, y?: number, w?: number, h?: number, rx?: number,   // для ellipse и rect: рамка фигуры (rx — скругление)
+    fill?: string,                      // #rrggbb | имя из palette (можно "-shade"/"-light") | токен документа | "none"
+    gradient?: { kind: "linear"|"radial", angle?: number, stops: [{ at: 0..1, color: string }] },  // вместо fill
+    stroke?: string, strokeWidth?: number,   // своя обводка; "none" — без контура
+    rotate?: number, opacity?: number,       // поворот в градусах вокруг центра детали; прозрачность 0..1
+    group?: string                      // общая группа: детали одного глаза, все крошки — станут одним слоем
+  }],
+  cannot?: string }                     // только если нарисовать просимое нельзя — объясни по-русски`,
+    example: ART_EXAMPLE,
   },
 };
 
@@ -1693,7 +1823,7 @@ const DSL_RULES = `ПРАВИЛА МОДЕЛИ ДОКУМЕНТА (DSL)
    а ручные сдвиги пользователя сохраняются сами. Чтобы что-то подвинуть, есть отдельная правка
    op:"nudge" со смещением dx/dy В ПИКСЕЛЯХ от текущего места (dx<0 — влево, dy<0 — вверх).
 10. name — короткое осмысленное имя по-русски: «Шапка», «Карточка тарифа», «Кнопка оформить». Имена полей и значения-перечисления — английские, как в схеме.
-11. ЧЕГО В ЭТОЙ МОДЕЛИ НЕТ ВООБЩЕ: поворота (rotation, angle), градиента, размытия, ссылки и
+11. ЧЕГО В ЭТОЙ МОДЕЛИ НЕТ ВООБЩЕ: размытия, ссылки и
     обработчика нажатия (куда ведёт кнопка), видимости (visible, hidden), блокировки, z-порядка, маски,
     автослоёв поверх друг друга, а из анимаций — появления и исчезновения, бесконечных (циклических)
     анимаций, загрузчиков и переходов между экранами. Если просят это — НЕ выдумывай поле и не подменяй
@@ -1704,7 +1834,13 @@ const DSL_RULES = `ПРАВИЛА МОДЕЛИ ДОКУМЕНТА (DSL)
     (opacity 0…1) и МИКРОАНИМАЦИИ — состояния слоя states.hover / states.press / states.focus (наведение,
     нажатие, фокус: заливка, цвет текста, обводка, прозрачность, масштаб, подъём, тень) и motion — скорость
     и характер перехода между ними. «Оживи кнопки», «добавь микроанимации», «при наведении карточка
-    приподнимается» — выполнимые просьбы, на них НЕ отказывают.`;
+    приподнимается» — выполнимые просьбы, на них НЕ отказывают.
+13. ЧТО ЕСТЬ (круг 37): ПОВОРОТ слоя (rotate — градусы по часовой, вокруг центра), ГРАДИЕНТ в заливке
+    (fill: "linear-gradient(180deg, #ffd166, #f4a261)" или "radial-gradient(#fff, #e3a85f)") и
+    ИЛЛЮСТРАЦИИ — векторные картинки из деталей. Картинку (персонажа, зверька, предмет, еду, иконку-рисунок)
+    НЕ собирай из rect и ellipse в колонках: положи узел {type:"illustration", name:"Печенька",
+    size:{w:160, h:160}, draw:"печенька с шоколадной крошкой, вид сверху"} — её нарисует иллюстратор
+    кривыми, с тенями и бликами. Остальное (текст, кнопки, карточка вокруг) собирай как обычно.`;
 
 const CONTENT_RULES = `СОДЕРЖИМОЕ
 - Текст, числа, названия, которые дал пользователь, переноси ДОСЛОВНО. Ничего не выдумывай на месте заданного и не «улучшай» формулировки.
@@ -1730,6 +1866,8 @@ function header(ctx, role) {
   // Круг 20 (SPEC §6.6): как читать «gap=spacing.6(16)» — только если шкалы в документе есть
   if (ctx.scales) lines.push(SCALE_LEGEND);
   if (ctx.motion) lines.push(MOTION_LEGEND);
+  // круг 37 (SPEC §12): как читать свободные рамки и детали иллюстраций — только если они есть
+  if (ctx.art) lines.push(ART_LEGEND);
   lines.push(ctx.digest);
   if (ctx.checks) {
     // Круг 3, п.5: валидатор звался только ПОСЛЕ применения, и на «проверь макет, что не так?»
@@ -1757,6 +1895,11 @@ export const PROMPTS = {
   ВЛОЖИТЬ в существующий узел («добавь в список пункт», «добавь в шапку кнопку», «добавь под
   заголовком плашку»), это edit с правкой {op:"create", parent:"<узел из выжимки>"} — так новое
   попадёт именно туда, куда просили, а не в конец экрана.
+- illustration — нужно НАРИСОВАТЬ картинку как самостоятельную вещь: персонажа, маскота, монстра, зверька,
+  предмет, еду, иконку-рисунок («нарисуй милого монстра», «иллюстрация котика», «маскот для приложения»).
+  Если картинка — часть интерфейса («виджет печеньки», «карточка с котиком», «баннер с маскотом»), это
+  create (или edit, если кладём в существующее): картинка станет узлом illustration внутри раскладки.
+  Правка уже нарисованного («сделай монстра зелёным», «добавь рожки», «увеличь глаза») — это edit.
 - theme — нужно поменять оформление документа: цвета, типографику, шкалы (токены). Токены ОБЩИЕ ДЛЯ
   ВСЕГО документа: это меняет разом ВСЕ доски, а не тот, что назван в «РАБОТАЕМ С:». Если просят
   оформление ОДНОГО экрана («сделай только этот экран тёмным»), theme не годится: это либо edit
@@ -1773,12 +1916,13 @@ export const PROMPTS = {
     три разных слоя; если непонятно, что с ним делать, — три разных правки;
   • до 60 знаков, без кавычек по краям, строчными, как человек сказал бы вслух.
   Лучше переспросить, чем угадать и построить лишнее: команда пришла голосом и могла недослышаться.
-- refuse — команда ПОНЯТНА, но в этой модели документа невыполнима: просят поворот, градиент,
+- refuse — команда ПОНЯТНА, но в этой модели документа невыполнима: просят
   размытие, ссылку, видимость, z-порядок, анимацию появления, бесконечную анимацию, загрузчик или переход
   между экранами — ничего такого у узлов нет. Тогда положи в cannot одно-два русских предложения: чего
   именно в редакторе нет и что можно попросить вместо этого (например, состояния наведения и нажатия).
   Это не clarify (переспрашивать нечего) и не повод угадывать похожую правку.
-  ТЕНЬ, СОСТОЯНИЯ (наведение, нажатие, фокус) и МИКРОАНИМАЦИИ между ними В РЕДАКТОРЕ ЕСТЬ — это edit, не refuse.`,
+  ТЕНЬ, СОСТОЯНИЯ (наведение, нажатие, фокус) и МИКРОАНИМАЦИИ между ними В РЕДАКТОРЕ ЕСТЬ — это edit, не refuse.
+  ПОВОРОТ, ГРАДИЕНТ и РИСУНКИ (векторные иллюстрации) тоже ЕСТЬ — не отказывай в них.`,
       '',
       `${motionRules('plan')}\n`,
       ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'plan')}\n` : '',
@@ -1832,6 +1976,7 @@ export const PROMPTS = {
       ctx.personaHint ? `ХАРАКТЕР — ТВОЙ И ТОЛЬКО ТВОЙ\n${ctx.personaHint}\n` : '',
       ctx.variantHint ? `${ctx.variantHint}\n` : '',
       `КУДА ВСТАВЛЯЕМ\n${ctx.placement}`,
+      ctx.artHint ? `\n${ctx.artHint}\n` : '',
       'Выжимка выше — весь документ. Держи единый язык с уже существующими экранами: те же токены,'
       + ' те же шкалы отступов и радиусов, похожие имена слоёв. Не копируй чужой экран целиком, если об этом не просили.',
       '',
@@ -1854,6 +1999,7 @@ export const PROMPTS = {
       // Круг 5, п.10: «куда класть» считает приложение (describePlacement) и на него же
       // опирается материализация, когда модель не назвала parent, — а модель этого не видела.
       ctx.placement ? `КУДА КЛАДЁМ НОВОЕ, ЕСЛИ ПРАВКА ЕГО СОЗДАЁТ (это посчитало приложение)\n${ctx.placement}\n` : '',
+      ctx.artHint ? `${ctx.artHint}\n` : '',
       ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'patch')}\n` : '',
       `ПРАВИЛА ПРАВОК
 - Меняй только то, о чём просят. Ничего не переписывай «заодно».
@@ -1866,8 +2012,8 @@ export const PROMPTS = {
 - path — ТОЛЬКО эти корни: characters, style, align, color, fill, stroke, radius, size.w, size.h,
   layout.mode, layout.gap, layout.padding, layout.align, layout.justify, layout.wrap, name, opacity, src, clip,
   shadow, states (states.hover / states.press / states.focus и их поля), motion (motion.duration, motion.easing,
-  motion.delay, motion.follow).
-  Ничего другого не существует: visible, locked, hidden, onclick, z, rotation, pos и подобное будет отброшено.
+  motion.delay, motion.follow), rotate (поворот в градусах, value:"15"); у деталей иллюстраций ещё d (контур).
+  Ничего другого не существует: visible, locked, hidden, onclick, z и подобное будет отброшено.
 - СНЯТЬ свойство («убери фон», «без заливки», «сними обводку», «убери скругление», «сделай
   непрозрачным») — это value:"none": {op:"set", target:"Карточка", path:"fill", value:"none"}.
   Так же понимаются "", "нет", "прозрачный", "убрать" и правка вовсе без поля value. Снимаются:
@@ -1903,7 +2049,10 @@ export const PROMPTS = {
 - Чтобы размножить существующее, НЕ пересказывай его поддерево: {op:"duplicate", target:"Карточка встречи"}
   (можно указать parent и index) — копия делается движком со всем оформлением.
 - Размеры из выжимки («→ 350×52») — посчитанные. «На 20 пикселей шире» = size.w в "370", а не "+20".
-- Если просят то, чего в модели документа НЕТ (поворот, градиент, размытие, ссылка, видимость,
+- Картинку (персонажа, предмет, иконку-рисунок) добавляй узлом {op:"create", parent:"…", node:{type:"illustration",
+  name:"Котик", size:{w:120, h:120}, draw:"рыжий котик сидит, вид спереди"}} — её нарисует иллюстратор.
+  Градиент в заливке — value:"linear-gradient(180deg, #ffd166, #f4a261)".
+- Если просят то, чего в модели документа НЕТ (размытие, ссылка, видимость,
   z-порядок, анимация появления, бесконечная анимация, переход между экранами), не выдумывай поле и не
   подменяй просьбу похожим: верни {cannot: "<почему>"} с пустым edits. Одно-два предложения по-русски:
   чего в редакторе нет и что можно попросить вместо. Тень, состояния и микроанимации — ЕСТЬ (ниже).
@@ -1911,6 +2060,7 @@ export const PROMPTS = {
       '',
       motionRules('patch'),
       '',
+      ctx.art ? `${ART_PATCH_RULES}\n` : '',
       JSON_RULE,
     ].filter(Boolean).join('\n');
   },
@@ -1958,6 +2108,36 @@ export const PROMPTS = {
     ].join('\n');
   },
 
+  /**
+   * Круг 37 (SPEC §12.2): иллюстратор. Выжимки документа здесь нет — картинке она ни к чему,
+   * а локальной модели каждые 10 тысяч знаков стоят секунд. Есть: что рисуем, холст, куда
+   * встанет, цвета документа, техника рисования и образцы хороших деталей.
+   */
+  illustration(ctx) {
+    const cv = ctx.canvas || { w: ART_CANVAS, h: ART_CANVAS };
+    return [
+      'Ты — иллюстратор Imago Studio. Рисуешь векторную картинку из деталей: каждая деталь — контур'
+      + ' с заливкой. Ответ станет свободной рамкой с векторами, и человек сможет выделить и поправить'
+      + ' любую деталь — поэтому детали осмысленные и названы по-русски.',
+      '',
+      `ЧТО НАРИСОВАТЬ: ${ctx.subject || 'то, о чём просят в команде'}`,
+      `ХОЛСТ: ${cv.w}×${cv.h} px. Начало координат — левый верхний угол, ось y направлена ВНИЗ. Все координаты —`
+      + ' в пикселях холста, целыми числами. Объект — по центру и занимает 70–85% холста; снизу оставь место под тень.',
+      ctx.where ? `КУДА ВСТАНЕТ: ${ctx.where}` : null,
+      '',
+      'ЦВЕТА ДОКУМЕНТА (имя токена можно писать вместо #rrggbb, если цвет подходит рисунку):',
+      ctx.colors || '(токенов цвета нет)',
+      '',
+      ART_TECHNIQUE,
+      '',
+      ART_SAMPLES,
+      '',
+      ctx.personaHint ? `ХАРАКТЕР ВАРИАНТА\n${ctx.personaHint}\n` : null,
+      ctx.history ? `ПРЕДЫДУЩИЕ КОМАНДЫ (старые сверху)\n${ctx.history}\n` : null,
+      JSON_RULE,
+    ].filter((x) => x != null).join('\n');
+  },
+
   /** Обратная связь для единственной попытки починки. */
   repair(problems, previous, entry) {
     return [
@@ -1967,10 +2147,15 @@ export const PROMPTS = {
       'Исправь ИМЕННО эти нарушения и верни полный JSON по той же схеме заново. Не меняй то, что было верно.',
       // круг 9, п.4: если поле было выдумано, вторая попытка должна уметь сказать «нельзя»,
       // а не выдумывать второе такое же — иначе человек получает аварию вместо ответа
-      'Если просимого в модели документа нет вообще (поворот, градиент, размытие, ссылка, видимость,'
+      'Если просимого в модели документа нет вообще (размытие, ссылка, видимость,'
       + ' z-порядок, анимация появления, бесконечная анимация, переход между экранами), не подбирай другое поле:'
       + ' верни {cannot: "<почему, по-русски>"} с пустым edits. Тень, состояния (states.hover/press/focus) и'
-      + ' движение (motion) в модели ЕСТЬ — для микроанимаций используй их, а не отказ.',
+      + ' движение (motion) в модели ЕСТЬ — для микроанимаций используй их, а не отказ.'
+      + ' Поворот (rotate), градиент и векторные иллюстрации тоже ЕСТЬ.',
+      entry && entry.name === 'illustration'
+        ? 'Иллюстрацию можно чинить частично: верни в parts ТОЛЬКО исправленные детали с теми же name — остальные останутся'
+          + ' как были. Если замечание про прямоугольники — перерисуй целиком.'
+        : '',
       entry && entry.hint ? `Схема "${entry.name}":\n${entry.hint}` : '',
       JSON_RULE,
     ].filter(Boolean).join('\n');
@@ -2136,6 +2321,32 @@ const RE_ADD = [rx('добав(ь|ить|ьте|им|ляй)', true), rx('вст
 const RE_ADD_PLACE = rx('(в|во|внутрь|внутри|под|над|после|перед|рядом|возле|около|сверху|снизу|вниз|наверх|слева|справа|между|в\\s+начал|в\\s+конец)');
 
 const anyMatch = (list, s) => list.some((r) => r.test(s));
+
+/* Круг 37 (SPEC §12.2): иллюстрация — свой вид задачи. «Нарисуй милого монстра», «маскот»,
+ * «иконка котика» — картинка сама по себе; «виджет печеньки», «карточка с котиком» — интерфейс
+ * с картинкой внутри (обычная раскладка + узел illustration). */
+/** Глагол рисования. «Нарисуй экран» — тоже он, но там предмет — интерфейс (см. RE_ART_WIDGET). */
+const RE_ART_VERB = rx('(нарису(й|йте|ешь|ем|ете)|нарисовать|изобрази(те)?|изобразить|набросай(те)?|draw|сделай(те)?\\s+(рисунок|иллюстраци\\p{L}*|картинк\\p{L}*))');
+/** Предмет-картинка — основы слов (начало слова). */
+const RE_ART_STEM = rx('(иллюстраци|рисун(ок|ка|ке|ком|ки)|картинк|персонаж|маскот|талисман|монстр|чудищ|чудовищ|зверюшк|зверушк|зверёк|зверек|зверьк|животн|котик|котён|котен|котят|кошк|собачк|собак|щенок|щенк|лисичк|лисён|зайч|зайк|кролик|медвед|медвеж|мишк|птичк|птиц|совушк|рыбк|дракон|динозавр|робот|привидени|призрак|единорог|пингвин|ёжик|ежик|печень|пончик|кекс|тортик|пирожн|мороженк|мороженое|фрукт|яблок|груш[аиуе]|апельсин|клубничк|ягодк|цветок|цветоч|цветк|ёлочк|елочк|солнышк|облачк|радуг|звёздочк|звездочк|сердечк|иконк|пиктограмм|логотип|эмблем|фигурк|стикер|эмодзи|смайлик|mascot|illustrat|monster|cookie|character)');
+/** Предмет-картинка — целые слова (у них опасные продолжения: «кот» → «который», «котлета»). */
+const RE_ART_WORD = rx('(кот|кота|коту|котом|пёс|пес|пса|псу|лиса|лису|заяц|зайца|зверь|зверя|сова|сову|торт|торта|рыба|рыбу|солнце|облако|облака|звезда|звезду|цветы)', true);
+/** Слова интерфейса: картинка — часть виджета, а не сама по себе. */
+const RE_ART_WIDGET = rx('(виджет|карточк|баннер|плашк|экран|страниц|лендинг|блок|секци|кнопк|шапк|модальн|окошк|уведомлени|меню|подвал|панел|макет|интерфейс|раздел|приложени|сайт|онбординг|пуст(ое|ого|ом)\\s+состояни|empty\\s+state|widget|card|banner)');
+/** «Ещё одного», «нового», «другого» — новая картинка рядом с уже нарисованной. */
+const RE_ART_ANOTHER = rx('(ещ[её]|нов(ый|ого|ую|ое|ая)|друг(ой|ого|ую|ое|ая)|втор(ой|ого|ую|ое|ая))', true);
+
+/** Есть ли в реплике предмет-картинка. */
+export function artSubjectIn(utterance) {
+  const s = String(utterance == null ? '' : utterance);
+  return RE_ART_STEM.test(s) || RE_ART_WORD.test(s);
+}
+
+/** Похоже ли на просьбу НАРИСОВАТЬ (иллюстрацию или картинку в интерфейсе). */
+export function looksIllustration(utterance) {
+  const s = String(utterance == null ? '' : utterance);
+  return RE_ART_VERB.test(s) || artSubjectIn(s);
+}
 
 /**
  * Слова-пустышки и глаголы, которые без дополнения ничего не значат.
@@ -2648,6 +2859,46 @@ export function classifyUtterance(utterance, { hasSelection = false, doc = null,
   const micro = !addsScreen && looksMicroAnimation(s);
   const isCreate = !micro && (anyMatch(RE.create, s) || (isAdd && !addsInto));
   const isEdit = micro || anyMatch(RE.edit, s) || addsInto;
+
+  /* Круг 37 (SPEC §12.2): рисунок. Порядок важен:
+   *   1) назван уже нарисованный («сделай монстра зелёным») или в области работы есть рисунок и
+   *      просят добавить/поменять деталь — это правка иллюстрации (edit);
+   *   2) картинка внутри интерфейса («виджет печеньки») — создание с картинкой (art:true);
+   *   3) картинка сама по себе — illustration. «Нарисуй экран входа» сюда не попадает: там предмет —
+   *      интерфейс, а не рисунок. */
+  const artVerb = RE_ART_VERB.test(s);
+  const artSubject = artSubjectIn(s);
+  const near = prefer instanceof Set ? prefer : null;
+  // в области работы есть рисунок: «добавь рожки», «сделай хвост длиннее» — про его детали
+  const artHere = !!(doc && near && [...near].some((id) => (nodeOf(doc, id) || {}).type === 'vector'));
+  if ((artVerb || artSubject || (artHere && (isAdd || isEdit))) && !micro && !(isAsk && !artVerb)) {
+    // «маскот для приложения», «иконка для сайта» — назначение, а не место: картинка сама по себе
+    const widget = RE_ART_WIDGET.test(s.replace(/(^|[\s,])для\s+[\p{L}\p{N}-]+/giu, ' ')) || addsScreen;
+    const named = doc ? mentionsExistingLayer(doc, s, { prefer: near || undefined }) : null;
+    const namedArt = !!(named && named.strength === 'strong' && doc
+      && ((nodeOf(doc, named.id) || {}).type === 'vector' || artFrameOf(doc, named.id)));
+    const another = RE_ART_ANOTHER.test(s);
+    if (namedArt && !another) {
+      return { intent: 'edit', confidence: 0.8, art: true, reason: `правка нарисованного «${named.name}»` };
+    }
+    if (artHere && !widget && !another && (isAdd || isEdit || !artVerb)) {
+      return { intent: 'edit', confidence: hasSelection ? 0.8 : 0.65, art: true, reason: 'правка иллюстрации в области работы: деталь добавить или поменять' };
+    }
+    if (isEdit && !artVerb && !addsInto) {
+      // «сделай иконки крупнее», «перекрась котика» — правка существующего, предмет лишь назван
+      return { intent: 'edit', confidence: hasSelection ? 0.9 : 0.6, reason: 'глагол изменения' };
+    }
+    if (widget && artSubject) {
+      return addsInto
+        ? { intent: 'edit', confidence: 0.75, art: true, reason: 'картинка внутрь существующего блока' }
+        : { intent: 'create', confidence: 0.85, art: true, reason: 'интерфейс с картинкой внутри — раскладка плюс иллюстрация' };
+    }
+    if (!widget) {
+      return addsInto
+        ? { intent: 'illustration', confidence: 0.8, reason: 'рисунок внутрь названного места' }
+        : { intent: 'illustration', confidence: artVerb ? 0.9 : 0.8, reason: artVerb ? 'просят нарисовать картинку' : 'предмет — картинка, а не интерфейс' };
+    }
+  }
 
   if (isAsk && !isCreate && !isEdit && !isTheme) return { intent: 'ask', confidence: 0.9, reason: 'вопросительная форма' };
   if (isAsk && !isCreate && !isEdit) return { intent: 'ask', confidence: 0.6, reason: 'вопрос об оформлении' };
@@ -4419,6 +4670,1418 @@ const sizeWord = (spec) => {
 };
 
 /** Бюджет выжимки: 20 000 знаков при 60 000 знаков бюджета всего запроса (п.3). */
+/* ────────────────────────────────────────────────────────────────────────────
+ * 6b. Векторные иллюстрации (круг 37, SPEC §12)
+ *
+ * Жалоба: «качественная фигурка 2D-монстра» выходила стопкой прямоугольников в колонке
+ * (палки-рожки, квадрат-голова), «виджет печеньки» — плоским кругом с точками. Модель
+ * собирала картинку UI-кирпичиками авто-раскладки: векторов в DSL не было.
+ *
+ * Теперь картинку рисует отдельная роль — ИЛЛЮСТРАТОР. Модель отвечает спецификацией:
+ * холст, палитра, детали снизу вверх (контур d или эллипс/прямоугольник, заливка или
+ * градиент, обводка, поворот). Компилятор ниже превращает её в СВОБОДНУЮ РАМКУ
+ * (layout.mode 'none', фиксированный размер, обрезка) с детьми-векторами: путь каждой
+ * детали разбирается (зеркало core.parsePath, а при живом ядре — им самим), битые детали
+ * отбрасываются с предупреждением, мелочи одной группы сливаются в один вектор с
+ * несколькими контурами, чтобы не плодить сотни слоёв, а pos/size/viewBox каждого вектора
+ * — по bbox его контуров в координатах холста (как core.fitVector).
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Пределы иллюстраций. paths/d/totalD/strokeWidth/stops — зеркало core.VECTOR_LIMITS. */
+export const ART_LIMITS = Object.freeze({
+  parts: 80,            // деталей в ответе модели (лишние — с предупреждением)
+  layers: 40,           // векторов-слоёв в одной иллюстрации (мелочи сливаются)
+  paths: 256, d: 20000, totalD: 100000, strokeWidth: 64, stops: 16, coord: 1e6,
+  canvasMin: 16, canvasMax: 4096,
+  perCommand: 3,        // иллюстраций, которые рисуются за одну команду
+});
+/** Холст по умолчанию: квадрат 400 — удобные круглые координаты для модели. */
+export const ART_CANVAS = 400;
+
+/* — путь: зеркало core.parsePath — */
+
+const ART_PATH_ARGS = { M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, A: 7, Z: 0 };
+const ART_NUM_RE = /[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/y;
+
+/**
+ * d → абсолютные команды M L C Q A Z (H/V → L, S → C, T → Q, дуга с нулевым радиусом → L).
+ * Строго, как ядро: первая команда M, числа конечные и не больше 1e6 по модулю, флаги дуг —
+ * 0/1, длина ≤ 20 000. Ответ: {ok, cmds} | {ok:false, error}.
+ */
+export function parseArtPath(d) {
+  const s = typeof d === 'string' ? d : '';
+  if (!s.trim()) return { ok: false, error: 'путь пуст' };
+  if (s.length > ART_LIMITS.d) return { ok: false, error: `путь длиннее ${ART_LIMITS.d} знаков` };
+  const out = [];
+  const n = s.length;
+  let i = 0;
+  let cmd = null;
+  let cx = 0, cy = 0, sx = 0, sy = 0;
+  let lastC = null, lastQ = null;                  // управляющие точки для S и T
+  const skip = () => { while (i < n && (s[i] === ' ' || s[i] === ',' || s[i] === '\t' || s[i] === '\n' || s[i] === '\r' || s[i] === '\f')) i++; };
+  const num = () => {
+    skip();
+    ART_NUM_RE.lastIndex = i;
+    const m = ART_NUM_RE.exec(s);
+    if (!m) return null;
+    i = ART_NUM_RE.lastIndex;
+    const v = Number(m[0]);
+    return Number.isFinite(v) && Math.abs(v) <= ART_LIMITS.coord ? v : null;
+  };
+  const flag = () => {
+    skip();
+    if (s[i] === '0' || s[i] === '1') { i++; return s[i - 1] === '1' ? 1 : 0; }
+    return null;
+  };
+  for (;;) {
+    skip();
+    if (i >= n) break;
+    const ch = s[i];
+    if (/[A-Za-z]/.test(ch)) {
+      if (!Object.prototype.hasOwnProperty.call(ART_PATH_ARGS, ch.toUpperCase())) {
+        return { ok: false, error: `неизвестная команда «${ch}» (есть M L H V C S Q T A Z)` };
+      }
+      cmd = ch;
+      i++;
+    } else if (cmd == null) {
+      return { ok: false, error: 'путь должен начинаться с команды M' };
+    } else if (cmd === 'Z' || cmd === 'z') {
+      return { ok: false, error: 'после Z идут числа без команды' };
+    }
+    const U = cmd.toUpperCase();
+    const rel = cmd !== U;
+    if (!out.length && U !== 'M') return { ok: false, error: 'путь должен начинаться с команды M' };
+    if (U === 'Z') {
+      out.push({ c: 'Z', a: [] });
+      cx = sx; cy = sy; lastC = null; lastQ = null;
+      continue;
+    }
+    const a = [];
+    if (U === 'A') {
+      const rx = num(), ry = num(), rot = num(), fa = flag(), fs = flag(), x = num(), y = num();
+      if ([rx, ry, rot, fa, fs, x, y].some((v) => v === null)) return { ok: false, error: `команде ${cmd} не хватает чисел (A rx ry поворот большая-дуга направление x y)` };
+      a.push(rx, ry, rot, fa, fs, x, y);
+    } else {
+      for (let k = 0; k < ART_PATH_ARGS[U]; k++) {
+        const v = num();
+        if (v === null) return { ok: false, error: `команде ${cmd} не хватает чисел (нужно ${ART_PATH_ARGS[U]})` };
+        a.push(v);
+      }
+    }
+    const ox = rel ? cx : 0, oy = rel ? cy : 0;
+    if (U === 'M') {
+      cx = a[0] + ox; cy = a[1] + oy; sx = cx; sy = cy;
+      out.push({ c: 'M', a: [cx, cy] });
+      cmd = rel ? 'l' : 'L';                       // неявный повтор после M — это L
+      lastC = null; lastQ = null;
+    } else if (U === 'L' || U === 'H' || U === 'V') {
+      if (U === 'L') { cx = a[0] + ox; cy = a[1] + oy; }
+      else if (U === 'H') cx = a[0] + ox;
+      else cy = a[0] + oy;
+      out.push({ c: 'L', a: [cx, cy] });
+      lastC = null; lastQ = null;
+    } else if (U === 'C' || U === 'S') {
+      let x1, y1, rest;
+      if (U === 'C') { x1 = a[0] + ox; y1 = a[1] + oy; rest = a.slice(2); }
+      else { x1 = lastC ? 2 * cx - lastC[0] : cx; y1 = lastC ? 2 * cy - lastC[1] : cy; rest = a; }
+      const x2 = rest[0] + ox, y2 = rest[1] + oy, x = rest[2] + ox, y = rest[3] + oy;
+      out.push({ c: 'C', a: [x1, y1, x2, y2, x, y] });
+      lastC = [x2, y2]; lastQ = null; cx = x; cy = y;
+    } else if (U === 'Q' || U === 'T') {
+      let x1, y1, x, y;
+      if (U === 'Q') { x1 = a[0] + ox; y1 = a[1] + oy; x = a[2] + ox; y = a[3] + oy; }
+      else { x1 = lastQ ? 2 * cx - lastQ[0] : cx; y1 = lastQ ? 2 * cy - lastQ[1] : cy; x = a[0] + ox; y = a[1] + oy; }
+      out.push({ c: 'Q', a: [x1, y1, x, y] });
+      lastQ = [x1, y1]; lastC = null; cx = x; cy = y;
+    } else if (U === 'A') {
+      const x = a[5] + ox, y = a[6] + oy;
+      if (!a[0] || !a[1]) out.push({ c: 'L', a: [x, y] });
+      else out.push({ c: 'A', a: [Math.abs(a[0]), Math.abs(a[1]), a[2], a[3], a[4], x, y] });
+      cx = x; cy = y; lastC = null; lastQ = null;
+    }
+  }
+  if (!out.length) return { ok: false, error: 'в пути нет команд' };
+  if (out.every((c) => c.c === 'M')) return { ok: false, error: 'в пути одни перемещения M — нечего рисовать' };
+  return { ok: true, cmds: out };
+}
+
+const artNum = (v, digits = 1) => {
+  const k = 10 ** digits;
+  let r = Math.round(v * k) / k;
+  if (Object.is(r, -0)) r = 0;
+  return String(r);
+};
+
+/** Абсолютные команды → строка d (числа до десятых: пиксели холста). */
+export function formatArtPath(cmds, digits = 1) {
+  return cmds.map((c) => {
+    if (c.c === 'Z') return 'Z';
+    if (c.c === 'A') {
+      const [rx, ry, rot, fa, fs, x, y] = c.a;
+      return `A${artNum(rx, digits)} ${artNum(ry, digits)} ${artNum(rot, digits)} ${fa ? 1 : 0} ${fs ? 1 : 0} ${artNum(x, digits)} ${artNum(y, digits)}`;
+    }
+    return c.c + c.a.map((v) => artNum(v, digits)).join(' ');
+  }).join(' ');
+}
+
+/** Сдвиг и масштаб абсолютных команд (масштаб — равный по осям: дуги остаются дугами). */
+function transformArtCmds(cmds, k, dx, dy) {
+  return cmds.map((c) => {
+    if (c.c === 'Z') return c;
+    if (c.c === 'A') {
+      const [rx, ry, rot, fa, fs, x, y] = c.a;
+      return { c: 'A', a: [rx * k, ry * k, rot, fa, fs, x * k + dx, y * k + dy] };
+    }
+    return { c: c.c, a: c.a.map((v, j) => (j % 2 ? v * k + dy : v * k + dx)) };
+  });
+}
+
+/** Точки дуги SVG (параметризация через центр, SVG 1.1 F.6.5). */
+function arcPoints(x1, y1, rxIn, ryIn, phiDeg, fa, fs, x2, y2, steps = 48) {
+  if (x1 === x2 && y1 === y2) return [];
+  let rx = Math.abs(rxIn), ry = Math.abs(ryIn);
+  if (!rx || !ry) return [[x2, y2]];
+  const phi = (phiDeg * Math.PI) / 180;
+  const cos = Math.cos(phi), sin = Math.sin(phi);
+  const dx = (x1 - x2) / 2, dy = (y1 - y2) / 2;
+  const x1p = cos * dx + sin * dy, y1p = -sin * dx + cos * dy;
+  const lam = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+  if (lam > 1) { const q = Math.sqrt(lam); rx *= q; ry *= q; }
+  const num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+  const den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+  let co = den ? Math.sqrt(Math.max(0, num / den)) : 0;
+  if (fa === fs) co = -co;
+  const cxp = (co * rx * y1p) / ry, cyp = (-co * ry * x1p) / rx;
+  const ccx = cos * cxp - sin * cyp + (x1 + x2) / 2, ccy = sin * cxp + cos * cyp + (y1 + y2) / 2;
+  const ang = (ux, uy, vx, vy) => Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+  const t1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  let dt = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+  if (!fs && dt > 0) dt -= 2 * Math.PI;
+  else if (fs && dt < 0) dt += 2 * Math.PI;
+  const pts = [];
+  for (let k = 1; k <= steps; k++) {
+    const t = t1 + (dt * k) / steps;
+    pts.push([ccx + rx * Math.cos(t) * cos - ry * Math.sin(t) * sin, ccy + rx * Math.cos(t) * sin + ry * Math.sin(t) * cos]);
+  }
+  return pts;
+}
+
+/** bbox абсолютных команд: кривые — выборкой (зеркало core.pathBounds с точностью до долей px). */
+function artCmdsBox(cmds) {
+  let x0 = 0, y0 = 0, sx = 0, sy = 0;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const add = (x, y) => { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; };
+  const STEPS = 24;
+  for (const c of cmds) {
+    const a = c.a;
+    if (c.c === 'M') { x0 = a[0]; y0 = a[1]; sx = x0; sy = y0; add(x0, y0); continue; }
+    if (c.c === 'Z') { x0 = sx; y0 = sy; continue; }
+    if (c.c === 'L') { add(a[0], a[1]); }
+    else if (c.c === 'C') {
+      for (let k = 1; k <= STEPS; k++) {
+        const t = k / STEPS, u = 1 - t;
+        add(u * u * u * x0 + 3 * u * u * t * a[0] + 3 * u * t * t * a[2] + t * t * t * a[4],
+          u * u * u * y0 + 3 * u * u * t * a[1] + 3 * u * t * t * a[3] + t * t * t * a[5]);
+      }
+    } else if (c.c === 'Q') {
+      for (let k = 1; k <= STEPS; k++) {
+        const t = k / STEPS, u = 1 - t;
+        add(u * u * x0 + 2 * u * t * a[0] + t * t * a[2], u * u * y0 + 2 * u * t * a[1] + t * t * a[3]);
+      }
+    } else if (c.c === 'A') {
+      for (const [px, py] of arcPoints(x0, y0, a[0], a[1], a[2], a[3], a[4], a[5], a[6])) add(px, py);
+      add(a[5], a[6]);
+    }
+    const last = c.c === 'A' ? [a[5], a[6]] : [a[a.length - 2], a[a.length - 1]];
+    x0 = last[0]; y0 = last[1];
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/**
+ * Инструменты пути: ядро, если в нём есть parsePath/pathBounds (круг 37), иначе зеркало.
+ * check(d) → {ok, d (нормализованный, абсолютный), cmds} | {ok:false, error};
+ * box(vpaths) → bbox с половиной обводки, как core.pathBounds(paths, {stroke:true}).
+ */
+function artTools(engine) {
+  const coreParse = engine && typeof engine.parsePath === 'function' ? engine.parsePath : null;
+  const coreBox = engine && typeof engine.pathBounds === 'function' ? engine.pathBounds : null;
+  const check = (d) => {
+    const got = parseArtPath(d);
+    if (!got.ok) return got;
+    const norm = formatArtPath(got.cmds);
+    if (norm.length > ART_LIMITS.d) return { ok: false, error: `путь длиннее ${ART_LIMITS.d} знаков` };
+    if (coreParse) {
+      let r;
+      try { r = coreParse(norm); } catch (e) { r = { ok: false, error: e && e.message ? e.message : String(e) }; }
+      if (!r || r.ok === false) return { ok: false, error: (r && r.error) || 'ядро не приняло путь' };
+    }
+    return { ok: true, d: norm, cmds: got.cmds };
+  };
+  const box = (vpaths) => {
+    if (coreBox) {
+      try {
+        const b = coreBox(vpaths, { stroke: true });
+        if (b && Number.isFinite(b.x) && Number.isFinite(b.w)) return b;
+      } catch { /* зеркало ниже */ }
+    }
+    let out = null;
+    for (const p of vpaths) {
+      const got = parseArtPath(p.d);
+      if (!got.ok) continue;
+      const b = artCmdsBox(got.cmds);
+      if (!b) continue;
+      const half = p.stroke && Number(p.strokeWidth) > 0 ? Number(p.strokeWidth) / 2 : 0;
+      const e = { x: b.x - half, y: b.y - half, w: b.w + 2 * half, h: b.h + 2 * half };
+      if (!out) out = e;
+      else {
+        const x = Math.min(out.x, e.x), y = Math.min(out.y, e.y);
+        out = { x, y, w: Math.max(out.x + out.w, e.x + e.w) - x, h: Math.max(out.y + out.h, e.y + e.h) - y };
+      }
+    }
+    return out;
+  };
+  return { check, box };
+}
+
+/* — цвет: тона материала и краски с градиентом — */
+
+function rgbHsl([r, g, b]) {
+  const R = r / 255, G = g / 255, B = b / 255;
+  const max = Math.max(R, G, B), min = Math.min(R, G, B);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = max === R ? (G - B) / d + (G < B ? 6 : 0) : max === G ? (B - R) / d + 2 : (R - G) / d + 4;
+  return [h * 60, s, l];
+}
+
+function hslHex(h, s, l) {
+  const H = (((h % 360) + 360) % 360) / 360;
+  const S = Math.max(0, Math.min(1, s)), L = Math.max(0, Math.min(1, l));
+  const q = L < 0.5 ? L * (1 + S) : L + S - L * S;
+  const p = 2 * L - q;
+  const ch = (t) => {
+    let u = t;
+    if (u < 0) u += 1;
+    if (u > 1) u -= 1;
+    if (u < 1 / 6) return p + (q - p) * 6 * u;
+    if (u < 1 / 2) return q;
+    if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
+    return p;
+  };
+  const rgb = S === 0 ? [L, L, L] : [ch(H + 1 / 3), ch(H), ch(H - 1 / 3)];
+  return '#' + rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Тон материала от одного источника света (сверху-слева): тень темнее и чуть холоднее,
+ * блик светлее и чуть теплее. Модели достаточно назвать основу: «body», «body-shade»,
+ * «body-light» — согласованные тени и блики считаются здесь, одинаково для всех деталей.
+ */
+export function artTone(hex, kind) {
+  const rgb = hexRgb(hex);
+  if (!rgb) return hex;
+  // смешение в RGB с холодной глубокой тенью / тёплым светом: оттенок не «кислотный»,
+  // как при сдвиге насыщенности, и одинаково годится для ярких и приглушённых основ
+  const mix = (to, t) => '#' + rgb.map((c, i) => Math.round(c + (to[i] - c) * t).toString(16).padStart(2, '0')).join('');
+  return kind === 'shade' ? mix([42, 32, 78], 0.3) : mix([255, 250, 232], 0.42);
+}
+
+const ART_NONE = new Set(['none', 'нет', 'no', 'null', 'transparent', 'прозрачный', 'прозрачная', 'прозрачное', 'без заливки', 'без обводки', 'off', 'false', '0']);
+const ART_TONE_RE = /^(.+?)[\s._-]*(shade|shadow|dark|darker|тень|тёмный|темный|тёмн|темн|light|lighter|highlight|блик|светлый|светл)$/iu;
+
+function expandHex(s) {
+  const m = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})(?:[0-9a-fA-F]{2})?$/.exec(s);
+  if (!m) return null;
+  const v = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+  return '#' + v.toLowerCase();
+}
+
+/** rgb()/rgba() → #rrggbb (альфа — отдельно, в прозрачность контура). */
+function cssRgb(s) {
+  const m = /^rgba?\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*(?:[,/]\s*([\d.]+%?)\s*)?\)$/i.exec(s);
+  if (!m) return null;
+  const c = [m[1], m[2], m[3]].map((x) => Math.max(0, Math.min(255, Number(x))));
+  let alpha = null;
+  if (m[4] != null) alpha = /%$/.test(m[4]) ? Number(m[4].slice(0, -1)) / 100 : Number(m[4]);
+  return { hex: '#' + c.map((v) => v.toString(16).padStart(2, '0')).join(''), alpha: Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : null };
+}
+
+/**
+ * Цвет из ответа иллюстратора → '#rrggbb' | имя токена документа | null («без») | undefined
+ * (не понят). Порядок: «без» → #hex/rgb() → имя из палитры иллюстрации (с тоном «-shade»/
+ * «-light») → токен документа → обиходное слово («зелёный»).
+ */
+function artColor(raw, ctx, depth = 0) {
+  if (raw == null) return undefined;
+  if (typeof raw === 'object') {
+    const v = raw.color || raw.token || raw.value || raw.hex;
+    return typeof v === 'string' ? artColor(v, ctx, depth + 1) : undefined;
+  }
+  const s = String(raw).trim();
+  if (!s) return undefined;
+  const low = s.toLowerCase().replace(/ё/g, 'е');
+  if (ART_NONE.has(low)) return null;
+  const hex = expandHex(s);
+  if (hex) return hex;
+  const rgb = cssRgb(s);
+  if (rgb) return rgb.hex;
+  const pal = ctx && ctx.palette;
+  if (pal && pal.has(low)) return pal.get(low);
+  const colors = (ctx && ctx.doc && ctx.doc.tokens && ctx.doc.tokens.colors) || {};
+  if (Object.prototype.hasOwnProperty.call(colors, s) && !UNSAFE_KEYS.has(s)) return s;
+  const tokenCi = Object.keys(colors).find((k) => k.toLowerCase() === low);
+  if (tokenCi) return tokenCi;
+  const tone = depth < 2 ? ART_TONE_RE.exec(s) : null;
+  if (tone) {
+    const base = artColor(tone[1], ctx, depth + 1);
+    const baseHex = typeof base === 'string' ? (base[0] === '#' ? base : hexNorm(colors[base])) : null;
+    if (baseHex && /^#[0-9a-f]{6}$/.test(baseHex)) {
+      return artTone(baseHex, /light|highlight|блик|светл/iu.test(tone[2]) ? 'light' : 'shade');
+    }
+  }
+  const word = colorFromWord(s);
+  if (word) return word;
+  return undefined;
+}
+
+/** «to right», «45deg», «0.25turn» → угол CSS (0 — снизу вверх, 90 — слева направо). */
+function cssAngle(s) {
+  const t = String(s).trim().toLowerCase();
+  const m = /^(-?[\d.]+)\s*(deg|turn|rad|grad)?$/.exec(t);
+  if (m) {
+    let v = Number(m[1]);
+    if (m[2] === 'turn') v *= 360;
+    else if (m[2] === 'rad') v = (v * 180) / Math.PI;
+    else if (m[2] === 'grad') v *= 0.9;
+    return Number.isFinite(v) ? ((v % 360) + 360) % 360 : null;
+  }
+  const to = /^to\s+(.+)$/.exec(t);
+  if (!to) return null;
+  const w = to[1].split(/\s+/).sort().join(' ');
+  const map = { top: 0, right: 90, bottom: 180, left: 270, 'right top': 45, 'bottom right': 135, 'bottom left': 225, 'left top': 315 };
+  return Object.prototype.hasOwnProperty.call(map, w) ? map[w] : null;
+}
+
+/** Разрезать по запятым верхнего уровня (внутри rgb(...) запятые не режем). */
+function splitTop(s) {
+  const out = [];
+  let depth = 0, cur = '';
+  for (const ch of s) {
+    if (ch === '(') depth++;
+    if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+/** «linear-gradient(135deg, #ffd166, #f4a261 80%)» → {kind, angle, stops:[{at, color}]}. */
+function cssGradient(s) {
+  const m = /^\s*(linear|radial)-gradient\(\s*([\s\S]*)\)\s*$/i.exec(s);
+  if (!m) return null;
+  const kind = m[1].toLowerCase();
+  const parts = splitTop(m[2]);
+  const g = { kind, stops: [] };
+  if (parts.length && kind === 'linear') {
+    const a = cssAngle(parts[0]);
+    if (a !== null) { g.angle = a; parts.shift(); }
+  } else if (parts.length && kind === 'radial' && /\b(circle|ellipse|at|closest|farthest)\b/i.test(parts[0])) {
+    const at = /at\s+(-?[\d.]+)%\s+(-?[\d.]+)%/i.exec(parts[0]);
+    if (at) { g.cx = Number(at[1]) / 100; g.cy = Number(at[2]) / 100; }
+    parts.shift();
+  }
+  for (const p of parts) {
+    const pm = /^(.*?)(?:\s+(-?[\d.]+)%)?$/.exec(p);
+    g.stops.push(pm[2] != null ? { color: pm[1].trim(), at: Number(pm[2]) / 100 } : { color: pm[1].trim() });
+  }
+  return g;
+}
+
+const fracOf = (v) => {
+  if (typeof v === 'string' && /%\s*$/.test(v)) return Number(v.replace('%', '')) / 100;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return n > 1 && n <= 100 ? n / 100 : n;
+};
+
+/**
+ * Градиент в любой из форм, которыми его пишет модель: {gradient:{…}}, {kind, angle, stops},
+ * {colors:[…]}, CSS-строка. Стопы — {at, color|token}; без «at» — поровну. Один годный стоп —
+ * это сплошной цвет; ни одного — undefined (не понят).
+ */
+function artGradient(raw, ctx) {
+  let g = raw;
+  if (typeof g === 'string') g = cssGradient(g);
+  if (g && typeof g === 'object' && g.gradient && typeof g.gradient === 'object') g = g.gradient;
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return undefined;
+  const list = Array.isArray(g.stops) ? g.stops : Array.isArray(g.colors) ? g.colors : null;
+  if (!list) return undefined;
+  const kindRaw = String(g.kind || g.type || '').toLowerCase();
+  const kind = /radial|радиал|круг/.test(kindRaw) || (!kindRaw && (g.cx != null || g.cy != null || g.r != null)) ? 'radial' : 'linear';
+  const stops = [];
+  list.slice(0, ART_LIMITS.stops).forEach((st, i, all) => {
+    const colorRaw = st && typeof st === 'object' ? (st.color != null ? st.color : st.token) : st;
+    const c = artColor(colorRaw, ctx);
+    if (typeof c !== 'string') return;
+    const atRaw = st && typeof st === 'object' ? (st.at != null ? st.at : st.offset != null ? st.offset : st.pos) : null;
+    let at = atRaw == null ? null : fracOf(atRaw);
+    if (at == null || !Number.isFinite(at)) at = all.length > 1 ? i / (all.length - 1) : 0;
+    const stop = { at: Math.round(Math.max(0, Math.min(1, at)) * 1000) / 1000 };
+    if (c[0] === '#') stop.color = c; else stop.token = c;
+    const op = st && typeof st === 'object' && st.opacity != null ? fracOf(st.opacity) : null;
+    if (op != null && Number.isFinite(op) && op >= 0 && op < 1) stop.opacity = op;
+    stops.push(stop);
+  });
+  if (!stops.length) return undefined;
+  if (stops.length === 1) return stops[0].color || stops[0].token;
+  stops.sort((a, b) => a.at - b.at);
+  const out = { kind, stops };
+  if (kind === 'linear' && g.angle != null) {
+    const a = typeof g.angle === 'number' ? g.angle : cssAngle(g.angle);
+    if (Number.isFinite(a)) out.angle = Math.round((((a % 360) + 360) % 360) * 10) / 10;
+  }
+  if (kind === 'radial') {
+    for (const k of ['cx', 'cy', 'r']) {
+      const v = g[k] == null ? null : fracOf(g[k]);
+      if (v != null && Number.isFinite(v)) out[k] = Math.max(0, Math.min(1, v));
+    }
+  }
+  return { gradient: out };
+}
+
+const looksGradient = (v) => (typeof v === 'string' && /^\s*(linear|radial)-gradient\(/i.test(v))
+  || (v && typeof v === 'object' && !Array.isArray(v) && (v.gradient || Array.isArray(v.stops) || Array.isArray(v.colors)));
+
+/** Краска (Paint) из ответа иллюстратора: цвет, токен, градиент; null — «без»; undefined — не понята. */
+export function artPaint(raw, ctx = {}) {
+  if (looksGradient(raw)) return artGradient(raw, ctx);
+  return artColor(raw, ctx);
+}
+
+/** Сплошные цвета краски (у градиента — стопы) в '#rrggbb' по палитре документа. */
+function paintHexes(doc, paint) {
+  if (paint == null) return [];
+  if (typeof paint === 'object' && paint.gradient && Array.isArray(paint.gradient.stops)) {
+    return paint.gradient.stops.map((s) => (s.color ? hexNorm(s.color) : hexOf(doc, s.token))).filter((h) => /^#[0-9a-f]{6}$/.test(String(h)));
+  }
+  const h = hexOf(doc, paint);
+  return h ? [h] : [];
+}
+
+/** Краска словами выжимки: «#7c3aed», «accent», «gradient(#ffd166→#f4a261)». */
+function paintWord(paint) {
+  if (paint == null) return 'none';
+  if (typeof paint === 'string') return paint;
+  if (typeof paint === 'object' && paint.gradient && Array.isArray(paint.gradient.stops)) {
+    const g = paint.gradient;
+    return `${g.kind === 'radial' ? 'radial' : 'linear'}(${g.stops.map((s) => s.color || s.token).join('→')})`;
+  }
+  return refWord(paint);
+}
+
+/* — палитра и обводка иллюстрации — */
+
+function artPalette(raw, ctx, note) {
+  const map = new Map();
+  const add = (name, color) => {
+    const key = String(name == null ? '' : name).trim().toLowerCase().replace(/ё/g, 'е');
+    if (!key || UNSAFE_KEYS.has(key)) return;
+    const c = artColor(color, { doc: ctx.doc, palette: map });
+    if (typeof c !== 'string') { note(`Палитра иллюстрации: цвет «${cutText(String(color), 30)}» для «${cutText(key, 30)}» не понят — пропущен`); return; }
+    const hex = c[0] === '#' ? c : hexOf(ctx.doc, c);
+    if (hex) map.set(key, hex);
+  };
+  if (Array.isArray(raw)) {
+    raw.slice(0, 16).forEach((e, i) => {
+      if (e && typeof e === 'object') add(e.name != null ? e.name : e.role, e.color != null ? e.color : e.value);
+      else if (typeof e === 'string') add(`c${i + 1}`, e);
+    });
+  } else if (raw && typeof raw === 'object') {
+    for (const [k, v] of Object.entries(raw).slice(0, 16)) add(k, v);
+  }
+  return map;
+}
+
+/** Слова в имени детали, у которой контура не бывает: тень, блик, румянец, мелочи. */
+const ART_NO_OUTLINE = /(тень|теней|тени|блик|отблеск|свет|сияни|румян|веснушк|крошк|искр|пятн|shadow|shade|highlight|shine|glare|blush|sparkle|crumb)/iu;
+
+/* — деталь — */
+
+const ART_KIND_ALIASES = {
+  path: 'path', vector: 'path', shape: 'path', polygon: 'path', контур: 'path', путь: 'path', форма: 'path',
+  ellipse: 'ellipse', circle: 'ellipse', oval: 'ellipse', эллипс: 'ellipse', круг: 'ellipse', овал: 'ellipse',
+  rect: 'rect', rectangle: 'rect', square: 'rect', box: 'rect', прямоугольник: 'rect', квадрат: 'rect',
+};
+
+const finite = (v) => (typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN);
+
+/** Эллипс по рамке → путь из двух дуг. */
+function ellipseD(x, y, w, h) {
+  const rx = w / 2, ry = h / 2, cy = y + ry;
+  return `M${artNum(x)} ${artNum(cy)} A${artNum(rx)} ${artNum(ry)} 0 1 0 ${artNum(x + w)} ${artNum(cy)} A${artNum(rx)} ${artNum(ry)} 0 1 0 ${artNum(x)} ${artNum(cy)} Z`;
+}
+
+/** Прямоугольник (со скруглением) → путь. */
+function rectD(x, y, w, h, rIn) {
+  const r = Math.max(0, Math.min(Number(rIn) || 0, w / 2, h / 2));
+  if (!r) return `M${artNum(x)} ${artNum(y)} L${artNum(x + w)} ${artNum(y)} L${artNum(x + w)} ${artNum(y + h)} L${artNum(x)} ${artNum(y + h)} Z`;
+  const R = artNum(r);
+  return `M${artNum(x + r)} ${artNum(y)} L${artNum(x + w - r)} ${artNum(y)} A${R} ${R} 0 0 1 ${artNum(x + w)} ${artNum(y + r)}`
+    + ` L${artNum(x + w)} ${artNum(y + h - r)} A${R} ${R} 0 0 1 ${artNum(x + w - r)} ${artNum(y + h)}`
+    + ` L${artNum(x + r)} ${artNum(y + h)} A${R} ${R} 0 0 1 ${artNum(x)} ${artNum(y + h - r)}`
+    + ` L${artNum(x)} ${artNum(y + r)} A${R} ${R} 0 0 1 ${artNum(x + r)} ${artNum(y)} Z`;
+}
+
+/** Путь — прямоугольник, поставленный ровно (только M/L/Z по осям, ≤ 5 точек)? */
+function rectLikeCmds(cmds) {
+  if (!cmds || cmds.length > 6) return false;
+  if (cmds.some((c) => c.c !== 'M' && c.c !== 'L' && c.c !== 'Z')) return false;
+  const pts = cmds.filter((c) => c.c !== 'Z').map((c) => c.a);
+  if (pts.length < 4) return false;
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1];
+    const [x1, y1] = pts[i];
+    if (Math.abs(x0 - x1) > 0.5 && Math.abs(y0 - y1) > 0.5) return false;
+  }
+  return true;
+}
+
+/**
+ * Одна деталь ответа → {part} | {dropped:{name, why}}. part: {name, group, rotate, rectLike,
+ * vpath:{d, name, fill?, stroke?, strokeWidth?, opacity?, lineCap, lineJoin}, area}.
+ */
+function artPart(raw, i, ctx) {
+  const fallbackName = `Деталь ${i + 1}`;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { dropped: { name: fallbackName, why: 'деталь — не объект' } };
+  const name = cutText(strOf(raw.name).trim() || strOf(raw.title).trim() || fallbackName, 80);
+  const kindRaw = String(raw.kind || raw.type || raw.shape || '').trim().toLowerCase();
+  let kind = ART_KIND_ALIASES[kindRaw] || null;
+  const dRaw = typeof raw.d === 'string' ? raw.d : typeof raw.path === 'string' ? raw.path : null;
+  if (!kind) kind = dRaw ? 'path' : 'ellipse';
+  if (kind === 'path' && !dRaw && (raw.w != null || raw.r != null || raw.rx != null)) kind = 'ellipse';
+  let d = dRaw;
+  if (kind !== 'path') {
+    let x = finite(raw.x), y = finite(raw.y), w = finite(raw.w != null ? raw.w : raw.width), h = finite(raw.h != null ? raw.h : raw.height);
+    const cx = finite(raw.cx), cy = finite(raw.cy);
+    const r = finite(raw.r);
+    const rx = finite(raw.rx), ry = finite(raw.ry);
+    if (kind === 'ellipse' && Number.isFinite(cx) && Number.isFinite(cy)) {
+      const ax = Number.isFinite(rx) ? rx : r, ay = Number.isFinite(ry) ? ry : Number.isFinite(rx) ? rx : r;
+      if (Number.isFinite(ax) && Number.isFinite(ay)) { x = cx - ax; y = cy - ay; w = 2 * ax; h = 2 * ay; }
+    }
+    if (Number.isFinite(w) && !Number.isFinite(h)) h = w;
+    if (![x, y, w, h].every(Number.isFinite)) return { dropped: { name, why: 'у фигуры нет x, y, w, h' } };
+    if (w <= 0 || h <= 0) return { dropped: { name, why: 'нулевой размер' } };
+    d = kind === 'ellipse' ? ellipseD(x, y, w, h) : rectD(x, y, w, h, Number.isFinite(rx) ? rx : r);
+  }
+  const got = ctx.tools.check(d);
+  if (!got.ok) return { dropped: { name, why: `контур не разобран: ${got.error}`, broken: true } };
+
+  const vpath = { d: got.d, name, lineCap: 'round', lineJoin: 'round' };
+  const what = `Деталь «${cutText(name, 40)}»`;
+  let fillRaw = raw.gradient != null && typeof raw.gradient === 'object' ? { gradient: raw.gradient.gradient || raw.gradient } : raw.fill;
+  if (fillRaw === undefined && raw.color !== undefined) fillRaw = raw.color;
+  let fill = fillRaw === undefined ? undefined : artPaint(fillRaw, ctx);
+  if (fill === undefined && fillRaw !== undefined) ctx.note(`${what}: заливка «${cutText(typeof fillRaw === 'string' ? fillRaw : JSON.stringify(fillRaw), 40)}» не понята — поставил основной цвет`);
+  const strokeRaw = raw.stroke;
+  let stroke = strokeRaw === undefined ? undefined : artPaint(strokeRaw, ctx);
+  if (stroke === undefined && strokeRaw !== undefined && strokeRaw !== '') ctx.note(`${what}: обводка «${cutText(String(strokeRaw), 40)}» не понята — без обводки`);
+  let strokeWidth = finite(raw.strokeWidth != null ? raw.strokeWidth : raw.lineWidth);
+  // контур иллюстрации — один цвет на все крупные формы, тени и блики — без него
+  if (stroke === undefined && strokeRaw === undefined && ctx.outline && !ART_NO_OUTLINE.test(name)) {
+    stroke = ctx.outline.paint;
+    if (!Number.isFinite(strokeWidth)) strokeWidth = ctx.outline.width;
+  }
+  if (fill === undefined) {
+    if (!stroke) fill = ctx.mainColor;               // невидимой детали не бывает
+  }
+  if (fill != null) vpath.fill = fill;
+  if (stroke != null) {
+    vpath.stroke = stroke;
+    vpath.strokeWidth = Math.round(Math.max(0, Math.min(ART_LIMITS.strokeWidth, Number.isFinite(strokeWidth) ? strokeWidth : 2)) * 10) / 10;
+  }
+  if (vpath.fill == null && vpath.stroke == null) return { dropped: { name, why: 'ни заливки, ни обводки — деталь была бы невидимой' } };
+  let opacity = raw.opacity == null || raw.opacity === '' ? null : fracOf(raw.opacity);
+  if (opacity == null && typeof fillRaw === 'string') { const rgb = cssRgb(fillRaw.trim()); if (rgb && rgb.alpha != null) opacity = rgb.alpha; }
+  if (opacity != null && Number.isFinite(opacity) && opacity >= 0 && opacity < 1) vpath.opacity = Math.round(opacity * 100) / 100;
+  if (String(raw.fillRule || '').toLowerCase() === 'evenodd') vpath.fillRule = 'evenodd';
+  let rotate = finite(raw.rotate != null ? raw.rotate : raw.rotation);
+  if (!Number.isFinite(rotate) || Math.abs(rotate) < 0.05) rotate = 0;
+  rotate = Math.max(-360, Math.min(360, Math.round(rotate * 10) / 10));
+  const b = ctx.tools.box([vpath]);
+  if (!b) return { dropped: { name, why: 'контур без размеров' } };
+  if (b.x > ctx.cw || b.y > ctx.ch || b.x + b.w < 0 || b.y + b.h < 0) return { dropped: { name, why: 'целиком за пределами холста' } };
+  const group = cutText(strOf(raw.group).trim(), 80);
+  return {
+    part: {
+      name, group, rotate, vpath, area: Math.max(1, b.w * b.h),
+      rectLike: kind === 'rect' || rectLikeCmds(got.cmds),
+    },
+  };
+}
+
+/** «Крошка 3», «Пятно №2», «Звезда-4» → «Крошка» (ряд одинаковых мелочей). */
+function artSeriesStem(name) {
+  const m = /^(.*?\p{L})[\s№#._-]*\d+$/u.exec(String(name || '').trim());
+  return m ? m[1].trim() : '';
+}
+
+/** Узел-вектор по набору контуров: viewBox, pos и size — по их bbox в координатах холста. */
+function fitArtVector(vpaths, tools) {
+  const b = tools.box(vpaths);
+  if (!b) return null;
+  const x = Math.floor(b.x * 10) / 10, y = Math.floor(b.y * 10) / 10;
+  const w = Math.max(1, Math.ceil((b.x + b.w - x) * 10) / 10), h = Math.max(1, Math.ceil((b.y + b.h - y) * 10) / 10);
+  return { viewBox: { x, y, w, h }, pos: { x, y }, w, h };
+}
+
+const ART_RECT_PROBLEM = 'Иллюстрация собрана из прямоугольников — так выходит стопка палок, а не рисунок.'
+  + ' Перерисуй: сначала силуэт и крупные формы плавными кривыми (C, Q, A) и эллипсами, формы'
+  + ' перекрывают друг друга (голова заходит на тело, лапы — на тело), у каждого материала'
+  + ' основа, тень и блик. kind:"rect" — только для действительно прямоугольных предметов.';
+
+/**
+ * Спецификация иллюстрации → свободная рамка с векторами (спецификация для specToNodes).
+ * opts.box — размер рамки (картинка внутри виджета); без него рамка = холст. Рисунок
+ * вписывается в рамку целиком, по центру, без искажения пропорций.
+ * Ответ: {spec, parts, paths, layers, dropped:[{name, why, broken}], blocking:[], human:[]}.
+ */
+export function compileIllustration(raw, { doc = null, engine = null, warn = null, box = null, name = '' } = {}) {
+  const note = warn || (() => {});
+  const data = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const title = cutText(strOf(data.name).trim() || strOf(name).trim() || 'Иллюстрация', 80);
+  const cvRaw = data.canvas && typeof data.canvas === 'object' ? data.canvas : {};
+  const clampCanvas = (v) => {
+    const n = finite(v);
+    return Number.isFinite(n) && n > 0 ? Math.max(ART_LIMITS.canvasMin, Math.min(ART_LIMITS.canvasMax, Math.round(n))) : null;
+  };
+  let cw = clampCanvas(cvRaw.w != null ? cvRaw.w : cvRaw.width != null ? cvRaw.width : data.w != null ? data.w : data.width);
+  let ch = clampCanvas(cvRaw.h != null ? cvRaw.h : cvRaw.height != null ? cvRaw.height : data.h != null ? data.h : data.height);
+  if (!cw && !ch) { cw = ART_CANVAS; ch = ART_CANVAS; } else { cw = cw || ch; ch = ch || cw; }
+  const tools = artTools(engine);
+  const ctx = { doc, note, tools, cw, ch, palette: null, outline: null, mainColor: '#8a8f98' };
+  ctx.palette = artPalette(data.palette != null ? data.palette : data.colors, ctx, note);
+  if (ctx.palette.size) ctx.mainColor = [...ctx.palette.values()][0];
+  const ol = data.outline;
+  if (ol != null && ol !== '' && ol !== false) {
+    const olColor = typeof ol === 'object' ? (ol.color != null ? ol.color : ol.stroke) : ol;
+    const paint = artColor(olColor, ctx);
+    if (typeof paint === 'string') {
+      const wv = typeof ol === 'object' ? finite(ol.width != null ? ol.width : ol.strokeWidth) : NaN;
+      ctx.outline = { paint, width: Number.isFinite(wv) && wv >= 0 ? Math.min(ART_LIMITS.strokeWidth, wv) : Math.max(1, Math.round(Math.min(cw, ch) / 100)) };
+    } else if (paint === undefined) {
+      note(`Иллюстрация «${title}»: цвет контура «${cutText(String(olColor), 30)}» не понят — рисую без контура`);
+    }
+  }
+  let list = [data.parts, data.details, data.shapes, data.layers].find(Array.isArray) || [];
+  if (list.length > ART_LIMITS.parts) {
+    note(`Иллюстрация «${title}»: деталей ${list.length} — оставил первые ${ART_LIMITS.parts}`);
+    list = list.slice(0, ART_LIMITS.parts);
+  }
+  const good = [];
+  const dropped = [];
+  list.forEach((p, i) => {
+    const got = artPart(p, i, ctx);
+    if (got.part) good.push(got.part); else dropped.push(got.dropped);
+  });
+
+  const human = [];
+  const blocking = [];
+  if (dropped.length) {
+    const names = dropped.slice(0, 4).map((x) => `«${cutText(x.name, 30)}»`).join(', ');
+    const msg = `Иллюстрация «${title}»: ${dropped.length} ${plural(dropped.length, 'деталь отброшена', 'детали отброшены', 'деталей отброшено')}`
+      + ` (${names}${dropped.length > 4 ? '…' : ''}) — ${dropped[0].why}`;
+    note(msg);
+    human.push(msg);
+    const broken = dropped.filter((x) => x.broken);
+    if (broken.length) {
+      blocking.push(`Детали с негодным контуром отброшены: ${broken.slice(0, 8).map((x) => `«${x.name}» — ${x.why}`).join('; ')}.`
+        + ' Верни ЭТИ детали заново (те же name) с правильным d: команды M L C Q A Z заглавными, числа через пробел,'
+        + ' у каждой команды полный набор чисел (C — шесть, Q — четыре, A — семь), путь начинается с M и замыкается Z.'
+        + ' Можно вернуть в parts только исправленные детали — остальные останутся как были.');
+    }
+  }
+  if (good.length >= 4 && good.filter((p) => p.rectLike).length / good.length >= 0.5) {
+    blocking.push(ART_RECT_PROBLEM);
+    human.push(`Иллюстрация «${title}» вышла из прямоугольников — прошу модель перерисовать кривыми`);
+  }
+
+  // слои: группа модели → один вектор; ряд «Крошка 1, Крошка 2…» — тоже; повёрнутая деталь — своим слоем
+  const layers = [];
+  for (const p of good) {
+    const key = p.group ? `g:${p.group.toLowerCase()}` : (artSeriesStem(p.name) ? `s:${artSeriesStem(p.name).toLowerCase()}` : null);
+    const last = layers[layers.length - 1];
+    const fits = last && key && last.key === key && !p.rotate && !last.rotate
+      && last.parts.length < ART_LIMITS.paths
+      && last.parts.reduce((s, q) => s + q.vpath.d.length, 0) + p.vpath.d.length <= ART_LIMITS.totalD;
+    if (fits) last.parts.push(p);
+    else layers.push({ key, parts: [p], rotate: p.rotate, name: p.group || p.name });
+  }
+  for (const l of layers) {
+    if (!l.key || !l.key.startsWith('s:') || l.parts.length < 2) continue;
+    l.name = `${artSeriesStem(l.parts[0].name)} ×${l.parts.length}`;
+  }
+  // предел слоёв: сливаем соседние мелочи (самую маленькую пару), чтобы слоёв было обозримо
+  while (layers.length > ART_LIMITS.layers) {
+    let best = -1, bestArea = Infinity;
+    for (let k = 0; k + 1 < layers.length; k++) {
+      const a = layers[k], b = layers[k + 1];
+      if (a.rotate || b.rotate || a.parts.length + b.parts.length > ART_LIMITS.paths) continue;
+      const area = a.parts.reduce((s, q) => s + q.area, 0) + b.parts.reduce((s, q) => s + q.area, 0);
+      if (area < bestArea) { bestArea = area; best = k; }
+    }
+    if (best < 0) break;
+    const [a, b] = layers.splice(best, 2);
+    layers.splice(best, 0, { key: a.key, parts: a.parts.concat(b.parts), rotate: 0, name: a.name });
+  }
+
+  // рамка: холст 1:1 или вписан в заданный размер
+  const W = box && Number(box.w) > 0 ? Number(box.w) : cw;
+  const H = box && Number(box.h) > 0 ? Number(box.h) : ch;
+  const k = Math.min(W / cw, H / ch);
+  const ox = (W - cw * k) / 2, oy = (H - ch * k) / 2;
+  const children = [];
+  for (const l of layers) {
+    const vpaths = l.parts.map((p) => {
+      const v = { ...p.vpath };
+      if (l.parts.length === 1) delete v.name;       // имя одной детали — имя слоя
+      return v;
+    });
+    const fit = fitArtVector(vpaths, tools);
+    if (!fit) continue;
+    const vec = {
+      viewBox: fit.viewBox,
+      paths: vpaths,
+      pos: { x: r2(ox + fit.pos.x * k), y: r2(oy + fit.pos.y * k) },
+      size: { w: { mode: 'fixed', value: Math.max(0.5, r2(fit.w * k)) }, h: { mode: 'fixed', value: Math.max(0.5, r2(fit.h * k)) } },
+    };
+    if (l.rotate) vec.rotate = l.rotate;
+    children.push({ type: 'vector', name: cutText(l.name, 80), $vector: vec });
+  }
+  const spec = {
+    type: 'frame', name: title,
+    layout: { mode: 'none', gap: 0, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false },
+    size: { w: { mode: 'fixed', value: r2(W) }, h: { mode: 'fixed', value: r2(H) } },
+    radius: 0, clip: true, role: 'illustration', children,
+  };
+  const bg = data.background != null ? artPaint(data.background, ctx) : undefined;
+  if (bg) spec.fill = bg;
+  else if (bg === undefined && data.background != null && data.background !== '') {
+    note(`Иллюстрация «${title}»: фон «${cutText(String(data.background), 30)}» не понят — без фона`);
+  }
+  return {
+    spec, parts: good.length, paths: good.length, layers: children.length, dropped, blocking, human,
+    canvas: { w: cw, h: ch }, scale: k,
+  };
+}
+
+/**
+ * Ответ починки иллюстрации: модель может вернуть только исправленные детали (те же имена) —
+ * тогда они встают на места отброшенных, остальное остаётся. Иначе — полная замена.
+ */
+export function mergeIllustration(prev, fixed) {
+  if (!prev || typeof prev !== 'object' || !fixed || typeof fixed !== 'object') return fixed;
+  const was = Array.isArray(prev.parts) ? prev.parts : [];
+  const now = Array.isArray(fixed.parts) ? fixed.parts : [];
+  if (!was.length || !now.length || now.length >= was.length) return fixed;
+  const key = (p) => String(p && p.name != null ? p.name : '').trim().toLowerCase();
+  const byName = new Map(now.map((p) => [key(p), p]));
+  if (![...byName.keys()].every((k) => k && was.some((p) => key(p) === k))) return fixed;
+  const used = new Set();
+  const parts = was.map((p) => {
+    const k = key(p);
+    if (byName.has(k) && !used.has(k)) { used.add(k); return byName.get(k); }
+    return p;
+  });
+  return { ...prev, parts };
+}
+
+/* — промпты иллюстратора и правок иллюстраций — */
+
+/** Техника рисования: уходит иллюстратору. Каждое правило — против конкретной беды «стопки палок». */
+const ART_TECHNIQUE = `КАК РИСОВАТЬ
+1. Детали — СНИЗУ ВВЕРХ: первая в parts рисуется первой и оказывается под остальными. Порядок:
+   мягкая тень на земле → задние части (дальняя лапа, хвост, рожки за головой) → силуэт: крупные формы
+   (тело, голова) → тени формы и блики на них → передние части (лапки, рот, нос) → глаза → мелочи
+   (блики в глазах, румянец, веснушки, крошки).
+2. Сначала СИЛУЭТ: крупные формы — плавными кривыми C, Q, дугами A или эллипсами. Силуэт должен читаться,
+   даже если залить его одним цветом. Персонажа, зверя, еду НЕЛЬЗЯ строить из прямоугольников-палок и
+   колонки фигур: kind "rect" — только для по-настоящему прямоугольных предметов (коробка, экран, книга).
+3. Формы ПЕРЕКРЫВАЮТСЯ: голова заходит на тело, лапки — на тело, рожки уходят за голову, глаза лежат на
+   голове. Не ставь части встык одна под другой.
+4. Свет один — сверху-слева. У каждого материала 2–3 тона: основа ("body"), тень ("body-shade" —
+   полумесяц внутри силуэта на правой-нижней стороне) и блик ("body-light" — небольшое пятно сверху-слева).
+   Тона пиши через палитру с суффиксами -shade и -light — они посчитаются согласованно.
+5. Под объектом — мягкая тень: эллипс шире основания, тёмный, opacity 0.15–0.25.
+6. Контур — либо у ВСЕХ крупных форм один тёмный цвет (поле outline, толщина около 1–1.5% холста), либо
+   контура нет вовсе. Тени, блики и румянец рисуются без контура — он с них снимется сам. Не смешивай стили.
+7. Глаза делают персонажа: белок (ellipse), крупный тёмный зрачок, смещённый в сторону взгляда, и
+   маленький белый блик в зрачке сверху-слева. Детали одного глаза — с общей group ("Левый глаз").
+8. Палитра — 4–6 согласованных основ: главная, одна-две дополнительные, тёмная для контура и зрачков.
+   Если цвет документа подходит рисунку — бери токен по имени.
+9. Деталей 20–60 для персонажа или сложного предмета, 6–15 для иконки. Однородные мелочи (крошки, пятна,
+   веснушки, звёздочки) — с общей group: они станут одним слоем.
+10. Пути компактные: абсолютные заглавные команды M L C Q A Z, целые числа, 3–10 сегментов на форму, каждая
+    замкнутая форма кончается Z. У C — шесть чисел, у Q — четыре, у A — семь (rx ry поворот 0|1 0|1 x y).
+11. Имена деталей — по-русски и по смыслу: «Тело», «Левый рожок», «Тень на теле», «Блик», «Тень».
+    Симметричные части — парами «Левый …» / «Правый …» с зеркальными координатами (x → ширина холста − x).
+12. Образцы ниже и в формате ответа показывают ТЕХНИКУ. Не копируй их: рисуй то, что просят, своими формами и цветами.`;
+
+/** Образцы хороших деталей (few-shot): тело-капля, глаз с бликом, печенька, градиент. Проверены отрисовкой. */
+const ART_SAMPLES = `ОБРАЗЦЫ ХОРОШИХ ДЕТАЛЕЙ (холст 400×400)
+• Тело-капля монстра — силуэт из четырёх кривых, и тень формы полумесяцем внутри него:
+  {"name":"Тело","kind":"path","d":"M200 90 C272 90 318 150 320 228 C322 300 272 336 200 336 C128 336 78 300 80 228 C82 150 128 90 200 90 Z","fill":"body"}
+  {"name":"Тень на теле","kind":"path","d":"M290 170 C314 214 312 278 274 306 C244 328 200 332 164 324 C232 316 284 268 290 170 Z","fill":"body-shade"}
+• Глаз с бликом — три детали одной группы (ink — тёмный цвет из палитры для зрачков):
+  {"name":"Белок левого глаза","kind":"ellipse","x":134,"y":152,"w":58,"h":64,"fill":"#ffffff","group":"Левый глаз"}
+  {"name":"Зрачок левого глаза","kind":"ellipse","x":156,"y":172,"w":28,"h":34,"fill":"ink","group":"Левый глаз"}
+  {"name":"Блик левого глаза","kind":"ellipse","x":162,"y":177,"w":10,"h":10,"fill":"#ffffff","group":"Левый глаз"}
+• Печенька — неровный край путём из 8–12 кривых с чуть разным радиусом (не ровный круг!), тень полумесяцем,
+  блик, тёмные кусочки шоколада неправильной формы, крошки рядом, мягкая тень снизу, без контура.
+  Палитра: [{"name":"dough","color":"#e3a85f"},{"name":"choco","color":"#4a2a14"}]
+  {"name":"Тень","kind":"ellipse","x":86,"y":304,"w":228,"h":30,"fill":"#5b3a1e","opacity":0.2}
+  {"name":"Печенье","kind":"path","d":"M200 56 C225 57 253 73 274 88 C296 103 321 124 329 148 C337 172 331 204 323 230 C315 255 302 287 281 302 C261 316 227 318 200 317 C173 316 141 312 122 298 C102 283 91 253 82 228 C73 203 63 172 70 148 C77 124 102 100 124 85 C145 70 175 55 200 56 Z","fill":"dough"}
+  {"name":"Тень печенья","kind":"path","d":"M321 178 C324 236 296 290 238 306 C222 310 206 310 192 308 C258 296 304 248 321 178 Z","fill":"dough-shade"}
+  {"name":"Блик","kind":"path","d":"M96 160 C104 118 140 86 182 74 C150 96 124 124 112 160 C108 172 94 172 96 160 Z","fill":"dough-light","opacity":0.85}
+  {"name":"Кусочек шоколада 1","kind":"path","d":"M140 120 L166 112 L174 136 L156 150 L134 140 Z","fill":"choco","group":"Кусочки шоколада"}
+  {"name":"Кусочек шоколада 2","kind":"path","d":"M176 196 L204 188 L214 212 L194 226 L172 216 Z","fill":"choco","group":"Кусочки шоколада"}
+  {"name":"Крошка 1","kind":"ellipse","x":318,"y":318,"w":12,"h":9,"fill":"dough-shade","group":"Крошки"}
+• Градиент вместо плоской заливки — объём шара, неба, стекла:
+  {"name":"Шар","kind":"ellipse","x":120,"y":120,"w":160,"h":160,"gradient":{"kind":"radial","cx":0.35,"cy":0.3,"stops":[{"at":0,"color":"#fde68a"},{"at":1,"color":"#f59e0b"}]}}`;
+
+/** Как читать иллюстрации в выжимке (уходит, только если в документе есть векторы). */
+export const ART_LEGEND = 'Иллюстрации: «free» — свободная рамка без раскладки: дети стоят по координатам at=x,y ВНУТРИ рамки'
+  + ' (ось y вниз), а строки детей идут СНИЗУ ВВЕРХ (последняя — верхний слой). vector — деталь рисунка из контуров:'
+  + ' «fill=#8b5cf6» — цвет (у нескольких контуров — через запятую), «linear(#a→#b)» — градиент, «контуров: 3» — сколько их'
+  + ' в детали, «rotate=15» — поворот. У ВЫДЕЛЕННОЙ детали печатается и её контур d — в координатах рамки.';
+
+/** Правила правки иллюстраций (уходят в промпт правок, только если в документе есть векторы). */
+const ART_PATCH_RULES = `ПРАВКА ИЛЛЮСТРАЦИЙ (рамки «free» с деталями vector)
+- Перекрасить деталь: {op:"set", target:"Тело", path:"fill", value:"#30a46c"} — перекрасятся её контуры этого
+  материала, тени и блики того же цвета подстроятся сами.
+- Перекрасить персонажа или предмет ЦЕЛИКОМ («сделай монстра зелёным»): target — САМА РАМКА иллюстрации,
+  path:"fill" — перекрасится главный материал во всех деталях вместе с тенями и бликами. Фон рамки — path:"background".
+- Больше/меньше: {op:"set", target:"Левый глаз", path:"size", value:"130%"} — деталь растёт от своего центра;
+  у рамки иллюстрации так же масштабируется весь рисунок. Повернуть: path:"rotate", value:"15" (градусы).
+- Сдвинуть: {op:"nudge", target:"Левый рожок", dx:-6, dy:0}.
+- Новая форма детали: {op:"set", target:"Хвост", path:"d", value:"M… Z"} — контур в координатах рамки (как at=).
+- Добавить деталь: {op:"create", parent:"<рамка иллюстрации>", index:<слой>, node:{type:"vector", name:"Левый рожок",
+  d:"M150 122 C134 92 132 62 148 40 C164 66 176 92 182 114 Z", fill:"#fcd34d"}} — d в координатах рамки; круглая
+  деталь — node:{type:"ellipse", name, x, y, size:{w,h}, fill}. index — слой: 0 — самый нижний (тень); рожки и хвост
+  за телом — сразу над тенью; глаза и блики — поверх (без index деталь ляжет на самый верх).
+  Держи технику рисунка: плавные кривые C/Q, тень темнее основы, блик светлее, тот же контур, что у соседей.
+- Убрать деталь — {op:"remove", target:"Правый рожок"}.`;
+
+/* — иллюстрация и деталь в дереве (tree и create патча) — */
+
+/** Слова модели для узла-картинки. */
+const ART_NODE_TYPES = new Set(['illustration', 'art', 'artwork', 'drawing', 'иллюстрация', 'рисунок', 'mascot', 'маскот']);
+/** Размер картинки, если модель его не задала или задала «по содержимому». */
+const ART_BOX_DEFAULT = 160;
+
+/**
+ * Узел {type:"illustration", name, size, draw, art?} → спецификация свободной рамки. art —
+ * ответ иллюстратора, который конвейер подложил заранее (fillArtPlaceholders); без него рамка
+ * остаётся пустым местом под картинку, и человеку говорят почему.
+ */
+function treeIllustration(raw, { doc, engine, note, bud }) {
+  const artName = raw.art && typeof raw.art === 'object' && typeof raw.art.name === 'string' ? raw.art.name.trim() : '';
+  const name = raw.$autoName && artName ? cutText(artName, 80)
+    : typeof raw.name === 'string' && raw.name.trim() ? cutText(raw.name.trim(), 80) : (cutText(artName, 80) || 'Иллюстрация');
+  const fixedOf = (v) => {
+    const spec = normSizeSpec(v);
+    return spec && spec.mode === 'fixed' && spec.value > 0 ? Math.min(ART_LIMITS.canvasMax, spec.value) : null;
+  };
+  let w = fixedOf(raw.size && raw.size.w);
+  let h = fixedOf(raw.size && raw.size.h);
+  if (!w && !h) { w = ART_BOX_DEFAULT; h = ART_BOX_DEFAULT; } else { w = w || h; h = h || w; }
+  const art = raw.art && typeof raw.art === 'object' ? raw.art : null;
+  let spec;
+  if (art) {
+    const got = compileIllustration(art, { doc, engine, warn: note, box: { w, h }, name });
+    spec = got.spec;
+    spec.name = name;
+    const kids = [];
+    for (const k of spec.children) {
+      if (!bud.take()) break;
+      kids.push(k);
+    }
+    if (kids.length < spec.children.length) note(`Иллюстрация «${name}»: слоёв больше предела документа — часть деталей не поместилась`);
+    spec.children = kids;
+    spec.$art = { parts: got.parts, paths: kids.reduce((n, k) => n + k.$vector.paths.length, 0), blocking: got.blocking, human: got.human, dropped: got.dropped };
+  } else {
+    spec = {
+      type: 'frame', name,
+      layout: { mode: 'none', gap: 0, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false },
+      size: { w: { mode: 'fixed', value: w }, h: { mode: 'fixed', value: h } },
+      radius: 0, clip: true, role: 'illustration', children: [],
+      $art: { parts: 0, paths: 0, blocking: [], human: [], pending: true },
+    };
+    note(`Картинка «${name}» не нарисована — на её месте пустая рамка ${w}×${h}. Скажите «нарисуй ${name.toLowerCase()}», чтобы дорисовать`);
+  }
+  const rot = finite(raw.rotate);
+  if (Number.isFinite(rot) && rot !== 0 && Math.abs(rot) <= 360) spec.rotate = rot;
+  if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
+  return spec;
+}
+
+/**
+ * Деталь рисунка из дерева или правки ({type:"vector", d, fill…}, а внутри рамки-иллюстрации — и
+ * {type:"ellipse"|"rect", x, y, size}) → спецификация вектора: контур проверен, viewBox и pos — по bbox
+ * в координатах рамки. null — деталь негодна (о причине уже сказано).
+ */
+function treeVector(raw, { doc, engine, note, outline = null }) {
+  const tools = artTools(engine);
+  const ctx = { doc, note, tools, cw: ART_LIMITS.coord, ch: ART_LIMITS.coord, palette: new Map(), outline, mainColor: '#8a8f98' };
+  const src = { ...raw };
+  if (src.type && !ART_KIND_ALIASES[String(src.type).toLowerCase()]) delete src.type;
+  if (String(raw.type || '').toLowerCase() === 'vector') src.kind = raw.kind || 'path';
+  if (src.w == null && raw.size && typeof raw.size === 'object') {
+    const sw = parsePx(raw.size.w), sh = parsePx(raw.size.h);
+    if (sw) src.w = sw.n;
+    if (sh) src.h = sh.n;
+  }
+  const many = Array.isArray(raw.paths) ? raw.paths : null;
+  const parts = many ? many.map((p) => ({ ...(p && typeof p === 'object' ? p : {}), kind: 'path', name: (p && p.name) || raw.name })) : [src];
+  const vpaths = [];
+  for (let i = 0; i < parts.length && i < ART_LIMITS.paths; i++) {
+    const got = artPart(parts[i], i, ctx);
+    if (!got.part) { note(`Деталь «${cutText(strOf(raw.name) || `№${i + 1}`, 40)}»: ${got.dropped.why} — пропущена`); continue; }
+    const v = { ...got.part.vpath };
+    if (!many) delete v.name;
+    vpaths.push(v);
+  }
+  if (!vpaths.length) return null;
+  const fit = fitArtVector(vpaths, tools);
+  if (!fit) return null;
+  const name = typeof raw.name === 'string' && raw.name.trim() ? cutText(raw.name.trim(), 80) : 'Деталь';
+  const spec = {
+    type: 'vector', name,
+    $vector: {
+      viewBox: fit.viewBox, paths: vpaths, pos: fit.pos,
+      size: { w: { mode: 'fixed', value: fit.w }, h: { mode: 'fixed', value: fit.h } },
+    },
+  };
+  const rot = finite(raw.rotate);
+  if (Number.isFinite(rot) && rot !== 0 && Math.abs(rot) <= 360) spec.$vector.rotate = rot;
+  if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
+  return spec;
+}
+
+/**
+ * Контур рисунка: если у большинства крупных деталей одна и та же обводка, новая деталь получает
+ * её же (толщина — в пикселях рамки). «Тот же контур, что у соседей» — не забота модели.
+ */
+function artOutlineOf(doc, frameId) {
+  const count = new Map();
+  let shapes = 0;
+  for (const k of kidsOf(nodeOf(doc, frameId))) {
+    const n = nodeOf(doc, k);
+    if (!n || n.type !== 'vector' || ART_NO_OUTLINE.test(strOf(n.name))) continue;
+    shapes++;
+    const p = vpathsOf(n).find((q) => typeof q.stroke === 'string' && Number(q.strokeWidth) > 0);
+    if (!p) continue;
+    const xf = vectorFrameXform(n);
+    const w = Math.round(Number(p.strokeWidth) * (xf ? xf.k : 1) * 10) / 10;
+    const key = `${p.stroke}|${w}`;
+    count.set(key, (count.get(key) || 0) + 1);
+  }
+  const best = [...count.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (!best || best[1] < Math.max(2, shapes * 0.4)) return null;
+  const [paint, w] = best[0].split('|');
+  return { paint, width: Number(w) };
+}
+
+/** Похожа ли новая деталь на кусок рисунка (контур или фигура с координатами)? */
+function looksArtPart(raw) {
+  if (!raw || typeof raw !== 'object') return false;
+  const t = String(raw.type || raw.kind || '').toLowerCase();
+  if (t === 'vector' || t === 'path') return true;
+  if (typeof raw.d === 'string' || Array.isArray(raw.paths)) return true;
+  return (t === 'ellipse' || t === 'rect' || t === 'circle') && (raw.x != null || raw.y != null || raw.cx != null);
+}
+
+/* — иллюстрации в документе: рамка, детали, перекраска — */
+
+/** Свободная рамка (layout.mode 'none'), как core.isFreeFrame. */
+function isFreeFrameNode(node, engine = null) {
+  if (!node || node.type !== 'frame') return false;
+  if (engine && typeof engine.isFreeFrame === 'function') {
+    try { return !!engine.isFreeFrame(node); } catch { /* зеркало ниже */ }
+  }
+  return !node.layout || node.layout.mode === 'none';
+}
+
+/** Рамка-иллюстрация: свободная рамка, среди детей которой есть вектор. */
+export function isArtFrame(doc, id, engine = null) {
+  const n = nodeOf(doc, id);
+  if (!n || !isFreeFrameNode(n, engine)) return false;
+  return n.role === 'illustration' || kidsOf(n).some((k) => (nodeOf(doc, k) || {}).type === 'vector');
+}
+
+/** Ближайшая рамка-иллюстрация вверх от узла (включая сам узел) или null. */
+function artFrameOf(doc, id, engine = null) {
+  let cur = nodeOf(doc, id) ? id : null;
+  let guard = 0;
+  while (cur && guard++ < 512) {
+    if (isArtFrame(doc, cur, engine)) return cur;
+    const n = nodeOf(doc, cur);
+    cur = n && n.parent;
+  }
+  return null;
+}
+
+/** Есть ли в документе векторы (тогда модели нужна легенда иллюстраций). */
+function docHasArt(doc) {
+  return Object.keys((doc && doc.nodes) || {}).some((id) => (nodeOf(doc, id) || {}).type === 'vector');
+}
+
+/** Контуры вектора (годные объекты с d). */
+const vpathsOf = (node) => (node && Array.isArray(node.paths) ? node.paths.filter((p) => p && typeof p === 'object' && typeof p.d === 'string') : []);
+
+/** Сколько контуров (деталей) в рамке-иллюстрации. */
+function artPathCount(doc, frameId) {
+  return kidsOf(nodeOf(doc, frameId)).reduce((s, k) => s + vpathsOf(nodeOf(doc, k)).length, 0);
+}
+
+/**
+ * Геометрия вектора в координатах рамки: масштаб viewBox → рамка узла (xMidYMid meet, как
+ * отрисовка ядра) и сдвиг. Нужна, чтобы печатать и принимать контуры в ОДНИХ координатах.
+ */
+function vectorFrameXform(node) {
+  const vb = node && node.viewBox && typeof node.viewBox === 'object' ? node.viewBox : null;
+  const vw = vb && Number(vb.w) > 0 ? Number(vb.w) : null;
+  const vh = vb && Number(vb.h) > 0 ? Number(vb.h) : null;
+  const sw = node && node.size && node.size.w && node.size.w.mode === 'fixed' ? Number(node.size.w.value) : vw;
+  const sh = node && node.size && node.size.h && node.size.h.mode === 'fixed' ? Number(node.size.h.value) : vh;
+  if (!vw || !vh || !(sw > 0) || !(sh > 0)) return null;
+  const k = Math.min(sw / vw, sh / vh);
+  const px = node.pos && Number.isFinite(Number(node.pos.x)) ? Number(node.pos.x) : 0;
+  const py = node.pos && Number.isFinite(Number(node.pos.y)) ? Number(node.pos.y) : 0;
+  const vx = Number(vb.x) || 0, vy = Number(vb.y) || 0;
+  return { k, dx: px + (sw - vw * k) / 2 - vx * k, dy: py + (sh - vh * k) / 2 - vy * k, sw, sh };
+}
+
+/** d контура вектора в координатах рамки (для выжимки выделенной детали). */
+function vpathInFrame(node, d, digits = 0) {
+  const xf = vectorFrameXform(node);
+  const got = parseArtPath(d);
+  if (!xf || !got.ok) return null;
+  return formatArtPath(transformArtCmds(got.cmds, xf.k, xf.dx, xf.dy), digits);
+}
+
+/* — правка иллюстраций: перекраска материала, масштаб от центра, новая форма, место — */
+
+/** «Фон» в реплике: перекрашивают рамку, а не персонажа. */
+const RE_ART_BG = /(фон|подложк|background|задн\p{L}*\s+план)/iu;
+
+const hueDist = (a, b) => { const d = Math.abs(((a - b) % 360 + 360) % 360); return Math.min(d, 360 - d); };
+
+/**
+ * Перекраска материала: всё, что одного «семейства» с опорным цветом (близкий оттенок и светлота
+ * в разумных пределах), уходит в новый цвет с тем же сдвигом светлоты — тень остаётся темнее
+ * основы, блик светлее. Белки глаз, тёмный контур и зрачки в семейство не входят.
+ * → (hex) => новый '#rrggbb' | null (цвет не из семейства).
+ */
+function familyMapper(refHex, targetHex) {
+  const r = hexRgb(refHex), t = hexRgb(targetHex);
+  if (!r || !t) return () => null;
+  const [h0, s0, l0] = rgbHsl(r);
+  const [ht, st, lt] = rgbHsl(t);
+  const neutralRef = s0 < 0.12;
+  return (hex) => {
+    const c = hexRgb(hex);
+    if (!c) return null;
+    const [h, sat, l] = rgbHsl(c);
+    if (Math.abs(l - l0) > 0.32) return null;
+    if (neutralRef ? sat >= 0.12 : (sat < 0.12 || hueDist(h, h0) > 30)) return null;
+    const h1 = neutralRef ? ht : ht + (((h - h0 + 540) % 360) - 180);
+    const s1 = st < 0.05 ? sat * 0.1 : neutralRef ? st : Math.min(1, sat * (st / Math.max(s0, 0.05)));
+    const l1 = Math.max(0.04, Math.min(0.97, l + (lt - l0)));
+    return hslHex(h1, s1, l1);
+  };
+}
+
+/** Площадь контура в единицах рамки (для «главного цвета»). */
+function vpathArea(node, d) {
+  const got = parseArtPath(d);
+  const b = got.ok ? artCmdsBox(got.cmds) : null;
+  const xf = vectorFrameXform(node);
+  return b ? b.w * b.h * (xf ? xf.k * xf.k : 1) : 0;
+}
+
+/** Главный цвет материала: самый «площадный» насыщенный цвет среди контуров узлов. */
+function dominantArtColor(doc, ids) {
+  const area = new Map();
+  const fallback = new Map();
+  for (const id of ids) {
+    const n = nodeOf(doc, id);
+    for (const p of vpathsOf(n)) {
+      const paint = p.fill !== undefined ? p.fill : n.fill;
+      const a = vpathArea(n, p.d);
+      for (const hex of paintHexes(doc, paint)) {
+        const [, sat, l] = rgbHsl(hexRgb(hex));
+        const box = sat >= 0.12 && l > 0.12 && l < 0.92 ? area : fallback;
+        box.set(hex, (box.get(hex) || 0) + a);
+      }
+    }
+  }
+  const pick = (m) => [...m.entries()].sort((a, b) => b[1] - a[1])[0];
+  const got = pick(area) || pick(fallback);
+  return got ? got[0] : null;
+}
+
+/** Краска через перекраску семейства (градиент — по стопам). undefined — не изменилась. */
+function recolorPaint(doc, paint, map) {
+  if (paint == null) return undefined;
+  if (typeof paint === 'object' && paint.gradient && Array.isArray(paint.gradient.stops)) {
+    let changed = false;
+    const stops = paint.gradient.stops.map((st) => {
+      const hex = st.color ? hexNorm(st.color) : hexOf(doc, st.token);
+      const to = hex ? map(hex) : null;
+      if (!to) return st;
+      changed = true;
+      const { token: _t, color: _c, ...rest } = st;
+      return { ...rest, color: to };
+    });
+    return changed ? { gradient: { ...paint.gradient, stops } } : undefined;
+  }
+  const hex = hexOf(doc, paint);
+  const to = hex ? map(hex) : null;
+  return to && to !== hex ? to : undefined;
+}
+
+/** Перекраска векторов: операции set paths (и fill узла, если контуры его наследуют). */
+function recolorOps(doc, engine, ids, map) {
+  const ops = [];
+  let touched = 0;
+  for (const id of ids) {
+    const n = nodeOf(doc, id);
+    if (!n || n.type !== 'vector') continue;
+    let changed = false;
+    const paths = vpathsOf(n).map((p) => {
+      const q = { ...p };
+      for (const k of ['fill', 'stroke']) {
+        const got = recolorPaint(doc, p[k], map);
+        if (got !== undefined) { q[k] = got; changed = true; }
+      }
+      return q;
+    });
+    if (changed) ops.push(mkOp(engine, 'set', { id, path: 'paths', value: paths }));
+    const own = recolorPaint(doc, n.fill, map);
+    if (own !== undefined) { ops.push(mkOp(engine, 'set', { id, path: 'fill', value: own })); changed = true; }
+    if (changed) touched++;
+  }
+  return { ops, touched };
+}
+
+/** «130%», «+30%», «x1.3», «1.3» (множитель), «64» (px по оси) → множитель к нынешнему размеру. */
+function artScaleFactor(raw, curPx, axisPath) {
+  let v = raw;
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const side = v.w !== undefined ? v.w : v.h;
+    const cur = v.w !== undefined ? curPx.w : curPx.h;
+    const got = parsePx(side && typeof side === 'object' ? side.value : side);
+    return got && cur > 0 ? got.n / cur : null;
+  }
+  const s = String(v == null ? '' : v).trim().toLowerCase().replace(',', '.');
+  let m = /^([+-])\s*(\d+(?:\.\d+)?)\s*%$/.exec(s);
+  if (m) return 1 + (m[1] === '-' ? -1 : 1) * Number(m[2]) / 100;
+  m = /^(\d+(?:\.\d+)?)\s*%$/.exec(s);
+  if (m) return Number(m[1]) / 100;
+  m = /^(?:[x×*]\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*[x×])$/.exec(s);
+  if (m) return Number(m[1] || m[2]);
+  const px = parsePx(s);
+  if (!px) return null;
+  if (axisPath === 'size' && px.n > 0 && px.n <= 5) return px.n;            // «1.3» у size — множитель
+  const cur = axisPath === 'size.h' ? curPx.h : curPx.w;
+  return cur > 0 ? px.n / cur : null;
+}
+
+const fixedPx = (spec) => (spec && spec.mode === 'fixed' && Number(spec.value) > 0 ? Number(spec.value) : null);
+
+/** Размер узла в px: фиксированный из документа, иначе посчитанный решателем. */
+function nodePx(doc, id, geo, engine) {
+  const n = nodeOf(doc, id);
+  const rects = rectsOf(geo) || (engine ? rectsOf(safeSolve(engine, doc)) : null);
+  const r = rects && rects[id];
+  return {
+    w: fixedPx(n && n.size && n.size.w) || (r ? Number(r.w) : 0),
+    h: fixedPx(n && n.size && n.size.h) || (r ? Number(r.h) : 0),
+  };
+}
+
+const ART_SIZE_PATHS = new Set(['size', 'size.w', 'size.h']);
+
+/**
+ * Правки иллюстраций, которые обычный set сделал бы неправильно:
+ *   • fill у рамки-иллюстрации — перекраска главного материала во всех деталях (фон — «background»);
+ *   • fill/stroke у детали — перекраска её контуров семейством, обводка — всем контурам;
+ *   • размер детали — от её центра и без искажения пропорций; размер рамки — весь рисунок разом;
+ *   • d — новая форма детали в координатах рамки (viewBox, место и размер — по новому bbox).
+ * → null (правка не про это — общий путь) | {ops} (пустой ops — правку пропустили, о причине сказано).
+ */
+function artSetOps({ doc, engine, id, path, rawPath, raw, note, said = '', geo = null }) {
+  const node = nodeOf(doc, id);
+  if (!node) return null;
+  const rp = String(rawPath == null ? '' : rawPath).trim().toLowerCase();
+  const artFrame = node.type === 'frame' && isArtFrame(doc, id, engine);
+  const who = nameOrId(doc, id);
+  const bgAsked = rp === 'background' || rp === 'bg' || rp === 'backgroundcolor' || rp === 'фон';
+  if (artFrame && (path === 'fill' || bgAsked)) {
+    if (bgAsked || RE_ART_BG.test(said)) return null;              // фон рамки — обычная заливка
+    const target = artPaint(typeof raw === 'string' ? raw.trim() : raw, { doc });
+    const hex = typeof target === 'string' ? (target[0] === '#' ? target : hexOf(doc, target)) : null;
+    if (!hex) { note(`${who}: цвет «${cutText(String(raw), 30)}» не понят — правка пропущена`); return { ops: [] }; }
+    const kids = kidsOf(node).filter((k) => (nodeOf(doc, k) || {}).type === 'vector');
+    const ref = dominantArtColor(doc, kids);
+    if (!ref) { note(`${who}: в рисунке нет цветных деталей — перекрашивать нечего`); return { ops: [] }; }
+    if (ref === hex) { note(`${who}: главный цвет рисунка и так ${hex} — эта правка ничего не меняет`); return { ops: [] }; }
+    const got = recolorOps(doc, engine, kids, familyMapper(ref, hex));
+    if (got.ops.length) {
+      note(`${who}: перекрасил главный материал рисунка ${ref} → ${hex} в ${got.touched} ${plural(got.touched, 'детали', 'деталях', 'деталях')}`
+        + ' — тени и блики подстроены под новый цвет. Фон рамки не трогал');
+    }
+    return got;
+  }
+  if (node.type === 'vector' && (path === 'fill' || path === 'color')) {
+    const target = artPaint(typeof raw === 'string' ? raw.trim() : raw, { doc });
+    if (target === undefined) { note(`${who}: цвет «${cutText(String(raw), 30)}» не понят — правка пропущена`); return { ops: [] }; }
+    if (target === null || (target && typeof target === 'object')) {
+      // «без заливки» или градиент — всем контурам детали одинаково
+      const paths = vpathsOf(node).map((p) => {
+        const q = { ...p };
+        if (target === null) delete q.fill; else q.fill = target;
+        return q;
+      });
+      return { ops: [mkOp(engine, 'set', { id, path: 'paths', value: paths })] };
+    }
+    const hex = target[0] === '#' ? target : hexOf(doc, target);
+    const ref = dominantArtColor(doc, [id]);
+    if (!ref || !hex) {
+      const paths = vpathsOf(node).map((p) => ({ ...p, fill: target }));
+      return { ops: [mkOp(engine, 'set', { id, path: 'paths', value: paths })] };
+    }
+    if (ref === hex) { note(`${who}: цвет и так ${hex} — эта правка ничего не меняет`); return { ops: [] }; }
+    // тени и блики ЭТОЙ детали («Тень на теле», «Блик на теле») идут за ней; соседние детали того же
+    // цвета («Правый рожок» при правке левого) — нет: о них не просили
+    const mine = artNameWords(node.name);
+    const parent = node.parent != null ? nodeOf(doc, node.parent) : null;
+    const tones = parent && isFreeFrameNode(parent, engine) && mine.length
+      ? kidsOf(parent).filter((k) => k !== id && (nodeOf(doc, k) || {}).type === 'vector'
+        && ART_TONE_NAME.test(strOf(nodeOf(doc, k).name))
+        && artNameWords(nodeOf(doc, k).name).some((w) => mine.some((m) => artWordsAlike(w, m))))
+      : [];
+    const got = recolorOps(doc, engine, [id, ...tones], familyMapper(ref, hex));
+    if (got.ops.length && tones.length) {
+      note(`${who}: вместе с деталью перекрашены её ${tones.map((k) => `«${nodeOf(doc, k).name}»`).join(', ')} — тона подстроены под новый цвет`);
+    }
+    return got.ops.length ? got : { ops: [] };
+  }
+  if (node.type === 'vector' && (path === 'stroke' || path === 'stroke.color' || path === 'stroke.width')) {
+    const vps = vpathsOf(node);
+    if (path === 'stroke.width') {
+      const w = parsePx(raw);
+      if (!w || w.n < 0) { note(`${who}: толщина обводки «${cutText(String(raw), 20)}» — не число: правка пропущена`); return { ops: [] }; }
+      const sw = Math.min(ART_LIMITS.strokeWidth, w.n / ((vectorFrameXform(node) || { k: 1 }).k || 1));
+      return { ops: [mkOp(engine, 'set', { id, path: 'paths', value: vps.map((p) => ({ ...p, strokeWidth: r2(sw) })) })] };
+    }
+    const paint = looksCleared(raw, 'stroke') ? null : artPaint(typeof raw === 'string' ? raw.trim() : raw, { doc });
+    if (paint === undefined) { note(`${who}: цвет обводки «${cutText(String(raw), 30)}» не понят — правка пропущена`); return { ops: [] }; }
+    const paths = vps.map((p) => {
+      const q = { ...p };
+      if (paint === null) { delete q.stroke; delete q.strokeWidth; } else { q.stroke = paint; if (q.strokeWidth == null) q.strokeWidth = 2; }
+      return q;
+    });
+    return { ops: [mkOp(engine, 'set', { id, path: 'paths', value: paths })] };
+  }
+  if ((node.type === 'vector' || artFrame) && ART_SIZE_PATHS.has(path)) {
+    const cur = nodePx(doc, id, geo, engine);
+    const k = artScaleFactor(raw, cur, path);
+    if (!k || !Number.isFinite(k) || k <= 0) { note(`${who}: размер «${cutText(String(raw), 20)}» не понят — правка пропущена`); return { ops: [] }; }
+    if (k < 0.05 || k > 20) { note(`${who}: масштаб ×${r2(k)} — слишком резко, правка пропущена; скажите в процентах, например «130%»`); return { ops: [] }; }
+    if (!(cur.w > 0) || !(cur.h > 0)) return null;
+    const nw = r2(cur.w * k), nh = r2(cur.h * k);
+    const sizeOf = (w, h) => ({ w: { mode: 'fixed', value: Math.max(0.5, w) }, h: { mode: 'fixed', value: Math.max(0.5, h) } });
+    const ops = [mkOp(engine, 'set', { id, path: 'size', value: sizeOf(nw, nh) })];
+    const parent = nodeOf(doc, node.parent);
+    if (node.type === 'vector' && parent && isFreeFrameNode(parent, engine)) {
+      const px = node.pos && Number.isFinite(Number(node.pos.x)) ? Number(node.pos.x) : 0;
+      const py = node.pos && Number.isFinite(Number(node.pos.y)) ? Number(node.pos.y) : 0;
+      ops.push(mkOp(engine, 'set', { id, path: 'pos', value: { x: r2(px - (nw - cur.w) / 2), y: r2(py - (nh - cur.h) / 2) } }));
+    }
+    if (artFrame) {
+      // весь рисунок разом: место и размер каждой детали — в том же масштабе
+      for (const kid of kidsOf(node)) {
+        const c = nodeOf(doc, kid);
+        if (!c) continue;
+        const cp = nodePx(doc, kid, geo, engine);
+        const x = c.pos && Number.isFinite(Number(c.pos.x)) ? Number(c.pos.x) : 0;
+        const y = c.pos && Number.isFinite(Number(c.pos.y)) ? Number(c.pos.y) : 0;
+        ops.push(mkOp(engine, 'set', { id: kid, path: 'pos', value: { x: r2(x * k), y: r2(y * k) } }));
+        if (cp.w > 0 && cp.h > 0) ops.push(mkOp(engine, 'set', { id: kid, path: 'size', value: sizeOf(r2(cp.w * k), r2(cp.h * k)) }));
+      }
+      note(`${who}: рисунок ${k > 1 ? 'увеличен' : 'уменьшен'} целиком — ${Math.round(cur.w)}×${Math.round(cur.h)} → ${Math.round(nw)}×${Math.round(nh)} px, детали в том же масштабе`);
+    }
+    return { ops };
+  }
+  if (node.type === 'vector' && path === 'd') {
+    const tools = artTools(engine);
+    const got = tools.check(typeof raw === 'string' ? raw : '');
+    if (!got.ok) { note(`${who}: новый контур не разобран — ${got.error}; правка пропущена`); return { ops: [] }; }
+    const vps = vpathsOf(node);
+    const framed = vps.map((p) => ({ ...p, d: vpathInFrame(node, p.d, 1) || p.d }));
+    const base = framed[0] || { lineCap: 'round', lineJoin: 'round' };
+    if (framed.length) framed[0] = { ...base, d: got.d };
+    else framed.push({ d: got.d, fill: node.fill === undefined ? '#8a8f98' : node.fill });
+    const fit = fitArtVector(framed, tools);
+    if (!fit) { note(`${who}: у нового контура нет размеров — правка пропущена`); return { ops: [] }; }
+    return {
+      ops: [
+        mkOp(engine, 'set', { id, path: 'paths', value: framed }),
+        mkOp(engine, 'set', { id, path: 'viewBox', value: fit.viewBox }),
+        mkOp(engine, 'set', { id, path: 'pos', value: fit.pos }),
+        mkOp(engine, 'set', { id, path: 'size', value: { w: { mode: 'fixed', value: fit.w }, h: { mode: 'fixed', value: fit.h } } }),
+      ],
+    };
+  }
+  return null;
+}
+
+/** Детали-тона: тень, блик, свет материала. */
+const ART_TONE_NAME = /(тень|тени|теней|блик|свет|отблеск|shade|shadow|highlight)/iu;
+const ART_SIDE_WORDS = new Set(['левый', 'левая', 'левое', 'левого', 'левой', 'правый', 'правая', 'правое', 'правого', 'правой',
+  'верхний', 'верхняя', 'нижний', 'нижняя', 'для', 'над', 'под', 'при', 'left', 'right']);
+/** Смысловые слова имени детали (без «левый/правый», предлогов и слов-тонов). */
+function artNameWords(name) {
+  return (String(name || '').toLowerCase().replace(/ё/g, 'е').match(/\p{L}+/gu) || [])
+    .filter((w) => w.length >= 3 && !ART_SIDE_WORDS.has(w) && !ART_TONE_NAME.test(w));
+}
+/** «тело» ~ «теле», «рожок» ~ «рожка»: общее начало и близкая длина. */
+const artWordsAlike = (a, b) => a === b || (a.length >= 4 && b.length >= 4 && a.slice(0, 3) === b.slice(0, 3) && Math.abs(a.length - b.length) <= 2);
+
+/** Место ребёнка свободной рамки: «120,80», {x,y}, «x» и «y» по отдельности. → {x,y} | null. */
+function freePosValue(node, path, raw) {
+  const cur = { x: node.pos && Number.isFinite(Number(node.pos.x)) ? Number(node.pos.x) : 0, y: node.pos && Number.isFinite(Number(node.pos.y)) ? Number(node.pos.y) : 0 };
+  let v = raw;
+  if (typeof v === 'string' && /^[[{]/.test(v.trim())) { const p = tryParse(v.trim()); if (p !== undefined) v = p; }
+  const num = (x) => { const g = parsePx(x); return g ? g.n : null; };
+  if (path === 'x' || path === 'pos.x') { const x = num(v); return x === null ? null : { x: r2(x), y: cur.y }; }
+  if (path === 'y' || path === 'pos.y') { const y = num(v); return y === null ? null : { x: cur.x, y: r2(y) }; }
+  if (Array.isArray(v) && v.length === 2) { const x = num(v[0]), y = num(v[1]); return x === null || y === null ? null : { x: r2(x), y: r2(y) }; }
+  if (v && typeof v === 'object') {
+    const x = v.x === undefined ? cur.x : num(v.x), y = v.y === undefined ? cur.y : num(v.y);
+    return x === null || y === null ? null : { x: r2(x), y: r2(y) };
+  }
+  const m = /^\s*(-?\d+(?:[.,]\d+)?)\s*[,; ]\s*(-?\d+(?:[.,]\d+)?)\s*$/.exec(String(v == null ? '' : v));
+  return m ? { x: r2(Number(m[1].replace(',', '.'))), y: r2(Number(m[2].replace(',', '.'))) } : null;
+}
+
 export const DIGEST_LIMIT = 20000;
 
 /** Пометки области работы на строках выжимки (круг 2, п.1). */
@@ -4497,7 +6160,7 @@ function refWord(v) {
 }
 
 /** Одна строка выжимки по узлу. */
-function digestLine(doc, id, depth, rects, engine) {
+function digestLine(doc, id, depth, rects, engine, selected = false) {
   const n = nodeOf(doc, id);
   const pad = '  '.repeat(depth);
   /**
@@ -4547,6 +6210,38 @@ function digestLine(doc, id, depth, rects, engine) {
     if (n.layout.wrap) bits.push('wrap');
   }
   if (n.size) bits.push(`w=${sizeWord(n.size.w)} h=${sizeWord(n.size.h)}`);
+  /* Круг 37 (SPEC §12): ребёнок свободной рамки стоит по pos — это и есть его координаты в рисунке;
+   * рамка-иллюстрация говорит, что она рисунок и из скольких деталей. */
+  const host = n.parent != null ? nodeOf(doc, n.parent) : null;
+  if (host && host.type === 'frame' && isFreeFrameNode(host, engine) && n.parent !== doc.root) {
+    const px = n.pos && Number.isFinite(Number(n.pos.x)) ? rnd(n.pos.x) : 0;
+    const py = n.pos && Number.isFinite(Number(n.pos.y)) ? rnd(n.pos.y) : 0;
+    bits.push(`at=${px},${py}`);
+  }
+  if (n.type === 'frame' && isArtFrame(doc, id, engine)) {
+    const parts = artPathCount(doc, id);
+    bits.push(`[иллюстрация: ${parts} ${plural(parts, 'деталь', 'детали', 'деталей')}]`);
+  }
+  if (n.type === 'vector') {
+    const vps = vpathsOf(n);
+    const fills = [...new Set(vps.map((p) => (p.fill !== undefined ? paintWord(p.fill) : n.fill !== undefined ? paintWord(n.fill) : 'none')))];
+    bits.push(`fill=${fills.slice(0, 4).join(',')}${fills.length > 4 ? ',…' : ''}`);
+    const strokes = [...new Set(vps.filter((p) => p.stroke != null).map((p) => `${paintWord(p.stroke)}/${rnd(p.strokeWidth == null ? 1 : p.strokeWidth)}`))];
+    if (strokes.length) bits.push(`stroke=${strokes.slice(0, 2).join(',')}`);
+    if (vps.length > 1) bits.push(`контуров: ${vps.length}`);
+    if (selected) {
+      // выделенной детали — её контуры в координатах рамки: «сделай рожок длиннее» правится по ним
+      let room = 900;
+      vps.slice(0, 3).forEach((p, i) => {
+        const d = vpathInFrame(n, p.d);
+        if (!d || room <= 0) return;
+        const shown = d.length > room ? `${cutText(d, room)}…` : d;
+        room -= shown.length;
+        bits.push(`d${vps.length > 1 ? i : ''}="${shown}"`);
+      });
+    }
+  }
+  if (n.rotate != null && Number(n.rotate) !== 0 && Number.isFinite(Number(n.rotate))) bits.push(`rotate=${r2(n.rotate)}`);
   if (n.type === 'text') {
     const chars = (typeof n.characters === 'number' ? wordOf(n.characters) : strOf(n.characters)).replace(/\s+/g, ' ').trim();
     bits.push(`text="${chars.length > 60 ? cutText(chars, 57) + '…' : chars}"`);
@@ -4554,8 +6249,8 @@ function digestLine(doc, id, depth, rects, engine) {
     if (n.align && n.align !== 'left') bits.push(`align=${wordOf(n.align)}`);
     if (n.color) bits.push(`color=${refWord(n.color)}`);
   }
-  if (n.fill) bits.push(`fill=${refWord(n.fill)}`);
-  if (n.stroke) bits.push(`stroke=${refWord(n.stroke)}`);
+  if (n.fill && n.type !== 'vector') bits.push(`${n.type === 'frame' && isArtFrame(doc, id, engine) ? 'background' : 'fill'}=${paintWord(n.fill)}`);
+  if (n.stroke && n.type !== 'vector') bits.push(`stroke=${refWord(n.stroke)}`);
   /* Круг 20: скругление — «r=radii.4(16)»; нулевое (числом или ссылкой на нулевой шаг) не
    * печатается, как и раньше не печатался ноль. Мёртвая ссылка печатается с пометкой. */
   if (n.radius != null && n.radius !== 0 && !Array.isArray(n.radius)) {
@@ -4714,7 +6409,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
   };
   const index = new Map();
   const build = (id, depth) => {
-    const text = digestLine(doc, id, depth, rects, engine) + mark(id);
+    const text = digestLine(doc, id, depth, rects, engine, workSet.has(id)) + mark(id);
     const entry = { id, depth, text, children: [], collapsed: null, cost: text.length + 1, far: !near.has(id) };
     index.set(id, entry);
     for (const kid of kidsOf(nodeOf(doc, id))) {
@@ -4965,6 +6660,8 @@ function buildContext({ doc, scope, engine, guess, persona, placement, geo, hist
     checks: intent && !CHECKS_INTENTS.has(intent) ? '' : (checks || ''),
     // круг 36: как читать «hover{…} motion{…}» — только если в документе это есть
     motion: Object.keys((doc && doc.nodes) || {}).some((id) => hasMotion(nodeOf(doc, id))),
+    // круг 37: как читать иллюстрации и как их править — только если в документе есть векторы
+    art: docHasArt(doc),
   };
 }
 
@@ -5646,6 +7343,14 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
     if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
     return spec;
   }
+  /* Круг 37 (SPEC §12): картинка — свободная рамка, нарисованная иллюстратором; деталь
+   * рисунка — вектор с проверенным контуром. Обе ветки выходят сразу: у них своя форма. */
+  if (ART_NODE_TYPES.has(type)) return treeIllustration(raw, { doc, engine, note, bud });
+  if (type === 'vector' || type === 'path') {
+    const vec = treeVector(raw, { doc, engine, note });
+    if (!vec) note(`Деталь «${cutText(strOf(raw.name) || 'без имени', 40)}» без годного контура — отброшена`);
+    return vec;
+  }
   if (!NODE_TYPES.includes(type)) {
     if (type && NODE_TYPE_ALIASES[type]) {
       type = NODE_TYPE_ALIASES[type];
@@ -5685,7 +7390,12 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
       h: sizeOr(raw.size && raw.size.h, { mode: 'hug' }, `Текст «${name || ''}», высота`),
     };
   } else {
-    const fill = treeColor(raw.fill, `Слой «${name || type}»`);
+    // круг 37 (SPEC §12): заливка градиентом — краска-объект ядра
+    let fill;
+    if (looksGradient(raw.fill)) {
+      fill = artGradient(raw.fill, { doc });
+      if (fill === undefined) note(`Слой «${name || type}»: градиент не понят — без заливки`);
+    } else fill = treeColor(raw.fill, `Слой «${name || type}»`);
     if (fill) spec.fill = fill;
     const stroke = treeColor(raw.stroke, `Обводка «${name || type}»`);
     if (stroke) spec.stroke = stroke;
@@ -5740,6 +7450,8 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
 
   // круг 36 (SPEC §11): тень, прозрачность, состояния и движение нового слоя
   treeMotion(spec, raw, doc, note, `Слой «${name || type}»`, { engine, said });
+  // круг 37: поворот — у любого слоя
+  { const rot = finite(raw.rotate); if (Number.isFinite(rot) && rot !== 0 && Math.abs(rot) <= 360) spec.rotate = Math.round(rot * 10) / 10; }
   if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
 
   if (type === 'frame') {
@@ -5836,6 +7548,10 @@ function specToNodes(spec, parentId, ids, out) {
     node.align = spec.align;
     node.size = spec.size;
     if (spec.color) node.color = spec.color;
+  } else if (spec.type === 'vector') {
+    // круг 37 (SPEC §12): деталь рисунка — контуры, viewBox, место в рамке и размер уже посчитаны
+    const v = JSON.parse(JSON.stringify(spec.$vector));
+    for (const k of ['viewBox', 'paths', 'size', 'pos', 'rotate']) if (v[k] !== undefined) node[k] = v[k];
   } else if (spec.type === 'instance') {
     // круг 19 (§5.5): у экземпляра только ссылка на компонент, свойства и (необязательно) размер
     node.of = spec.of;
@@ -5848,6 +7564,10 @@ function specToNodes(spec, parentId, ids, out) {
     if (spec.stroke) node.stroke = spec.stroke;
     if (spec.src) node.src = spec.src;
   }
+  // круг 37: свободная рамка-иллюстрация обрезает рисунок; поворот — у любого слоя
+  if (spec.type === 'frame' && spec.clip) node.clip = true;
+  if (spec.type === 'frame' && typeof spec.role === 'string' && spec.role) node.role = spec.role;
+  if (spec.rotate) node.rotate = spec.rotate;
   // круг 36 (SPEC §11): у любого слоя, кроме страницы
   if (spec.shadow !== undefined) node.shadow = spec.shadow;
   if (spec.opacity !== undefined) node.opacity = spec.opacity;
@@ -5865,7 +7585,7 @@ function defaultName(spec) {
   if (spec.type === 'text') return cutText(spec.characters || 'Текст', 24);
   // экземпляр без своего имени зовётся как компонент: в списке слоёв так его и узнают
   if (spec.type === 'instance') return cutText(spec.compName || 'Экземпляр', 24);
-  return { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка' }[spec.type] || 'Слой';
+  return { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка', vector: 'Деталь' }[spec.type] || 'Слой';
 }
 
 function nextArtboardPos(doc) {
@@ -5936,7 +7656,7 @@ export function treeToOps({ doc, tree, parentId, index, engine, warn, persona, a
   }
 
   const ops = nodes.map((node, i) => mkOp(engine, 'create', i === 0 && index != null ? { node, index } : { node }));
-  return { ops, rootId, nodeIds: nodes.map((n) => n.id) };
+  return { ops, rootId, nodeIds: nodes.map((n) => n.id), spec };
 }
 
 /* — разрешение целей — */
@@ -6518,6 +8238,9 @@ const PATH_ALIASES = {
   justify: 'layout.justify', wrap: 'layout.wrap', direction: 'layout.mode',
   bg: 'fill', background: 'fill', backgroundColor: 'fill', fontStyle: 'style', typography: 'style',
   cornerRadius: 'radius', borderRadius: 'radius', textColor: 'color',
+  // круг 37 (SPEC §12): поворот и деталь рисунка словами модели
+  rotation: 'rotate', angle: 'rotate', rotate: 'rotate', strokeWidth: 'stroke.width', viewbox: 'viewBox',
+  shape: 'd', path: 'd', 'paths.0.d': 'd', scale: 'size',
 };
 
 const PROTECTED_PATHS = new Set(['id', 'type', 'parent', 'children', '__proto__', 'prototype', 'constructor']);
@@ -6538,6 +8261,8 @@ export const ALLOWED_PATH_HEADS = new Set([
   'size', 'layout', 'name', 'opacity', 'src', 'clip',
   // круг 36 (SPEC §11): состояния (наведение, нажатие, фокус), движение между ними и тень
   'states', 'motion', 'shadow',
+  // круг 37 (SPEC §12): поворот любого слоя; контуры, холст и форма детали рисунка
+  'rotate', 'paths', 'viewBox', 'd',
   // круг 19, п.3 (SPEC §5.5): «props.<имя>» — ОБЪЯВЛЕННОЕ свойство экземпляра компонента.
   // Единственный законный путь внутрь экземпляра: всё остальное у него задаёт компонент.
   'props',
@@ -6553,12 +8278,12 @@ const MOVE_PATHS = new Set(['pos', 'override', 'x', 'y', 'left', 'top', 'positio
  */
 const UNIFORM_PATHS = new Set(['style', 'align', 'color', 'fill', 'stroke', 'radius', 'size', 'layout', 'opacity', 'clip',
   // круг 36: «оживи кнопки» — про все кнопки колонки так же, как «сделай кнопки темнее»
-  'states', 'motion', 'shadow']);
+  'states', 'motion', 'shadow', 'rotate']);
 
 /** Русские названия типов в родительном падеже: «поля нет у эллипса «Аватар»». */
 const RU_TYPE = {
   frame: 'фрейма', text: 'текста', rect: 'прямоугольника',
-  ellipse: 'эллипса', image: 'картинки', page: 'страницы',
+  ellipse: 'эллипса', image: 'картинки', page: 'страницы', vector: 'детали рисунка',
   // круг 19: у экземпляра компонента свой разговор (см. adjustSetPath), но в общих строках
   // он тоже должен зваться по-русски
   instance: 'экземпляра компонента',
@@ -6577,12 +8302,14 @@ const TEXT_ONLY_PATHS = new Set(['characters', 'style', 'align', 'color']);
  */
 const PATH_OWNERS = {
   characters: ['text'], style: ['text'], align: ['text'], color: ['text'],
-  fill: ['frame', 'rect', 'ellipse', 'image'],
-  stroke: ['frame', 'rect', 'ellipse', 'image'],
+  fill: ['frame', 'rect', 'ellipse', 'image', 'vector'],
+  stroke: ['frame', 'rect', 'ellipse', 'image', 'vector'],
   radius: ['frame', 'rect', 'ellipse', 'image'],
   layout: ['frame'],
-  clip: ['frame'],
+  clip: ['frame', 'vector'],
   src: ['image'],
+  // круг 37 (SPEC §12): контуры, холст и форма — только у детали рисунка
+  paths: ['vector'], viewBox: ['vector'], d: ['vector'],
 };
 
 /** Все текстовые потомки узла (без самого узла), в порядке документа. */
@@ -6614,6 +8341,10 @@ export function adjustSetPath(doc, id, path, warn) {
   // круг 36 (SPEC §11): состояния и движение — своя сверка (страница, цвет текста у кнопки)
   if (isMotionPath(path)) return adjustMotionPath(doc, id, String(path), note);
   const head = String(path).split('.')[0];
+  if (head === 'rotate' && node.type === 'page') {
+    note(`Страницу повернуть нельзя — поворот бывает у слоёв, правка пропущена`);
+    return null;
+  }
   const owners = PATH_OWNERS[head];
   const who = nameOrId(doc, id);
   if (!owners || owners.includes(node.type)) return { id, path };
@@ -6844,6 +8575,8 @@ const CLEAR_PHRASE = /^без\s+(заливк\p{L}*|фона|обводк\p{L}*|
 export const CLEARABLE_PATHS = new Set([
   'fill', 'stroke', 'color', 'radius', 'opacity', 'src', 'clip', 'style', 'align', 'override',
   'layout', 'layout.mode', 'layout.gap', 'layout.padding', 'layout.align', 'layout.justify', 'layout.wrap',
+  // круг 37: «верни ровно» — снять поворот
+  'rotate',
   // круг 36 (SPEC §11): «убери анимации» — снять states и motion целиком или по полю, тень — тоже
   ...motionClearablePaths(),
 ]);
@@ -6931,6 +8664,8 @@ export const PATH_RU = {
   lineHeight: 'интерлиньяж', letterSpacing: 'трекинг', font: 'гарнитура', token: 'стиль текста',
   // круг 36 (SPEC §11); вложенные пути состояний переводит motionPathRu
   states: 'состояния', motion: 'анимация', shadow: 'тень',
+  // круг 37 (SPEC §12)
+  rotate: 'поворот', paths: 'контуры', viewBox: 'холст детали', d: 'форма детали', background: 'фон',
 };
 
 /** Тот же словарь в родительном падеже: «и так нет заливки», «нет адреса картинки». */
@@ -6950,6 +8685,7 @@ const PATH_RU_GEN = {
   w: 'ширины', h: 'высоты', fontSize: 'кегля', fontWeight: 'жирности',
   lineHeight: 'интерлиньяжа', letterSpacing: 'трекинга', font: 'гарнитуры', token: 'стиля текста',
   states: 'состояний', motion: 'анимации', shadow: 'тени',
+  rotate: 'поворота', paths: 'контуров', viewBox: 'холста детали', d: 'формы детали', background: 'фона',
 };
 
 /** Сторона отступа словами: «padding.t» — это «отступ сверху». */
@@ -7044,9 +8780,14 @@ export function ruEnum(field, value) {
 
 /** Значение для человека: «по содержимому», «350 px», «приглушённый», «16 px (шаг шкалы)». */
 function valueWords(v, path, doc = null, engine = null) {
+  // круг 37: без поворота — это 0°, а не «не задано»
+  if (String(path) === 'rotate' && (v === UNSET || v === undefined || v === null)) return '0°';
   if (v === UNSET || v === undefined || v === null) return '«не задано»';
   const p = String(path == null ? '' : path);
   if (typeof v === 'boolean') return v ? '«да»' : '«нет»';
+  // круг 37: поворот — градусами, градиент — цветами стопов
+  if (p === 'rotate' && typeof v === 'number') return `${r2(v)}°`;
+  if (v && typeof v === 'object' && v.gradient) return `градиент ${paintWord(v)}`;
   // круг 36: «подъём 2 px», «тень «средняя»», «120 мс» — без motion.fast и shadow.md
   if (isMotionPath(p)) { const w = motionValueWords(v, p, doc, engine); if (w) return w; }
   /* Круг 20 (SPEC §6.7): ссылка на шаг человеку показывается ЧИСЛОМ с пометкой «шаг шкалы» —
@@ -7200,7 +8941,24 @@ export function coerceValue(raw, path, doc, warn, ctx = null) {
   if (p === 'layout.mode' || p === 'layout.align' || p === 'layout.justify' || p === 'align') {
     return pickEnum(v, p, { warn: note, what: `Правка «${ruPath(p)}»` });
   }
+  /* Круг 37 (SPEC §12): градиент в заливке и цвете текста — краска-объект ядра; у обводки узла
+   * градиента нет (её цвет — один), там берём средний стоп словами. */
+  if ((p === 'fill' || p === 'color' || p === 'stroke') && looksGradient(v)) {
+    const g = artGradient(v, { doc });
+    if (g === undefined) { note(`Правка «${ruPath(p)}»: градиент не понят — нужны два цвета и больше; правка пропущена`); return undefined; }
+    if (p !== 'stroke' || typeof g === 'string') return g;
+    const mid = g.gradient.stops[Math.floor(g.gradient.stops.length / 2)];
+    note('Правка «обводка»: у обводки слоя градиента нет — поставил один цвет из середины градиента');
+    return mid.color || mid.token;
+  }
   if (p === 'fill' || p === 'color' || p === 'stroke') return normColor(v, doc, note, `Правка «${ruPath(p)}»`);
+  if (p === 'rotate') {
+    const m = /^\s*(-?\d+(?:[.,]\d+)?)\s*(°|deg|град\p{L}*)?\s*$/iu.exec(String(v == null ? '' : v));
+    const n = m ? Number(m[1].replace(',', '.')) : Number(v);
+    if (!Number.isFinite(n)) { note(`Правка «поворот»: «${v}» — не число градусов: правка пропущена`); return undefined; }
+    if (Math.abs(n) > 360) { note(`Правка «поворот»: ${n}° — поворот задаётся от −360 до 360 градусов: правка пропущена`); return undefined; }
+    return Math.round(n * 10) / 10;
+  }
   if (p === 'style' || p === 'style.token') {
     // круг 27: правка существующего узла — незнакомый стиль не подменяется обычным текстом
     const node = ctx && ctx.id ? nodeOf(doc, ctx.id) : null;
@@ -7920,6 +9678,30 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
        * абсолютные координаты холста, а override отсчитывается от родителя.
        */
       const clearsPath = looksCleared(edit.value, path);
+      /* Круг 37 (SPEC §12): у детали СВОБОДНОЙ рамки место — это pos, и задать его можно: координаты
+       * рисунка модель видит в выжимке (at=x,y). В потоке раскладки pos по-прежнему закрыт. */
+      if ((head === 'pos' || head === 'x' || head === 'y') && edit.target != null) {
+        let cands = [];
+        try { cands = refCandidates(engine, doc, edit.target, scope, { ...refOpts }).ids || []; } catch { cands = []; }
+        const free = cands.length > 0 && cands.every((cid) => {
+          const n = nodeOf(doc, cid);
+          const par = n && n.parent != null ? nodeOf(doc, n.parent) : null;
+          return !!par && par.id !== doc.root && isFreeFrameNode(par, engine);
+        });
+        if (free) {
+          const targets = resolveRefs(engine, doc, edit.target, scope, note, { ...refOpts, group });
+          for (const tid of targets) {
+            const n = nodeOf(doc, tid);
+            const v = n ? freePosValue(n, path, edit.value) : null;
+            if (!v) { note(`${nameOrId(doc, tid)}: место «${cutText(String(edit.value), 30)}» не понято — нужны x,y в координатах рамки`); continue; }
+            const k = `${tid}|pos|${JSON.stringify(v)}`;
+            if (setSeen.has(k)) continue;
+            setSeen.add(k);
+            ops.push(mkOp(engine, 'set', { id: tid, path: 'pos', value: v }));
+          }
+          continue;
+        }
+      }
       if (MOVE_PATHS.has(head) && !(head === 'override' && clearsPath)) {
         note('Задать положение напрямую нельзя: место слоя считает раскладка.'
           + ' Скажите, на сколько и куда сдвинуть, — это отдельная правка; эта пропущена');
@@ -7934,6 +9716,18 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
       });
       if (!targets.length) continue;
       for (const id of targets) {
+        /* Круг 37 (SPEC §12): перекраска рисунка и детали, масштаб от центра, новая форма — свои
+         * правила (artSetOps); всё остальное у деталей идёт общей дорогой. */
+        const artGot = artSetOps({ doc, engine, id, path, rawPath: edit.path, raw: edit.value, note, said: utterance, geo });
+        if (artGot) {
+          for (const o of artGot.ops) {
+            const k = `${o.id}|${o.path}|${JSON.stringify(o.value)}`;
+            if (setSeen.has(k)) continue;
+            setSeen.add(k);
+            ops.push(o);
+          }
+          continue;
+        }
         // путь сверяется с ТИПОМ цели: текстовое свойство на фрейме уходит в его текст,
         // заливка на тексте отбрасывается с объяснением (круг 3, п.1)
         const aimed = adjustSetPath(doc, id, path, note);
@@ -8124,6 +9918,23 @@ export function patchToOps({ doc, patch, scope, engine, warn, persona, placement
         parentId = containerFor(doc, parentNode.parent);
       }
       if (!parentId) { note('Некуда вставить новый слой — правка пропущена'); continue; }
+      /* Круг 37 (SPEC §12): деталь в рисунок — контур в координатах рамки (как at= в выжимке),
+       * index — слой. Собираем вектор по bbox контура, как компилятор иллюстраций. */
+      const host = nodeOf(doc, parentId);
+      if (host && host.type === 'frame' && parentId !== doc.root && isFreeFrameNode(host, engine) && looksArtPart(edit.node)) {
+        const vec = treeVector(edit.node, { doc, engine, note, outline: artOutlineOf(doc, parentId) });
+        if (!vec) { note(`Деталь «${cutText(strOf(edit.node && edit.node.name) || 'без имени', 40)}» без годного контура — правка пропущена`); continue; }
+        if (!budget.take()) continue;
+        const made = [];
+        specToNodes(vec, parentId, ids, made);
+        const idx = edit.index != null && Number.isFinite(Number(edit.index))
+          ? Math.max(0, Math.min(kidsOf(host).length, Math.round(Number(edit.index)))) : null;
+        ops.push(mkOp(engine, 'create', idx != null ? { node: made[0], index: idx } : { node: made[0] }));
+        registerCreated(created, made[0].name, made[0].id);
+        createdParents.set(made[0].id, parentId);
+        if (!isSelfRef(edit.target)) registerCreated(created, edit.target, made[0].id);
+        continue;
+      }
       const spec = normalizeTree(edit.node, { doc, warn: note, persona, budget, engine });
       if (!spec) continue;
       let at = edit.index != null ? Number(edit.index)
@@ -9804,10 +11615,31 @@ async function runCommandCore(options = {}) {
       return { ops: [], preview: { doc, geo: geoNow }, plan, answer, followups, warnings: sortWarnings(warnings), usage, stages };
     }
 
-    const placement = describePlacement(doc, scope, engine, utterance, plan, warn, geoNow);
+    const placement = intent === 'illustration'
+      ? artPlacement(doc, scope, engine, utterance, geoNow)
+      : describePlacement(doc, scope, engine, utterance, plan, warn, geoNow);
     const ctx = buildContext({ ...ctxBase, intent, placement: placement.text });
-    const schemaEntry = intent === 'create' ? SCHEMAS.tree : intent === 'theme' ? SCHEMAS.theme : SCHEMAS.patch;
-    const system = intent === 'create' ? PROMPTS.tree(ctx) : intent === 'theme' ? PROMPTS.theme(ctx) : PROMPTS.patch(ctx);
+    // круг 37: в команде просят картинку внутри интерфейса — модели прямо говорим, как её положить
+    if (guess.art && (intent === 'create' || intent === 'edit')) {
+      ctx.artHint = 'КАРТИНКА: в команде просят рисунок. НЕ собирай его из rect и ellipse — положи узел'
+        + ' {type:"illustration", name:"<что это>", size:{w:<px>, h:<px>}, draw:"<что нарисовать, одной фразой>"}'
+        + (intent === 'edit' ? ' правкой {op:"create", parent:"<куда>", node:{…}}' : ' там, где картинка стоит в блоке')
+        + ': его нарисует иллюстратор. Текст, кнопки и карточку вокруг собирай как обычно.';
+    }
+    /* Круг 37 (SPEC §12.2): иллюстратор — своя роль со своей схемой; выжимки документа ему не
+     * нужно, только цвета документа, холст и место. Ответ большой — даём модели запас токенов. */
+    const artCtx = (subject, where, canvas = { w: ART_CANVAS, h: ART_CANVAS }) => ({
+      subject, where, canvas, colors: artColorsLine(doc), history: ctx.history,
+      // характер варианта для рисунка — словами варианта, а не правилами раскладки
+      personaHint: persona ? `${persona.label}: ${persona.description}` : '',
+    });
+    const ART_TOKENS = 8192;
+    const schemaEntry = intent === 'create' ? SCHEMAS.tree : intent === 'theme' ? SCHEMAS.theme
+      : intent === 'illustration' ? SCHEMAS.illustration : SCHEMAS.patch;
+    const system = intent === 'create' ? PROMPTS.tree(ctx) : intent === 'theme' ? PROMPTS.theme(ctx)
+      : intent === 'illustration'
+        ? PROMPTS.illustration(artCtx(`${String(utterance).trim()}${plan && plan.summary ? ` (${plan.summary})` : ''}`, placement.where))
+        : PROMPTS.patch(ctx);
     const userTurn = buildUserTurn(utterance, plan, persona);
 
     let messages = [
@@ -9815,8 +11647,55 @@ async function runCommandCore(options = {}) {
       { role: 'user', content: userTurn },
     ];
 
-    emit('generate', intent === 'create' ? 'Строю дерево макета' : intent === 'theme' ? 'Подбираю токены' : 'Собираю правки');
-    let data = await ask(schemaEntry, messages, { stage: 'generate' });
+    emit('generate', intent === 'create' ? 'Строю дерево макета' : intent === 'theme' ? 'Подбираю токены'
+      : intent === 'illustration' ? 'Рисую иллюстрацию' : 'Собираю правки');
+    let data = await ask(schemaEntry, messages, { stage: 'generate', ...(intent === 'illustration' ? { maxTokens: ART_TOKENS } : {}) });
+
+    /* Круг 37: картинки внутри интерфейса («виджет печеньки») рисует иллюстратор — отдельным
+     * вызовом на каждое место под картинку (не больше ART_LIMITS.perCommand за команду; одинаковое
+     * место на починке не перерисовывается). Модель забыла место под картинку при явной просьбе
+     * о ней — ставим его сами. */
+    const artCache = new Map();
+    let artCalls = 0;
+    const fillArt = async (got) => {
+      if (intent !== 'create' && intent !== 'edit') return got;
+      if (!got || typeof got !== 'object') return got;
+      let holes = artPlaceholders(got, intent);
+      if (!holes.length && intent === 'create' && guess.art && injectArtPlaceholder(got, utterance)) {
+        serviceNote('Модель собрала картинку фигурами раскладки — поставил место под иллюстрацию');
+        holes = artPlaceholders(got, intent);
+      }
+      for (const { node, parent } of holes) {
+        if (node.art && typeof node.art === 'object') continue;
+        const name = cutText(strOf(node.name).trim() || 'Иллюстрация', 80);
+        const draw = cutText(strOf(node.draw).trim() || strOf(node.prompt).trim() || name, 300);
+        const key = `${name.toLowerCase()}|${draw.toLowerCase()}`;
+        if (artCache.has(key)) { node.art = artCache.get(key); continue; }
+        if (artCalls >= ART_LIMITS.perCommand) {
+          warn(`Картинок в ответе больше ${ART_LIMITS.perCommand} — «${name}» оставил пустой рамкой; попросите нарисовать её отдельно`);
+          continue;
+        }
+        artCalls++;
+        const sw = Number(node.size && node.size.w) > 0 ? Math.round(Number(node.size.w)) : ART_BOX_DEFAULT;
+        const shh = Number(node.size && node.size.h) > 0 ? Math.round(Number(node.size.h)) : sw;
+        const host = parent && strOf(parent.name).trim() ? `внутрь «${cutText(parent.name.trim(), 60)}», ` : '';
+        emit('generate', `Рисую «${name}»`);
+        try {
+          const art = await ask(SCHEMAS.illustration, [
+            { role: 'system', content: PROMPTS.illustration(artCtx(`${draw} — для «${String(utterance).trim()}»`,
+              `${host}рамкой ${sw}×${shh} px внутри интерфейса. Фон холста — "none": подложку даёт сам блок.`)) },
+            { role: 'user', content: `Нарисуй: ${draw}` },
+          ], { stage: 'generate', detail: name, maxTokens: ART_TOKENS });
+          if (cannotOf(art) && !hasEdits(art, 'illustration')) { warn(`«${name}»: ${cannotOf(art)}`); continue; }
+          artCache.set(key, art);
+          node.art = art;
+        } catch (e) {
+          if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+          warn(`Картинку «${name}» нарисовать не вышло (${factOnly(e && e.message ? e.message : e)}) — на её месте пустая рамка`);
+        }
+      }
+      return got;
+    };
 
     /* Круг 36: тот же устаревший отказ, но уже в патче — один раз переспрашиваем с напоминанием,
      * что состояния и движение есть. Второй отказ — уже ответ, как обычно. */
@@ -9856,9 +11735,11 @@ async function runCommandCore(options = {}) {
       };
     }
 
+    data = await fillArt(data);
     // Нарушения, которые уже были в документе (ручные правки пользователя), агенту не вменяем.
     const baseline = baselineViolations(baseList);
-    emit('materialize', intent === 'theme' ? 'Меняю оформление документа' : intent === 'create' ? 'Ставлю новые слои на место' : 'Нахожу слои, которые надо поменять');
+    emit('materialize', intent === 'theme' ? 'Меняю оформление документа' : intent === 'create' ? 'Ставлю новые слои на место'
+      : intent === 'illustration' ? 'Собираю детали рисунка' : 'Нахожу слои, которые надо поменять');
     let attempt = materialize({ engine, doc, data, intent, scope, placement, persona, baseline, geo: geoNow, group, said: utterance });
     let repaired = false;
     let keptFirst = false;                         // круг 11, п.9: починка не помогла, но прогон выжил
@@ -9879,7 +11760,7 @@ async function runCommandCore(options = {}) {
        * не ему. problems — те же нарушения словами для человека; когда их нет (правка легла
        * «в пустоту», нарушений ноль), берём человеческую заготовку.
        */
-      const forHuman = attempt.problems.length ? attempt.problems
+      const forHuman = attempt.repairNote ? [attempt.repairNote] : attempt.problems.length ? attempt.problems
         : [attempt.nothingChanged
           ? 'Правка ничего не изменила в макете — прошу модель поправить цели'
           : 'Ответ модели применить не удалось — прошу поправить'];
@@ -9890,7 +11771,10 @@ async function runCommandCore(options = {}) {
         { role: 'user', content: PROMPTS.repair(problems.slice(0, 8), data, schemaEntry) },
       ]);
       try {
-        const fixed = await ask(schemaEntry, messages, { stage: 'repair', temperature: 0 });
+        let fixed = await ask(schemaEntry, messages, { stage: 'repair', temperature: 0, ...(intent === 'illustration' ? { maxTokens: ART_TOKENS } : {}) });
+        // круг 37: иллюстрацию чинят по деталям — исправленные встают на свои места
+        if (intent === 'illustration') fixed = mergeIllustration(data, fixed);
+        else fixed = await fillArt(fixed);
         /* Круг 9, п.4: починка — законное место для отказа. «Поверни аватар» первым ответом даёт
          * выдуманное поле rotation, все правки отклоняются; вторая попытка обязана иметь право
          * сказать «поворота у узлов нет», а не выдумывать второе такое же поле. */
@@ -9927,6 +11811,10 @@ async function runCommandCore(options = {}) {
       if (i >= 0) warnings.splice(i, 1);
     }
     for (const w of attempt.warnings) warn(w);
+    if (attempt.art && attempt.art.rects && !attempt.fatal) {
+      warn('Иллюстрация вышла угловатой: модель собрала её из прямоугольников и после починки.'
+        + ' Скажите «перерисуй плавными формами» или опишите картинку подробнее');
+    }
     /**
      * Круг 16, п.8: «повторять нечего» вправе сказать только прогон, у которого ВСЕ попытки
      * уткнулись в отсутствующие цели. Если починка упала по другой причине, повтор может и
@@ -10040,6 +11928,7 @@ function hasEdits(data, intent) {
   if (intent === 'theme') {
     return ['colors', 'type', 'spacing', 'radii'].some((k) => Array.isArray(data[k]) && data[k].length > 0);
   }
+  if (intent === 'illustration') return [data.parts, data.details, data.shapes].some((v) => Array.isArray(v) && v.length > 0);
   return false;
 }
 
@@ -10052,7 +11941,7 @@ function betterAttempt(next, prev) {
 }
 
 function normalizePlan(raw, guess) {
-  const intents = ['create', 'edit', 'theme', 'ask', 'clarify', 'refuse'];
+  const intents = ['create', 'edit', 'theme', 'ask', 'clarify', 'refuse', 'illustration'];
   const plan = {
     intent: intents.includes(String(raw && raw.intent)) ? String(raw.intent) : guess.intent,
     title: cutText(String((raw && raw.title) || '').trim(), 120) || 'Правка макета',
@@ -10100,6 +11989,16 @@ function arbitrateIntent(plan, guess, warn) {
    * для классификатора обычный глагол правки, и он всегда «уверен»; но выполнимость команды
    * решается по модели документа, а её видела только модель.
    */
+  /* Круг 37 (SPEC §12.2): «нарисуй монстра» — рисунок, даже если план (по старой привычке
+   * собирать всё раскладкой) сказал create: иначе снова выйдет стопка прямоугольников. И наоборот,
+   * «виджет печеньки» — интерфейс с картинкой: план illustration тут уступает созданию виджета. */
+  if (guess.intent === 'illustration' && guess.confidence >= 0.8 && (planned === 'create' || planned === 'edit')) {
+    return 'illustration';
+  }
+  if (guess.intent === 'illustration' && planned === 'refuse' && staleArtRefusal(plan && (plan.cannot || plan.summary))) {
+    return 'illustration';
+  }
+  if (planned === 'illustration' && guess.art && (guess.intent === 'create' || guess.intent === 'edit')) return guess.intent;
   if (planned === 'refuse') return 'refuse';
   if (guess.intent === 'clarify' && guess.confidence >= 0.8 && planned !== 'ask') {
     warn(`Команда «${guess.reason}» — вместо «${planned}» переспрашиваю`);
@@ -10110,6 +12009,11 @@ function arbitrateIntent(plan, guess, warn) {
     return 'ask';
   }
   return planned;                                  // во всём остальном слушаем модель
+}
+
+/** Устаревший отказ «рисовать/поворачивать/градиент нельзя» — круг 37 это снял. */
+function staleArtRefusal(text) {
+  return /(рис|иллюстрац|картин|вектор|кривы|контур|поворот|градиент|персонаж|фигурк)/iu.test(String(text || ''));
 }
 
 function buildUserTurn(utterance, plan, persona) {
@@ -10457,6 +12361,114 @@ export function findInsertTarget(doc, utterance, scope, engine, geo = null) {
  * (круг 3, п.3), а если он не назван — в активная доска/выделенный фрейм:
  * «добавь снизу панель с тремя кнопками» обязано попасть в текущий экран, а не в сторону.
  */
+/**
+ * Круг 37 (SPEC §12.2): куда встаёт нарисованная картинка. Картинка сама по себе — отдельной
+ * доской (по умолчанию: «нарисуй монстра» не должно раздувать экран, на который человек смотрит).
+ * Внутрь — если место названо в команде («нарисуй котика в карточке») или человек выделил блок;
+ * тогда рамка вписывается в ширину блока.
+ */
+function artPlacement(doc, scope, engine, utterance, geo = null) {
+  const spoken = String(utterance || '');
+  const explicitNew = RE_NEW_ARTBOARD.test(spoken) || RE_ARTBOARD_WORD.test(spoken);
+  const insert = explicitNew ? null : findInsertTarget(doc, spoken, scope, engine, geo);
+  const humanSel = scope.kind === 'selection' && scope.selectionBy !== 'agent';
+  let parentId = null, index = null;
+  if (insert) { parentId = insert.parentId; index = insert.index; }
+  else if (!explicitNew && humanSel) parentId = scope.containerId;
+  const host = parentId ? nodeOf(doc, parentId) : null;
+  if (!host || host.type === 'page' || parentId === doc.root || artFrameOf(doc, parentId, engine)) {
+    return {
+      asArtboard: true, insert: false, parentId: doc.root, index: null, box: null,
+      text: 'Картинка становится отдельной доской на холсте.',
+      where: 'отдельной доской на холсте — картинка сама по себе, поэтому дай ей спокойный светлый фон (background).',
+    };
+  }
+  const rects = rectsOf(geo) || rectsOf(safeSolve(engine, doc));
+  const r = rects && rects[parentId];
+  const pad = host.layout && host.layout.padding && typeof host.layout.padding === 'object' ? host.layout.padding : {};
+  const padPx = (k) => scaleNum(doc, pad[k] == null ? 0 : pad[k], 'spacing', engine) || 0;
+  const inner = r ? Number(r.w) - padPx('l') - padPx('r') : 240;
+  const side = Math.round(Math.max(48, Math.min(240, Number.isFinite(inner) ? inner : 240)));
+  return {
+    asArtboard: false, insert: !!insert, parentId, index: insert ? insert.index : null, box: { w: side, h: side },
+    text: `Картинка встаёт внутрь ${nameOrId(doc, parentId)} рамкой ${side}×${side}.`,
+    where: `внутрь ${nameOrId(doc, parentId)}, рамкой ${side}×${side} px. Фон холста — "none": подложку даёт сам блок.`,
+  };
+}
+
+/** Итоги компиляции иллюстраций в дереве: замечания модели, человеку, сколько деталей. */
+function collectArt(spec) {
+  const out = { blocking: [], human: [], parts: 0, pictures: 0, pending: 0, rects: false };
+  const walk = (sp) => {
+    if (!sp || typeof sp !== 'object') return;
+    if (sp.$art) {
+      out.pictures++;
+      out.parts += sp.$art.paths || 0;
+      if (sp.$art.pending) out.pending++;
+      out.blocking.push(...(sp.$art.blocking || []));
+      out.human.push(...(sp.$art.human || []));
+      if ((sp.$art.blocking || []).includes(ART_RECT_PROBLEM)) out.rects = true;
+    }
+    for (const k of sp.children || []) walk(k);
+  };
+  walk(spec);
+  return out;
+}
+
+/** Узлы-картинки в ответе модели (дерево или create патча), которые ещё не нарисованы. */
+function artPlaceholders(data, intent) {
+  const out = [];
+  const walk = (n, parent, depth) => {
+    if (!n || typeof n !== 'object' || Array.isArray(n) || depth > MAX_TREE_DEPTH + 2) return;
+    if (ART_NODE_TYPES.has(String(n.type || '').trim().toLowerCase())) { out.push({ node: n, parent }); return; }
+    if (Array.isArray(n.children)) for (const k of n.children) walk(k, n, depth + 1);
+  };
+  if (intent === 'create') walk(data, null, 0);
+  else if (data && Array.isArray(data.edits)) {
+    for (const e of data.edits) if (e && typeof e === 'object' && e.node) walk(e.node, null, 0);
+  }
+  return out;
+}
+
+/**
+ * Круг 37: «виджет печеньки», а модель собрала печеньку кругом с точками и не положила узла-картинки.
+ * Ставим место под иллюстрацию сами: слой, чьё имя совпадает с предметом из реплики, заменяется
+ * узлом illustration того же размера; не нашёлся — картинка встаёт первой в корень виджета.
+ * Возвращает true, если место поставлено.
+ */
+function injectArtPlaceholder(tree, utterance) {
+  if (!tree || typeof tree !== 'object' || !Array.isArray(tree.children)) return false;
+  const words = (String(utterance || '').toLowerCase().match(/[\p{L}]+/gu) || [])
+    .filter((w) => w.length >= 4 && !RE_ART_WIDGET.test(w) && artSubjectIn(w)).map(stemRu);
+  const fixedSide = (v) => (typeof v === 'number' && v > 0 ? v : null);
+  let hit = null;
+  const walk = (n, parent, depth) => {
+    if (hit || !n || typeof n !== 'object' || depth > MAX_TREE_DEPTH) return;
+    const nameStems = (String(n.name || '').toLowerCase().match(/[\p{L}]+/gu) || []).map(stemRu);
+    if (parent && words.length && nameStems.some((w) => words.includes(w)) && n.type !== 'text') { hit = { n, parent }; return; }
+    for (const k of Array.isArray(n.children) ? n.children : []) walk(k, n, depth + 1);
+  };
+  walk(tree, null, 0);
+  const subject = String(utterance || '').trim();
+  if (hit) {
+    const i = hit.parent.children.indexOf(hit.n);
+    const w = fixedSide(hit.n.size && hit.n.size.w) || ART_BOX_DEFAULT;
+    const h = fixedSide(hit.n.size && hit.n.size.h) || w;
+    hit.parent.children[i] = { type: 'illustration', name: hit.n.name, size: { w, h }, draw: `${hit.n.name} — для «${subject}»` };
+    return true;
+  }
+  // имени предмета в именительном падеже из реплики не достать («печеньки») — назовёт иллюстратор
+  tree.children.unshift({ type: 'illustration', name: 'Иллюстрация', $autoName: true, size: { w: ART_BOX_DEFAULT, h: ART_BOX_DEFAULT }, draw: subject });
+  return true;
+}
+
+/** Цвета документа строкой для иллюстратора: «accent #2a6fdb, canvas #ffffff, …». */
+function artColorsLine(doc) {
+  const colors = (doc && doc.tokens && doc.tokens.colors) || {};
+  return cutText(Object.keys(colors).filter((k) => !UNSAFE_KEYS.has(k) && typeof colors[k] === 'string')
+    .map((k) => `${k} ${colors[k]}`).join(', '), 800);
+}
+
 function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null) {
   const note = warn || (() => {});
   const spoken = String(utterance || '');
@@ -10977,6 +12989,25 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
         asArtboard: placement.asArtboard,
       });
       out.ops = built.ops;
+      out.art = collectArt(built.spec);
+    } else if (intent === 'illustration') {
+      /* Круг 37 (SPEC §12.2): ответ иллюстратора → свободная рамка с векторами. Отдельной доской
+       * рамка = холст модели; внутри блока — вписана в рамку места. */
+      out.placement = placement;
+      const cv = data && data.canvas && typeof data.canvas === 'object' ? data.canvas : {};
+      const cw = Number(cv.w) > 0 ? Math.min(ART_LIMITS.canvasMax, Math.max(ART_LIMITS.canvasMin, Math.round(Number(cv.w)))) : ART_CANVAS;
+      const chh = Number(cv.h) > 0 ? Math.min(ART_LIMITS.canvasMax, Math.max(ART_LIMITS.canvasMin, Math.round(Number(cv.h)))) : cw;
+      const box = placement.box || { w: cw, h: chh };
+      const name = cutText(strOf(data && data.name).trim() || 'Иллюстрация', 80);
+      const built = treeToOps({
+        doc, tree: { type: 'illustration', name, size: { w: box.w, h: box.h }, art: data }, engine, warn, persona, said,
+        parentId: placement.parentId, index: placement.insert && placement.index != null ? placement.index : undefined,
+        asArtboard: placement.asArtboard,
+      });
+      out.art = collectArt(built.spec);
+      if (!out.art.parts) throw ERR('schema', 'Модель не нарисовала ни одной годной детали'
+        + (out.art.blocking.length ? `: ${out.art.blocking[0]}` : ' — нужны детали с контуром d или фигуры с x, y, w, h'));
+      out.ops = built.ops;
     } else if (intent === 'theme') {
       out.ops = themeToOps({ doc, theme: data, engine, warn, scope });
     } else {
@@ -11058,6 +13089,12 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
   out.violations = fresh;
   out.problems = fresh.map((v) => formatViolation(v, applied.doc));
   out.blocking = fresh.filter(isBlocking).map((v) => formatViolation(v, applied.doc));
+  /* Круг 37: битые детали и «стопка прямоугольников» — повод для ОДНОГО круга починки; человеку
+   * про них сказано отдельно (warn в компиляторе), в «Проверку макета» они не идут. */
+  if (out.art && out.art.blocking.length) {
+    out.blocking.push(...out.art.blocking);
+    if (out.art.human.length) out.repairNote = out.art.human[0];
+  }
 
   /* Круг 3, п.1: правки могли примениться «в пустоту» — версия документа вырастет, а на экране
    * не изменится ничего. Раньше в таком случае человеку говорили «Готово». Теперь это факт:
@@ -11268,15 +13305,37 @@ export function describeChange(ops, doc, after = null, engine = null) {
   const born = new Map(creates.map((o) => [o.node.id, o.node]));
   const phrases = [];
   const tops = creates.filter((o) => !born.has(o.node.parent));
+  /* Круг 37 (SPEC §12.2): нарисованное — словами рисунка: «Нарисовал «Монстр»: 34 детали». Деталь —
+   * контур; мелочи одной группы лежат в одном слое, но деталями считаются по отдельности. */
+  const bornArt = creates.filter((o) => o.node.type === 'frame' && o.node.role === 'illustration');
+  const artParts = (fid) => creates.filter((o) => o.node.parent === fid && o.node.type === 'vector')
+    .reduce((n, o) => n + (Array.isArray(o.node.paths) ? o.node.paths.length : 0), 0);
   if (tops.length) {
     const parentId = tops[0].node.parent;
     const parent = nodeOf(doc, parentId);
     const onCanvas = !parent || parent.type === 'page' || parentId === doc.root;
     const where = onCanvas ? (tops[0].node.type === 'frame' ? ' новой доской' : '') : ` в ${changeName(doc, born, parentId)}`;
-    phrases.push(tops.length === 1
-      ? `добавил ${changeName(doc, born, tops[0].node.id)}${where}`
-      : `добавил ${tops.length} ${plural(tops.length, 'слой', 'слоя', 'слоёв')}${where}`);
+    const top = tops.length === 1 ? tops[0].node : null;
+    if (top && top.role === 'illustration') {
+      const n = artParts(top.id);
+      phrases.push(`нарисовал ${changeName(doc, born, top.id)}${onCanvas ? '' : where}: ${n} ${plural(n, 'деталь', 'детали', 'деталей')}`);
+    } else if (top && top.type === 'vector' && parent && artFrameOf(doc, parentId, engine)) {
+      phrases.push(`дорисовал ${changeName(doc, born, top.id)} в ${changeName(doc, born, parentId)}`);
+    } else if (!top && tops.every((o) => o.node.type === 'vector') && parent && artFrameOf(doc, parentId, engine)) {
+      phrases.push(`дорисовал ${tops.length} ${plural(tops.length, 'деталь', 'детали', 'деталей')} в ${changeName(doc, born, parentId)}`);
+    } else {
+      phrases.push(tops.length === 1
+        ? `добавил ${changeName(doc, born, tops[0].node.id)}${where}`
+        : `добавил ${tops.length} ${plural(tops.length, 'слой', 'слоя', 'слоёв')}${where}`);
+      // картинка внутри нового блока — отдельной фразой, это главное в «виджете печеньки»
+      for (const a of bornArt.slice(0, 2)) {
+        const n = artParts(a.node.id);
+        if (n) phrases.push(`нарисовал ${changeName(doc, born, a.node.id)}: ${n} ${plural(n, 'деталь', 'детали', 'деталей')}`);
+      }
+    }
   }
+  const artSkip = new Set();
+  phrases.push(...artChangePhrases(list, doc, after, engine, born, artSkip));
   const removes = list.filter((o) => o.op === 'remove' && o.id && !born.has(o.id));
   if (removes.length === 1) phrases.push(`удалил ${changeName(doc, born, removes[0].id)}`);
   else if (removes.length) phrases.push(`удалил ${removes.length} ${plural(removes.length, 'слой', 'слоя', 'слоёв')}`);
@@ -11293,7 +13352,7 @@ export function describeChange(ops, doc, after = null, engine = null) {
   // одинаковая правка у нескольких слоёв — одной строкой
   const groups = new Map();
   for (const op of list) {
-    if (op.op !== 'set' || !op.id || born.has(op.id)) continue;
+    if (op.op !== 'set' || !op.id || born.has(op.id) || artSkip.has(op)) continue;
     const path = String(op.path || '');
     if (/^(states|motion)(\.|$)/.test(path)) continue;
     const node = nodeOf(doc, op.id);
@@ -11331,6 +13390,82 @@ export function describeChange(ops, doc, after = null, engine = null) {
     ? `${phrases.slice(0, 2).join('; ')} и ещё ${rest} ${plural(rest, 'правка', 'правки', 'правок')}`
     : phrases.join('; ');
   return cutText(text.charAt(0).toUpperCase() + text.slice(1), 200);
+}
+
+/**
+ * Круг 37 (SPEC §12.2): правки рисунка словами — «перекрасил «Монстр»: 6 деталей, #8b5cf6 → #30a46c»,
+ * «размер «Левый глаз»: 58×64 → 75×83 px», «новая форма «Хвост»», «рисунок «Монстр»: 400×400 → 520×520 px».
+ * Операции, сказанные здесь, кладутся в skip — общая группировка их не повторяет.
+ */
+function artChangePhrases(list, doc, after, engine, born, skip) {
+  const out = [];
+  const sets = list.filter((o) => o.op === 'set' && o.id && !born.has(o.id));
+  const byId = new Map();
+  for (const o of sets) {
+    if (!byId.has(o.id)) byId.set(o.id, []);
+    byId.get(o.id).push(o);
+  }
+  const final = after || doc;
+  const sizeWords = (spec) => {
+    const w = fixedPx(spec && spec.w), h = fixedPx(spec && spec.h);
+    return w && h ? `${Math.round(w)}×${Math.round(h)}` : null;
+  };
+  // рисунок целиком: размер рамки-иллюстрации и место/размер её детей
+  const scaledFrames = new Set();
+  for (const [id, ops] of byId) {
+    const n = nodeOf(doc, id);
+    if (!n || n.type !== 'frame' || !isArtFrame(doc, id, engine)) continue;
+    const so = ops.find((o) => String(o.path) === 'size');
+    if (!so) continue;
+    scaledFrames.add(id);
+    skip.add(so);
+    const was = sizeWords(n.size), now = sizeWords(so.value);
+    out.push(`рисунок ${changeName(doc, born, id)}: ${was && now ? `${was} → ${now} px` : 'новый масштаб'}`);
+  }
+  const recolored = new Map();                     // рамка-иллюстрация (или сама деталь) → [id]
+  for (const [id, ops] of byId) {
+    const n = nodeOf(doc, id);
+    if (!n || n.type !== 'vector') continue;
+    if (scaledFrames.has(n.parent)) { ops.filter((o) => ['pos', 'size'].includes(String(o.path))).forEach((o) => skip.add(o)); continue; }
+    const pathsOp = ops.find((o) => String(o.path) === 'paths');
+    const shape = pathsOp && vpathsOf({ paths: pathsOp.value }).map((p) => p.d).join('|') !== vpathsOf(n).map((p) => p.d).join('|');
+    if (shape) {
+      ops.filter((o) => ['paths', 'viewBox', 'pos', 'size'].includes(String(o.path))).forEach((o) => skip.add(o));
+      out.push(`новая форма ${changeName(doc, born, id)}`);
+      continue;
+    }
+    if (pathsOp || ops.some((o) => String(o.path) === 'fill')) {
+      ops.filter((o) => ['paths', 'fill'].includes(String(o.path))).forEach((o) => skip.add(o));
+      const key = artFrameOf(doc, id, engine) || id;
+      if (!recolored.has(key)) recolored.set(key, []);
+      recolored.get(key).push(id);
+    }
+    const so = ops.find((o) => String(o.path) === 'size');
+    if (so) {
+      skip.add(so);
+      ops.filter((o) => String(o.path) === 'pos').forEach((o) => skip.add(o));
+      const was = sizeWords(n.size), now = sizeWords(so.value);
+      out.push(`размер ${changeName(doc, born, id)}: ${was && now ? `${was} → ${now} px` : 'новый'}`);
+    }
+  }
+  for (const [key, ids] of recolored) {
+    const before = dominantArtColor(doc, ids);
+    const now = dominantArtColor(final, ids);
+    const change = before && now && before !== now ? `, ${before} → ${now}` : '';
+    out.push(ids.length > 1 || key !== ids[0]
+      ? `перекрасил ${changeName(doc, born, key)}: ${ids.length} ${plural(ids.length, 'деталь', 'детали', 'деталей')}${change}`
+      : `перекрасил ${changeName(doc, born, ids[0])}${change}`);
+  }
+  // место детали в рисунке: «положение «Левый рожок» в рисунке: 120,80»
+  for (const o of sets) {
+    if (skip.has(o) || String(o.path) !== 'pos') continue;
+    const n = nodeOf(doc, o.id);
+    const par = n && n.parent != null ? nodeOf(doc, n.parent) : null;
+    if (!par || par.id === doc.root || !isFreeFrameNode(par, engine) || !o.value) continue;
+    skip.add(o);
+    out.push(`положение ${changeName(doc, born, o.id)} в ${changeName(doc, born, par.id)}: ${Math.round(Number(o.value.x) || 0)},${Math.round(Number(o.value.y) || 0)}`);
+  }
+  return out;
 }
 
 /**

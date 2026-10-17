@@ -39,7 +39,7 @@
  * ------------------------------------------------------------------ */
 
 /** @type {Set<string>} */
-const NODE_TYPES = new Set(['page', 'frame', 'text', 'rect', 'ellipse', 'image', 'instance']);
+const NODE_TYPES = new Set(['page', 'frame', 'text', 'rect', 'ellipse', 'image', 'instance', 'vector']);
 const CONTAINER_TYPES = new Set(['page', 'frame']);
 /* Круг 19 (SPEC §5): компоненты. Мастер — узел в библиотеке с полем `component`,
    экземпляр — узел типа `instance` со ссылкой `of` и значениями пропсов. Детей у
@@ -855,20 +855,14 @@ function styleProblem(v) {
   return null;
 }
 
-/** Цвет (fill, color, stroke.color): null, строка или обёртка {token|color|value: строка}. */
-function paintProblem(v, what) {
-  if (v === null || typeof v === 'string') return null;
-  if (!isObj(v)) return `${what}: цвет — строка или объект`;
-  for (const k of ['token', 'color', 'value']) if (!optStr(v, k)) return `${what}.${k} должен быть строкой`;
-  return null;
-}
 
-/** Обводка: null, строка или {color|token|value, width}. */
-function strokeProblem(v) {
+/** Обводка: null, строка или {color|token|value, width}; color — краска (круг 37: и градиент). */
+function strokeProblem(v, noGradient) {
   if (v === null || typeof v === 'string') return null;
   if (!isObj(v)) return 'stroke: строка или объект';
+  if (v.gradient !== undefined) return 'stroke: градиент обводки — в stroke.color';
   if (v.color !== undefined) {
-    const err = paintProblem(v.color, 'stroke.color');
+    const err = paintProblem(v.color, 'stroke.color', noGradient);
     if (err) return err;
   }
   for (const k of ['token', 'value']) if (!optStr(v, k)) return `stroke.${k} должен быть строкой`;
@@ -1019,8 +1013,9 @@ function statePatchProblem(v, what) {
     if (x === undefined) continue;
     let err = null;
     switch (k) {
-      case 'fill': case 'color': err = paintProblem(x, `${what}.${k}`); break;
-      case 'stroke': err = strokeProblem(x); if (err) err = `${what}.${err}`; break;
+      // круг 37: в состоянии — только цвет, градиент не переходит плавно
+      case 'fill': case 'color': err = paintProblem(x, `${what}.${k}`, true); break;
+      case 'stroke': err = strokeProblem(x, true); if (err) err = `${what}.${err}`; break;
       case 'opacity': err = isNum(x) && x >= 0 && x <= 1 ? null : `${what}.opacity вне 0..1`; break;
       case 'scale':
         err = isNum(x) && x >= STATE_LIMITS.scale[0] && x <= STATE_LIMITS.scale[1] ? null
@@ -1081,6 +1076,492 @@ function hasStates(node) {
   return false;
 }
 
+/* ------------------------------------------------------------------ *
+ * 2.4b Векторы и краски (круг 37, SPEC §12)
+ *
+ * Узел `vector` — контуры SVG (`paths`) в собственной системе координат
+ * (`viewBox` {x?, y?, w, h}), вписанные в рамку узла с сохранением пропорций
+ * (xMidYMid meet). Путь разбирается ядром строго (parsePath): неверный путь —
+ * bad-node, импорт — bad-doc. Краска (Paint) — цвет, как раньше, или градиент
+ * {gradient:{kind, angle?, cx?, cy?, r?, stops}}; стоп — доля 0…1 и цвет/токен.
+ * `rotate` — визуальный поворот вокруг центра у любого не-page узла: решатель его
+ * не читает, как и scale состояний (§11).
+ * ------------------------------------------------------------------ */
+
+/** Пределы вектора (SPEC §12.1). */
+const VECTOR_LIMITS = Object.freeze({
+  maxPaths: 256,            // контуров на узел
+  maxD: 20000,              // символов в одном d
+  maxTotalD: 100000,        // символов d на узел суммарно
+  maxStrokeWidth: 64,       // толщина обводки контура, ед. viewBox
+  maxStops: 16,             // стопов градиента
+  heavyCommands: 5000,      // больше команд на узел — path-heavy (info)
+  maxCoord: 1e6             // |число| в пути
+});
+const GRADIENT_KINDS = Object.freeze(['linear', 'radial']);
+const GRADIENT_KIND_SET = new Set(GRADIENT_KINDS);
+const GRADIENT_KEYS = new Set(['kind', 'angle', 'cx', 'cy', 'r', 'stops']);
+const STOP_KEYS = new Set(['at', 'color', 'token', 'opacity']);
+const VPATH_KEYS = new Set(['d', 'name', 'fill', 'stroke', 'strokeWidth', 'opacity', 'fillRule', 'lineCap', 'lineJoin']);
+const FILL_RULES = new Set(['nonzero', 'evenodd']);
+const LINE_CAPS = new Set(['butt', 'round', 'square']);
+const LINE_JOINS = new Set(['miter', 'round', 'bevel']);
+const ROTATE_LIMIT = 360;
+/** Число аргументов команды пути. */
+const PATH_ARGS = Object.freeze({ M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, A: 7, Z: 0 });
+const PATH_NUM_RE = /[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/y;
+const isPathWsp = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+
+/** Градиент. @returns {string|null} */
+function gradientProblem(g, what) {
+  const w = what + '.gradient';
+  if (!isObj(g)) return `${w}: нужен объект {kind, stops, …}`;
+  for (const k of Object.keys(g)) if (!GRADIENT_KEYS.has(k)) return `${w}.${k}: поля градиента — kind, angle, cx, cy, r, stops`;
+  if (!GRADIENT_KIND_SET.has(g.kind)) return `${w}.kind: 'linear' или 'radial'`;
+  if (!optNum(g, 'angle', 0, 360)) return `${w}.angle: градусы 0..360`;
+  for (const k of ['cx', 'cy', 'r']) if (!optNum(g, k, 0, 1)) return `${w}.${k}: доля 0..1`;
+  const s = g.stops;
+  if (!Array.isArray(s) || !s.length) return `${w}.stops: нужен массив стопов`;
+  if (s.length > VECTOR_LIMITS.maxStops) return `${w}.stops: не больше ${VECTOR_LIMITS.maxStops} стопов`;
+  for (let i = 0; i < s.length; i++) {
+    const st = s[i];
+    const sw = `${w}.stops.${i}`;
+    if (!isObj(st)) return `${sw}: нужен объект {at, color|token, opacity?}`;
+    for (const k of Object.keys(st)) if (!STOP_KEYS.has(k)) return `${sw}.${k}: поля стопа — at, color, token, opacity`;
+    if (!isNum(st.at) || st.at < 0 || st.at > 1) return `${sw}.at: доля 0..1`;
+    const hasC = st.color !== undefined;
+    const hasT = st.token !== undefined;
+    if (hasC === hasT) return `${sw}: нужен ровно один из color или token`;
+    if (hasC && (typeof st.color !== 'string' || !st.color)) return `${sw}.color должен быть строкой`;
+    if (hasT && (typeof st.token !== 'string' || !st.token)) return `${sw}.token должен быть строкой`;
+    if (!optNum(st, 'opacity', 0, 1)) return `${sw}.opacity вне 0..1`;
+  }
+  return null;
+}
+
+/**
+ * Краска (fill, color, stroke.color, контуры): null, строка, обёртка
+ * {token|color|value: строка} или (круг 37) {gradient}. В патчах состояний
+ * градиента нет — там переход цвета, а не смена краски.
+ * @param {any} v @param {string} what @param {boolean} [noGradient]
+ * @returns {string|null}
+ */
+function paintProblem(v, what, noGradient) {
+  if (v === null || typeof v === 'string') return null;
+  if (!isObj(v)) return `${what}: цвет — строка или объект`;
+  if (v.gradient !== undefined) {
+    if (noGradient) return `${what}: здесь градиент недопустим — только цвет`;
+    if (Object.keys(v).length !== 1) return `${what}: у градиента других ключей нет — {gradient:{…}}`;
+    return gradientProblem(v.gradient, what);
+  }
+  for (const k of ['token', 'color', 'value']) if (!optStr(v, k)) return `${what}.${k} должен быть строкой`;
+  return null;
+}
+
+/** Есть ли в значении градиент. */
+const isGradientPaint = (v) => isObj(v) && isObj(v.gradient);
+
+/** Кеш проверки путей: d → {err, at, count}. Путь проверяется на каждый set узла. */
+const pathCheckCache = new Map();
+const PATH_CACHE_LIMIT = 4096;
+
+/**
+ * Разбор пути SVG. Строгий: первая команда M/m, числа конечные и не больше
+ * VECTOR_LIMITS.maxCoord по модулю, флаги дуг — 0 или 1, между числами —
+ * пробелы и не больше одной запятой. Неявные повторы раскрываются (лишние пары
+ * после M — это L), координаты становятся абсолютными.
+ * @param {any} d
+ * @returns {{ok:true, cmds:Array<{c:string,a:number[]}>, count:number}|{ok:false, error:string, at:number}}
+ */
+function parsePath(d) {
+  const fail = (error, at) => ({ ok: false, error, at });
+  if (typeof d !== 'string') return fail('путь должен быть строкой', 0);
+  if (d.length > VECTOR_LIMITS.maxD) return fail(`путь длиннее ${VECTOR_LIMITS.maxD} символов`, VECTOR_LIMITS.maxD);
+  const n = d.length;
+  let i = 0;
+  const cmds = [];
+  let cx = 0; let cy = 0; let sx = 0; let sy = 0;
+  const skipWsp = () => { while (i < n && isPathWsp(d[i])) i++; };
+  /** Разделитель между числами: пробелы и не больше одной запятой. */
+  const skipSep = () => {
+    skipWsp();
+    if (i < n && d[i] === ',') { i++; skipWsp(); return true; }
+    return false;
+  };
+  const readNum = () => {
+    PATH_NUM_RE.lastIndex = i;
+    const m = PATH_NUM_RE.exec(d);
+    if (!m) return null;
+    const v = Number(m[0]);
+    if (!Number.isFinite(v) || Math.abs(v) > VECTOR_LIMITS.maxCoord) return NaN;
+    i += m[0].length;
+    return v === 0 ? 0 : v;   // без -0: JSON и хэш его не различают, сравнение — да
+  };
+  const startsNum = () => {
+    const c = d[i];
+    return c !== undefined && ((c >= '0' && c <= '9') || c === '-' || c === '+' || c === '.');
+  };
+  skipWsp();
+  if (i >= n) return fail('пустой путь', 0);
+  let cmd = null;
+  while (true) {
+    skipWsp();
+    if (i >= n) break;
+    const ch = d[i];
+    const up = ch.toUpperCase();
+    if (!hasOwnProp.call(PATH_ARGS, up)) {
+      return fail(startsNum() ? (cmds.length ? 'число без команды (после Z нужна команда)' : 'путь начинается с M') : `неизвестная команда «${ch}»`, i);
+    }
+    if (!cmds.length && up !== 'M') return fail('путь начинается с M', i);
+    cmd = ch;
+    i++;
+    if (up === 'Z') { cmds.push({ c: 'Z', a: [] }); cx = sx; cy = sy; continue; }
+    const argc = PATH_ARGS[up];
+    const rel = ch !== up;
+    let first = true;
+    do {
+      if (!first) {
+        // повтор: после M неявные пары — это L
+        if (up === 'M') { cmd = rel ? 'l' : 'L'; }
+      }
+      const a = new Array(argc);
+      for (let k = 0; k < argc; k++) {
+        if (k > 0 && skipSep() && !startsNum() && !(up === 'A' && (k === 3 || k === 4))) return fail('после запятой нужно число', i);
+        if (k === 0) skipWsp();
+        if (up === 'A' && (k === 3 || k === 4)) {
+          if (d[i] !== '0' && d[i] !== '1') return fail('флаг дуги — 0 или 1', i);
+          a[k] = d[i] === '1' ? 1 : 0;
+          i++;
+          continue;
+        }
+        const v = readNum();
+        if (v === null) return fail(`команде ${up} нужно ${argc} ${plural(argc, 'число', 'числа', 'чисел')}`, i);
+        if (Number.isNaN(v)) return fail(`число вне ±${VECTOR_LIMITS.maxCoord}`, i);
+        a[k] = v;
+      }
+      const c = (cmd || ch).toUpperCase();
+      // в абсолютные
+      if (rel) {
+        if (c === 'H') a[0] += cx;
+        else if (c === 'V') a[0] += cy;
+        else if (c === 'A') { a[5] += cx; a[6] += cy; }
+        else for (let k = 0; k < argc; k += 2) { a[k] += cx; a[k + 1] += cy; }
+      }
+      for (let k = 0; k < argc; k++) if (!Number.isFinite(a[k]) || Math.abs(a[k]) > VECTOR_LIMITS.maxCoord * 2) return fail('координата вне пределов', i);
+      if (c === 'H') cx = a[0];
+      else if (c === 'V') cy = a[0];
+      else { cx = a[argc - 2]; cy = a[argc - 1]; }
+      if (c === 'M') { sx = cx; sy = cy; }
+      cmds.push({ c, a });
+      first = false;
+      // ещё один набор той же команды? Запятая перед ним допустима
+      const save = i;
+      const comma = skipSep();
+      if (startsNum()) continue;
+      if (comma) return fail('после запятой нужно число', i);
+      i = save;
+      break;
+    } while (true);
+  }
+  return { ok: true, cmds, count: cmds.length };
+}
+
+/** Проверка пути с кешем. @returns {{err:string|null, at:number, count:number}} */
+function pathCheck(d) {
+  if (typeof d !== 'string') return { err: 'путь должен быть строкой', at: 0, count: 0 };
+  const hit = pathCheckCache.get(d);
+  if (hit) return hit;
+  const r = parsePath(d);
+  const res = r.ok ? { err: null, at: 0, count: r.count } : { err: r.error, at: r.at, count: 0 };
+  if (pathCheckCache.size >= PATH_CACHE_LIMIT) pathCheckCache.delete(pathCheckCache.keys().next().value);
+  pathCheckCache.set(d, res);
+  return res;
+}
+
+/** Один контур вектора. @returns {string|null} */
+function vpathProblem(p, what) {
+  if (!isObj(p)) return `${what}: контур — объект {d, fill?, stroke?, …}`;
+  for (const k of Object.keys(p)) if (!VPATH_KEYS.has(k)) return `${what}.${k}: поля контура — ${[...VPATH_KEYS].join(', ')}`;
+  if (typeof p.d !== 'string') return `${what}.d: нужен путь SVG строкой`;
+  const pc = pathCheck(p.d);
+  if (pc.err) return `${what}.d: ${pc.err} (символ ${pc.at})`;
+  if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 200)) return `${what}.name: строка до 200 символов`;
+  for (const k of ['fill', 'stroke']) {
+    if (p[k] === undefined) continue;
+    const err = paintProblem(p[k], `${what}.${k}`);
+    if (err) return err;
+  }
+  if (!optNum(p, 'strokeWidth', 0, VECTOR_LIMITS.maxStrokeWidth)) return `${what}.strokeWidth: 0..${VECTOR_LIMITS.maxStrokeWidth}`;
+  if (!optNum(p, 'opacity', 0, 1)) return `${what}.opacity вне 0..1`;
+  if (p.fillRule !== undefined && !FILL_RULES.has(p.fillRule)) return `${what}.fillRule: 'nonzero' или 'evenodd'`;
+  if (p.lineCap !== undefined && !LINE_CAPS.has(p.lineCap)) return `${what}.lineCap: butt | round | square`;
+  if (p.lineJoin !== undefined && !LINE_JOINS.has(p.lineJoin)) return `${what}.lineJoin: miter | round | bevel`;
+  return null;
+}
+
+/** Поле paths вектора. @returns {string|null} */
+function pathsProblem(v) {
+  if (!Array.isArray(v)) return 'paths: нужен массив контуров';
+  if (v.length > VECTOR_LIMITS.maxPaths) return `paths: не больше ${VECTOR_LIMITS.maxPaths} контуров`;
+  let total = 0;
+  for (let i = 0; i < v.length; i++) {
+    const err = vpathProblem(v[i], 'paths.' + i);
+    if (err) return err;
+    total += v[i].d.length;
+    if (total > VECTOR_LIMITS.maxTotalD) return `paths: суммарно больше ${VECTOR_LIMITS.maxTotalD} символов пути`;
+  }
+  return null;
+}
+
+/** Поле viewBox вектора. @returns {string|null} */
+function viewBoxProblem(v) {
+  if (!isObj(v)) return 'viewBox: нужен объект {x?, y?, w, h}';
+  for (const k of Object.keys(v)) if (k !== 'x' && k !== 'y' && k !== 'w' && k !== 'h') return `viewBox.${k}: поля — x, y, w, h`;
+  for (const k of ['w', 'h']) if (!isNum(v[k]) || v[k] <= 0 || v[k] > MAX_SIZE) return `viewBox.${k}: число больше 0 и до ${MAX_SIZE}`;
+  for (const k of ['x', 'y']) if (!optNum(v, k, -MAX_SIZE, MAX_SIZE)) return `viewBox.${k}: число ±${MAX_SIZE}`;
+  return null;
+}
+
+/** viewBox для отрисовки и решателя: всегда числа (негодный — нулевой). */
+function vbOf(node) {
+  const v = node && isObj(node.viewBox) ? node.viewBox : null;
+  if (!v) return { x: 0, y: 0, w: 0, h: 0 };
+  return {
+    x: numIn(v.x, -MAX_SIZE, MAX_SIZE, 0), y: numIn(v.y, -MAX_SIZE, MAX_SIZE, 0),
+    w: numIn(v.w, 0, MAX_SIZE, 0), h: numIn(v.h, 0, MAX_SIZE, 0)
+  };
+}
+
+/** Свободная рамка: фрейм без авто-раскладки (дети по pos). */
+function isFreeFrame(node) {
+  if (!node || node.type !== 'frame') return false;
+  const m = isObj(node.layout) ? node.layout.mode : undefined;
+  return m === undefined || m === 'none' || !LAYOUT_MODES.has(m);
+}
+
+/* --------------------- геометрия путей: bbox, сдвиг --------------------- */
+
+/** Экстремумы кубической кривой по одной оси: значения в t∈(0,1). */
+function cubicExtrema(p0, p1, p2, p3, out) {
+  const a = -p0 + 3 * p1 - 3 * p2 + p3;
+  const b = 2 * (p0 - 2 * p1 + p2);
+  const c = p1 - p0;
+  const at = (t) => {
+    const mt = 1 - t;
+    return mt * mt * mt * p0 + 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t * p3;
+  };
+  if (Math.abs(a) < 1e-12) {
+    if (Math.abs(b) > 1e-12) { const t = -c / b; if (t > 0 && t < 1) out.push(at(t)); }
+    return;
+  }
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return;
+  const sq = Math.sqrt(disc);
+  for (const t of [(-b + sq) / (2 * a), (-b - sq) / (2 * a)]) if (t > 0 && t < 1) out.push(at(t));
+}
+
+/** Точки дуги (эндпоинт-параметризация SVG → центр), включая концы. */
+function arcSamples(x1, y1, rxIn, ryIn, phiDeg, fa, fs, x2, y2, steps) {
+  let rx = Math.abs(rxIn);
+  let ry = Math.abs(ryIn);
+  if (rx < 1e-9 || ry < 1e-9 || (x1 === x2 && y1 === y2)) return [[x1, y1], [x2, y2]];
+  const phi = (phiDeg * Math.PI) / 180;
+  const cos = Math.cos(phi);
+  const sin = Math.sin(phi);
+  const dx = (x1 - x2) / 2;
+  const dy = (y1 - y2) / 2;
+  const x1p = cos * dx + sin * dy;
+  const y1p = -sin * dx + cos * dy;
+  const lam = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+  if (lam > 1) { const s = Math.sqrt(lam); rx *= s; ry *= s; }
+  const num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+  const den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+  let k = den > 0 ? Math.sqrt(Math.max(0, num / den)) : 0;
+  if (fa === fs) k = -k;
+  const cxp = (k * rx * y1p) / ry;
+  const cyp = (-k * ry * x1p) / rx;
+  const ccx = cos * cxp - sin * cyp + (x1 + x2) / 2;
+  const ccy = sin * cxp + cos * cyp + (y1 + y2) / 2;
+  const ang = (ux, uy, vx, vy) => {
+    const a = Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+    return a;
+  };
+  const t1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  let dt = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+  if (!fs && dt > 0) dt -= 2 * Math.PI;
+  else if (fs && dt < 0) dt += 2 * Math.PI;
+  const out = [];
+  for (let s = 0; s <= steps; s++) {
+    const t = t1 + (dt * s) / steps;
+    const ex = rx * Math.cos(t);
+    const ey = ry * Math.sin(t);
+    out.push([cos * ex - sin * ey + ccx, sin * ex + cos * ey + ccy]);
+  }
+  out[0] = [x1, y1];
+  out[out.length - 1] = [x2, y2];
+  return out;
+}
+
+/** bbox разобранного пути (cmds из parsePath). @returns {{x1,y1,x2,y2}|null} */
+function cmdsBox(cmds) {
+  let x1 = Infinity; let y1 = Infinity; let x2 = -Infinity; let y2 = -Infinity;
+  const add = (x, y) => {
+    if (x < x1) x1 = x; if (x > x2) x2 = x;
+    if (y < y1) y1 = y; if (y > y2) y2 = y;
+  };
+  let cx = 0; let cy = 0; let sx = 0; let sy = 0;
+  let pc = null;   // прошлая контрольная точка (для S/T): {x, y, kind}
+  for (const { c, a } of cmds) {
+    if (c === 'M') { cx = a[0]; cy = a[1]; sx = cx; sy = cy; add(cx, cy); pc = null; continue; }
+    if (c === 'Z') { cx = sx; cy = sy; pc = null; continue; }
+    if (c === 'L') { add(a[0], a[1]); cx = a[0]; cy = a[1]; pc = null; continue; }
+    if (c === 'H') { add(a[0], cy); cx = a[0]; pc = null; continue; }
+    if (c === 'V') { add(cx, a[0]); cy = a[0]; pc = null; continue; }
+    if (c === 'C' || c === 'S') {
+      let c1x; let c1y; let c2x; let c2y; let ex; let ey;
+      if (c === 'C') { [c1x, c1y, c2x, c2y, ex, ey] = a; }
+      else {
+        c1x = pc && pc.kind === 'C' ? 2 * cx - pc.x : cx;
+        c1y = pc && pc.kind === 'C' ? 2 * cy - pc.y : cy;
+        [c2x, c2y, ex, ey] = a;
+      }
+      const xs = []; const ys = [];
+      cubicExtrema(cx, c1x, c2x, ex, xs);
+      cubicExtrema(cy, c1y, c2y, ey, ys);
+      add(ex, ey);
+      for (const x of xs) { x1 = Math.min(x1, x); x2 = Math.max(x2, x); }
+      for (const y of ys) { y1 = Math.min(y1, y); y2 = Math.max(y2, y); }
+      pc = { x: c2x, y: c2y, kind: 'C' };
+      cx = ex; cy = ey; continue;
+    }
+    if (c === 'Q' || c === 'T') {
+      let qx; let qy; let ex; let ey;
+      if (c === 'Q') { [qx, qy, ex, ey] = a; }
+      else {
+        qx = pc && pc.kind === 'Q' ? 2 * cx - pc.x : cx;
+        qy = pc && pc.kind === 'Q' ? 2 * cy - pc.y : cy;
+        [ex, ey] = a;
+      }
+      add(ex, ey);
+      const ext = (p0, p1, p2) => {
+        const den = p0 - 2 * p1 + p2;
+        if (Math.abs(den) < 1e-12) return null;
+        const t = (p0 - p1) / den;
+        if (!(t > 0 && t < 1)) return null;
+        return (1 - t) * (1 - t) * p0 + 2 * (1 - t) * t * p1 + t * t * p2;
+      };
+      const ex1 = ext(cx, qx, ex);
+      const ey1 = ext(cy, qy, ey);
+      if (ex1 !== null) { x1 = Math.min(x1, ex1); x2 = Math.max(x2, ex1); }
+      if (ey1 !== null) { y1 = Math.min(y1, ey1); y2 = Math.max(y2, ey1); }
+      pc = { x: qx, y: qy, kind: 'Q' };
+      cx = ex; cy = ey; continue;
+    }
+    if (c === 'A') {
+      for (const [x, y] of arcSamples(cx, cy, a[0], a[1], a[2], a[3], a[4], a[5], a[6], 48)) add(x, y);
+      cx = a[5]; cy = a[6]; pc = null; continue;
+    }
+  }
+  if (x1 === Infinity) return null;
+  return { x1, y1, x2, y2 };
+}
+
+/**
+ * Рамка контуров — для «подогнать viewBox». Точная по кривым (экстремумы C/Q,
+ * дуги — плотной выборкой). stroke (по умолчанию) — плюс половина толщины
+ * обводки у контуров с обводкой.
+ * @param {string|Array<string|object>} paths строка d, массив строк или контуров {d, stroke?, strokeWidth?}
+ * @param {{stroke?:boolean}} [opts]
+ * @returns {{x:number,y:number,w:number,h:number}|null}
+ */
+function pathBounds(paths, opts) {
+  const withStroke = !(opts && opts.stroke === false);
+  const list = typeof paths === 'string' ? [paths] : Array.isArray(paths) ? paths : [];
+  let box = null;
+  for (const p of list) {
+    const d = typeof p === 'string' ? p : isObj(p) ? p.d : null;
+    const r = parsePath(d);
+    if (!r.ok) continue;
+    const b = cmdsBox(r.cmds);
+    if (!b) continue;
+    let pad = 0;
+    if (withStroke && isObj(p) && p.stroke !== undefined && p.stroke !== null) {
+      pad = (isNum(p.strokeWidth) ? clamp(p.strokeWidth, 0, VECTOR_LIMITS.maxStrokeWidth) : 1) / 2;
+    }
+    const bb = { x1: b.x1 - pad, y1: b.y1 - pad, x2: b.x2 + pad, y2: b.y2 + pad };
+    box = box ? { x1: Math.min(box.x1, bb.x1), y1: Math.min(box.y1, bb.y1), x2: Math.max(box.x2, bb.x2), y2: Math.max(box.y2, bb.y2) } : bb;
+  }
+  if (!box) return null;
+  return { x: r2(box.x1), y: r2(box.y1), w: r2(box.x2 - box.x1), h: r2(box.y2 - box.y1) };
+}
+
+/** Число для d: округление, без «-0» и экспоненты. */
+function fmtNum(v, digits) {
+  const p = Math.pow(10, digits);
+  let x = Math.round((v + (v >= 0 ? Number.EPSILON : -Number.EPSILON)) * p) / p;
+  if (Object.is(x, -0) || x === 0) x = 0;
+  const s = String(x);
+  return /e/i.test(s) ? x.toFixed(digits).replace(/\.?0+$/, '') : s;
+}
+
+/**
+ * Команды parsePath → строка d (абсолютные команды).
+ * @param {Array<{c:string,a:number[]}>} cmds @param {number} [digits=2]
+ * @returns {string}
+ */
+function formatPath(cmds, digits) {
+  const dg = isNum(digits) ? clamp(Math.round(digits), 0, 6) : 2;
+  const out = [];
+  for (const cm of Array.isArray(cmds) ? cmds : []) {
+    if (!cm || typeof cm.c !== 'string') continue;
+    const a = Array.isArray(cm.a) ? cm.a : [];
+    out.push(cm.c + a.map((v, k) => (cm.c === 'A' && (k === 3 || k === 4) ? (v ? '1' : '0') : fmtNum(v, dg))).join(' '));
+  }
+  return out.join('');
+}
+
+/**
+ * Сдвиг пути на (dx, dy). Результат — абсолютные команды.
+ * @returns {string} '' — путь негоден
+ */
+function translatePath(d, dx, dy) {
+  const r = parsePath(d);
+  if (!r.ok) return '';
+  const tx = isNum(dx) ? dx : 0;
+  const ty = isNum(dy) ? dy : 0;
+  for (const cm of r.cmds) {
+    const a = cm.a;
+    if (cm.c === 'H') a[0] += tx;
+    else if (cm.c === 'V') a[0] += ty;
+    else if (cm.c === 'A') { a[5] += tx; a[6] += ty; }
+    else for (let k = 0; k + 1 < a.length; k += 2) { a[k] += tx; a[k + 1] += ty; }
+  }
+  return formatPath(r.cmds, 3);
+}
+
+/**
+ * «Подогнать viewBox»: деталь, нарисованная в координатах холста иллюстрации,
+ * становится вектором ровно по своей рамке: viewBox — рамка контуров, pos — её
+ * левый верхний угол, размер — фиксированный, 1:1 с координатами холста.
+ * @param {Array<string|object>|string} paths
+ * @param {{pad?:number}} [opts]
+ * @returns {{viewBox:{x:number,y:number,w:number,h:number}, pos:{x:number,y:number}, size:object}|null}
+ */
+function fitVector(paths, opts) {
+  const b = pathBounds(paths);
+  if (!b) return null;
+  const pad = opts && isNum(opts.pad) ? clamp(opts.pad, 0, 1000) : 0;
+  const x = r2(Math.floor((b.x - pad) * 100) / 100);
+  const y = r2(Math.floor((b.y - pad) * 100) / 100);
+  const w = r2(Math.max(1, Math.ceil((b.x + b.w + pad - x) * 100) / 100));
+  const h = r2(Math.max(1, Math.ceil((b.y + b.h + pad - y) * 100) / 100));
+  return {
+    viewBox: { x, y, w, h },
+    pos: { x: clamp(x, -MAX_SIZE, MAX_SIZE), y: clamp(y, -MAX_SIZE, MAX_SIZE) },
+    size: sizeSpec(w, h)
+  };
+}
+
 /**
  * Форма ОДНОГО поля узла. Структурные поля (id, type, parent, children) — не
  * здесь: их проверяет checkNode. Обязательность поля (size у фрейма,
@@ -1121,6 +1602,13 @@ function fieldProblem(node, k) {
       case 'shadow': err = shadowRefProblem(v, 'shadow'); break;
       case 'props': err = isObj(v) ? null : 'props экземпляра: нужен объект'; break;
       case 'component': err = isObj(v) ? null : 'component должен быть объектом'; break;
+      // круг 37 (SPEC §12.1): поворот — у всех, кроме страницы; контуры и viewBox — только у вектора
+      case 'rotate':
+        err = node.type === 'page' ? 'rotate: страницу не поворачивают'
+          : isNum(v) && v >= -ROTATE_LIMIT && v <= ROTATE_LIMIT ? null : `rotate: градусы −${ROTATE_LIMIT}..${ROTATE_LIMIT}`;
+        break;
+      case 'viewBox': err = node.type === 'vector' ? viewBoxProblem(v) : 'viewBox бывает только у vector'; break;
+      case 'paths': err = node.type === 'vector' ? pathsProblem(v) : 'paths бывают только у vector'; break;
       default: break;
     }
   }
@@ -1142,6 +1630,8 @@ function withoutBadFields(node, keep) {
     if (k === 'characters' && node.type === 'text') out.characters = '';
     else if (k === 'size' && node.type !== 'page' && node.type !== 'instance') out.size = sizeSpec('hug', 'hug');
     else if (k === 'of' && node.type === 'instance') out.of = '?' + node.id;
+    else if (k === 'viewBox' && node.type === 'vector') out.viewBox = { w: 1, h: 1 };
+    else if (k === 'paths' && node.type === 'vector') out.paths = [];
     else delete out[k];
   }
   return out;
@@ -1236,6 +1726,11 @@ function checkNode(node, doc, loose) {
         }
       }
     }
+  }
+  if (node.type === 'vector') {
+    // круг 37 (SPEC §12.1): viewBox и контуры обязательны; форму проверяет fieldProblem
+    if (node.viewBox === undefined) return 'vector: нет viewBox';
+    if (node.paths === undefined) return 'vector: нет paths';
   }
   if (node.type === 'text') {
     if (typeof node.characters !== 'string') return 'text: нет characters';
@@ -1651,6 +2146,8 @@ function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps) {
       if (isObj(inst.states)) sn.states = mergeStates(mn.states, inst.states);
       if (isObj(inst.motion)) sn.motion = { ...(isObj(mn.motion) ? mn.motion : {}), ...inst.motion };
       if (inst.shadow !== undefined) sn.shadow = inst.shadow;
+      // круг 37: поворот экземпляра заменяет поворот корня мастера
+      if (inst.rotate !== undefined) sn.rotate = inst.rotate;
     } else {
       sn.parent = synId(mn.parent);
     }
@@ -1979,7 +2476,7 @@ function placeholderName(doc, idOrNode) {
 }
 const PLACEHOLDER_NAMES = {
   frame: 'Группа', text: 'Текст', rect: 'Прямоугольник', ellipse: 'Эллипс', image: 'Картинка',
-  instance: 'Экземпляр'
+  instance: 'Экземпляр', vector: 'Вектор'
 };
 
 /**
@@ -4233,8 +4730,10 @@ function measureNodeInner(ctx, node, availW, availH, key, stretch) {
     else h = r2(lines.length * style.lineHeight);
     res = { w: r2(Math.max(0, w)), h: r2(Math.max(0, h)) };
   } else {
-    const w = sw.mode === 'fixed' ? fixedSize(sw) : (byBoxW ? availW : 0);
-    const h = sh.mode === 'fixed' ? fixedSize(sh) : (byBoxH ? availH : 0);
+    // круг 37 (SPEC §12.1): вектор — как rect, но «по содержимому» — это его viewBox
+    const vb = node.type === 'vector' ? vbOf(node) : null;
+    const w = sw.mode === 'fixed' ? fixedSize(sw) : (byBoxW ? availW : (vb ? vb.w : 0));
+    const h = sh.mode === 'fixed' ? fixedSize(sh) : (byBoxH ? availH : (vb ? vb.h : 0));
     res = { w: r2(Math.max(0, w)), h: r2(Math.max(0, h)) };
   }
   ctx.measCache.set(key, res);
@@ -4562,6 +5061,8 @@ function hashGeometry(geo) {
  */
 function resolveColor(doc, value) {
   let v = value;
+  // круг 37: градиент — цвет стопа, ближайшего к середине (контраст, описания, плашка доски)
+  if (isGradientPaint(v)) return gradientMidColor(doc, v.gradient);
   if (v && typeof v === 'object') {
     v = v.token !== undefined ? v.token : v.color !== undefined ? v.color : v.value;
   }
@@ -4576,6 +5077,96 @@ function resolveColor(doc, value) {
   if (/^#[0-9a-fA-F]{6}$/.test(v)) return v.toLowerCase();
   if (/^#[0-9a-fA-F]{8}$/.test(v)) return v.slice(0, 7).toLowerCase();
   return null;
+}
+
+/** Цвет стопа градиента, ближайшего к середине. @returns {string|null} */
+function gradientMidColor(doc, g) {
+  const stops = Array.isArray(g.stops) ? g.stops : [];
+  let best = null;
+  let dist = Infinity;
+  for (const st of stops) {
+    if (!isObj(st)) continue;
+    const c = resolveColor(doc, typeof st.token === 'string' ? st.token : st.color);
+    if (!c) continue;
+    const dd = Math.abs((isNum(st.at) ? st.at : 0) - 0.5);
+    if (dd < dist) { dist = dd; best = c; }
+  }
+  return best;
+}
+
+/**
+ * Краска → значение для отрисовки (круг 37, SPEC §12.1). Единственное место, где
+ * градиент становится числами: сцена, экспорт, образцы в инспекторе и мозг читают
+ * краску только так. Стоп с неразрешимым цветом пропускается (о нём скажет
+ * dead-color-ref); градиент без живых стопов — краски нет.
+ * @param {object} doc @param {any} paint
+ * @returns {null|{type:'color', color:string}|{type:'gradient', kind:string, angle:number, cx:number, cy:number, r:number,
+ *   stops:Array<{at:number, color:string, opacity:number}>}}
+ */
+function resolvePaint(doc, paint) {
+  if (isGradientPaint(paint)) {
+    const g = paint.gradient;
+    const stops = [];
+    for (const st of Array.isArray(g.stops) ? g.stops.slice(0, VECTOR_LIMITS.maxStops) : []) {
+      if (!isObj(st)) continue;
+      const color = resolveColor(doc, typeof st.token === 'string' ? st.token : st.color);
+      if (!color) continue;
+      stops.push({ at: numIn(st.at, 0, 1, 0), color, opacity: numIn(st.opacity, 0, 1, 1) });
+    }
+    if (!stops.length) return null;
+    return {
+      type: 'gradient', kind: g.kind === 'radial' ? 'radial' : 'linear',
+      angle: numIn(g.angle, 0, 360, 180), cx: numIn(g.cx, 0, 1, 0.5), cy: numIn(g.cy, 0, 1, 0.5), r: numIn(g.r, 0, 1, 0.5),
+      stops
+    };
+  }
+  const color = resolveColor(doc, paint);
+  return color ? { type: 'color', color } : null;
+}
+
+/** '#rrggbb' + прозрачность → CSS. */
+function cssColor(hex, opacity) {
+  if (!isNum(opacity) || opacity >= 1) return hex;
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${r2(opacity)})`;
+}
+
+/**
+ * Краска как CSS-фон — для образцов в инспекторе и списке контуров.
+ * @returns {string|null} '#hex' | 'linear-gradient(…)' | 'radial-gradient(…)'
+ */
+function paintCss(doc, paint) {
+  const p = resolvePaint(doc, paint);
+  if (!p) return null;
+  if (p.type === 'color') return p.color;
+  const stops = p.stops.map((s) => `${cssColor(s.color, s.opacity)} ${r2(s.at * 100)}%`).join(', ');
+  return p.kind === 'radial'
+    ? `radial-gradient(circle at ${r2(p.cx * 100)}% ${r2(p.cy * 100)}%, ${stops})`
+    : `linear-gradient(${r2(p.angle)}deg, ${stops})`;
+}
+
+/**
+ * Сводка вектора для описаний и слоёв: сколько контуров и команд, какие цвета.
+ * @returns {{paths:number, commands:number, colors:string[], gradients:number}}
+ */
+function vectorSummary(doc, node) {
+  const out = { paths: 0, commands: 0, colors: [], gradients: 0 };
+  if (!node || node.type !== 'vector' || !Array.isArray(node.paths)) return out;
+  const seen = new Set();
+  const take = (paint) => {
+    if (paint === undefined || paint === null) return;
+    if (isGradientPaint(paint)) out.gradients++;
+    const c = resolveColor(doc, paint);
+    if (c && !seen.has(c)) { seen.add(c); out.colors.push(c); }
+  };
+  for (const p of node.paths) {
+    if (!isObj(p)) continue;
+    out.paths++;
+    out.commands += pathCheck(p.d).count;
+    take(p.fill === undefined ? node.fill : p.fill);
+    take(p.stroke === undefined ? (isObj(node.stroke) ? node.stroke.color : node.stroke) : p.stroke);
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ *
@@ -4780,7 +5371,9 @@ function contrastRatio(hexA, hexB) {
    off-scale для чисел остаётся как был — мягкое замечание. */
 const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'dead-scale-ref': 'error', 'bad-children': 'warn', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info',
   /* Круг 36 (SPEC §11.2): состояния и движение */
-  'state-on-page': 'error', 'motion-slow': 'warn', 'dead-motion-ref': 'warn', 'state-no-effect': 'info', 'press-without-hover': 'info' };
+  'state-on-page': 'error', 'motion-slow': 'warn', 'dead-motion-ref': 'warn', 'state-no-effect': 'info', 'press-without-hover': 'info',
+  /* Круг 37 (SPEC §12.1): векторы и краски */
+  'bad-path': 'error', 'vector-empty': 'warn', 'dead-color-ref': 'warn', 'path-heavy': 'info' };
 const SEV_RANK = { error: 0, warn: 1, info: 2 };
 
 function nearestFill(doc, node) {
@@ -4964,6 +5557,78 @@ function validateMotion(doc, node, add) {
  * @param {{measureText?:Function}} [opts] тот же измеритель, что и у solve
  * @returns {Array<{code:string,nodeId:string,message:string,severity:string}>}
  */
+/** Строки цвета в краске (как их читает resolveColor) — для dead-color-ref. */
+function paintRefs(v, path, out) {
+  if (typeof v === 'string') { out.push({ path, value: v }); return; }
+  if (!isObj(v)) return;
+  if (isGradientPaint(v)) {
+    const stops = Array.isArray(v.gradient.stops) ? v.gradient.stops : [];
+    stops.forEach((st, i) => {
+      if (!isObj(st)) return;
+      const val = typeof st.token === 'string' ? st.token : st.color;
+      if (typeof val === 'string') out.push({ path: `${path}.gradient.stops.${i}`, value: val });
+    });
+    return;
+  }
+  const val = v.token !== undefined ? v.token : v.color !== undefined ? v.color : v.value;
+  if (typeof val === 'string') out.push({ path, value: val });
+}
+
+/**
+ * Краски и контуры узла (круг 37, SPEC §12.1): dead-color-ref — цвет, который не
+ * разрешается (не #hex и не токен палитры) в заливке, цвете, обводке, состояниях,
+ * контурах и стопах; у вектора — bad-path, vector-empty, path-heavy.
+ */
+function validatePaint(doc, node, add) {
+  const refs = [];
+  paintRefs(node.fill, 'fill', refs);
+  paintRefs(node.color, 'color', refs);
+  if (isObj(node.stroke) && !isGradientPaint(node.stroke)) {
+    if (node.stroke.color !== undefined) paintRefs(node.stroke.color, 'stroke.color', refs);
+    else paintRefs(node.stroke, 'stroke', refs);
+  } else paintRefs(node.stroke, 'stroke', refs);
+  if (isObj(node.states)) {
+    for (const s of STATE_NAMES) {
+      const p = node.states[s];
+      if (!isObj(p)) continue;
+      paintRefs(p.fill, `states.${s}.fill`, refs);
+      paintRefs(p.color, `states.${s}.color`, refs);
+      paintRefs(isObj(p.stroke) && p.stroke.color !== undefined ? p.stroke.color : p.stroke, `states.${s}.stroke`, refs);
+    }
+  }
+  const name = () => displayName(doc, node);
+  if (node.type === 'vector') {
+    const paths = node.paths;
+    if (!Array.isArray(paths)) add('bad-path', node.id, `«${name()}»: paths не массив — контуров нет`);
+    else {
+      let commands = 0;
+      let visible = 0;
+      const nodeStroke = isObj(node.stroke) ? (node.stroke.color !== undefined ? node.stroke.color : node.stroke) : node.stroke;
+      paths.forEach((p, i) => {
+        const err = vpathProblem(p, 'paths.' + i);
+        if (err) { add('bad-path', node.id, `«${name()}»: ${err}`); return; }
+        commands += pathCheck(p.d).count;
+        paintRefs(p.fill, `paths.${i}.fill`, refs);
+        paintRefs(p.stroke, `paths.${i}.stroke`, refs);
+        const fill = resolvePaint(doc, p.fill !== undefined ? p.fill : node.fill);
+        const stroke = resolvePaint(doc, p.stroke !== undefined ? p.stroke : nodeStroke);
+        const sw = isNum(p.strokeWidth) ? p.strokeWidth : isObj(node.stroke) && isNum(node.stroke.width) ? node.stroke.width : 1;
+        if ((fill || (stroke && sw > 0)) && p.opacity !== 0) visible++;
+      });
+      if (!paths.length) add('vector-empty', node.id, `«${name()}»: у вектора нет контуров`);
+      else if (!visible) add('vector-empty', node.id, `«${name()}»: ни у одного контура нет видимой заливки или обводки`);
+      if (commands > VECTOR_LIMITS.heavyCommands) {
+        add('path-heavy', node.id, `«${name()}»: ${commands} команд пути — больше ${VECTOR_LIMITS.heavyCommands}, отрисовка и правка тяжелеют`);
+      }
+    }
+  }
+  const dead = refs.filter((r) => r.value && r.value !== 'none' && r.value !== 'transparent' && !resolveColor(doc, r.value));
+  if (dead.length) {
+    add('dead-color-ref', node.id, `«${name()}»: ${dead.slice(0, 4).map((r) => `${r.path} → «${cutText(r.value, 40)}» нет в палитре`).join('; ')}`
+      + (dead.length > 4 ? ` и ещё ${dead.length - 4}` : ''));
+  }
+}
+
 function validate(doc, geo, opts) {
   const out = [];
   if (!doc || !doc.nodes || !geo || !geo.rects) return out;
@@ -4992,6 +5657,7 @@ function validate(doc, geo, opts) {
     // круг 36: мёртвый шаг в подъёме состояния — dead-motion-ref (warn), см. validateMotion
     const dead = deadScaleRefs(doc, node).filter((d) => d.path.indexOf('states.') !== 0);
     validateMotion(doc, node, add);
+    if (node && typeof node === 'object') validatePaint(doc, node, add);
     if (dead.length) {
       add('dead-scale-ref', id, `«${displayName(doc, node)}»: ${dead.map((d) => `${d.path} → ${d.reason}`).join('; ')}`);
     }
@@ -5058,8 +5724,12 @@ function validate(doc, geo, opts) {
       if (bad.length) add('off-scale', id, `вне шкалы отступов: ${bad.join(', ')}`);
       if (L.mode === 'none') {
         const kids = kidsOf(node).map((c) => ownNode(doc.nodes, c)).filter(Boolean);
+        // круг 37: фигуры свободной рамки перекрываются намеренно — это иллюстрация
+        const shape = (n) => n.type === 'vector' || n.type === 'rect' || n.type === 'ellipse';
         for (let i = 0; i < kids.length; i++) {
+          if (shape(kids[i])) continue;
           for (let j = i + 1; j < kids.length; j++) {
+            if (shape(kids[j])) continue;
             const a = geo.rects[kids[i].id];
             const b = geo.rects[kids[j].id];
             if (!a || !b) continue;
@@ -5079,7 +5749,11 @@ function validate(doc, geo, opts) {
       if (pr) {
         const dx = Math.max(pr.x - rect.x, (rect.x + rect.w) - (pr.x + pr.w));
         const dy = Math.max(pr.y - rect.y, (rect.y + rect.h) - (pr.y + pr.h));
-        if (dx > 0.5 || dy > 0.5) {
+        // круг 37: в свободной рамке с обрезкой выход за край — кадрирование, а не ошибка
+        const cropped = parent.clip === true && isFreeFrame(parent);
+        if ((dx > 0.5 || dy > 0.5) && cropped) {
+          // ничего: деталь иллюстрации срезается рамкой намеренно
+        } else if (dx > 0.5 || dy > 0.5) {
           add('out-of-parent', id, `«${node.name || id}» выходит за «${parent.name || parent.id}» на ${r2(Math.max(0, dx))}×${r2(Math.max(0, dy))}`);
         } else if (!node.override && CONTAINER_TYPES.has(parent.type)) {
           /* Круг 16, п.2: ребёнок ПОТОКА, который съел отступ контейнера, не выходил
@@ -5128,6 +5802,90 @@ function emptyDoc(name) {
     tokens: { ...deepClone(DEFAULT_TOKENS), motion: { ...DEFAULT_MOTION }, shadow: { ...DEFAULT_SHADOW } },
     meta: { name: name || 'Без названия', createdAt: new Date().toISOString() }
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * 9a. Пример иллюстрации (круг 37, SPEC §12): небольшой персонаж из векторов —
+ * для тестов, для пустого состояния оболочки и как образец «как устроена
+ * иллюстрация»: свободная рамка с обрезкой, детали снизу вверх (тень, рога,
+ * лапы, тело, животик, блик, глаза, рот…), у каждой — свой вектор ровно по
+ * рамке контуров (fitVector), 2–3 тона на материал и один источник света
+ * (сверху слева). Детали нарисованы в координатах холста 240×240.
+ * ------------------------------------------------------------------ */
+
+const lin = (a, b, angle) => ({ gradient: { kind: 'linear', angle: angle === undefined ? 180 : angle, stops: [{ at: 0, color: a }, { at: 1, color: b }] } });
+/** Эллипс как путь из двух дуг. */
+const ellD = (cx, cy, rx, ry) => `M${cx - rx} ${cy}A${rx} ${ry} 0 1 0 ${cx + rx} ${cy}A${rx} ${ry} 0 1 0 ${cx - rx} ${cy}Z`;
+const MONSTER_PARTS = [
+  { name: 'Тень', paths: [{ d: ellD(120, 216, 58, 8), fill: '#2b1d5c', opacity: 0.2 }] },
+  { name: 'Рога', paths: [
+    { name: 'Левый рог', d: 'M80 66C66 50 62 28 72 12C80 30 92 44 104 52Z', fill: lin('#ffe7a3', '#f2a33a'), stroke: '#b86b12', strokeWidth: 2, lineJoin: 'round' },
+    { name: 'Правый рог', d: 'M160 66C174 50 178 28 168 12C160 30 148 44 136 52Z', fill: lin('#ffe7a3', '#f2a33a'), stroke: '#b86b12', strokeWidth: 2, lineJoin: 'round' }
+  ] },
+  { name: 'Ручки', paths: [
+    { name: 'Левая', d: 'M52 124C30 126 20 148 30 158C38 166 52 158 58 142Z', fill: '#5d4dd6', stroke: '#33278c', strokeWidth: 3, lineJoin: 'round' },
+    { name: 'Правая', d: 'M188 124C210 126 220 148 210 158C202 166 188 158 182 142Z', fill: '#5d4dd6', stroke: '#33278c', strokeWidth: 3, lineJoin: 'round' }
+  ] },
+  { name: 'Лапы', paths: [
+    { name: 'Левая', d: 'M78 194C68 196 66 214 82 215L104 215C114 215 114 197 104 194Z', fill: lin('#5a4bd1', '#3d2fa3'), stroke: '#2a1f73', strokeWidth: 3, lineJoin: 'round' },
+    { name: 'Правая', d: 'M136 194C126 197 126 215 136 215L158 215C174 214 172 196 162 194Z', fill: lin('#5a4bd1', '#3d2fa3'), stroke: '#2a1f73', strokeWidth: 3, lineJoin: 'round' }
+  ] },
+  { name: 'Тело', paths: [{
+    d: 'M120 38C172 38 198 82 198 132C198 184 166 208 120 208C74 208 42 184 42 132C42 82 68 38 120 38Z',
+    fill: { gradient: { kind: 'radial', cx: 0.38, cy: 0.3, r: 0.8, stops: [{ at: 0, color: '#ab9dff' }, { at: 0.55, color: '#7563ef' }, { at: 1, color: '#4c3cc0' }] } },
+    stroke: '#33278c', strokeWidth: 3
+  }] },
+  { name: 'Животик', paths: [{ d: 'M120 110C150 110 168 132 168 160C168 188 146 200 120 200C94 200 72 188 72 160C72 132 90 110 120 110Z', fill: lin('#ddd6ff', '#b3a7ff'), opacity: 0.9 }] },
+  { name: 'Блик тела', paths: [{ d: 'M78 74C88 56 106 48 124 48C106 56 94 70 88 88C82 88 76 82 78 74Z', fill: '#ffffff', opacity: 0.4 }] },
+  { name: 'Румянец', paths: [{ d: ellD(68, 134, 11, 6.5) + ellD(172, 134, 11, 6.5), fill: '#ff8fb3', opacity: 0.6 }] },
+  { name: 'Глаза', paths: [
+    { name: 'Левый', d: ellD(98, 102, 17, 19), fill: { gradient: { kind: 'radial', cx: 0.4, cy: 0.35, r: 0.7, stops: [{ at: 0, color: '#ffffff' }, { at: 1, color: '#dcd8f5' }] } }, stroke: '#33278c', strokeWidth: 2.5 },
+    { name: 'Правый', d: ellD(142, 102, 17, 19), fill: { gradient: { kind: 'radial', cx: 0.4, cy: 0.35, r: 0.7, stops: [{ at: 0, color: '#ffffff' }, { at: 1, color: '#dcd8f5' }] } }, stroke: '#33278c', strokeWidth: 2.5 }
+  ] },
+  { name: 'Зрачки', paths: [
+    { name: 'Левый', d: ellD(102, 106, 8.5, 9.5), fill: '#1d1640' },
+    { name: 'Правый', d: ellD(146, 106, 8.5, 9.5), fill: '#1d1640' }
+  ] },
+  { name: 'Блики глаз', paths: [{ d: ellD(105.5, 101, 3.2, 3.2) + ellD(149.5, 101, 3.2, 3.2), fill: '#ffffff' }] },
+  { name: 'Рот', paths: [{ d: 'M100 140C108 152 132 152 140 140C134 162 106 162 100 140Z', fill: '#2a1f5c', stroke: '#2a1f5c', strokeWidth: 2, lineJoin: 'round' }] },
+  { name: 'Язык', paths: [{ d: 'M111 153C116 149 124 149 129 153C125 158 115 158 111 153Z', fill: '#ff7aa8' }] },
+  { name: 'Клыки', paths: [{ d: 'M107 146L111.5 154L116 147.6ZM124 147.6L128.5 154L133 146Z', fill: '#ffffff', stroke: '#ffffff', strokeWidth: 1, lineJoin: 'round' }] }
+];
+
+/**
+ * Операции, которые кладут пример иллюстрации — «Монстрик» 240×240 — в контейнер
+ * `parent` (круг 37). ops[0] — свободная рамка (clip, градиентный фон), дальше —
+ * детали-векторы снизу вверх. id новые на каждый вызов. Документ не меняется:
+ * оболочка применяет операции транзакцией.
+ * @param {{parent:string, pos?:{x:number,y:number}, scale?:number, name?:string, index?:number}} opts
+ * @returns {object[]}
+ */
+function sampleIllustration(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const parent = typeof o.parent === 'string' ? o.parent : null;
+  const k = isNum(o.scale) ? clamp(o.scale, 0.1, 20) : 1;
+  const side = r2(240 * k);
+  const frame = {
+    type: 'frame', name: typeof o.name === 'string' && o.name ? o.name : 'Иллюстрация · Монстрик', role: 'illustration',
+    parent, children: [], layout: { mode: 'none' }, clip: true, radius: r2(28 * k),
+    size: sizeSpec(side, side),
+    fill: { gradient: { kind: 'radial', cx: 0.5, cy: 0.42, r: 0.75, stops: [{ at: 0, color: '#fff6ea' }, { at: 1, color: '#ffd6bd' }] } },
+    pos: isObj(o.pos) && isNum(o.pos.x) && isNum(o.pos.y) ? { x: r2(o.pos.x), y: r2(o.pos.y) } : { x: 0, y: 0 }
+  };
+  const list = [ops.create(frame, isNum(o.index) ? o.index : undefined)];
+  const fid = list[0].node.id;
+  for (const part of MONSTER_PARTS) {
+    const fit = fitVector(part.paths);
+    if (!fit) continue;
+    list.push(ops.create({
+      type: 'vector', name: part.name, parent: fid,
+      pos: { x: r2(fit.pos.x * k), y: r2(fit.pos.y * k) },
+      size: sizeSpec(r2(fit.viewBox.w * k), r2(fit.viewBox.h * k)),
+      viewBox: fit.viewBox,
+      paths: deepClone(part.paths)
+    }));
+  }
+  return list;
 }
 
 function buildDemo(doc) {
@@ -5555,11 +6313,91 @@ function repairNode(n, doc) {
     if (v === undefined || v === null) continue;
     if (typeof v === 'string') continue;
     if (typeof v === 'object' && typeof v.token === 'string') continue;
+    // круг 37: градиент чиним по стопам, а не снимаем целиком
+    if (isGradientPaint(v)) {
+      const g = repairGradient(v.gradient);
+      if (g) {
+        if (Object.keys(v).length !== 1 || gradientProblem(v.gradient, k)) { n[k] = { gradient: g }; mark(k); }
+        continue;
+      }
+    }
     delete n[k]; mark(k);
   }
+  if (n.type === 'vector') repairVector(n, mark);
   repairMotionFields(n, mark);
   repairShapes(n, mark);
   return fixed;
+}
+
+/**
+ * Круг 37: градиент из чужого файла — годные стопы остаются, негодные поля уходят.
+ * @returns {object|null} null — живых стопов нет
+ */
+function repairGradient(g) {
+  if (!isObj(g)) return null;
+  const out = { kind: GRADIENT_KIND_SET.has(g.kind) ? g.kind : 'linear' };
+  if (isNum(g.angle) && g.angle >= 0 && g.angle <= 360) out.angle = g.angle;
+  for (const k of ['cx', 'cy', 'r']) if (isNum(g[k]) && g[k] >= 0 && g[k] <= 1) out[k] = g[k];
+  const stops = [];
+  for (const st of Array.isArray(g.stops) ? g.stops : []) {
+    if (stops.length >= VECTOR_LIMITS.maxStops) break;
+    if (!isObj(st) || !isNum(st.at)) continue;
+    const one = { at: clamp(st.at, 0, 1) };
+    if (typeof st.token === 'string' && st.token) one.token = st.token;
+    else if (typeof st.color === 'string' && st.color) one.color = st.color;
+    else continue;
+    if (isNum(st.opacity)) one.opacity = clamp(st.opacity, 0, 1);
+    stops.push(one);
+  }
+  if (!stops.length) return null;
+  out.stops = stops;
+  return out;
+}
+
+/** Краска контура после починки: годная — как есть, градиент — по стопам, иначе undefined. */
+function repairPaint(v, what) {
+  if (!paintProblem(v, what)) return v;
+  if (isGradientPaint(v)) { const g = repairGradient(v.gradient); if (g) return { gradient: g }; }
+  return undefined;
+}
+
+/**
+ * Круг 37: вектор из чужого файла. Негодный контур (путь не разбирается, не объект)
+ * выбрасывается, сверх пределов — тоже; негодные поля годного контура снимаются по
+ * одному. Негодный viewBox — по рамке оставшихся контуров, иначе 100×100.
+ */
+function repairVector(n, mark) {
+  const src = Array.isArray(n.paths) ? n.paths : [];
+  if (!Array.isArray(n.paths)) mark('paths');
+  if (src.length > VECTOR_LIMITS.maxPaths) mark('paths');
+  const kept = [];
+  let total = 0;
+  for (let i = 0; i < src.length && kept.length < VECTOR_LIMITS.maxPaths; i++) {
+    const p = src[i];
+    if (!isObj(p) || typeof p.d !== 'string' || pathCheck(p.d).err || total + p.d.length > VECTOR_LIMITS.maxTotalD) {
+      mark('paths.' + i);
+      continue;
+    }
+    if (vpathProblem(p, 'paths.' + i)) {
+      const q = { d: p.d };
+      for (const k of VPATH_KEYS) {
+        if (k === 'd' || p[k] === undefined) continue;
+        let v = p[k];
+        if (k === 'fill' || k === 'stroke') v = repairPaint(v, k);
+        if (v !== undefined && !vpathProblem({ d: p.d, [k]: v }, '')) q[k] = v;
+      }
+      kept.push(q);
+      mark('paths.' + i);
+    } else kept.push(p);
+    total += p.d.length;
+  }
+  n.paths = kept;
+  if (viewBoxProblem(n.viewBox)) {
+    const b = pathBounds(kept);
+    const vb = b ? { x: b.x, y: b.y, w: Math.max(1, b.w), h: Math.max(1, b.h) } : null;
+    n.viewBox = vb && !viewBoxProblem(vb) ? vb : { w: 100, h: 100 };
+    mark('viewBox');
+  }
 }
 
 /**
@@ -5980,6 +6818,11 @@ function newClipPrefix() {
   clipPrefixSeq = (clipPrefixSeq + 1) % 1000000;
   const rnd = Math.random().toString(36).slice(2, 8);
   return 'imago-clip-' + rnd + clipPrefixSeq.toString(36) + '-';
+}
+
+/** Атрибут поворота вокруг центра рамки (круг 37). */
+function rotateAttr(deg, rect, dx, dy) {
+  return `rotate(${fmtNum(deg, 3)} ${fmtNum(rect.x + dx + rect.w / 2, 2)} ${fmtNum(rect.y + dy + rect.h / 2, 2)})`;
 }
 
 function svgEl(name, attrs) {
@@ -7076,7 +7919,8 @@ class Stage {
       for (const id of plan.remove.concat(plan.rebuild)) {
         const c = this._drawn.get(id);
         if (!c) continue;
-        doomed.push({ id, el: c.el, parentEl: c.el.parentNode, drop: plan.rebuild.indexOf(id) < 0 });
+        const el = c.outer || c.el;   // круг 37: у повёрнутого узла снаружи обёртка поворота
+        doomed.push({ id, el, parentEl: el.parentNode, drop: plan.rebuild.indexOf(id) < 0 });
         this._forgetSubtree(id);
       }
       for (const d of doomed) {
@@ -7117,6 +7961,8 @@ class Stage {
       // состав детей или обрезка изменились — пересобираем ветку целиком
       const wantClip = !!(kids.length && node.clip);
       if (wantClip !== !!c.clip || !sameIdList(kids, c.kids)) { plan.rebuild.push(id); return true; }
+      // круг 37: появилась или ушла обёртка поворота — ветку собираем заново
+      if (!this._rotDeg(node) !== !c.rotDeg) { plan.rebuild.push(id); return true; }
     }
     const lines = this.geo.lines && this.geo.lines[id];
     if (node !== c.node || !sameRect(rect, c.rect) || !sameLines(lines, c.lines)) plan.shapes.push(id);
@@ -7168,6 +8014,10 @@ class Stage {
     else c.el.removeAttribute('opacity');
     this._baseShadow(c.el, node, shapes);
     c.stKey = null;   // фигуры новые — состояние (если есть) накладываем заново
+    // круг 37: угол или центр поворота мог смениться (обёртка уже есть — см. _planNode)
+    const rotDeg = this._rotDeg(node);
+    if (rotDeg && c.outer && c.outer !== c.el) c.outer.setAttribute('transform', rotateAttr(rotDeg, rect, 0, 0));
+    c.rotDeg = rotDeg;
     if (c.clip) {
       const radius = resolveRadius(this.doc, node.radius);
       c.clip.rect.setAttribute('x', r2(rect.x));
@@ -7243,10 +8093,12 @@ class Stage {
   _nodeShapes(node, rect, dx, dy) {
     const doc = this.doc;
     const out = [];
+    const defs = [];   // круг 37: градиенты этого узла — в его же <defs>
+    const paint = (v) => this._paintRef(v, defs);
     const x = r2(rect.x + dx);
     const y = r2(rect.y + dy);
-    const fill = resolveColor(doc, node.fill);
-    const stroke = node.stroke ? resolveColor(doc, node.stroke.color || node.stroke) : null;
+    const fill = paint(node.fill);
+    const stroke = node.stroke ? paint(isObj(node.stroke) && node.stroke.color !== undefined ? node.stroke.color : node.stroke) : null;
     const strokeW = node.stroke && isNum(node.stroke.width) ? node.stroke.width : 1;
     const radius = resolveRadius(doc, node.radius);
 
@@ -7255,7 +8107,9 @@ class Stage {
        экспортированном SVG наведение ловится по всей площади, а не по детям. */
     const live = hasStates(node);
     const noFill = live ? 'transparent' : 'none';
-    if (node.type === 'ellipse') {
+    if (node.type === 'vector') {
+      out.push(this._vectorShape(node, rect, x, y, paint, fill, stroke));
+    } else if (node.type === 'ellipse') {
       out.push(svgEl('ellipse', {
         cx: r2(x + rect.w / 2), cy: r2(y + rect.h / 2), rx: r2(rect.w / 2), ry: r2(rect.h / 2),
         fill: fill || noFill, stroke: stroke || undefined, 'stroke-width': stroke ? strokeW : undefined
@@ -7267,7 +8121,7 @@ class Stage {
       const tx = anchor === 'middle' ? r2(x + rect.w / 2) : anchor === 'end' ? r2(x + rect.w) : x;
       const t = svgEl('text', {
         x: tx, y: r2(y + (style.lineHeight - style.fontSize) / 2 + style.fontSize * 0.8),
-        fill: resolveColor(doc, node.color) || '#14161C',
+        fill: paint(node.color) || '#14161C',
         'font-family': style.fontFamily, 'font-size': style.fontSize, 'font-weight': style.fontWeight,
         'text-anchor': anchor,
         'letter-spacing': style.letterSpacing ? style.letterSpacing : undefined,
@@ -7303,7 +8157,82 @@ class Stage {
     }
     // главная фигура узла: на неё ложатся заливка/цвет/обводка состояний и тень
     if (out.length) out[0].setAttribute('class', 'imago-shape');
+    if (defs.length) {
+      const el = svgEl('defs');
+      for (const d of defs) el.appendChild(d);
+      out.push(el);
+    }
     return out;
+  }
+
+  /**
+   * Краска → значение атрибута fill/stroke (круг 37). Градиент заводит элемент
+   * <linearGradient>/<radialGradient> в `defs` (список вызывающего — он кладёт их
+   * в группу узла, и точечное обновление меняет их вместе с фигурами). id
+   * уникален на сборку: префикс сцены/экспорта + общий счётчик с обрезками.
+   * @returns {string|null}
+   */
+  _paintRef(v, defs) {
+    if (v === undefined || v === null) return null;
+    const p = resolvePaint(this.doc, v);
+    if (!p) return null;
+    if (p.type === 'color') return p.color;
+    const id = String(this._clipPrefix || 'imago-clip-').replace(/^imago-clip-/, 'imago-paint-') + (this._clipSeq++);
+    let el;
+    if (p.kind === 'radial') {
+      el = svgEl('radialGradient', { id, cx: r2(p.cx), cy: r2(p.cy), r: r2(p.r) });
+    } else {
+      // угол — как в CSS linear-gradient: 0 — снизу вверх, 90 — слева направо, 180 — сверху вниз
+      const a = (p.angle * Math.PI) / 180;
+      const sx = Math.sin(a) / 2;
+      const sy = Math.cos(a) / 2;
+      el = svgEl('linearGradient', {
+        id, x1: fmtNum(0.5 - sx, 4), y1: fmtNum(0.5 + sy, 4), x2: fmtNum(0.5 + sx, 4), y2: fmtNum(0.5 - sy, 4)
+      });
+    }
+    for (const st of p.stops) {
+      el.appendChild(svgEl('stop', {
+        offset: r2(st.at), 'stop-color': st.color, 'stop-opacity': st.opacity < 1 ? r2(st.opacity) : undefined
+      }));
+    }
+    defs.push(el);
+    return `url(#${id})`;
+  }
+
+  /**
+   * Фигура вектора (круг 37, SPEC §12): группа с преобразованием viewBox → рамка
+   * узла (xMidYMid meet — пропорции сохраняются, по центру) и по <path> на
+   * контур. Заливка и обводка узла стоят на группе и наследуются контурами без
+   * своих — поэтому заливка состояния перекрашивает и их. Обрезки по viewBox нет.
+   * @returns {Element}
+   */
+  _vectorShape(node, rect, x, y, paint, fill, stroke) {
+    const vb = vbOf(node);
+    const s = vb.w > 0 && vb.h > 0 ? Math.min(rect.w / vb.w, rect.h / vb.h) : 0;
+    const tx = x + (rect.w - vb.w * s) / 2 - vb.x * s;
+    const ty = y + (rect.h - vb.h * s) / 2 - vb.y * s;
+    const nodeSW = isObj(node.stroke) && isNum(node.stroke.width) ? clamp(node.stroke.width, 0, 1000) : null;
+    const g = svgEl('g', {
+      transform: `matrix(${fmtNum(s, 6)} 0 0 ${fmtNum(s, 6)} ${fmtNum(tx, 3)} ${fmtNum(ty, 3)})`,
+      fill: fill || 'none', stroke: stroke || undefined, 'stroke-width': stroke && nodeSW !== null ? nodeSW : undefined
+    });
+    if (!s) return g;
+    for (const p of Array.isArray(node.paths) ? node.paths : []) {
+      if (!isObj(p) || typeof p.d !== 'string' || pathCheck(p.d).err) continue;
+      const pf = p.fill !== undefined ? (paint(p.fill) || 'none') : undefined;
+      const ps = p.stroke !== undefined ? (paint(p.stroke) || 'none') : undefined;
+      const hasStroke = ps !== undefined ? ps !== 'none' : !!stroke;
+      const sw = isNum(p.strokeWidth) ? clamp(p.strokeWidth, 0, VECTOR_LIMITS.maxStrokeWidth) : undefined;
+      g.appendChild(svgEl('path', {
+        d: p.d, fill: pf, stroke: ps,
+        'stroke-width': hasStroke ? sw : undefined,
+        'fill-rule': FILL_RULES.has(p.fillRule) ? p.fillRule : undefined,
+        'stroke-linecap': hasStroke && LINE_CAPS.has(p.lineCap) ? p.lineCap : undefined,
+        'stroke-linejoin': hasStroke && LINE_JOINS.has(p.lineJoin) ? p.lineJoin : undefined,
+        opacity: isNum(p.opacity) && p.opacity < 1 ? r2(clamp(p.opacity, 0, 1)) : undefined
+      }));
+    }
+    return g;
   }
 
   /**
@@ -7316,6 +8245,33 @@ class Stage {
     if (g.style) g.style.filter = '';
     const target = shapes[0] || g;
     if (target.style) target.style.filter = f === 'none' ? '' : f;
+  }
+
+  /** Поворот узла в градусах (круг 37); у доски на холсте не рисуется. */
+  _rotDeg(node) {
+    if (!node || !isNum(node.rotate) || node.type === 'page') return 0;
+    const a = clamp(node.rotate, -ROTATE_LIMIT, ROTATE_LIMIT);
+    if (a === 0 || a === 360 || a === -360) return 0;
+    if (this.doc && isArtboard(this.doc, node)) return 0;
+    return a;
+  }
+
+  /**
+   * Сдвиг в мире → сдвиг в координатах группы узла (круг 37): внутри повёрнутых
+   * обёрток (своей и предков) translate идёт по повёрнутым осям — поворачиваем
+   * вектор назад на сумму углов. Без поворотов — тот же сдвиг.
+   * @returns {{x:number,y:number}}
+   */
+  _localDelta(id, dx, dy) {
+    let sum = 0;
+    let cur = this._rn(id);
+    for (let i = 0; cur && i <= MAX_DEPTH; i++) {
+      sum += this._rotDeg(cur);
+      cur = typeof cur.parent === 'string' ? this._rn(cur.parent) : null;
+    }
+    if (!sum) return { x: r2(dx), y: r2(dy) };
+    const a = (-sum * Math.PI) / 180;
+    return { x: r2(dx * Math.cos(a) - dy * Math.sin(a)), y: r2(dx * Math.sin(a) + dy * Math.cos(a)) };
   }
 
   /** Рисует узел и его детей. dx/dy — сдвиг системы координат (для toSVG). */
@@ -7377,17 +8333,26 @@ class Stage {
         if (child) this._drawNode(holder, child, dx, dy, collect, d + 1);
       }
     }
-    parentEl.appendChild(g);
+    /* Круг 37 (SPEC §12.1): поворот — обёртка вокруг группы узла. На самой группе
+       transform занят: FLIP пишет атрибут, состояния — CSS-свойство (оно перебило
+       бы атрибут поворота). Центр — середина рамки узла. */
+    const rotDeg = this._rotDeg(node);
+    let outer = g;
+    if (rotDeg) {
+      outer = svgEl('g', { class: 'imago-rot', transform: rotateAttr(rotDeg, rect, dx, dy) });
+      outer.appendChild(g);
+    }
+    parentEl.appendChild(outer);
     if (!collect) {
       this._nodeEls.set(node.id, g);
       // слепок для точечного обновления: по нему следующий кадр решает,
       // что перерисовывать, а что оставить как есть (круг 16, п.6)
       this._drawn.set(node.id, {
         node, rect, lines: this.geo.lines && this.geo.lines[node.id],
-        kids: kids.slice(), el: g, shapes, holder, clip
+        kids: kids.slice(), el: g, outer, rotDeg, shapes, holder, clip
       });
     }
-    return g;
+    return outer;
   }
 
   /**
@@ -8168,7 +9133,8 @@ class Stage {
         const dy = r2(prev.y - next.y);
         if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
           g.style.transition = 'none';
-          g.setAttribute('transform', `translate(${dx} ${dy})`);
+          const lv = this._localDelta(id, dx, dy);
+          g.setAttribute('transform', `translate(${lv.x} ${lv.y})`);
           const run = () => {
             if (this._dead) return;   // сцену уже сняли — кадр рисовать некуда
             g.style.transition = 'transform 220ms cubic-bezier(.2,.7,.2,1)';
@@ -8551,9 +9517,57 @@ class Stage {
       if (!n || n.visible === false || n.locked) continue;
       const r = this.geo.rects[order[i]];
       if (!r) continue;
-      if (world.x >= r.x && world.x <= r.x + r.w && world.y >= r.y && world.y <= r.y + r.h) return n;
+      if (world.x >= r.x && world.x <= r.x + r.w && world.y >= r.y && world.y <= r.y + r.h) {
+        // круг 37: вектор ловится по контурам — сквозь «пустоту» рамки клик идёт к тому, что под ним
+        if (n.type === 'vector' && !this._vectorHit(n, r, world)) continue;
+        return n;
+      }
     }
     return null;
+  }
+
+  /**
+   * Попала ли точка в контуры вектора (круг 37). Нужен DOM с isPointInFill —
+   * без него (и без нарисованной фигуры) отвечаем «да»: попадание по рамке, как раньше.
+   * Поворот самого узла учитывается, поворот предков — нет (рамка их и так не знает).
+   * @returns {boolean}
+   */
+  _vectorHit(n, r, world) {
+    const c = this._drawn && this._drawn.get(n.id);
+    const g = c && c.shapes && c.shapes[0];
+    if (!g || !g.children || typeof DOMPoint !== 'function') return true;
+    let px = world.x;
+    let py = world.y;
+    const rd = this._rotDeg(n);
+    if (rd) {
+      const a = (-rd * Math.PI) / 180;
+      const cx = r.x + r.w / 2;
+      const cy = r.y + r.h / 2;
+      const ux = px - cx;
+      const uy = py - cy;
+      px = cx + ux * Math.cos(a) - uy * Math.sin(a);
+      py = cy + ux * Math.sin(a) + uy * Math.cos(a);
+    }
+    const vb = vbOf(n);
+    const s = vb.w > 0 && vb.h > 0 ? Math.min(r.w / vb.w, r.h / vb.h) : 0;
+    if (!s) return false;
+    const tx = r.x + (r.w - vb.w * s) / 2 - vb.x * s;
+    const ty = r.y + (r.h - vb.h * s) / 2 - vb.y * s;
+    const pt = new DOMPoint((px - tx) / s, (py - ty) / s);
+    const gFill = g.getAttribute('fill');
+    const gStroke = g.getAttribute('stroke');
+    try {
+      for (const el of g.children) {
+        if (typeof el.isPointInFill !== 'function') return true;
+        const f = el.getAttribute('fill') || gFill;
+        if (f && f !== 'none' && el.isPointInFill(pt)) return true;
+        const st = el.getAttribute('stroke') || gStroke;
+        if (st && st !== 'none' && el.isPointInStroke(pt)) return true;
+      }
+    } catch (e) {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -9017,7 +10031,8 @@ class Stage {
     const snapped = isRoot ? { x: target.x, y: target.y, guides: [] } : this._snap(target, node);
     this._guides = snapped.guides;
     d.result = {
-      kind: isRoot ? 'pos-canvas' : (L.mode === 'none' ? 'pos' : 'override'),
+      // свободная рамка: сдвиг пишет pos ребёнка (SPEC §12.3); отсоединённый — свой override
+      kind: isRoot ? 'pos-canvas' : (L.mode === 'none' && !node.override ? 'pos' : 'override'),
       x: snapped.x, y: snapped.y
     };
     this._ghost(d.id, snapped.x - d.rect0.x, snapped.y - d.rect0.y);
@@ -9087,7 +10102,8 @@ class Stage {
   _ghost(id, dx, dy) {
     const g = this._nodeEls.get(id);
     if (!g) return;
-    g.setAttribute('transform', `translate(${r2(dx)} ${r2(dy)})`);
+    const lv = this._localDelta(id, dx, dy);
+    g.setAttribute('transform', `translate(${lv.x} ${lv.y})`);
     this._ghostEl = g;
     const r = this.geo.rects[id];
     if (r) this._drag.ghostRect = { x: r.x + dx, y: r.y + dy, w: r.w, h: r.h };
@@ -9748,5 +10764,9 @@ export {
   /* Круг 36 (SPEC §11): микроанимации — умолчания ядра, разрешение ссылок и
      состояний в значения отрисовки (сцене, экспорту, мозгу, инспектору) — */
   DEFAULT_MOTION, DEFAULT_SHADOW, EASINGS, STATE_NAMES, STATE_KEYS, STATE_LIMITS, MOTION_SLOW_MS,
-  resolveMotion, resolveState, resolveShadow, motionScale, parseShadow, hasStates, transitionCss
+  resolveMotion, resolveState, resolveShadow, motionScale, parseShadow, hasStates, transitionCss,
+  /* Круг 37 (SPEC §12): векторные иллюстрации — разбор и геометрия путей, краски
+     с градиентами, сводка вектора, свободная рамка, пример иллюстрации — */
+  parsePath, formatPath, pathBounds, fitVector, translatePath, resolvePaint, paintCss, paintProblem,
+  vectorSummary, isFreeFrame, sampleIllustration, VECTOR_LIMITS, GRADIENT_KINDS
 };
