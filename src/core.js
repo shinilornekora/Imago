@@ -197,7 +197,7 @@ function deepClone(value) {
 /**
  * Круг 25: строка не длиннее `n` КОДОВЫХ ТОЧЕК. `s.slice(0, n)` режет по
  * UTF-16-единицам и разрывает суррогатную пару (эмодзи) — остаётся одиночный
- * суррогат, невалидный UTF-8: Postgres отказывает в записи jsonb, а на экране «�».
+ * суррогат, невалидный UTF-8: Postgres отказывает в записи jsonb, а на экране «U+FFFD».
  * Не строка — приводится к строке (null/undefined → '').
  * @param {any} s @param {number} n
  * @returns {string}
@@ -230,7 +230,7 @@ function cleanText(s) {
   if (typeof out.isWellFormed === 'function') {
     if (!out.isWellFormed()) out = out.toWellFormed();
   } else {
-    out = out.replace(LONE_SURROGATE_RE, '�');
+    out = out.replace(LONE_SURROGATE_RE, '\uFFFD');
   }
   return out;
 }

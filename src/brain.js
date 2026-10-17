@@ -592,7 +592,7 @@ export function cleanText(s) {
   if (typeof out.isWellFormed === 'function') {
     if (!out.isWellFormed()) out = out.toWellFormed();
   } else {
-    out = out.replace(LONE_SURROGATE_RE, '�');
+    out = out.replace(LONE_SURROGATE_RE, '\uFFFD');
   }
   return out;
 }
