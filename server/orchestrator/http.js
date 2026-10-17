@@ -3,18 +3,22 @@
  *
  *   GET  /agent/health    {ok, engine, llm, document, document_reason?, model?} (document_reason — круг 31: storage|unreachable; круг 32: schema)
  *   POST /agent/command   SSE §10.3 (ошибки до старта потока — JSON с кодом)
- *   POST /agent/stop      {stopped}
- *   POST /agent/apply     событие result одним JSON
+ *   POST /agent/stop      {command_id, client?} → {stopped}
+ *   POST /agent/apply     {command_id, variant, client?} → событие result одним JSON
  *
  * Ошибки — `{error: true, code, message, retryable, detail?}`; 503 и 429 — с `Retry-After`.
- * Тело больше 1 МБ — 413; не тот метод — 405 с `Allow`; не JSON / не та форма — 400.
+ * Тело больше 1 МБ — 413; не тот метод — 405 с `Allow`; не JSON / не та форма — 400;
+ * тело не пришло за 30 с — 408 timeout (круг 33).
+ *
+ * Круг 33: stop и apply сверяют `client` с тем, что пришёл с командой (нет поля — null,
+ * и сверяется с null): чужая команда неотличима от неизвестной — `{stopped: false}` и 404.
  */
 
 import { OrchError, badRequest, toOrchError } from './errors.js';
 import { cutText } from '../../src/core.js';
 import {
   MAX_BODY_BYTES, MAX_TEXT, MAX_ID, MAX_SELECTION, MAX_HISTORY, MAX_HISTORY_CHARS, MAX_AUTHOR,
-  MAX_VARIANTS, SSE_PING_MS,
+  MAX_VARIANTS, SSE_PING_MS, BODY_TIMEOUT_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
 } from './limits.js';
 
 const ROUTES = {
@@ -45,39 +49,65 @@ function sendError(res, err, redact) {
   sendJSON(res, e.status === 499 ? 409 : e.status, body, headers);
 }
 
-/** Тело запроса с потолком: больше — 413 без дочитывания. */
-function readBody(req, limit = MAX_BODY_BYTES) {
+/**
+ * Тело запроса с потолком: больше — 413 без дочитывания; круг 33: не пришло целиком за
+ * `timeoutMs` — 408 timeout (медленное тело). Чтение останавливается, ответ уходит, потом
+ * обработчик закрывает соединение (тело не дочитано).
+ */
+function readBody(req, limit = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    const declared = Number(req.headers['content-length']);
-    if (Number.isFinite(declared) && declared > limit) {
-      reject(new OrchError(413, 'too_large', `Тело запроса больше ${Math.round(limit / 1024)} КБ`, { retryable: false }));
-      return;
-    }
     const chunks = [];
     let size = 0;
-    let failed = false;
+    let done = false;
+    let timer = null;
+    const finish = (fn, v) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      fn(v);
+    };
+    const stop = (e) => { req.pause(); finish(reject, e); };
+    const tooLarge = () => new OrchError(413, 'too_large', `Тело запроса больше ${Math.round(limit / 1024)} КБ`, { retryable: false });
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limit) { stop(tooLarge()); return; }
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => stop(new OrchError(408, 'timeout', `Тело запроса не пришло за ${Math.round(timeoutMs / 1000)} с`,
+        { retryable: true, detail: { limit: 'body_timeout', ms: timeoutMs } })), timeoutMs);
+      if (timer.unref) timer.unref();
+    }
     req.on('data', (c) => {
-      if (failed) return;
+      if (done) return;
       size += c.length;
-      if (size > limit) {
-        failed = true;
-        reject(new OrchError(413, 'too_large', `Тело запроса больше ${Math.round(limit / 1024)} КБ`, { retryable: false }));
-        return;
-      }
+      if (size > limit) { stop(tooLarge()); return; }
       chunks.push(c);
     });
-    req.on('end', () => { if (!failed) resolve(Buffer.concat(chunks).toString('utf8')); });
-    req.on('error', (e) => { if (!failed) { failed = true; reject(e); } });
+    req.on('end', () => finish(resolve, Buffer.concat(chunks).toString('utf8')));
+    req.on('error', () => finish(reject, badRequest('Обрыв тела запроса')));
+    req.on('aborted', () => finish(reject, badRequest('Клиент оборвал тело запроса')));
   });
 }
 
-async function readJSON(req) {
-  const text = await readBody(req);
+async function readJSON(req, timeoutMs) {
+  const text = await readBody(req, MAX_BODY_BYTES, timeoutMs);
   if (!text.trim()) throw badRequest('Пустое тело: нужен JSON-объект');
   let body;
   try { body = JSON.parse(text); } catch { throw badRequest('Тело — не JSON'); }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw badRequest('Тело должно быть JSON-объектом');
   return body;
+}
+
+/**
+ * Круг 33: таймауты приёма запроса на http.Server (как у Document service): заголовки и
+ * запрос целиком. Без них — умолчания node (запрос — 300 с).
+ * @param {import('node:http').Server} server
+ * @param {{headersTimeoutMs?: number, requestTimeoutMs?: number}} [o]
+ */
+export function applyServerTimeouts(server, o = {}) {
+  if (!server || typeof server !== 'object') return;
+  const request = o.requestTimeoutMs > 0 ? o.requestTimeoutMs : REQUEST_TIMEOUT_MS;
+  // headersTimeout не может быть больше requestTimeout (node требует headers ≤ request)
+  server.headersTimeout = Math.min(o.headersTimeoutMs > 0 ? o.headersTimeoutMs : HEADERS_TIMEOUT_MS, request);
+  server.requestTimeout = request;
 }
 
 const isId = (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_ID && /^[A-Za-z0-9_.:\-]+$/.test(v);
@@ -172,7 +202,7 @@ function openSse(req, res) {
 /**
  * @param {{pipeline: ReturnType<import('./pipeline.js').createPipeline>, redact: (s:string)=>string, log?: object, testHooks?: boolean}} deps
  */
-export function createRequestHandler({ pipeline, redact, log = console, testHooks = false }) {
+export function createRequestHandler({ pipeline, redact, log = console, testHooks = false, bodyTimeoutMs = BODY_TIMEOUT_MS }) {
   const streams = new Set();
 
   async function route(req, res, url) {
@@ -193,21 +223,26 @@ export function createRequestHandler({ pipeline, redact, log = console, testHook
       return;
     }
 
-    const body = await readJSON(req);
+    const body = await readJSON(req, bodyTimeoutMs);
 
     if (path === '/agent/stop') {
       if (!isId(body.command_id)) throw badRequest('command_id: строка');
-      sendJSON(res, 200, { stopped: pipeline.stop(body.command_id) });
+      if (!optStr(body.client, MAX_ID)) throw badRequest('client: строка до 128 символов');
+      // круг 33: остановить можно только свою команду — client тот же, что пришёл с ней;
+      // чужая — тот же ответ, что неизвестная ({stopped: false}): существование не раскрываем
+      sendJSON(res, 200, { stopped: pipeline.stop(body.command_id, { client: body.client || null }) });
       return;
     }
 
     if (path === '/agent/apply') {
       if (!isId(body.command_id)) throw badRequest('command_id: строка');
+      if (!optStr(body.client, MAX_ID)) throw badRequest('client: строка до 128 символов');
       const v = body.variant;
       if (!((typeof v === 'string' && v.length > 0 && v.length <= MAX_ID) || (Number.isInteger(v) && v >= 0 && v < 100))) {
         throw badRequest('variant: ключ варианта или его номер с 0');
       }
-      sendJSON(res, 200, await pipeline.apply(body.command_id, v));
+      // круг 33: варианты чужой команды — 404, как неизвестной
+      sendJSON(res, 200, await pipeline.apply(body.command_id, v, { client: body.client || null }));
       return;
     }
 

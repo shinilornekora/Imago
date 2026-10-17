@@ -332,6 +332,10 @@ function fuzzInverse(seed, steps) {
     assert.equal(back.error, undefined, `шаг ${i}: отмена не применилась: ${back.error && back.error.message}\n${JSON.stringify(ops)}\n${JSON.stringify(inv).slice(0, 2000)}`);
     assert.equal(hashDoc(back.doc), hashDoc(prev), `шаг ${i}: отмена не точная\n${JSON.stringify(ops)}\n${JSON.stringify(inv).slice(0, 2000)}`);
     assert.ok(!hasHoles(r.doc.tokens) && !hasHoles(r.doc.nodes), `шаг ${i}: дыра в массиве ${JSON.stringify(ops)}`);
+    // круг 33 (инвариант): принятое операцией — годный документ; иначе проект,
+    // который ядро вело, нельзя экспортировать и импортировать обратно
+    const imp = checkImportDoc(clone(r.doc));
+    assert.equal(imp, null, `шаг ${i}: принятая правка дала документ, который не импортируется: ${JSON.stringify(imp)}\n${JSON.stringify(ops)}`);
     // повтор (инверсия инверсии) возвращает документ после правки
     const redo = clone(invertOps(r.doc, clone(inv)));
     const again = quiet(() => applyOps(back.doc, redo));

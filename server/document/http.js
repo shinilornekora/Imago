@@ -7,18 +7,18 @@
  * dev-сборки на другом порту не падал на 404.
  *
  * `STATIC_DIR` — раздача клиента (index.html, app.js, styles.css, src/*.js)
- * для прогонов без nginx. Только GET/HEAD, только внутри каталога.
+ * для прогонов без nginx. Только GET/HEAD, только эти файлы (белый список, круг 33).
  */
 
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
-import * as core from '../../src/core.js';
-import { createDoc, ENGINE_VERSION } from '../../src/core.js';
+import { ENGINE_VERSION } from '../../src/core.js';
 import { DocError, badRequest, notFound, tooLarge, internalBody, viaStorage } from './errors.js';
-import { jsonBytes, projectSummary } from './storage/committed.js';
+import { projectSummary } from './storage/committed.js';
 import { createSemaphore } from './dslr.js';
+import { cleanBody as cleanBodyOf, projectName as projectNameOf, prepareProject } from './importer.js';
 import {
   MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX,
   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, PROJECTS_PAGE, PROJECTS_PAGE_MAX,
@@ -30,7 +30,6 @@ import {
 /** Предел тела запроса (совместимость: прежде экспортировался отсюда). */
 export const MAX_BODY = MAX_BODY_BYTES;
 const PROJECT_KINDS = new Set(['design', 'library']);
-const MAX_PROJECT_NAME = 200;
 /** Значение-заглушка из примеров конфигурации: внутренним токеном не считается никогда. */
 const PLACEHOLDER_TOKEN = 'change-me';
 
@@ -209,6 +208,20 @@ function sameToken(a, b) {
   return timingSafeEqual(x, y);
 }
 
+/**
+ * Что раздаёт STATIC_DIR (круг 33): только файлы клиента — те, что tools/build.mjs кладёт в
+ * dist/web (index.html, app.js, styles.css, src/<модуль>.js). Прежде каталог раздавался
+ * целиком: `STATIC_DIR=.` из корня репозитория отдавал `.env`, `.git/config`, исходники
+ * сервера и node_modules. Сегмент, начинающийся с точки, — 404 всегда (до белого списка).
+ */
+const STATIC_FILES = new Set(['/index.html', '/app.js', '/styles.css']);
+const STATIC_SRC_RE = /^\/src\/[A-Za-z0-9_-]+\.js$/;
+export function staticAllowed(rel) {
+  if (typeof rel !== 'string' || !rel.startsWith('/')) return false;
+  if (rel.split('/').some((seg) => seg.startsWith('.'))) return false;
+  return STATIC_FILES.has(rel) || STATIC_SRC_RE.test(rel);
+}
+
 async function serveStatic(req, res, root, pathname) {
   const missing = () => sendError(res, new DocError(404, 'not_found', 'нет такого файла', { retryable: false }));
   let rel;
@@ -219,6 +232,8 @@ async function serveStatic(req, res, root, pathname) {
     return;
   }
   if (rel === '/' || rel === '') rel = '/index.html';
+  // только файлы клиента: ни `.env`, ни `.git`, ни server/, ни node_modules (круг 33)
+  if (rel.includes('\\') || rel.includes('\u0000') || !staticAllowed(rel)) return missing();
   const file = path.resolve(root, '.' + rel);
   // путь вне каталога (../) не раздаём — как и всё, что не файл
   if (file !== root && !file.startsWith(root + path.sep)) return missing();
@@ -243,80 +258,11 @@ async function serveStatic(req, res, root, pathname) {
   createReadStream(file).pipe(res);
 }
 
-/** Значение для jsonb: строки и ключи чистые (§9.10); глубже предела — 400. */
-function cleanBody(v, what) {
-  try {
-    return cleanDeep(v);
-  } catch (e) {
-    if (e && e.code === 'depth') throw badRequest(`${what}: вложенность глубже ${MAX_VALUE_DEPTH}`);
-    throw e;
-  }
-}
+/** Значение для jsonb (трассы): строки и ключи чистые (§9.10); глубже предела — 400. Импорт — importer.js. */
+const cleanBody = cleanBodyOf;
 
-/** Имя проекта: чистая строка не длиннее MAX_PROJECT_NAME кодовых точек (звать только со строкой). */
-/** Имя проекта — метаданные (круг 31): без управляющих и bidi-символов. */
-const projectName = (v) => cutText(cleanMeta(String(v)), MAX_PROJECT_NAME);
-
-/** Предел глубины дерева: из движка, если он его даёт, иначе — тот же, что в core (256). */
-const MAX_TREE_DEPTH = Number.isInteger(core.MAX_DEPTH) && core.MAX_DEPTH > 0 ? core.MAX_DEPTH : 256;
-
-/**
- * Глубина дерева документа от корня по `children` (у корня 0) — без рекурсии; узел,
- * встреченный второй раз, не обходится снова (цикл). Больше `limit` — сразу выход.
- * @returns {number} наибольшая глубина (или limit + 1, если предел превышен)
- */
-function treeDepth(doc, limit) {
-  const nodes = doc && doc.nodes ? doc.nodes : {};
-  const own = (id) => (typeof id === 'string' && Object.prototype.hasOwnProperty.call(nodes, id) ? nodes[id] : null);
-  const seen = new Set();
-  const stack = [doc.root, 0];
-  let max = 0;
-  while (stack.length) {
-    const d = stack.pop();
-    const id = stack.pop();
-    if (seen.has(id)) continue;
-    const n = own(id);
-    if (!n) continue;
-    seen.add(id);
-    if (d > max) max = d;
-    if (max > limit) return max;
-    if (Array.isArray(n.children)) for (const c of n.children) stack.push(c, d + 1);
-  }
-  return max;
-}
-
-/**
- * Ответ `core.checkImportDoc(d, {maxNodes})` (J7, круг 29) → `{message, limit?, max?}` или null.
- * Предел узлов — тот же, что у сервиса (`MAX_DOC_NODES`). Форму ответа движок выбирает
- * сам: null/undefined/true/`{ok:true}` — годен; строка, `{error}`, `{ok:false}`, `{code,
- * message}` или исключение — нет. `limit`/`max` движка (`'depth'|'nodes'`) переходят в
- * `detail` ответа 400 (круг 30); без них — `limit: 'import'`.
- */
-function importDocError(d, maxNodes) {
-  if (typeof core.checkImportDoc !== 'function') return null;
-  let r;
-  try {
-    r = core.checkImportDoc(d, { maxNodes });
-  } catch (e) {
-    return { message: e && typeof e.message === 'string' ? e.message : 'документ не прошёл проверку' };
-  }
-  if (r === null || r === undefined || r === true) return null;
-  if (typeof r === 'string') return r ? { message: r } : null;
-  if (r === false) return { message: 'документ не прошёл проверку' };
-  if (typeof r === 'object') {
-    if (r.ok === true) return null;
-    const err = r.error !== undefined ? r.error
-      : r.ok === false ? (r.message || r.reason || true)
-        : typeof r.code === 'string' ? (r.message || true) : null;
-    if (err === null || err === undefined || err === false) return null;
-    const out = { message: typeof err === 'string' ? err
-      : err && typeof err === 'object' && typeof err.message === 'string' ? err.message : 'документ не прошёл проверку' };
-    if (typeof r.limit === 'string' && /^[a-z_]{1,32}$/.test(r.limit)) out.limit = r.limit;
-    if (Number.isFinite(r.max)) out.max = r.max;
-    return out;
-  }
-  return null;
-}
+/** Имя проекта — метаданные (круг 31): без управляющих и bidi-символов (PATCH; создание — importer.js). */
+const projectName = projectNameOf;
 
 /** Число выпавших операций по выжимке `dropped` (`{more: N}` — ещё N). */
 function droppedCount(list) {
@@ -356,10 +302,11 @@ function historyItem(m) {
  * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, internalToken?: string, log?: object,
  *   writes?: {max?: number, queue?: number, retryAfter?: number, bodyBytes?: number, bodyTimeoutMs?: number}}} deps
  *   `writes` — запись по HTTP (`POST …/tx`, `POST /api/projects`, `PATCH`): семафор (одновременно и в
- *   очереди; сверх — 503 busy), бюджет байт читаемых тел на экземпляр, таймаут тела
+ *   очереди; сверх — 503 busy), бюджет байт читаемых тел на экземпляр, таймаут тела;
+ *   `importer` — пул подготовки импорта (import-pool.js, круг 33); нет — подготовка здесь же
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void}
  */
-export function createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log = console, writes = {} }) {
+export function createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log = console, writes = {}, importer = null }) {
   const retryAfter = writes.retryAfter || BUSY_RETRY_S;
   // запись по HTTP — под семафором (§9.10)
   const writeGate = createSemaphore({
@@ -380,7 +327,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
    * работа — уже под слотом.
    * @param {(body: any) => Promise<void>} fn
    */
-  async function writeRoute(req, fn, max = MAX_BODY_BYTES) {
+  async function writeRoute(req, fn, max = MAX_BODY_BYTES, prepare = null) {
     const declared = Number(req.headers['content-length']);
     if (Number.isFinite(declared) && declared > max) throw tooLarge(`тело больше ${max} байт`, { detail: { limit: 'body_bytes', max } });
     const need = Number.isFinite(declared) && declared >= 0 ? declared : max;
@@ -392,7 +339,13 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
     bodyBytesUsed += need;
     try {
       const buf = await readBody(req, max, bodyTimeoutMs);
-      await writeGate.run(() => fn(parseBody(buf)));
+      // круг 33: тяжёлая подготовка тела (импорт) — до слота записи: слот держит только запись
+      if (prepare) {
+        const prep = await prepare(buf);
+        await writeGate.run(() => fn(prep));
+      } else {
+        await writeGate.run(() => fn(parseBody(buf)));
+      }
     } finally {
       bodyBytesUsed -= need;
     }
@@ -470,12 +423,18 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       // миграций) — хранилище догоняет миграции; пока не догнало — не здоров
       const schema = storage.schemaState || null;
       if (schema) {
-        throw new DocError(503, 'unavailable', 'схема базы не согласована с кодом (базу восстановили из старой копии?) — сервис догоняет миграции', {
+        const waiting = schema.phase === 'empty' || schema.phase === 'restore';
+        throw new DocError(503, 'unavailable', waiting
+          // круг 33: базу пересоздают и восстанавливают под работающим сервисом — DDL не трогаем, ждём
+          ? 'схема базы не согласована с кодом: база пуста или в неё идёт восстановление — сервис ждёт его конца и не запускает миграции'
+          : 'схема базы не согласована с кодом (базу восстановили из старой копии?) — сервис догоняет миграции', {
           retryable: true, retryAfter: 5,
           detail: { storage: 'schema', phase: schema.phase, ...(schema.migration ? { migration: schema.migration } : {}), since: schema.since }
         });
       }
-      sendJSON(res, 200, { ok: true, engine: ENGINE_VERSION, storage: 'up' });
+      // круг 33: схема годна, а долгое дозаполнение миграции (009) идёт фоном — сервис рабочий
+      const backfill = storage.backfillState || null;
+      sendJSON(res, 200, { ok: true, engine: ENGINE_VERSION, storage: 'up', ...(backfill ? { detail: { backfill } } : {}) });
       return;
     }
 
@@ -518,7 +477,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         return;
       }
       if (method === 'POST') {
-        await writeRoute(req, (raw) => createProject(res, raw || {}));
+        await createProjectRoute(req, res);
         return;
       }
       throw methodNotAllowed();
@@ -542,8 +501,17 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
             return;
           }
         }
-        const { project, snapshot, tail, more } = await dslr.open(id, { lean, since });
-        sendJSON(res, 200, { ...project, snapshot, tail, more });
+        const view = await dslr.open(id, { lean, since });
+        const { project, tail, more } = view;
+        if (typeof view.snapshotJson === 'string') {
+          // круг 33: снимок — уже строкой (кеш DSLR): в ответ вставляется как есть, без второй сериализации
+          const head = JSON.stringify(project);
+          const text = `${head.length > 2 ? head.slice(0, -1) + ',' : '{'}"snapshot":${view.snapshotJson},"tail":${JSON.stringify(tail)},"more":${more ? 'true' : 'false'}}`;
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(text), 'Cache-Control': 'no-store' });
+          res.end(text);
+          return;
+        }
+        sendJSON(res, 200, { ...project, snapshot: view.snapshot, tail, more });
         return;
       }
       if (method === 'PATCH') {
@@ -563,50 +531,31 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
     return route2(req, res, url, method, parts, id);
   }
 
-  /** POST /api/projects: тело уже прочитано и разобрано (под слотом записи). */
-  async function createProject(res, body) {
-    if (typeof body !== 'object' || Array.isArray(body)) throw badRequest('тело должно быть объектом');
-    // круг 29: имя — строка (число — тоже можно, как прежде); объект в String() — TypeError и 500
-    if (body.name !== undefined && body.name !== null && typeof body.name !== 'string' && typeof body.name !== 'number') throw badRequest('name: строка');
-    const name = body.name === undefined || body.name === null ? '' : projectName(body.name);
-    const kind = body.kind === undefined || body.kind === null ? 'design' : body.kind;
-    if (!PROJECT_KINDS.has(kind)) throw badRequest(`kind: design | library, а не «${showValue(kind)}»`);
-    let doc;
-    if (body.doc === undefined || body.doc === null) {
-      // новый проект — пустая страница; демо-документ — только по просьбе (§9.10)
-      doc = createDoc(body.demo === true ? undefined : 'empty');
-    } else {
-      const d = cleanBody(body.doc, 'doc');
-      // минимальная проверка формы; остальное приводит createDoc(seed) — тот же путь, что импорт JSON на клиенте
-      if (!d || typeof d !== 'object' || Array.isArray(d) || !d.nodes || typeof d.nodes !== 'object' || typeof d.root !== 'string' || !d.nodes[d.root]) {
-        throw badRequest('doc: объект с nodes и root, корень должен быть среди узлов');
-      }
-      if (Object.keys(d.nodes).length > MAX_DOC_NODES) throw tooLarge(`doc: не больше ${MAX_DOC_NODES} узлов`, { detail: { limit: 'doc_nodes', max: MAX_DOC_NODES } });
-      // J7 (круг 29): глубина и типы полей — проверка движка до приведения; без неё документ
-      // глубже предела ложился снимком, и потом каждая операция над ним шла по краю
-      const why = importDocError(d, MAX_DOC_NODES);
-      if (why) {
-        throw badRequest(`doc: ${why.message}`, {
-          detail: { limit: why.limit || 'import', ...(why.max !== undefined ? { max: why.max } : {}) }
-        });
-      }
-      try {
-        doc = createDoc(d);
-      } catch (e) {
-        // документ чужой: исключение движка на нём — негодный документ (400), а не сбой сервиса
-        // (круг 29: `type: {"toString":1}` у узла давал TypeError в тексте предупреждения движка)
-        log.warn('[document/http] createDoc не принял документ импорта:', e && e.message);
-        throw badRequest('doc: документ не разобран — проверьте типы полей узлов');
-      }
-      // своя проверка глубины — по приведённому дереву (движок прежней версии checkImportDoc не знает)
-      if (treeDepth(doc, MAX_TREE_DEPTH) > MAX_TREE_DEPTH) {
-        throw badRequest(`doc: вложенность глубже ${MAX_TREE_DEPTH} уровней`, { detail: { limit: 'depth', max: MAX_TREE_DEPTH } });
-      }
-    }
-    if (name) doc.meta = { ...(doc.meta || {}), name };
-    if (jsonBytes(doc) > MAX_DOC_BYTES) throw tooLarge('doc: больше предела документа', { detail: { limit: 'doc_bytes', max: MAX_DOC_BYTES } });
-    const project = await viaStorage(storage.createProject({ name, kind, doc, engine: ENGINE_VERSION }));
-    sendJSON(res, 201, { id: project.id, name: project.name, kind: project.kind, head_seq: 0, engine: project.engine, epoch: project.epoch, tip: '', created_at: project.created_at, updated_at: project.updated_at });
+  /**
+   * POST /api/projects (круг 33): тело готовится (разбор, проверка и приведение документа) ДО
+   * слота записи — большое в потоке импорта (`importer`), маленькое здесь же; слот записи
+   * берётся только на запись в хранилище. `create_id` (L1): проект с ним уже есть — 200 и он же.
+   */
+  async function createProjectRoute(req, res) {
+    await writeRoute(req, async (prep) => {
+      const project = await viaStorage(storage.createProject({
+        name: prep.name, kind: prep.kind, docJson: prep.docJson, engine: ENGINE_VERSION,
+        ...(prep.createId ? { createId: prep.createId } : {})
+      }));
+      const existing = project.existing === true;
+      sendJSON(res, existing ? 200 : 201, {
+        id: project.id, name: existing ? cleanMeta(project.name) : project.name, kind: project.kind,
+        head_seq: existing ? project.head_seq : 0, engine: project.engine, epoch: project.epoch,
+        tip: existing ? project.head_chain || '' : '', created_at: project.created_at, updated_at: project.updated_at,
+        ...(existing ? { existing: true } : {})
+      });
+    }, MAX_BODY_BYTES, (buf) => (importer ? importer.run(buf) : prepareInline(buf)));
+  }
+
+  /** Подготовка без пула потоков (обработчик собран без него — тесты прежних кругов). */
+  function prepareInline(buf) {
+    const body = parseBody(buf);
+    return prepareProject(body || {}, { onWarn: (w) => log.warn(w) });
   }
 
   /**

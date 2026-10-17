@@ -63,6 +63,12 @@ services:
       TOMB_MAX: ${TOMB_MAX:-50000}
       RECENT_TXS: ${RECENT_TXS:-500}
       RECENT_BYTES: ${RECENT_BYTES:-16777216}
+      # круг 33: головы проектов в памяти — байт документов (256 МиБ), сверх — выгрузка давно не тронутых;
+      # кеш снимков полного открытия (128 МиБ; 0 — без кеша); импорт документа в потоках: одновременно, в очереди
+      HEADS_BYTES: ${HEADS_BYTES:-268435456}
+      SNAPSHOT_CACHE_BYTES: ${SNAPSHOT_CACHE_BYTES:-134217728}
+      IMPORT_CONCURRENCY: ${IMPORT_CONCURRENCY:-2}
+      IMPORT_QUEUE: ${IMPORT_QUEUE:-8}
       # общий с orchestrator секрет для /api/internal/traces; заглушку change-me сервис
       # не принимает — тогда трассы просто не пишутся (см. deploy/env.example)
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-change-me}

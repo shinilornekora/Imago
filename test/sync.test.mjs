@@ -542,10 +542,10 @@ test('sync: потеря сокета обнуляет чужое присутс
 /* ------------------------------ круг 23 (SPEC §9.8) ------------------------------ */
 
 test('sync: droppedLine — одна строка; запись {more:N} не причина, но прибавляет к счёту', () => {
-  assert.equal(droppedLine([{ index: 0, reason: 'removed' }, { index: 1, reason: 'removed' }]), '2 правки не применились: узел уже удалён');
+  assert.equal(droppedLine([{ index: 0, reason: 'removed' }, { index: 1, reason: 'removed' }]), '2 правки не применились: слой уже удалён');
   const many = [...Array.from({ length: 50 }, (_, i) => ({ index: i, reason: i % 2 ? 'cycle' : 'removed' })), { more: 13 }];
-  assert.equal(droppedLine(many), '63 правки не применились: узел уже удалён, перемещение создало бы цикл');
-  assert.equal(droppedLine([{ index: 0, reason: 'invalid', limit: 'doc_nodes' }]), '1 правка не применилась: документ упёрся в предел числа узлов');
+  assert.equal(droppedLine(many), '63 правки не применились: слой уже удалён, перемещение создало бы цикл');
+  assert.equal(droppedLine([{ index: 0, reason: 'invalid', limit: 'doc_nodes' }]), '1 правка не применилась: документ упёрся в предел числа слоёв');
   assert.equal(droppedLine([{ index: 0, reason: 'странное' }, { more: 4 }]), '5 правок не применились: правка не подошла к документу');
   assert.equal(droppedLine(null), '0 правок не применились');
 });

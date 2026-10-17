@@ -48,7 +48,7 @@ curl -N -X POST localhost:8090/agent/command -H 'content-type: application/json'
 | `INTERNAL_TOKEN` | — | заголовок `X-Internal-Token` для трасс; не задан — трассы только в памяти |
 | `LLM_KIND` | `openai` | `openai` или `anthropic` |
 | `LLM_BASE_URL` | — | адрес API модели; не задан — `llm:'unconfigured'`, команды для модели → `503 llm_down` |
-| `LLM_MODEL` | первая из `/models` | имя модели |
+| `LLM_MODEL` | первая из `/models` | имя модели; id из `/models` — строкой без управляющих знаков, до 200 символов, иначе не берётся (круг 33) |
 | `LLM_API_KEY` | — | ключ; наружу не выводится нигде |
 | `LLM_TIMEOUT_MS` | `120000` | дедлайн одного запроса к модели |
 | `WORKERS` | `min(2, CPU)` | размер пула DSLV |
@@ -58,6 +58,11 @@ curl -N -X POST localhost:8090/agent/command -H 'content-type: application/json'
 | `WORKER_JOBS` | `4` | заданий на воркер одновременно, пока они ждут модель (круг 27) |
 | `POOL_QUEUE_MAX` | `32` | заданий, ждущих свободный воркер; больше — `error busy` (429, `retry_after: 5`) |
 | `POOL_QUEUE_WAIT_MS` | `30000` | сколько задание ждёт воркер; дольше — `error busy` (`retry_after: 10`) |
+
+Приём запроса (круг 33; `limits.js`, окружением не настраивается): тело не пришло за 30 с —
+`408 timeout` (`detail.limit: 'body_timeout'`), соединение закрывается; заголовки node ждёт
+20 с, запрос целиком — 35 с (`headersTimeout`/`requestTimeout`; раньше — умолчание node,
+300 с). Ответ (поток SSE команды) под эти сроки не попадает.
 
 Адрес модели собирается через `URL`: суффикс (`chat/completions`, `models`, `v1/messages`)
 дописывается к пути, query базы идёт после него (`…/v1/chat/completions?api-version=…`).
@@ -92,6 +97,10 @@ curl -N -X POST localhost:8090/agent/command -H 'content-type: application/json'
 * **Ошибки brain** (круг 29, J5): «ни одна правка не приложилась к документу» — `not_applied`
   (422, текст — сама причина, без «правлю …»), а не `llm_failed`. Отказ модели 4xx — человеку
   нейтральное «Модель не приняла запрос…», статус и тело отказа — строкой в лог.
+* **Чья команда** (круг 33). `POST /agent/stop {command_id, client?}` и
+  `POST /agent/apply {command_id, variant, client?}` сверяют `client` с тем, что пришёл с
+  командой (поля нет — `null`, и сверяется с `null`). Чужая команда неотличима от
+  неизвестной: стоп — `{stopped: false}`, apply — `404 not_found`.
 * **Стоп.** `POST /agent/stop` → AbortSignal: ждущая команда снимается из очереди, вызов
   модели прерывается сразу (гонка с сигналом в воркере), счёт — через `abort` воркеру (не
   ответил за 2 с — воркер снимается; если на нём есть чужие задания — снимается, только если

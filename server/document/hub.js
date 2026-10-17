@@ -61,7 +61,8 @@ import { applyServerTimeouts } from './http.js';
 import {
   MAX_BODY_BYTES, WS_ENVELOPE_BYTES, PRESENCE_PER_SECOND as PRESENCE_RATE, PRESENCE_SELECTION, PRESENCE_ID_CHARS,
   PRESENCE_PAYLOAD_BYTES, PRESENCE_TTL_MS, FRAME_CACHE_FRAMES, FRAME_CACHE_ROOM_BYTES, FRAME_CACHE_TOTAL_BYTES,
-  WS_INFLIGHT, WS_CONNECTING, BUSY_RETRY_S, isCleanText, cleanText, cleanMeta, cutText, showValue
+  WS_INFLIGHT, WS_CONNECTING, BUSY_RETRY_S, PRESENCE_TICK_MS, PRESENCE_ROOM_FRAMES, PRESENCE_BATCH_BYTES, PRESENCE_BUS_PER_TICK,
+  isCleanText, cleanText, cleanMeta, cutText, showValue
 } from './limits.js';
 
 /** Предел сообщения — тело транзакции (4 МБ) плюс конверт; больше — ws закрывает сокет кодом 1009. */
@@ -101,14 +102,20 @@ const PUMP_RETRY_MS = 500;
  *   maxInflight?: number,
  *   frameCache?: {frames?: number, roomBytes?: number, totalBytes?: number},
  *   maxConnecting?: number,
+ *   presence?: {tickMs?: number, roomFrames?: number, batchBytes?: number, busPerTick?: number},
  *   log?: {warn:Function, info:Function}
- * }} opts `maxConnecting` — сокетов, одновременно идущих от upgrade до hello
+ * }} opts `maxConnecting` — сокетов, одновременно идущих от upgrade до hello; `presence` — сводка
+ *   присутствия по тикам (круг 33)
  */
 export function createHub({
   server, dslr, dslts, bus = null, instanceId = 'i', pingInterval = 30000,
   presenceTtlMs = PRESENCE_TTL_MS, maxBuffered = MAX_BUFFERED, maxInflight = WS_INFLIGHT, frameCache = {}, log = console,
-  maxConnecting = WS_CONNECTING
+  maxConnecting = WS_CONNECTING, presence: presenceOpts = {}
 }) {
+  const tickMs = presenceOpts.tickMs > 0 ? presenceOpts.tickMs : PRESENCE_TICK_MS;
+  const roomFrames = presenceOpts.roomFrames > 0 ? presenceOpts.roomFrames : PRESENCE_ROOM_FRAMES;
+  const batchBytes = presenceOpts.batchBytes > 0 ? presenceOpts.batchBytes : PRESENCE_BATCH_BYTES;
+  const busPerTick = presenceOpts.busPerTick > 0 ? presenceOpts.busPerTick : PRESENCE_BUS_PER_TICK;
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE });
   // таймауты приёма запроса (круг 27, медленное тело): Hub — единственный модуль, которому
   // вход отдаёт сам http.Server; index.js может поставить их и сам — то же значение
@@ -226,11 +233,125 @@ export function createHub({
     sendTx(ws, committed);
   }
 
-  function relay(projectId, from, msg) {
+  /* ---------------------- присутствие: сводка по тикам (круг 33) ---------------------- */
+
+  /**
+   * Прежде каждое присутствие сразу расходилось всем сокетам комнаты: K сокетов по 10/с — K²·10
+   * кадров в секунду (150 сокетов — 220 тыс./с, строка JSON превращалась в Buffer на каждый
+   * сокет), и запись в проект вставала на 12–17 с. Теперь присутствие комнаты копится до тика
+   * (tickMs): от каждого источника (свой сокет, клиент чужого экземпляра) — только последнее,
+   * `left` — по клиенту (отменяет его ждущие presence, presence — его ждущий left). На тике:
+   *   — сокету прежнего вида (без `presence=batch`) — по кадру на запись, каждый кадр
+   *     сериализуется один раз (один Buffer на всех); записей за тик — столько, чтобы
+   *     кадров вышло не больше roomFrames (получатели × записи), остальное ждёт следующего
+   *     тика в том же порядке (давние — первыми): в большой комнате присутствие приходит
+   *     реже, но запись и рассылка правок не встают;
+   *   — сокету с `presence=batch` — одним кадром `{type:'presence_batch', items:[…]}` (до
+   *     batchBytes, своё присутствие в нём тоже есть — клиент отбрасывает его по client);
+   *   — шине между экземплярами — последнее от каждого своего сокета, не больше busPerTick
+   *     сообщений за тик на комнату (`left` уходит в шину сразу).
+   */
+  let presenceFramesSent = 0;
+  let presenceTicks = 0;
+
+  function schedulePresence(projectId, room) {
+    if (room.presTimer || closing) return;
+    room.presTimer = setTimeout(() => {
+      room.presTimer = null;
+      try {
+        flushPresence(projectId, room);
+      } catch (e) {
+        log.warn('[document/hub] присутствие:', e && e.stack ? e.stack : e);
+      }
+    }, tickMs);
+    if (room.presTimer.unref) room.presTimer.unref();
+  }
+
+  /** Поставить сообщение присутствия комнаты в очередь тика. */
+  function relay(projectId, from, msg, instance = '') {
     const room = rooms.get(projectId);
     if (!room) return;
-    const text = JSON.stringify(msg);
-    for (const ws of room.sockets) if (ws !== from && ws.ready) send(ws, text);
+    const client = msg.client;
+    let key;
+    if (msg.type === 'left') {
+      key = 'L\u0000' + client;
+      for (const [k, e] of room.pres) if (e.client === client) room.pres.delete(k);
+    } else {
+      key = from ? 'S\u0000' + from.token : 'R\u0000' + instance + '\u0000' + client;
+      room.pres.delete('L\u0000' + client);
+      room.pres.delete(key);
+    }
+    room.pres.set(key, { msg, from, client });
+    schedulePresence(projectId, room);
+  }
+
+  function flushPresence(projectId, room) {
+    if (rooms.get(projectId) !== room) return;
+    presenceTicks += 1;
+    // шина: последнее от каждого своего сокета, не больше busPerTick за тик
+    if (room.bus.size) {
+      let n = 0;
+      for (const [token, body] of room.bus) {
+        if (n >= busPerTick) break;
+        room.bus.delete(token);
+        publish(body);
+        n += 1;
+      }
+    }
+    if (room.pres.size) {
+      const plain = [];
+      const batch = [];
+      for (const ws of room.sockets) {
+        if (!ws.ready || ws.readyState !== ws.OPEN) continue;
+        (ws.presenceBatch ? batch : plain).push(ws);
+      }
+      if (!plain.length && !batch.length) {
+        room.pres.clear();
+      } else {
+        // записей за тик: кадров у прежних сокетов — не больше roomFrames
+        const limit = plain.length ? Math.max(1, Math.floor(roomFrames / plain.length)) : Infinity;
+        const take = [];
+        for (const [k, e] of room.pres) {
+          if (take.length >= limit) break;
+          room.pres.delete(k);
+          take.push(e);
+        }
+        const texts = take.map((e) => JSON.stringify(e.msg));
+        if (plain.length) {
+          for (let i = 0; i < take.length; i++) {
+            const buf = Buffer.from(texts[i], 'utf8');
+            const from = take[i].from;
+            for (const ws of plain) {
+              if (ws === from) continue;
+              send(ws, buf);
+              presenceFramesSent += 1;
+            }
+          }
+        }
+        if (batch.length) {
+          const head = '{"type":"presence_batch","items":[';
+          let parts = [];
+          let size = head.length + 2;
+          const flush = () => {
+            if (!parts.length) return;
+            const buf = Buffer.from(head + parts.join(',') + ']}', 'utf8');
+            for (const ws of batch) {
+              send(ws, buf);
+              presenceFramesSent += 1;
+            }
+            parts = [];
+            size = head.length + 2;
+          };
+          for (const t of texts) {
+            if (parts.length && size + t.length + 1 > batchBytes) flush();
+            parts.push(t);
+            size += t.length + 1;
+          }
+          flush();
+        }
+      }
+    }
+    if (room.pres.size || room.bus.size) schedulePresence(projectId, room);
   }
 
   function onEvent(ev) {
@@ -285,7 +406,7 @@ export function createHub({
   function join(projectId, ws) {
     let room = rooms.get(projectId);
     if (!room) {
-      room = { sockets: new Set(), frames: new Map(), frameBytes: 0, remote: new Map() };
+      room = { sockets: new Set(), frames: new Map(), frameBytes: 0, remote: new Map(), pres: new Map(), bus: new Map(), presTimer: null };
       rooms.set(projectId, room);
     }
     room.sockets.add(ws);
@@ -297,6 +418,10 @@ export function createHub({
     room.sockets.delete(ws);
     if (!room.sockets.size) {
       clearFrames(room);
+      if (room.presTimer) clearTimeout(room.presTimer);
+      room.presTimer = null;
+      room.pres.clear();
+      room.bus.clear();
       rooms.delete(projectId);
     }
   }
@@ -362,6 +487,11 @@ export function createHub({
     const room = rooms.get(ws.projectId);
     const had = ws.announced;
     ws.announced = false;
+    // его ждущее тика присутствие — уже не нужно (ни сокетам, ни шине)
+    if (room) {
+      room.pres.delete('S\u0000' + ws.token);
+      room.bus.delete(ws.token);
+    }
     // закрытие сообщается своим всегда (как прежде); молчание — только если о нём знали
     if ((closed || had) && !presentElsewhere(room, ws.clientId, ws)) relay(ws.projectId, ws, { type: 'left', client: ws.clientId });
     if (ws.published) {
@@ -383,9 +513,13 @@ export function createHub({
     ws.announced = true;
     ws.presenceAt = now;
     relay(projectId, ws, presenceMessage(body));
-    if (bus) {
+    const room = rooms.get(projectId);
+    if (bus && room) {
+      // в шину — на тике (последнее от сокета); left потом уйдёт сразу
       ws.published = true;
-      publish(body);
+      room.bus.delete(ws.token);
+      room.bus.set(ws.token, body);
+      schedulePresence(projectId, room);
     }
   }
 
@@ -409,7 +543,7 @@ export function createHub({
     if (m.k === 'presence') {
       if (!Array.isArray(m.s)) return;
       room.remote.set(key, { i: m.i, c: m.c, until: Date.now() + presenceTtlMs });
-      relay(m.p, null, presenceMessage(m));
+      relay(m.p, null, presenceMessage(m), m.i);
     } else if (m.k === 'left') {
       if (!room.remote.delete(key)) return;   // не видели — и уходить некому
       if (!presentElsewhere(room, m.c)) relay(m.p, null, { type: 'left', client: m.c });
@@ -655,6 +789,8 @@ export function createHub({
     ws.author = nameOf(url.searchParams.get('author'));
     ws.inflight = 0;
     ws.knowsAck = !!(tip || epoch || proto >= 2);
+    // круг 33: клиент умеет `presence_batch` — присутствие комнаты одним кадром на тик
+    ws.presenceBatch = url.searchParams.get('presence') === 'batch';
     ws.lastSeq = -1;
     ws.catchingUp = true;
     ws.deciding = true;
@@ -813,6 +949,11 @@ export function createHub({
     },
     /** Сколько кадров tx сериализовано (тестам: один раз на событие, а не на сокет). */
     framesSerialized: () => framesSerialized,
+    /** Присутствие (круг 33, тестам): кадров разослано, тиков, ждут в комнате (сокетам и шине). */
+    presenceStats(projectId) {
+      const room = projectId !== undefined ? rooms.get(projectId) : null;
+      return { framesSent: presenceFramesSent, ticks: presenceTicks, pending: room ? room.pres.size : 0, busPending: room ? room.bus.size : 0 };
+    },
     /** Сколько транзакций сокеты получили `busy` сверх предела «в полёте» (тестам). */
     busyRefused: () => busyRefused,
     /** Прогнать TTL присутствия сейчас (тестам). */
@@ -830,7 +971,11 @@ export function createHub({
       publish({ k: 'bye', i: instanceId });
       for (const ws of wss.clients) ws.close(1001, 'server shutting down');
       await new Promise((resolve) => wss.close(() => resolve()));
-      for (const room of rooms.values()) clearFrames(room);
+      for (const room of rooms.values()) {
+        clearFrames(room);
+        if (room.presTimer) clearTimeout(room.presTimer);
+        room.presTimer = null;
+      }
       rooms.clear();
     }
   };

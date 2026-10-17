@@ -334,6 +334,40 @@ export const WS_CONNECTING = 6;
 /** Журнал «Истории» (`GET …/history`, круг 29): страница по умолчанию и наибольшая. */
 export const HISTORY_PAGE = 50;
 export const HISTORY_PAGE_MAX = 200;
+/**
+ * Круг 33. Импорт (`POST /api/projects` с документом): разбор и проверка документа в 20 тыс.
+ * узлов — ~0,6 с счёта; идёт в потоках (IMPORT_CONCURRENCY одновременно, IMPORT_QUEUE ждут,
+ * сверх — 503 busy). Тело меньше IMPORT_INLINE_BYTES готовится сразу в главном потоке.
+ */
+export const IMPORT_CONCURRENCY = 2;
+export const IMPORT_QUEUE = 8;
+export const IMPORT_INLINE_BYTES = 256 * 1024;
+/**
+ * Круг 33. Головы секвенсора в памяти — не больше стольких байт документов (`docBytes`, JSON;
+ * объекты в куче — примерно втрое больше: документ 20 тыс. узлов — 3,8 МБ JSON и ~11 МБ кучи):
+ * сверх — выгружаются давно не тронутые головы без сокетов и без записи в полёте (LRU).
+ * Задаётся окружением HEADS_BYTES; 256 МиБ JSON — порядка 0,8 ГБ кучи на головы.
+ */
+export const HEADS_BYTES = 256 * 1024 * 1024;
+/**
+ * Круг 33. Кеш сериализованных снимков для полного открытия (`GET /api/projects/:id`): ключ —
+ * (проект, seq, chain), байты JSON — не больше SNAPSHOT_CACHE_BYTES на экземпляр (LRU); снимок
+ * больше четверти бюджета не кешируется. 30 одновременных открытий большого проекта читают и
+ * сериализуют снимок один раз. Окружение — SNAPSHOT_CACHE_BYTES.
+ */
+export const SNAPSHOT_CACHE_BYTES = 128 * 1024 * 1024;
+/**
+ * Круг 33. Присутствие сводится по тикам: на комнату — не чаще раза в PRESENCE_TICK_MS, только
+ * изменившиеся (последнее от каждого источника); кадров присутствия за тик на комнату — не больше
+ * PRESENCE_ROOM_FRAMES (получателей × записей), остальное ждёт следующего тика (прежде 150
+ * сокетов по 10/с — 220 тыс. кадров в секунду, запись вставала на 12–17 с). Сокету с
+ * `presence=batch` — одним кадром `presence_batch` до PRESENCE_BATCH_BYTES. Шине между
+ * экземплярами — не больше PRESENCE_BUS_PER_TICK сообщений за тик на комнату.
+ */
+export const PRESENCE_TICK_MS = 100;
+export const PRESENCE_ROOM_FRAMES = 3000;
+export const PRESENCE_BATCH_BYTES = 64 * 1024;
+export const PRESENCE_BUS_PER_TICK = 32;
 /** Проверка хранилища в `GET /api/health` (круг 29): дедлайн пинга и сколько помнится ответ. */
 export const HEALTH_PING_MS = 1000;
 export const HEALTH_CACHE_MS = 1000;

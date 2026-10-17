@@ -1178,6 +1178,8 @@ function checkComponent(node, doc, loose) {
     const parts = p.path.split('.');
     if (PROTECTED_PATHS.has(parts[0])) return `component.props «${p.name}»: путь «${parts[0]}» защищён`;
     if (parts.some((x) => UNSAFE_KEYS.has(x))) return `component.props «${p.name}»: путь «${p.path}» защищён`;
+    // круг 33: и пустой сегмент — как у set
+    if (parts.includes('')) return `component.props «${p.name}»: пустой сегмент в пути «${p.path}»`;
     if (p.kind === 'enum') {
       const ok = Array.isArray(p.values) && p.values.length && p.values.every((v) => typeof v === 'string' && v);
       if (!ok) return `component.props «${p.name}»: enum без непустого списка values`;
@@ -2277,10 +2279,23 @@ function tokenWriteProblem(parts, value, tokens) {
       return null;
     }
     if (n === 2) return del ? null : typeEntryProblem(value, 'type.' + parts[1]);
-    if (del) return null;
-    const entry = { [parts[2]]: n === 3 ? value : {} };
-    if (n > 3) return plainProblem(value, n - 1);
-    return typeEntryProblem(entry, 'type.' + parts[1]);
+    if (n === 3 && del) return null;   // поля стиля необязательны
+    if (n > 3) {
+      const plain = del ? null : plainProblem(value, n - 1);
+      if (plain) return `${parts.join('.')}: ${plain}`;
+    }
+    /* Круг 33: проверяется ИТОГОВОЕ поле записи, а не только записываемое
+       значение. `type.body.fontSize.x = 16` раньше проходило (глубже трёх —
+       «простые данные») и превращало число fontSize в объект {x:16}: документ
+       после этого не импортировался. Знакомые поля (font, fontSize, …) — скаляры,
+       путь глубже них даёт объект и отклоняется typeEntryProblem; незнакомые
+       поля — простые данные любой формы. Соседние поля записи не смотрим. */
+    const group = tokens && isObj(tokens.type) ? tokens.type : {};
+    const entryNow = isObj(group[parts[1]]) ? group[parts[1]] : {};
+    const field = n === 3
+      ? value
+      : setPath(isObj(entryNow[parts[2]]) ? entryNow[parts[2]] : {}, parts.slice(3).join('.'), value);
+    return typeEntryProblem({ [parts[2]]: field }, 'type.' + parts[1]);
   }
   if (group === 'spacing' || group === 'radii') {
     if (n === 1) {
@@ -2494,6 +2509,9 @@ function applyOne(draft, op, j) {
       const path = typeof op.path === 'string' ? op.path : isNum(op.path) ? String(op.path) : '';   // круг 29: без приведения объекта
       if (!path) return opErr('bad-op', 'set: пустой путь');
       const parts = path.split('.');
+      // круг 33: пустой сегмент (`.name`, `layout..gap`, `.`) заводил ключ «» — его
+      // инверсия выходила с пустым путём и не ложилась
+      if (parts.includes('')) return opErr('bad-op', `set «${shown(path)}»: пустой сегмент пути`);
       if (PROTECTED_PATHS.has(parts[0])) return opErr('protected-path', `set: путь «${parts[0]}» защищён`);
       // ключи прототипа — на любом уровне: set(id, 'style.__proto__') так же опасен
       // круг 29: и любые имена Object.prototype — `style.toString = 1` ломает приведение
@@ -2580,6 +2598,8 @@ function applyOne(draft, op, j) {
     case 'setToken': {
       const path = typeof op.path === 'string' ? op.path : isNum(op.path) ? String(op.path) : '';   // круг 29: без приведения объекта
       if (!path) return opErr('bad-op', 'setToken: пустой путь');
+      // круг 33: пустой сегмент (`.colors`, `colors.`, `..`) — см. set
+      if (path.split('.').includes('')) return opErr('bad-op', `setToken «${shown(path)}»: пустой сегмент пути`);
       const badKey = path.split('.').find((p) => PROTO_KEYS.has(p));
       if (badKey) return opErr('protected-path', `setToken: путь «${badKey}» защищён`);
       const tokErr = tokenWriteProblem(path.split('.'), op.value, draft.tokens)

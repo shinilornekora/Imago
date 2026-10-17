@@ -1005,6 +1005,9 @@ button, input, textarea { font: inherit; color: inherit; }
   grid-area: insp; background: var(--panel); border-left: 1px solid var(--line);
   display: flex; flex-direction: column; overflow: hidden; min-width: 0;
 }
+/* фокус на саму панель ставит оболочка (круг 33), рамка вокруг всей колонки не нужна */
+.inspector:focus { outline: none; }
+.insp-body .field[data-orphan] { opacity: .6; }
 .insp-head, .sheet-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 8px 8px 14px; border-bottom: 1px solid var(--line-soft);

@@ -44,8 +44,9 @@ export function cleanText(s) {
   const str = String(s == null ? '' : s);
   const safe = typeof CORE_NS.cleanText === 'function' ? CORE_NS.cleanText(str) : str;
   return String(safe)
+    // круг 33: изоляторы направления (U+2066–U+2069) и арабская метка (U+061C) тоже невидимы
     // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/g, ' ')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -323,7 +324,7 @@ const ERROR_WORDS = {
   llm_failed: ['Модель ответила ошибкой', 'Попробуйте ещё раз или скажите иначе.'],
   document_down: ['Сервер агента не видит документ', 'Повторите через несколько секунд — правки руками сохраняются.'],
   document_failed: ['Сервер агента не смог прочитать документ', 'Повторите через несколько секунд.'],
-  too_large: ['Команда слишком большая для агента', 'Скажите короче или выделите узел поменьше.'],
+  too_large: ['Команда слишком большая для агента', 'Скажите короче или выделите слой поменьше.'],
   bad_request: ['Сервер агента не понял команду', 'Обновите страницу: версия редактора могла устареть.'],
   /* Круг 29: проекта нет (базу восстановили из копии, проект удалили) — «Откройте проект
      заново» вело в никуда: открывать нечего. Работа цела во вкладке — её сохраняют копией. */
@@ -500,6 +501,24 @@ export function whoDid(who, verb) {
   return `${name} ${verb}`;
 }
 
+/**
+ * Круг 33, п.7. Подпись правки пишет вкладка автора в мужском роде («Загрузил «Б»»). В словах
+ * о другом человеке глагол согласуется с ним: «Аня отменила правку — загрузила «Б»», а не
+ * «— загрузил». Первое слово подписи — глагол прошедшего времени на «-л»; иначе — как есть.
+ * @param {{author?: string, author_kind?: string}|null} who
+ * @param {string} phrase
+ */
+export function agreeVerb(who, phrase) {
+  const s = String(phrase == null ? '' : phrase);
+  const m = /^([А-ЯЁа-яё]+л)(?=[\s:,.]|$)/.exec(s);
+  if (!m || !who) return s;
+  const word = m[1];
+  const said = whoDid(who, word.toLowerCase());
+  const verb = said.slice(said.lastIndexOf(' ') + 1);
+  const cased = word.charAt(0) === word.charAt(0).toUpperCase() ? verb.charAt(0).toUpperCase() + verb.slice(1) : verb;
+  return cased + s.slice(word.length);
+}
+
 /** Какой правки касалась отброшенная операция: существительное и согласованный глагол. */
 function droppedSubject(op, nameOf) {
   const o = op && typeof op === 'object' ? op : {};
@@ -644,7 +663,7 @@ export function tooLargeWords(e = {}, limits = {}) {
         + 'Сделайте её по частям: выделите меньше и повторите.';
       break;
     case 'doc_nodes':
-      note = `Документ упёрся в предел — ${num(limits.docNodes || 20000)} узлов. Удалите лишнее, тогда новое ляжет.`;
+      note = `Документ упёрся в предел — ${num(limits.docNodes || 20000)} слоёв. Удалите лишнее, тогда новое ляжет.`;
       break;
     case 'doc_bytes':
       note = `Документ упёрся в предел размера — ${mb(limits.docBytes, 24 * 1024 * 1024)} МБ. Удалите лишнее, тогда новое ляжет.`;
@@ -928,12 +947,38 @@ export function collapseParts(list, { empty = (t) => !!(t && t.empty) } = {}) {
       continue;
     }
     const p = partBase(t.title);
-    const row = { ...t, title: p && p.n === part.n ? p.base : cleanText(t.title || ''), partOf: key, parts: [t.tx_id], empty: empty(t) };
+    // круг 33 (L2): partTop — номер новейшей пришедшей части; меньше n-1 — серия ещё не вся
+    const row = { ...t, title: p && p.n === part.n ? p.base : cleanText(t.title || ''), partOf: key, parts: [t.tx_id], empty: empty(t), partTop: part.i, partN: part.n };
     out.push(row);
     if (part.i > 0) open.set(key, { row, next: part.i - 1 });
     else open.delete(key);
   }
   return out;
+}
+
+/** Сколько ждём следующую часть большой правки, прежде чем сказать «не завершена» (L2). */
+export const PART_STALE_MS = 3 * 60 * 1000;
+
+/**
+ * Круг 33 (L2). Большая правка уходит частями, и атомарности серии на сервере нет: вкладка
+ * автора могла закрыться после первой части. Остальные участники видят это по `undo_part`
+ * в рассылке: пока последней части нет — «правка Ани в пути (1 из 3)»; новейшая часть старше
+ * PART_STALE_MS — «правка Ани не завершена (1 из 3)». Строка из collapseParts; null — серия
+ * целая (или это не серия).
+ * @param {object} row строка collapseParts
+ * @param {{now?: number, staleMs?: number, mine?: boolean}} [o]
+ * @returns {{state: 'transit'|'stale', got: number, n: number, text: string}|null}
+ */
+export function partSeriesWords(row, { now = Date.now(), staleMs = PART_STALE_MS, mine = false } = {}) {
+  if (!row || !Number.isInteger(row.partTop) || !Number.isInteger(row.partN)) return null;
+  const n = row.partN;
+  if (n < 2 || row.partTop >= n - 1 || row.partTop < 0) return null;
+  const got = row.partTop + 1;
+  const at = Date.parse(row.created_at || '');
+  const stale = Number.isFinite(at) && now - at > staleMs;
+  const whose = mine ? 'ваша правка' : `правка ${editOf(row).replace(/^правки\s+/, '')}`;
+  const text = stale ? `${whose} не завершена (${got} из ${n})` : `${whose} в пути (${got} из ${n})`;
+  return { state: stale ? 'stale' : 'transit', got, n, text };
 }
 
 /**
@@ -977,7 +1022,7 @@ export function replaceDocOps(cur, nextDoc) {
 /** Файл больше предела документа — словами, с числом узлов. */
 export function importTooBigWords(count, max = 20000) {
   const num = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
-  return `Файл слишком большой: ${num(count)} ${plural(count, 'узел', 'узла', 'узлов')}, предел ${num(max)}`;
+  return `Файл слишком большой: ${num(count)} ${plural(count, 'слой', 'слоя', 'слоёв')}, предел ${num(max)}`;
 }
 
 /* -------------- круг 29: «Сохранить как новый проект» для большого документа -------------- */

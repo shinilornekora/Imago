@@ -178,7 +178,7 @@ test('слишком большая правка: понятная строка 
   }
   assert.match(tooLargeWords({ limit: 'tx_bytes' }, lim).note, /4 МБ/);
   assert.match(tooLargeWords({ limit: 'ops_per_tx' }, lim).note, /5 000 операций/);
-  assert.match(tooLargeWords({ detail: { limit: 'doc_nodes' } }, lim).note, /20 000 узлов/);
+  assert.match(tooLargeWords({ detail: { limit: 'doc_nodes' } }, lim).note, /20 000 слоёв/);
   // отказ сервера без limit (413 body_bytes) — тоже понятная строка
   assert.match(tooLargeWords({}).note, /по частям/);
 });

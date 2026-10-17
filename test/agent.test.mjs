@@ -650,3 +650,71 @@ test('круг 27, I6: shutting_down в потоке — «перезапуск�
   assert.equal(w.title, 'Сервер агента перезапускается — команда не выполнена');
   assert.doesNotMatch(w.title + w.note, /остановлен/i);
 });
+
+test('круг 33, L3: health() пробрасывает document_reason — «база данных», а не «сервер документа»', async () => {
+  const reply = (body) => async () => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body });
+  const up = { ok: true, engine: 1, llm: 'up', document: 'up', instance: 'orch_a' };
+  const prev = await health({ fetch: reply(up) });
+  assert.equal('document_reason' in prev, false);
+  const db = await health({ fetch: reply({ ...up, document: 'down', document_reason: 'storage' }) });
+  assert.equal(db.document, 'down');
+  assert.equal(db.document_reason, 'storage');
+  assert.match(agentHealthNotice(prev, db).text, /база данных сервера недоступна/);
+  const schema = await health({ fetch: reply({ ...up, document: 'down', document_reason: 'schema' }) });
+  assert.match(agentHealthNotice(prev, schema).text, /сервер обновляет базу данных/);
+  const svc = await health({ fetch: reply({ ...up, document: 'down', document_reason: 'unreachable' }) });
+  assert.equal(svc.document_reason, 'unreachable');
+  assert.match(agentHealthNotice(prev, svc).text, /сервер документа не отвечает/);
+  // чужая строка в текст человеку не попадает, у живого документа причины нет
+  const odd = await health({ fetch: reply({ ...up, document: 'down', document_reason: '<b>что-то</b>' }) });
+  assert.equal('document_reason' in odd, false);
+  const stale = await health({ fetch: reply({ ...up, document_reason: 'storage' }) });
+  assert.equal('document_reason' in stale, false);
+  // клиент агента (createAgentClient) — тот же ответ
+  const client = createAgentClient({ fetch: reply({ ...up, document: 'down', document_reason: 'storage' }) });
+  assert.equal((await client.health()).document_reason, 'storage');
+});
+
+test('круг 33 (ORCH): stop и apply несут client той вкладки, что дала команду', async (t) => {
+  const srv = await fakeServer({
+    'POST /agent/command': async (req, body, res) => {
+      streamHead(res);
+      res.write(sse('stage', { key: 'llm' }));
+    },
+    'POST /agent/stop': async (req, body, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ stopped: true }));
+    },
+    'POST /agent/apply': async (req, body, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ tx_id: 'tx_v', seq: 1, applied: 1, dropped: [], summary: 'вариант', warnings: [] }));
+    },
+  });
+  t.after(() => srv.close());
+  // «стоп» посреди потока — с client команды
+  const ctrl = new AbortController();
+  const p = runServerCommand({
+    baseUrl: srv.baseUrl, project: 'p', text: 'x', client: 'c_tab', signal: ctrl.signal,
+    onEvent: (e) => { if (e.type === 'stage') setTimeout(() => ctrl.abort(), 10); },
+  });
+  await assert.rejects(p, (e) => e.code === 'cancelled');
+  const cmd = srv.log.find((r) => r.path === '/agent/command');
+  const st = srv.log.find((r) => r.path === '/agent/stop');
+  assert.equal(cmd.body.client, 'c_tab');
+  assert.equal(st.body.client, 'c_tab');
+  // клиент с умолчаниями: client — функцией, как у оболочки (clientId реплики)
+  let cid = 'c_tab';
+  const client = createAgentClient({ baseUrl: srv.baseUrl, client: () => cid });
+  await client.apply('cmd_v', 'a');
+  await client.stop('cmd_v');
+  const ap = srv.log.filter((r) => r.path === '/agent/apply').at(-1);
+  const st2 = srv.log.filter((r) => r.path === '/agent/stop').at(-1);
+  assert.deepEqual(ap.body, { command_id: 'cmd_v', variant: 'a', client: 'c_tab' });
+  assert.deepEqual(st2.body, { command_id: 'cmd_v', client: 'c_tab' });
+  // нет client — поля нет (сервер сверит с null)
+  cid = '';
+  await client.stop('cmd_w');
+  assert.equal('client' in srv.log.filter((r) => r.path === '/agent/stop').at(-1).body, false);
+  await apply('cmd_w', 'b', { baseUrl: srv.baseUrl, client: 'x'.repeat(200) });
+  assert.equal('client' in srv.log.filter((r) => r.path === '/agent/apply').at(-1).body, false);
+});

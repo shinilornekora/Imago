@@ -235,7 +235,18 @@ export function parseBodyJson(text) {
 export function completionText(json) {
   const c = json && Array.isArray(json.choices) ? json.choices[0] : null;
   if (!c || typeof c !== 'object') return '';
-  const v = c.message && typeof c.message === 'object' ? c.message.content : c.text;
+  return contentText(c.message && typeof c.message === 'object' ? c.message.content : c.text);
+}
+
+/**
+ * Круг 33: поле `content` ответа модели (целиком или куском потока) → текст. Строка — как
+ * есть; массив частей — склейка их строк; null/undefined — пусто; иное (объект, число…) —
+ * `llm_bad_response` сразу, без повтора «по схеме»: модель прислала не текст, и второй
+ * запрос того же сервера ответит так же.
+ * @param {any} v
+ * @returns {string}
+ */
+export function contentText(v) {
   if (v == null) return '';
   if (typeof v === 'string') return v;
   if (Array.isArray(v)) {
@@ -248,6 +259,24 @@ export function completionText(json) {
     return out;
   }
   throw badResponse('Ответ модели не той формы — попробуйте ещё раз');
+}
+
+/** Круг 33: потолок длины id модели из `/models` (длиннее — мусор, id не берётся). */
+export const MODEL_ID_MAX = 200;
+
+/**
+ * Круг 33: id модели из ответа `/models` — только строка (или конечное число) без
+ * управляющих и форматных знаков (U+0000, RTL-переключатели…) и половин суррогатных пар,
+ * не длиннее MODEL_ID_MAX. Негодный — '' (модель не выбирается, остаётся заданная).
+ * @param {any} v
+ * @returns {string}
+ */
+export function cleanModelId(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) v = String(v);
+  if (typeof v !== 'string') return '';
+  const s = v.replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, '').trim();
+  if (!s || s.length > MODEL_ID_MAX) return '';
+  return s;
 }
 
 /** Ошибка → всегда понятный человеку объект {kind, message}. */
@@ -1337,7 +1366,8 @@ function makeOpenAiProvider(cfg) {
       const res = await fetchImpl(`${baseUrl}/models`, { method: 'GET', headers: headers(), signal: guard.signal });
       if (!res || !res.ok) return false;
       const body = await readBodyCapped(res, maxBodyBytes).then((t) => JSON.parse(t)).catch(() => null);
-      const first = body && Array.isArray(body.data) && body.data[0] && body.data[0].id;
+      // круг 33: id — строкой, чищенный и с пределом длины
+      const first = cleanModelId(body && Array.isArray(body.data) && body.data[0] ? body.data[0].id : null);
       if (!model && first) model = first;
       return true;
     } catch {
@@ -1523,8 +1553,16 @@ async function readSseStream(res, onText, maxBytes = MODEL_BODY_MAX_BYTES) {
       const chunk = tryParse(payload);
       if (!chunk) continue;
       if (chunk.usage) usage = chunk.usage;
-      const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta && chunk.choices[0].delta.content;
-      if (typeof delta === 'string' && delta) {
+      const c0 = Array.isArray(chunk.choices) ? chunk.choices[0] : null;
+      // круг 33: кусок не строкой (объект, число) — llm_bad_response, а не «нет JSON» с повтором
+      let delta = '';
+      try {
+        delta = c0 && typeof c0 === 'object' && c0.delta && typeof c0.delta === 'object' ? contentText(c0.delta.content) : '';
+      } catch (e) {
+        try { await reader.cancel(); } catch { /* ignore */ }
+        throw e;
+      }
+      if (delta) {
         text += delta;
         if (onText) { try { onText(text, delta); } catch { /* ignore */ } }
       }

@@ -40,7 +40,7 @@ import {
   SNAPSHOT_EVERY, SNAPSHOT_KEEP, VERIFY_MS, PAGE_TXS,
   QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES, BUSY_RETRY_S,
   REPLAY_MAX_AGE_MS, REPLAY_SCAN_TXS, MAX_VALUE_DEPTH, MAX_OP_ID, MAX_COMMAND_ID,
-  TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES,
+  TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES, HEADS_BYTES,
   isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue, undoPartOf
 } from './limits.js';
 
@@ -473,8 +473,9 @@ function summaryOf(c, replayAt) {
  *   maxDocBytes?: number,
  *   tombKeepSeq?: number, tombPruneEvery?: number, tombMax?: number,
  *   recentTxs?: number, recentBytes?: number,
+ *   headsBytes?: number,
  *   log?: {warn:Function, info:Function}
- * }} opts
+ * }} opts `headsBytes` — бюджет голов в памяти (байты документов, круг 33): сверх — выгрузка LRU
  */
 export function createSequencer({
   storage, instanceId = 'i', snapshotEvery = SNAPSHOT_EVERY, snapshotKeep = SNAPSHOT_KEEP,
@@ -482,7 +483,7 @@ export function createSequencer({
   queueProjectBytes = QUEUE_PROJECT_BYTES, queueProjectTxs = QUEUE_PROJECT_TXS, queueTotalBytes = QUEUE_TOTAL_BYTES,
   replayScanTxs = REPLAY_SCAN_TXS,
   tombKeepSeq = TOMB_KEEP_SEQ, tombPruneEvery = TOMB_PRUNE_EVERY, tombMax = TOMB_MAX,
-  recentTxs = RECENT_TXS, recentBytes = RECENT_BYTES
+  recentTxs = RECENT_TXS, recentBytes = RECENT_BYTES, headsBytes = HEADS_BYTES
 }) {
   const lim = { mergeBudgetMs, maxDocNodes, maxDocBytes };
   /** Очередь записи (§9.10): projectId → {bytes, txs} транзакций в мьютексе (ждут и пишутся); всего — байт. */
@@ -645,7 +646,36 @@ export function createSequencer({
     heads.delete(projectId);
   }
 
+  /**
+   * Бюджет голов в памяти (круг 33): прежде головы выгружались только по бездействию (10 мин),
+   * и 20 импортов по 20 тыс. узлов с правкой в каждый держали в памяти все 20 документов —
+   * память экземпляра росла без предела. Теперь сумма `docBytes` голов — не больше headsBytes:
+   * сверх — выгружаются самые давние по использованию (порядок Map — LRU: touch переставляет
+   * голову в конец), кроме открытых сокетами (`watched`), с записью или сверкой в полёте
+   * (мьютекс проекта занят) и той, что нужна сейчас (`keep`). Выгруженная голова
+   * поднимется со снимка при следующей записи — как после бездействия.
+   */
+  let evicted = 0;
+  function trimHeads(keep) {
+    if (!(headsBytes > 0)) return;
+    let total = 0;
+    for (const h of heads.values()) total += Number.isFinite(h.docBytes) ? h.docBytes : 0;
+    if (total <= headsBytes) return;
+    for (const [projectId, h] of [...heads]) {
+      if (total <= headsBytes) break;
+      if (projectId === keep || locks.has(projectId) || watched(projectId)) continue;
+      dropHead(projectId);
+      total -= Number.isFinite(h.docBytes) ? h.docBytes : 0;
+      evicted += 1;
+    }
+  }
+
   function touch(projectId, head) {
+    // LRU: тронутая голова — в конец порядка (выгрузка по бюджету снимает с начала)
+    if (heads.get(projectId) === head) {
+      heads.delete(projectId);
+      heads.set(projectId, head);
+    }
     head.lastUsed = Date.now();
     if (head.timer) clearTimeout(head.timer);
     if (idleMs > 0) {
@@ -727,6 +757,8 @@ export function createSequencer({
         absorbPage(head, projectId, page);
       }
       heads.set(projectId, head);
+      // круг 33: новая голова — сверх бюджета памяти выгружаются давние (не она сама)
+      trimHeads(projectId);
       if (restored) {
         log.warn(`[document/dslts] ${projectId}: надгробия снимка seq ${latest.seq} неизвестны (прежний экземпляр) — восстановлены журналом от снимка seq ${snap.seq}`);
         // свежий снимок с надгробиями: следующей загрузке переигрывать не придётся
@@ -1018,6 +1050,8 @@ export function createSequencer({
         // бездействие считается от конца записи, а не от её начала: долгая запись
         // (медленная база, длинная очередь) не должна выгружать голову сразу после себя
         touch(projectId, head);
+        // документ вырос — бюджет голов мог кончиться (выгружаются давние, не эта)
+        if (heads.size > 1) trimHeads(projectId);
         emit({ kind: 'tx', projectId, committed: res.committed });
         if (snapshotEvery > 0 && seq % snapshotEvery === 0) scheduleSnapshot(projectId, seq, head.doc, head.chain, head.tombstones, head.tombSeq);
         return { committed: res.committed, existing: false };
@@ -1263,7 +1297,9 @@ export function createSequencer({
 
     /** Гонки с другими экземплярами: сколько кругов заново, сколько раз попытки кончились (503). */
     stats() {
-      return { staleRetries, exhausted, heads: heads.size };
+      let bytes = 0;
+      for (const h of heads.values()) bytes += Number.isFinite(h.docBytes) ? h.docBytes : 0;
+      return { staleRetries, exhausted, heads: heads.size, headsBytes: bytes, evicted };
     },
 
     /** Загружена ли голова (после выгрузки по бездействию — нет). */

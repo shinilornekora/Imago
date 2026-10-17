@@ -20,7 +20,7 @@
 
 import {
   makeProvider, parseModelJson, BrainError, MODEL_REJECTED, cutText,
-  MODEL_BODY_MAX_BYTES, readBodyCapped, parseBodyJson, badResponse, modelDataProblem,
+  MODEL_BODY_MAX_BYTES, readBodyCapped, parseBodyJson, badResponse, modelDataProblem, cleanModelId,
 } from '../../../src/brain.js';
 import { LLM_HEALTH_CACHE_MS, LLM_HEALTH_TIMEOUT_MS } from '../limits.js';
 
@@ -244,9 +244,11 @@ export function createLlm(cfg = {}) {
       });
       const body = await readBodyCapped(res, 1024 * 1024).then((t) => JSON.parse(t)).catch(() => null);
       if (res.ok) {
-        const first = body && Array.isArray(body.data) && body.data[0] && body.data[0].id;
+        // круг 33: id из /models — строкой, без управляющих знаков, не длиннее MODEL_ID_MAX;
+        // негодный не берётся (раньше — String(first) как есть, хоть 1 МБ, хоть «[object Object]»)
+        const first = cleanModelId(body && Array.isArray(body.data) && body.data[0] ? body.data[0].id : null);
         if (!model && first) {
-          model = String(first);
+          model = first;
           if (provider && 'model' in provider && !provider.model) provider.model = model;
         }
         value = { llm: 'up', ...(model ? { model } : {}) };

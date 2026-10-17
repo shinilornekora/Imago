@@ -10,7 +10,9 @@
 server/document/
   index.js              вход: окружение и пределы, сборка модулей, graceful shutdown; export launch(opts), start(opts)
   http.js               маршруты §9.2 (node:http), статика клиента для прогонов без nginx
-  hub.js                WebSocket §9.3 (пакет ws): hello → догон → живой поток, presence, ping/pong
+  hub.js                WebSocket §9.3 (пакет ws): hello → догон → живой поток, presence (тиками), ping/pong
+  importer.js           подготовка нового проекта: разбор и проверка документа импорта (круг 33)
+  import-pool.js        потоки подготовки импорта (import-worker.js) — вне цикла событий
   dslr.js               чтение: open (снимок + хвост), since (догон или gone со снимком)
   dslts.js              секвенсор §9.4: голова в памяти, мьютекс, rebase → applyOps → commitTx → снимок
   errors.js             DocError → {error:true, code, message, retryable, detail?} — одно тело для HTTP и WS
@@ -60,15 +62,19 @@ DATABASE_URL=postgres://imago:imago@127.0.0.1:5432/imago node server/document/in
 | `TOMB_MAX` | `50000` | надгробий в голове (и в снимке) не больше стольких — самые старые уходят |
 | `RECENT_TXS` | `500` | выжимок последних транзакций в памяти головы (идемпотентность, окно `stale`) |
 | `RECENT_BYTES` | `16777216` | те же выжимки, байт (16 МиБ) |
+| `HEADS_BYTES` | `268435456` | головы секвенсора в памяти — сумма байт JSON документов (256 МиБ; в куче — примерно втрое больше); сверх — выгружаются давно не тронутые головы без сокетов и без записи в полёте (круг 33) |
+| `IMPORT_CONCURRENCY` | `2` | потоков подготовки импорта (`POST /api/projects` с документом больше 256 КиБ): разбор, проверка и приведение документа идут вне цикла событий (круг 33) |
+| `IMPORT_QUEUE` | `8` | импортов в очереди к этим потокам; сверх — `503 busy` (`import_queue`). Тело ждущего импорта занимает бюджет `WRITE_BODY_BYTES` — очередь не съедает его у записи соседей |
+| `SNAPSHOT_CACHE_BYTES` | `134217728` | кеш сериализованных снимков полного открытия, ключ (проект, seq, chain) (128 МиБ; `0` — без кеша; круг 33) |
 | `INTERNAL_TOKEN` | — | токен `POST /api/internal/traces` (заголовок `X-Internal-Token`); не задан или `change-me` — 403 |
-| `STATIC_DIR` | — | каталог клиента (`index.html`, `app.js`, `styles.css`, `src/*.js`) — раздаётся с верными MIME, чтобы гонять без nginx: `STATIC_DIR=. node server/document/index.js` из корня репозитория |
+| `STATIC_DIR` | — | каталог клиента (`index.html`, `app.js`, `styles.css`, `src/*.js`) — раздаётся с верными MIME, чтобы гонять без nginx: `STATIC_DIR=. node server/document/index.js` из корня репозитория. Раздаются только эти файлы (белый список, круг 33): `.env`, `.git/…`, `server/…`, `node_modules/…` и любой путь с сегментом на точку — 404 |
 
 Числа пределов — целые; пустая переменная — умолчание из `limits.js`; негодная (не целое,
 меньше допустимого) — строка в лог и то же умолчание: опечатка в окружении не снимает предел.
 Опция `start()`/`launch()` (`snapshotEvery`, `snapshotKeep`, `presenceTtlMs`, `dbTimeoutMs`,
 `maxInflight`, `writes: {max, queue, bodyBytes, bodyTimeoutMs}`, `queueProjectBytes`,
 `queueProjectTxs`, `queueTotalBytes`, `tombKeepSeq`, `tombPruneEvery`, `tombMax`, `recentTxs`,
-`recentBytes`) главнее окружения; итог — `svc.config` (ключи `writes.*` там — `writesMax`,
+`recentBytes`, `headsBytes`, `importConcurrency`, `importQueue`, `snapshotCacheBytes`) главнее окружения; итог — `svc.config` (ключи `writes.*` там — `writesMax`,
 `writesQueue`, `writesBodyBytes`, `writesBodyTimeoutMs`).
 
 ### Старт, миграции, останов
@@ -345,6 +351,43 @@ latin1, а `fetch` в браузере не-latin1 значение отверг
   и `undo_part` (`null`, если нет): оболочка сводит части одной правки в одну строку по ним,
   а не по подписи.
 
+Круг 33:
+
+* `POST /api/projects {…, create_id}` (L1) — идемпотентное создание: `create_id` — строка 8–64
+  символов `[A-Za-z0-9_-]` (иначе `400`, `detail.param: 'create_id'`). Проект с таким
+  `create_id` уже есть — `200` и он же (`existing: true`, `head_seq`/`tip` — нынешние, имя —
+  его, а не из повтора), второй не создаётся; одновременные одинаковые запросы — один проект
+  (частичный уникальный индекс, `ON CONFLICT`). Колонка `projects.create_id` — миграция 012
+  (`NULL` у старых проектов и у экземпляра прежней версии; схема без 012 — ключ не учитывается).
+* Импорт: тело `POST /api/projects` больше 256 КиБ разбирается и проверяется (`cleanDeep`,
+  `checkImportDoc`, `createDoc`, глубина, байты) в потоке (`import-pool.js`,
+  `IMPORT_CONCURRENCY` × `IMPORT_QUEUE`, сверх — `503 busy`, `detail.limit: 'import_queue'`) —
+  до слота записи; документ уходит в хранилище строкой JSON. Ошибки — те же `400`/`413`.
+* Присутствие сводится по тикам 100 мс: от каждого источника — последнее, `left` по клиенту
+  отменяет его ждущее присутствие (и наоборот). Кадров присутствия за тик на комнату — не
+  больше 3000 (получатели × записи), остальное — следующими тиками (в большой комнате
+  выделения других приходят реже, запись не встаёт). Сокет с `presence=batch` в адресе
+  получает присутствие одним кадром на тик: `{type:'presence_batch', items:[presence|left…]}`
+  (своё присутствие в нём тоже есть — отбрасывать по `client`). Шина между экземплярами —
+  последнее от сокета за тик, `left` — сразу.
+* Головы секвенсора — под бюджетом `HEADS_BYTES` (байты JSON документов, LRU): выгружаются
+  давние, кроме открытых сокетами и с записью в полёте.
+* Полное открытие (`GET /api/projects/:id`) берёт снимок строкой JSON из кеша по (проект, seq,
+  chain, эпоха, время снимка) — `SNAPSHOT_CACHE_BYTES`; одновременные открытия делят одно чтение.
+* Догон (`ops?since`, сокет, повтор транзакции) отдаёт `author`, `title`, `command_author` и у
+  старых записей чистыми (`cleanMeta`), как `/history`.
+* `STATIC_DIR` — только файлы клиента: `index.html`, `app.js`, `styles.css`, `src/<имя>.js`;
+  сегмент на точку — 404 всегда.
+* Восстановление «в ту же базу» под работающим экземпляром (`dropdb; createdb; pg_restore`):
+  сверка схемы DDL не делает, пока в базе нет `schema_migrations`, в ней нет первой миграции или
+  к базе подключён `pg_restore` (а после ожидания — пока схема не устоится две проверки подряд):
+  `/api/health` → `503 {detail:{storage:'schema', phase:'empty'|'restore'}}`, проверка раз в
+  секунду. На старте процесса пустую базу создают миграции, как раньше. Восстанавливать под
+  работающими сервисами лучше в новую базу с переименованием (ЗАПУСК.md).
+* Долгое дозаполнение (009) при сверке — после DDL всех ждущих миграций: запись тем временем
+  идёт с `command_author`/`undo_part`, `/api/health` → `200 {…, detail:{backfill:{migration,
+  since, progress?}}}`; учёт 009 — когда дозаполнение кончилось. На старте процесса — по порядку.
+
 ## Тесты
 
 ```sh
@@ -402,4 +445,9 @@ txsAfter, recentTxMeta, open проходят, колонки возвращаю
 Круг 32: `round32.test.mjs` (`undoPartOf`; `undo_part` в `Committed`, рассылке, догоне, `ops`,
 `/history` вместе с `undo_of`/`redo_of`, кривое — без поля; миграция 011 при живом экземпляре
 прежней версии).
+Круг 33: `round33.test.mjs` (белый список статики; 150 сокетов × 10/с присутствия — запись p99 < 1 с,
+`presence_batch`, сводка и `left`; 6 импортов 20 тыс. узлов — соседняя запись < 1 с; бюджет голов;
+`pg_restore` и пустая база под работающим экземпляром — без DDL, `dropdb; createdb; pg_restore` без
+ошибок; дозаполнение 009 после 010/011 — health 200 `backfill`; `create_id` и 012 при старом экземпляре;
+чистые подписи в догоне; кеш снимков).
 Нагрузочный самотест (не входит в `npm test`): `env -u NODE_OPTIONS node test/server/load.mjs`.

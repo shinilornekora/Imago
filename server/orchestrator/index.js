@@ -22,6 +22,9 @@
  *   POOL_QUEUE_MAX    ждущих свободного воркера заданий (32); больше — 429 busy
  *   POOL_QUEUE_WAIT_MS сколько задание ждёт воркер (30000); дольше — busy
  *
+ * Приём запроса (круг 33, не настраивается окружением — limits.js): тело не пришло за 30 с —
+ * 408 timeout; заголовки — 20 с, запрос целиком — 35 с (таймауты http.Server).
+ *
  * Останов по SIGTERM/SIGINT: новые команды — 503, выполняемые доводятся (до 10 с),
  * остальное прерывается, потоки закрываются, воркеры снимаются, трассы дописываются.
  *
@@ -42,9 +45,9 @@ import { createDslv } from './dslv/index.js';
 import { createLlm } from './llm/index.js';
 import { createTraces } from './traces.js';
 import { createPipeline } from './pipeline.js';
-import { createRequestHandler } from './http.js';
+import { createRequestHandler, applyServerTimeouts } from './http.js';
 import jev from './jev/index.js';
-import { SHUTDOWN_GRACE_MS, SHUTDOWN_FLUSH_MS, SHUTDOWN_HARD_MS } from './limits.js';
+import { SHUTDOWN_GRACE_MS, SHUTDOWN_FLUSH_MS, SHUTDOWN_HARD_MS, BODY_TIMEOUT_MS } from './limits.js';
 
 const num = (v) => (v === undefined || v === null || v === '' ? undefined : Number(v));
 
@@ -55,6 +58,8 @@ const num = (v) => (v === undefined || v === null || v === '' ? undefined : Numb
  *   workers?: number, workerMaxMb?: number, workerTimeoutMs?: number, queueMax?: number,
  *   workerJobs?: number, poolQueueMax?: number, poolQueueWaitMs?: number,
  *   variantsTtlMs?: number, tracePath?: string, testHooks?: boolean, fetch?: typeof fetch,
+ *   bodyTimeoutMs?: number, headersTimeoutMs?: number, requestTimeoutMs?: number,
+ *   connectionsCheckingIntervalMs?: number,
  *   log?: {info: Function, warn: Function}
  * }} [opts] всё необязательно — умолчания из окружения
  */
@@ -105,9 +110,17 @@ export async function start(opts = {}) {
     maxQueue: opts.queueMax !== undefined ? opts.queueMax : num(env.QUEUE_MAX),
     variantsTtlMs: opts.variantsTtlMs,
   });
-  const handler = createRequestHandler({ pipeline, redact: llm.redact, log, testHooks: !!opts.testHooks });
-  const server = http.createServer(handler);
+  // круг 33: свой таймер тела (408) и таймауты приёма запроса — как у Document service
+  // (из окружения не читается: тело Orchestrator — до 1 МБ, 30 с хватает с запасом)
+  const bodyTimeoutMs = opts.bodyTimeoutMs || BODY_TIMEOUT_MS;
+  const handler = createRequestHandler({ pipeline, redact: llm.redact, log, testHooks: !!opts.testHooks, bodyTimeoutMs });
+  const server = http.createServer(
+    // проверка node идёт раз в connectionsCheckingInterval (30 с): короткие сроки (тесты) — чаще
+    opts.connectionsCheckingIntervalMs ? { connectionsCheckingInterval: opts.connectionsCheckingIntervalMs } : {},
+    handler,
+  );
   server.keepAliveTimeout = 5000;
+  applyServerTimeouts(server, { headersTimeoutMs: opts.headersTimeoutMs, requestTimeoutMs: opts.requestTimeoutMs });
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);

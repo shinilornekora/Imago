@@ -38,6 +38,8 @@ export function createMemoryStorage() {
   /** @type {Map<string, object[]>} projectId → трассы */
   let traces = new Map();
   let traceId = 0;
+  /** @type {Map<string, string>} create_id → id проекта (круг 33, L1) */
+  let byCreateId = new Map();
   const listeners = new Set();
 
   const journalOf = (id) => {
@@ -90,7 +92,8 @@ export function createMemoryStorage() {
       tombstones: clone(joinTombstones({ seq: s.seq, chain: s.chain || '', parents: s.parents, meta: s.meta, metaChain: s.metaChain })),
       created_at: s.created_at
     };
-    if (withDoc) out.doc = clone(s.doc);
+    // снимок импорта хранится строкой JSON (круг 33): разбор — при чтении, а не в цикле записи
+    if (withDoc) out.doc = typeof s.docJson === 'string' ? JSON.parse(s.docJson) : clone(s.doc);
     return out;
   };
 
@@ -116,17 +119,32 @@ export function createMemoryStorage() {
       return true;
     },
 
-    async createProject({ name = '', kind = 'design', doc, engine }) {
-      const bad = pgRejects({ json: [doc], text: [name, kind] });
+    /**
+     * Как у pg: `docJson` — документ строкой (импорт, круг 33); `createId` — проект с таким
+     * create_id уже есть → он же с `existing: true` (L1).
+     */
+    async createProject({ name = '', kind = 'design', doc, docJson, engine, createId }) {
+      const cid = typeof createId === 'string' && createId ? createId : null;
+      if (cid && byCreateId.has(cid) && projects.has(byCreateId.get(cid))) return { ...clone(projects.get(byCreateId.get(cid))), existing: true };
+      // документ строкой (импорт, круг 33) уже вычищен подготовкой (cleanDeep): его не разбираем
+      // и не обходим здесь — только строку имени и вида; разбор — при чтении снимка
+      const bad = pgRejects({ json: typeof docJson === 'string' ? [] : [doc], text: [name, kind] });
       if (bad) throw bad;
       const now = new Date().toISOString();
       const epoch = newEpoch();
       const project = { id: randomUUID(), name, kind, head_seq: 0, head_chain: '', epoch, epoch_cause: 'init', engine, created_at: now, updated_at: now };
       projects.set(project.id, project);
-      snapshots.set(project.id, [{ seq: 0, doc: clone(doc), engine, chain: '', parents: {}, meta: null, metaChain: null, created_at: now }]);
+      if (cid) byCreateId.set(cid, project.id);
+      snapshots.set(project.id, [{ seq: 0, ...(typeof docJson === 'string' ? { docJson } : { doc: clone(doc) }), engine, chain: '', parents: {}, meta: null, metaChain: null, created_at: now }]);
       epochs.set(project.id, [{ epoch, seq: 0, cause: 'init', created_at: now }]);
       journalOf(project.id);
       return clone(project);
+    },
+
+    /** Проект по create_id (круг 33, L1) или null. */
+    async projectByCreateId(createId) {
+      const id = typeof createId === 'string' ? byCreateId.get(createId) : undefined;
+      return id && projects.has(id) ? clone(projects.get(id)) : null;
     },
 
     async listProjects() {
@@ -352,7 +370,7 @@ export function createMemoryStorage() {
 
     /** Копия всего хранилища — «бэкап» (тестам отката базы). */
     backup() {
-      return clone({ projects, journals, snapshots, epochs, traces, traceId });
+      return clone({ projects, journals, snapshots, epochs, traces, traceId, byCreateId });
     },
 
     /** Вернуть хранилище к бэкапу — «restore» под работающим сервисом. Уведомлений нет: restore их не шлёт. */
@@ -364,6 +382,7 @@ export function createMemoryStorage() {
       epochs = c.epochs;
       traces = c.traces;
       traceId = c.traceId;
+      byCreateId = c.byCreateId instanceof Map ? c.byCreateId : new Map();
     }
   };
   return self;

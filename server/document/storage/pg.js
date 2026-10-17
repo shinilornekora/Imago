@@ -543,13 +543,31 @@ export function createPgStorage(opts = {}) {
    * прогресс для 503 migrating. Упавшая миграция откатывается и не записывается в
    * учёт: следующий старт начнёт с неё (её работа идемпотентна).
    */
-  async function migrate() {
+  async function migrate({ deferFill = false, onDdl = null } = {}) {
     migrationState = { phase: 'connect', migration: null, progress: null };
+    /** Круг 33: миграции с долгим дозаполнением (`ddlUp` + `fillUp`), отложенные до конца DDL. */
+    const deferred = [];
     const client = new pg.Client({ ...base, ...(idleInTxMs > 0 ? { idle_in_transaction_session_timeout: Math.max(idleInTxMs, 60000) } : {}) });
     // разрыв посреди миграции — отказ запроса (и старта), а не необработанный error процесса
     client.on('error', (e) => log.warn('[document/pg] соединение миграций оборвалось:', e && e.message));
     migrationClient = client;
     let locked = false;
+    /** Контекст `.mjs`-миграции. */
+    const makeCtx = (file) => ({
+      client,
+      log,
+      lockTimeoutMs: migrationLockTimeoutMs,
+      lockTries: MIGRATION_LOCK_TRIES,
+      /** Ключ advisory-lock миграций (008: кто его ждёт). */
+      migrationLock: MIGRATION_LOCK,
+      isLockTimeout,
+      /** Прогресс для 503 migrating: {done, total} или что-то своё. */
+      progress(p) {
+        if (migrationState && migrationState.migration === file) migrationState.progress = p;
+      },
+      get closing() { return closing; }
+    });
+
     try {
       if (closing) throw new Error('хранилище закрывается');
       await client.connect();
@@ -598,20 +616,20 @@ export function createPgStorage(opts = {}) {
         } else {
           const mod = await import(pathToFileURL(full).href);
           if (typeof mod.up !== 'function') throw new Error(`миграция ${file}: нет export up()`);
-          const ctx = {
-            client,
-            log,
-            lockTimeoutMs: migrationLockTimeoutMs,
-            lockTries: MIGRATION_LOCK_TRIES,
-            /** Ключ advisory-lock миграций (008: кто его ждёт). */
-            migrationLock: MIGRATION_LOCK,
-            isLockTimeout,
-            /** Прогресс для 503 migrating: {done, total} или что-то своё. */
-            progress(p) {
-              if (migrationState && migrationState.migration === file) migrationState.progress = p;
-            },
-            get closing() { return closing; }
-          };
+          const ctx = makeCtx(file);
+          // круг 33: под работающим экземпляром долгое дозаполнение — после DDL всех миграций:
+          // запись тем временем идёт со всеми колонками (010, 011…), а не без них
+          if (deferFill && typeof mod.ddlUp === 'function' && typeof mod.fillUp === 'function') {
+            try {
+              await mod.ddlUp(ctx);
+            } catch (e) {
+              e.message = `миграция ${file}: ${e.message}`;
+              throw e;
+            }
+            deferred.push({ file, mod, started });
+            log.info(`[document/pg] миграция ${file}: схема применена за ${Date.now() - started} мс, дозаполнение — после остальных миграций`);
+            continue;
+          }
           try {
             await mod.up(ctx);
           } catch (e) {
@@ -621,6 +639,20 @@ export function createPgStorage(opts = {}) {
           await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [file]);
         }
         log.info(`[document/pg] миграция ${file} применена за ${Date.now() - started} мс`);
+      }
+      if (onDdl) await onDdl({ deferred: deferred.map((d) => d.file) });
+      for (const d of deferred) {
+        if (closing) throw new Error('хранилище закрывается');
+        const started = Date.now();
+        migrationState = { phase: 'fill', migration: d.file, progress: null, started_at: new Date(started).toISOString() };
+        try {
+          await d.mod.fillUp(makeCtx(d.file));
+        } catch (e) {
+          e.message = `миграция ${d.file} (дозаполнение): ${e.message}`;
+          throw e;
+        }
+        await client.query('INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING', [d.file]);
+        log.info(`[document/pg] миграция ${d.file}: дозаполнение за ${Date.now() - started} мс — применена`);
       }
     } catch (e) {
       const file = migrationState && migrationState.migration;
@@ -725,6 +757,8 @@ export function createPgStorage(opts = {}) {
   let hasCommandAuthor = true;
   /** Колонка 011 (`undo_part`, круг 32) есть: без неё часть большой правки не пишется и не читается. */
   let hasUndoPart = true;
+  /** Колонка 012 (`projects.create_id`, круг 33) есть: без неё create_id не учитывается. */
+  let hasCreateId = true;
   async function columnExists(table, column) {
     const r = await pool.query(
       'SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2 AND NOT attisdropped',
@@ -737,6 +771,7 @@ export function createPgStorage(opts = {}) {
     hasOpsSize = await columnExists('operations', 'ops_bytes');
     hasCommandAuthor = await columnExists('operations', 'command_author');
     hasUndoPart = await columnExists('operations', 'undo_part');
+    hasCreateId = await columnExists('projects', 'create_id');
   }
 
   /* -------------------- сверка схемы под работающим экземпляром -------------------- */
@@ -767,36 +802,133 @@ export function createPgStorage(opts = {}) {
   /** Неудачную сверку /api/health повторяет не чаще. */
   const RESCHEMA_RETRY_MS = 2000;
 
+  /**
+   * Круг 33: идёт ли в эту базу восстановление (или она пуста) — тогда DDL нельзя.
+   * Восстановление «в ту же базу» под работающим экземпляром (`dropdb; createdb; pg_restore`):
+   * прежде сверка видела пустую базу и гнала все миграции с 001 параллельно с pg_restore —
+   * дубли объектов и ошибки самого pg_restore. Теперь на работающем экземпляре миграции идут,
+   * только если таблица учёта есть и в ней учтена первая миграция (база — та, что создавал
+   * код), и к базе не подключён pg_restore (его сеанс виден в pg_stat_activity по
+   * application_name). Иначе — `phase: 'empty'` или `'restore'` (health 503 `storage:'schema'`)
+   * и проверка заново через EMPTY_RECHECK_MS. На старте процесса (init) — как раньше: пустую
+   * базу создают миграции.
+   * @returns {Promise<null|{phase: 'empty'|'restore', detail: string}>}
+   */
+  async function restoreGuard(settle) {
+    if (!migrationFiles) migrationFiles = (await readdir(migrationsDir)).filter((f) => MIGRATION_RE.test(f)).sort();
+    const first = migrationFiles[0];
+    const r = (await pool.query(
+      `SELECT to_regclass('schema_migrations') IS NOT NULL AS has_table,
+              (SELECT count(*)::int FROM pg_stat_activity
+                WHERE datname = current_database() AND application_name = 'pg_restore' AND pid <> pg_backend_pid()) AS restoring,
+              (SELECT count(*)::int FROM pg_class WHERE relnamespace = current_schema()::regnamespace) AS rels,
+              (SELECT count(*)::int FROM pg_constraint WHERE connamespace = current_schema()::regnamespace) AS cons,
+              (SELECT count(*)::int FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = current_schema()::regnamespace) AS trg`
+    )).rows[0];
+    if (r.restoring > 0) return { phase: 'restore', detail: 'к базе подключён pg_restore' };
+    if (!r.has_table) return { phase: 'empty', detail: 'нет таблицы schema_migrations' };
+    const names = (await pool.query('SELECT name FROM schema_migrations ORDER BY name')).rows.map((x) => x.name);
+    if (first && !names.includes(first)) return { phase: 'empty', detail: `в schema_migrations нет ${first}` };
+    // только что ждали (база была пуста или шло восстановление) — схема должна устояться: тот же
+    // учёт и то же число объектов (таблицы, индексы, ограничения, триггеры) две проверки подряд —
+    // восстановление не через pg_restore (psql < dump.sql) так не застаётся посреди DDL
+    const sig = `${names.join(',')}|${r.rels}|${r.cons}|${r.trg}`;
+    if (settle && sig !== lastSig) {
+      lastSig = sig;
+      return { phase: 'restore', detail: 'схема базы ещё меняется (идёт восстановление?)' };
+    }
+    lastSig = sig;
+    return null;
+  }
+  let lastSig = '';
+  let lastGuardAt = 0;
+  const EMPTY_RECHECK_MS = 1000;
+  let emptyTimer = null;
+  /** Дозаполнение под работающим экземпляром (круг 33): `{migration, since, progress}` или null. */
+  let backfillState = null;
+  let fillRetryAt = 0;
+
   function reschema(reason) {
     if (reschemaFlight) return reschemaFlight;
-    const since = new Date().toISOString();
-    schemaState = { reason, since, phase: 'check' };
+    // ждали восстановления (empty/restore) — время начала то же, и в лог второй раз не пишем
+    const waiting = !!(schemaState && (schemaState.phase === 'empty' || schemaState.phase === 'restore'));
+    // пока ждём, каждый упавший запрос не перепроверяет базу: проверка — не чаще EMPTY_RECHECK_MS
+    if (waiting && Date.now() - lastGuardAt < EMPTY_RECHECK_MS) {
+      const now = Promise.resolve();
+      return { flags: now, ddl: now, done: now };
+    }
+    const since = waiting && schemaState.since ? schemaState.since : new Date().toISOString();
+    // перепроверка во время ожидания восстановления — фаза та же (empty/restore), а не «check»
+    schemaState = waiting ? { ...schemaState } : { reason, since, phase: 'check' };
     let flagsDone;
     const flags = new Promise((r) => { flagsDone = r; });
+    let ddlDone;
+    const ddl = new Promise((r) => { ddlDone = r; });
+    let ddlReady = false;
     const done = (async () => {
       try {
         // сразу — флаги по факту: запросы снова идут (без новых колонок), пока мигрируем
         await refreshFlags().catch(() => {});
         flagsDone();
         if (closing) throw new Error('хранилище закрывается');
+        // круг 33: пустая база или идёт pg_restore — DDL не трогаем, ждём и проверяем заново
+        lastGuardAt = Date.now();
+        const guard = await restoreGuard(waiting);
+        if (guard) {
+          const first = !waiting;
+          schemaState = { reason, since, phase: guard.phase, wait: guard.detail };
+          reschemaFailedAt = Date.now();
+          if (first) log.warn(`[document/pg] сверка схемы (${reason}): ${guard.detail} — базу восстанавливают? Миграции не запускаю, проверяю раз в ${EMPTY_RECHECK_MS} мс`);
+          if (!emptyTimer && !closing) {
+            emptyTimer = setTimeout(() => {
+              emptyTimer = null;
+              if (!closing && schemaState && (schemaState.phase === 'empty' || schemaState.phase === 'restore')) reschema(schemaState.reason);
+            }, EMPTY_RECHECK_MS);
+            if (emptyTimer.unref) emptyTimer.unref();
+          }
+          ddlDone();
+          return;
+        }
         schemaState = { reason, since, phase: 'migrate' };
-        await migrate();
-        await refreshFlags();
-        schemaState = null;
-        reschemaFailedAt = 0;
-        log.warn(`[document/pg] схема базы сверена (${reason}): миграции догнаны, колонки журнала — ops_bytes ${hasOpsSize ? 'есть' : 'нет'}, command_author ${hasCommandAuthor ? 'есть' : 'нет'}, undo_part ${hasUndoPart ? 'есть' : 'нет'}`);
+        // круг 33: DDL всех ждущих миграций — сначала, долгое дозаполнение (009) — потом: флаги
+        // пересчитаны сразу после DDL, сервис здоров (health 200 с detail.backfill)
+        await migrate({
+          deferFill: true,
+          onDdl: async ({ deferred }) => {
+            await refreshFlags();
+            ddlReady = true;
+            schemaState = null;
+            reschemaFailedAt = 0;
+            if (deferred.length) backfillState = { migration: deferred[0], since: new Date().toISOString() };
+            log.warn(`[document/pg] схема базы сверена (${reason}): миграции догнаны${deferred.length ? ` (дозаполнение ${deferred.join(', ')} — фоном)` : ''}, колонки журнала — ops_bytes ${hasOpsSize ? 'есть' : 'нет'}, command_author ${hasCommandAuthor ? 'есть' : 'нет'}, undo_part ${hasUndoPart ? 'есть' : 'нет'}`);
+            ddlDone();
+          }
+        });
+        if (backfillState) log.info(`[document/pg] дозаполнение ${backfillState.migration} завершено`);
+        backfillState = null;
+        fillRetryAt = 0;
       } catch (e) {
         flagsDone();
-        reschemaFailedAt = Date.now();
-        schemaState = { reason, since, phase: 'failed', error: String((e && e.message) || e).slice(0, 200) };
-        if (!closing) log.warn(`[document/pg] сверка схемы базы не удалась (${reason}): ${e && e.message} — повторю`);
+        ddlDone();
+        backfillState = null;
+        if (ddlReady) {
+          // схема уже годна, не дошло только дозаполнение — сервис здоров; повторит /api/health
+          fillRetryAt = Date.now() + RESCHEMA_RETRY_MS;
+          if (!closing) log.warn(`[document/pg] дозаполнение после сверки схемы не завершено (${reason}): ${e && e.message} — повторю`);
+        } else {
+          reschemaFailedAt = Date.now();
+          schemaState = { reason, since, phase: 'failed', error: String((e && e.message) || e).slice(0, 200) };
+          if (!closing) log.warn(`[document/pg] сверка схемы базы не удалась (${reason}): ${e && e.message} — повторю`);
+        }
         throw e;
       } finally {
         reschemaFlight = null;
       }
     })();
     done.catch(() => {});
-    reschemaFlight = { flags, done };
+    const flight = { flags, ddl, done, ddlSettled: false };
+    ddl.then(() => { flight.ddlSettled = true; });
+    reschemaFlight = flight;
     return reschemaFlight;
   }
 
@@ -832,6 +964,17 @@ export function createPgStorage(opts = {}) {
    * @returns {Promise<T>}
    */
   async function withSchema(fn) {
+    // круг 33: сверка идёт, а DDL ещё нет — флаги уже «без колонок», и запрос молча записал бы
+    // без command_author/undo_part; подождать DDL (не дольше schemaWaitMs), как упавший запрос
+    const pending = reschemaFlight;
+    if (pending && !pending.ddlSettled) {
+      let t;
+      await Promise.race([pending.ddl, new Promise((r) => {
+        t = setTimeout(r, schemaWaitMs);
+        if (t.unref) t.unref();
+      })]);
+      clearTimeout(t);
+    }
     try {
       return await fn();
     } catch (e) {
@@ -840,7 +983,8 @@ export function createPgStorage(opts = {}) {
       const flight = reschema(e.code);
       await flight.flags;
       let timer;
-      await Promise.race([flight.done.catch(() => {}), new Promise((r) => {
+      // круг 33: ждём DDL (не дозаполнения): повтор уже пишет новые колонки
+      await Promise.race([flight.ddl, new Promise((r) => {
         timer = setTimeout(r, schemaWaitMs);
         if (timer.unref) timer.unref();
       })]);
@@ -875,6 +1019,11 @@ export function createPgStorage(opts = {}) {
     if (closing) return Promise.resolve(false);
     // сверка схемы не удалась (база была недоступна посреди неё) — /api/health её повторяет
     if (schemaState && !reschemaFlight && Date.now() - reschemaFailedAt > RESCHEMA_RETRY_MS) reschema(schemaState.reason);
+    // дозаполнение после сверки оборвалось (схема годна) — повторить
+    else if (!schemaState && fillRetryAt && !reschemaFlight && Date.now() > fillRetryAt) {
+      fillRetryAt = 0;
+      reschema('дозаполнение не завершено');
+    }
     if (pingCache && Date.now() - pingCache.at < PING_CACHE_MS) return Promise.resolve(pingCache.value);
     if (pingFlight) return pingFlight;
     pingFlight = (async () => {
@@ -921,10 +1070,23 @@ export function createPgStorage(opts = {}) {
       if (migrationState && migrationState.migration) out.migration = migrationState.migration;
       return out;
     },
+    /**
+     * Дозаполнение после сверки схемы идёт фоном (круг 33): `{migration, since, progress?}` или null.
+     * Сервис здоров (схема годна) — /api/health 200 с `detail.backfill`.
+     */
+    get backfillState() {
+      if (!backfillState) return null;
+      const out = { ...backfillState };
+      if (migrationState && migrationState.phase === 'fill' && migrationState.migration) {
+        out.migration = migrationState.migration;
+        if (migrationState.progress) out.progress = migrationState.progress;
+      }
+      return out;
+    },
     /** Сверить схему сейчас (тестам и отладке): промис сверки. */
     recheckSchema(reason = 'по запросу') { return reschema(reason).done; },
     /** Колонки журнала, которые адаптер сейчас пишет и читает (тестам). */
-    get schemaFlags() { return { opsSize: hasOpsSize, commandAuthor: hasCommandAuthor, undoPart: hasUndoPart }; },
+    get schemaFlags() { return { opsSize: hasOpsSize, commandAuthor: hasCommandAuthor, undoPart: hasUndoPart, createId: hasCreateId }; },
 
     /** Миграции и слушатель уведомлений; повторный вызов (второй экземпляр на том же адаптере) — тот же промис. */
     init() {
@@ -948,6 +1110,8 @@ export function createPgStorage(opts = {}) {
       if (migrationClient) destroyClient(migrationClient);
       if (listenTimer) clearTimeout(listenTimer);
       listenTimer = null;
+      if (emptyTimer) clearTimeout(emptyTimer);
+      emptyTimer = null;
       if (listener) {
         const l = listener;
         listener = null;
@@ -962,22 +1126,49 @@ export function createPgStorage(opts = {}) {
       return () => listeners.delete(fn);
     },
 
-    async createProject({ name = '', kind = 'design', doc, engine }) {
+    /**
+     * Новый проект и его снимок seq 0. `docJson` — документ уже строкой JSON (импорт готовит его
+     * вне цикла событий, круг 33) — тогда `doc` не нужен. `createId` (круг 33, L1, миграция 012):
+     * проект с таким create_id уже есть — он и возвращается с `existing: true`, второй не
+     * создаётся (гонка двух одинаковых запросов — уникальный индекс, ON CONFLICT). Колонки нет
+     * (схема до 012) — create_id не учитывается.
+     */
+    async createProject({ name = '', kind = 'design', doc, docJson, engine, createId }) {
       const epoch = newEpoch();
-      return inTx(async (client) => {
+      const cid = typeof createId === 'string' && createId && hasCreateId ? createId : null;
+      if (cid) {
+        const found = await self.projectByCreateId(cid);
+        if (found) return { ...found, existing: true };
+      }
+      const made = await inTx(async (client) => {
         const ins = await client.query(
-          'INSERT INTO projects (name, kind, engine, epoch, epoch_cause) VALUES ($1, $2, $3, $4, \'init\') RETURNING *',
-          [name, kind, engine, epoch]
+          cid
+            ? 'INSERT INTO projects (name, kind, engine, epoch, epoch_cause, create_id) VALUES ($1, $2, $3, $4, \'init\', $5) ON CONFLICT (create_id) WHERE create_id IS NOT NULL DO NOTHING RETURNING *'
+            : 'INSERT INTO projects (name, kind, engine, epoch, epoch_cause) VALUES ($1, $2, $3, $4, \'init\') RETURNING *',
+          cid ? [name, kind, engine, epoch, cid] : [name, kind, engine, epoch]
         );
+        // тот же create_id записал одновременный запрос — ничего не создаём
+        if (!ins.rows.length) return rollback(null);
         const project = projectOf(ins.rows[0]);
         // документ = снимок при seq 0: открытие проекта всегда начинается со снимка; его не удаляет прореживание
         await client.query(
           'INSERT INTO snapshots (project_id, seq, doc, engine, chain, tombstones) VALUES ($1, 0, $2::jsonb, $3, \'\', \'{}\'::jsonb)',
-          [project.id, JSON.stringify(doc), engine]
+          [project.id, typeof docJson === 'string' ? docJson : JSON.stringify(doc), engine]
         );
         await client.query('INSERT INTO project_epochs (project_id, epoch, seq, cause) VALUES ($1, $2, 0, \'init\') ON CONFLICT DO NOTHING', [project.id, epoch]);
         return project;
       });
+      if (made) return made;
+      const found = await self.projectByCreateId(cid);
+      if (!found) throw new Error('проект с этим create_id создаётся одновременно — повторите');
+      return { ...found, existing: true };
+    },
+
+    /** Проект по create_id (круг 33, L1) или null; колонки нет (схема до 012) — null. */
+    async projectByCreateId(createId) {
+      if (!hasCreateId || typeof createId !== 'string' || !createId) return null;
+      const res = await pool.query('SELECT * FROM projects WHERE create_id = $1', [createId]);
+      return projectOf(res.rows[0]);
     },
 
     async listProjects() {
@@ -1361,7 +1552,7 @@ export function createPgStorage(opts = {}) {
   };
   // круг 31: запросы к базе — с одной попыткой после сверки схемы (ошибка 42703/42P01)
   for (const name of ['createProject', 'listProjects', 'listProjectsPage', 'getProject', 'renameProject', 'latestSnapshot',
-    'latestSnapshotMeta', 'snapshotBefore', 'snapshotSeqs', 'txsAfter', 'recentTxMeta', 'chainAt', 'commitTx', 'writeSnapshot',
+    'projectByCreateId', 'latestSnapshotMeta', 'snapshotBefore', 'snapshotSeqs', 'txsAfter', 'recentTxMeta', 'chainAt', 'commitTx', 'writeSnapshot',
     'pruneSnapshots', 'findTx', 'knownEpoch', 'bumpEpoch', 'epochs', 'addTrace', 'listTraces']) {
     const fn = self[name];
     self[name] = (...args) => withSchema(() => fn.apply(self, args));

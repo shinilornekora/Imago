@@ -16,7 +16,7 @@
 import { DocError, notFound, unavailable, viaStorage } from './errors.js';
 import { headSummary } from './storage/committed.js';
 import { flatTombstones } from './dslts.js';
-import { PAGE_TXS, MAX_LIMIT as LIMIT_MAX, PAGE_BYTES, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S } from './limits.js';
+import { PAGE_TXS, MAX_LIMIT as LIMIT_MAX, PAGE_BYTES, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, SNAPSHOT_CACHE_BYTES } from './limits.js';
 
 /** Верхняя граница `limit` в `ops?since=` (совместимость: прежде экспортировалась отсюда). */
 export const MAX_LIMIT = LIMIT_MAX;
@@ -58,9 +58,10 @@ export function createSemaphore({ max = HEAVY_CONCURRENCY, queue = HEAVY_QUEUE, 
 }
 
 /**
- * @param {{storage: object, heavy?: ReturnType<typeof createSemaphore>, pageBytes?: number}} deps
+ * @param {{storage: object, heavy?: ReturnType<typeof createSemaphore>, pageBytes?: number, snapshotCacheBytes?: number}} deps
+ *   `snapshotCacheBytes` — кеш сериализованных снимков полного открытия (круг 33; 0 — без кеша)
  */
-export function createReader({ storage, heavy = createSemaphore(), pageBytes = PAGE_BYTES }) {
+export function createReader({ storage, heavy = createSemaphore(), pageBytes = PAGE_BYTES, snapshotCacheBytes = SNAPSHOT_CACHE_BYTES }) {
   async function project(projectId) {
     const p = await viaStorage(storage.getProject(projectId));
     if (!p) throw notFound();
@@ -92,6 +93,71 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
   };
 
   /**
+   * Кеш сериализованных снимков (круг 33): полное открытие большого проекта читало снимок из
+   * базы и сериализовало его в JSON на каждый запрос — 30 одновременных открытий проекта в 20
+   * тыс. узлов делали это 30 раз. Ключ — (проект, seq, chain, эпоха) последнего годного снимка
+   * (его мета читается без документа); одинаковые открытия в полёте ждут одно чтение. Байты —
+   * не больше snapshotCacheBytes на экземпляр (LRU), снимок больше четверти бюджета не
+   * кешируется (но одновременные открытия всё равно делят одно чтение).
+   */
+  const snapCache = new Map();   // ключ → {json, bytes}
+  const isoAt = (v) => (v instanceof Date ? v.toISOString() : typeof v === 'string' ? v : '');
+  let snapCacheBytes = 0;
+  const snapLoading = new Map(); // ключ → промис {seq, json}
+  const snapStats = { hits: 0, loads: 0, shared: 0 };
+  // created_at — переписанный на том же seq снимок (надгробия прибавились) получает новое время
+  const snapKey = (projectId, seq, chain, epoch, at) => `${projectId}\u0000${seq}\u0000${chain || ''}\u0000${epoch || ''}\u0000${at || ''}`;
+  function snapPut(key, json) {
+    const bytes = json.length * 2;
+    if (snapshotCacheBytes <= 0 || bytes > snapshotCacheBytes / 4) return;
+    const had = snapCache.get(key);
+    if (had) { snapCache.delete(key); snapCacheBytes -= had.bytes; }
+    snapCache.set(key, { json, bytes });
+    snapCacheBytes += bytes;
+    for (const [k, v] of snapCache) {
+      if (snapCacheBytes <= snapshotCacheBytes) break;
+      snapCache.delete(k);
+      snapCacheBytes -= v.bytes;
+    }
+  }
+  /** Снимок для полного открытия — `{seq, json}` (json — `snapOut` строкой). */
+  async function snapshotJson(projectId) {
+    const load = async () => {
+      const s = await snapshotOf(projectId);
+      snapStats.loads += 1;
+      return { seq: s.seq, chain: s.chain || '', at: isoAt(s.created_at), json: JSON.stringify(snapOut(s)) };
+    };
+    if (snapshotCacheBytes <= 0 || typeof storage.latestSnapshotMeta !== 'function') {
+      const r = await load();
+      return { seq: r.seq, json: r.json };
+    }
+    const meta = await viaStorage(storage.latestSnapshotMeta(projectId));
+    if (!meta) throw unavailable('у проекта нет снимка — журнал не с чего переигрывать');
+    const key = snapKey(projectId, meta.seq, meta.chain, meta.epoch, isoAt(meta.created_at));
+    const hit = snapCache.get(key);
+    if (hit) {
+      snapCache.delete(key);
+      snapCache.set(key, hit);
+      snapStats.hits += 1;
+      return { seq: meta.seq, json: hit.json };
+    }
+    let flight = snapLoading.get(key);
+    if (flight) {
+      snapStats.shared += 1;
+    } else {
+      flight = load().then((r) => {
+        // ключ — по тому снимку, что прочитан (между метой и чтением мог лечь новый)
+        snapPut(snapKey(projectId, r.seq, r.chain, meta.epoch, r.at), r.json);
+        return r;
+      });
+      snapLoading.set(key, flight);
+      flight.finally(() => { if (snapLoading.get(key) === flight) snapLoading.delete(key); }).catch(() => {});
+    }
+    const r = await flight;
+    return { seq: r.seq, json: r.json };
+  }
+
+  /**
    * Мета последнего снимка без документа (I2): `latestSnapshotMeta` хранилища не читает
    * jsonb документа. Хранилище прежней версии его не знает — полный снимок, но под
    * семафором тяжёлых чтений: шторм `?lean=1` по большому проекту иначе занимал все
@@ -108,6 +174,11 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
 
   return {
     heavy,
+
+    /** Кеш снимков (тестам): попадания, чтения, разделённые чтения, байты и записи. */
+    snapshotCacheStats() {
+      return { ...snapStats, bytes: snapCacheBytes, entries: snapCache.size };
+    },
 
     /** Сводка головы (`?head=1`): {id, name, kind, head_seq, updated_at, epoch, tip}. */
     async head(projectId) {
@@ -138,13 +209,18 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
           more: last < head_seq
         };
       }
-      const snapshot = await snapshotOf(projectId);
-      const tail = await page(projectId, snapshot.seq);
-      const last = tail.length ? tail[tail.length - 1].seq : snapshot.seq;
+      // круг 33: снимок — готовой строкой JSON из кеша (или одним чтением на все одновременные)
+      const snap = await snapshotJson(projectId);
+      const tail = await page(projectId, snap.seq);
+      const last = tail.length ? tail[tail.length - 1].seq : snap.seq;
       const head_seq = Math.max(p.head_seq, last);
+      let parsed;
       return {
         project: { ...headSummary(p), head_seq },
-        snapshot: snapOut(snapshot),
+        /** JSON снимка — http.js вставляет его в ответ как есть */
+        snapshotJson: snap.json,
+        /** объект снимка — по требованию (разбор строки) */
+        get snapshot() { return parsed || (parsed = JSON.parse(snap.json)); },
         tail,
         more: last < head_seq
       };

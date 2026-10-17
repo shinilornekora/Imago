@@ -192,7 +192,7 @@ test('sync r31 (UX Д1): импорт 19 000 узлов в серверном р
     assert.deepEqual(got.nodes[got.root].children.filter((id) => id.startsWith('ab')), ['ab0', 'ab1', 'ab2', 'ab3'], 'доски по порядку');
     assert.deepEqual(got.nodes.f2_7.children.length, 104);
     // больше предела — словами, с числом
-    assert.equal(SHELL.importTooBigWords(25004, LIMITS.docNodes), 'Файл слишком большой: 25 004 узла, предел 20 000');
+    assert.equal(SHELL.importTooBigWords(25004, LIMITS.docNodes), 'Файл слишком большой: 25 004 слоя, предел 20 000');
     a.sync.close(); b.sync.close();
   } finally { await svc.close(); }
 });

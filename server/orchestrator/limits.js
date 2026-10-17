@@ -5,6 +5,16 @@
 
 /** Тело запроса больше — 413 too_large (SPEC §10.2). */
 export const MAX_BODY_BYTES = 1024 * 1024;
+/**
+ * Круг 33: приём запроса (как у Document service, круг 27). Тело не пришло целиком за
+ * BODY_TIMEOUT_MS — 408 timeout, соединение закрывается (медленное тело не держит сокет
+ * и память пять минут — умолчание node). Таймауты http.Server: заголовки — HEADERS_TIMEOUT_MS,
+ * запрос целиком — REQUEST_TIMEOUT_MS (node сам отвечает 408). Ответ (поток SSE команды)
+ * под них не попадает: requestTimeout node считает только до конца приёма запроса.
+ */
+export const BODY_TIMEOUT_MS = 30000;
+export const HEADERS_TIMEOUT_MS = 20000;
+export const REQUEST_TIMEOUT_MS = 35000;
 
 /** Ждущих команд на проект (кроме выполняемой). Больше — 429 busy. */
 export const MAX_QUEUE_PER_PROJECT = 4;

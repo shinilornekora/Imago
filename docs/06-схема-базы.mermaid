@@ -3,6 +3,9 @@ erDiagram
     %% работающим экземпляром — Document service сверяет schema_migrations с каталогом при
     %% переподключении LISTEN и на ошибке 42703/42P01, догоняет миграции под тем же advisory-lock;
     %% пока не догнал — /api/health 503 detail.storage = schema.
+    %% Круг 33: на работающем экземпляре DDL нет, пока таблицы schema_migrations нет, в ней нет
+    %% 001 или к базе подключён pg_restore (phase empty|restore, проверка раз в секунду); долгое
+    %% дозаполнение (009) идёт после DDL остальных миграций — health 200 с detail.backfill.
     PROJECTS ||--o{ OPERATIONS : "журнал — источник истины"
     PROJECTS ||--o{ SNAPSHOTS : "снимки для открытия"
     PROJECTS ||--o{ LIBRARY_VERSIONS : "проект вида library: помеченные снимки"
@@ -25,6 +28,7 @@ erDiagram
         text epoch "эпоха журнала: случайная метка, меняется при откате базы"
         text epoch_cause "init · instance · client"
         int engine "версия формата движка"
+        text create_id "UNIQUE где не NULL: ключ идемпотентного создания (L1) — повтор POST с ним отдаёт тот же проект; NULL — без ключа или старый экземпляр (012, круг 33)"
         uuid workspace_id FK "фаза 2"
         timestamptz created_at
         timestamptz updated_at "индекс (updated_at DESC, id DESC) — страницы списка (008)"

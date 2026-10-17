@@ -239,6 +239,9 @@ test('круг29: фаззинг — тысячи set/create с чужими з�
       const back = quiet(() => applyOps(next, inv));
       assert.equal(back.error, undefined, 'отмена ложится: ' + JSON.stringify(back.error));
       assert.equal(hashDoc(back.doc), hashDoc(doc), 'отмена возвращает документ');
+      // круг 33 (инвариант): принятое операцией — документ, который импортируется
+      const imp = checkImportDoc(clone(next));
+      assert.equal(imp, null, 'принятое импортируется: ' + JSON.stringify(imp) + ' ' + JSON.stringify(m.ops).slice(0, 300));
       // каждый узел нового документа — по схеме
       for (const node of Object.values(next.nodes)) {
         for (const k of Object.keys(node)) assert.equal(fieldProblem(node, k), null, `${node.id}.${k} = ${JSON.stringify(node[k]).slice(0, 80)}`);

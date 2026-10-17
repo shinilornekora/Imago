@@ -77,6 +77,8 @@ const UNSAVED_KEEP = 50;          // снятых «не сохранено» п
 const HTTP_RETRIES = 4;           // 503/429 с Retry-After: столько повторов, потом — как сбой
 const RETRY_AFTER_MAX = 30;       // Retry-After больше этого (с) не ждём — это уже не «чуть позже»
 const EPOCH_REOPEN_MS = 250;      // переоткрытие после 4410 — сразу, с разбросом, чтобы вкладки не били в такт
+const IDLE_HEALTH_MS = 12000;
+const PRESENCE_BATCH_MAX = 2000;  // записей в одном presence_batch — больше не разбираем (кадр ≤ 64 КБ)     // круг 33: /api/health в простое — база могла лечь без единой правки
 const CLOSE_EPOCH = 4410;         // сервер: эпоха журнала сменилась (SPEC §9.8)
 const CLOSE_NOT_FOUND = 4404;     // сервер: проекта нет (базу восстановили без него) — круг 27, I3
 const CLOSE_TOO_BIG = 1009;       // ws: сообщение больше предела
@@ -125,12 +127,12 @@ export const LIMITS = Object.freeze({
 
 /** Причины отброшенных операций — словами человека (SPEC §9.1 DropReason, §9.8 limit). */
 export const DROP_WORDS = Object.freeze({
-  removed: 'узел уже удалён',
+  removed: 'слой уже удалён',
   orphan: 'родитель удалён',
   cycle: 'перемещение создало бы цикл',
   exists: 'уже есть',
   invalid: 'правка не подошла к документу',
-  doc_nodes: 'документ упёрся в предел числа узлов',
+  doc_nodes: 'документ упёрся в предел числа слоёв',
   doc_bytes: 'документ упёрся в предел размера',
   merge_budget: 'сервер не успел разобрать правку',
   ops_per_tx: 'слишком много операций в одной правке',
@@ -528,6 +530,8 @@ export function memoryStorage() {
  * @param {number} [o.reconnectMin] пауза перед первым переподключением, мс (1000)
  * @param {number} [o.reconnectMax] потолок паузы, мс (30000)
  * @param {number} [o.epochReopenMs] переоткрытие после 4410 (смена эпохи) — через столько мс с разбросом вниз до половины (250)
+ * @param {number} [o.idleHealthMs] пока проект открыт и правок нет — /api/health раз в столько мс с разбросом
+ *                                  (12000; 0 — не спрашивать): база могла лечь в простое, а статус — «всё сохранено»
  */
 export function createSync(o) {
   const core = o.core;
@@ -544,6 +548,7 @@ export function createSync(o) {
   const reconnectMin = isNum(o.reconnectMin) ? o.reconnectMin : 1000;
   const reconnectMax = isNum(o.reconnectMax) ? o.reconnectMax : 30000;
   const epochReopenMs = isNum(o.epochReopenMs) ? o.epochReopenMs : EPOCH_REOPEN_MS;
+  const idleHealthMs = isNum(o.idleHealthMs) ? o.idleHealthMs : IDLE_HEALTH_MS;
   const heartbeatMs = isNum(o.presenceHeartbeatMs) ? o.presenceHeartbeatMs : LIMITS.presenceHeartbeatMs;
   const presenceTtl = isNum(o.presenceTtl) ? o.presenceTtl : PRESENCE_TTL;
   // прореживание надгробий (круг 29): числа сервера; опции — для тестов и для сервиса с другими
@@ -571,6 +576,11 @@ export function createSync(o) {
   let closed = false;
   let opened = false;
   let helloHead = -1;          // голова по последнему hello: пока не догнали — «синхронизация…»
+  /* Круг 33, п.3: голова сервера на момент открытия (снимок с сервера или первый hello).
+     Всё до неё — догоняющая загрузка: история, а не новости. Оболочка рисует документ, но
+     тостов «Аня отменила правку» новичку не показывает (`info.backlog` в onChange). */
+  let openHead = -1;
+  let firstHello = true;
   let ready = false;           // hello получен: сервер до него ничего не принимает (Hub), и «в сети» — только с него
   let helloTimer = null;
   let openRetry = null;        // ожидание повтора в open() без сервера — reconnect() будит его раньше срока
@@ -606,6 +616,9 @@ export function createSync(o) {
   let healthTimer = null;      // следующая проверка /api/health, пока хранилище лежит
   let healthTries = 0;
   let healthBusy = false;
+  let idleHealthTimer = null;
+  let presenceHolding = false; // круг 33: разбираем presence_batch — уведомить оболочку один раз в конце
+  let presenceHold = 0;  // круг 33, п.4: проверка хранилища в простое (без правок отказа не увидеть)
   let historyLoaded = false;   // J3: «История» с сервера взята (после открытия; после снимка — снова)
   let historyReq = 0;          // номер последнего запроса истории: ответ на прежний не берётся
   let journalEra = 0;          // журнал очищен (эпоха сменилась) — ответы, запрошенные до, не берутся
@@ -1086,6 +1099,23 @@ export function createSync(o) {
     healthTimer = setT(() => { healthTimer = null; checkHealth(); }, Math.max(1, wait));
   }
   /**
+   * Круг 33, п.4. База легла, пока никто не правит: записи нет — нет и отказа, и статус
+   * оставался «в сети · всё сохранено», хотя следующая правка не сохранится. Пока сокет
+   * жив, раз в idleHealthMs (10–15 с) спрашиваем /api/health; лежит — «сервер не может
+   * сохранить», дальше ведёт обычная проверка с растущей паузой.
+   */
+  function armIdleHealth() {
+    if (closed || idleHealthTimer || !(idleHealthMs > 0) || !fetchImpl) return;
+    const wait = Math.round(idleHealthMs * (0.85 + Math.random() * 0.4));
+    idleHealthTimer = setT(() => {
+      idleHealthTimer = null;
+      if (closed || !ready) return;   // сокета нет — статус и так «не в сети»; новый hello заведёт снова
+      if (!storageDown && !healthBusy && !healthTimer) checkHealth();
+      armIdleHealth();
+    }, Math.max(1, wait));
+  }
+
+  /**
    * GET /api/health (J1): 200 — хранилище живо (очередь — сразу, не дожидаясь паузы); 503
    * с `storage: 'down'` — проверить позже. Сервис без health (404) или недоступен вовсе —
    * про хранилище ничего не известно: флаг снимается, дальше решат сокет и запись.
@@ -1175,12 +1205,13 @@ export function createSync(o) {
   }
 
   /** Снимок + хвост с сервера → confirmed (очередь переигрывается поверх). */
-  async function loadFromServer() {
+  async function loadFromServer({ opening = false } = {}) {
     const r = await http(`/api/projects/${encodeURIComponent(projectId)}`);
     if (r.status === 404) { markNotFound(); return false; }
     if (!r.ok || !r.body || !r.body.snapshot || !r.body.snapshot.doc) throw Object.assign(new Error(`GET /api/projects: ${r.status}`), { status: r.status });
     const moved = !!(epoch && typeof r.body.epoch === 'string' && r.body.epoch !== epoch);
     if (notFound) { notFound = false; if (error === 'not_found') error = null; }
+    if (opening && isNum(r.body.head_seq)) openHead = Math.max(openHead, r.body.head_seq);
     projectSummary(r.body);
     adoptSnapshot(r.body.snapshot, r.body.tail, r.body.epoch, moved);
     return true;
@@ -1351,7 +1382,9 @@ export function createSync(o) {
       let inverse = [];
       try { inverse = core.invertOps(before, c.ops); } catch (e) { report('invert', e); }
       if (Array.isArray(c.dropped) && c.dropped.length) call(o.onDropped, explainDropped(c, own));
-      call(o.onChange, view, confirmedInfo(c, inverse, fast, prevView, view));
+      const info = confirmedInfo(c, inverse, fast, prevView, view);
+      if (c.seq <= openHead) info.backlog = true;
+      call(o.onChange, view, info);
       sendNext();
       return;
     }
@@ -1359,7 +1392,7 @@ export function createSync(o) {
     scheduleWrite();
     /* круг 31: `before` — подтверждённый документ до этой транзакции (без своих неподтверждённых
        правок): подписи «Аня удалила «Ярлыки»» — по имени на сервере, а не по своему черновику */
-    if (!opts.silent) call(o.onChange, view, { reason: 'remote', tx: c, mine: !!c.client && c.client === clientId, before });
+    if (!opts.silent) call(o.onChange, view, { reason: 'remote', tx: c, mine: !!c.client && c.client === clientId, before, ...(c.seq <= openHead ? { backlog: true } : {}) });
   }
 
   /** Транзакция агента из рассылки — в форме Tx для переигрывания (применённые операции). */
@@ -1605,7 +1638,9 @@ export function createSync(o) {
   function wsUrl() {
     // имя — и в query: браузер не ставит заголовков при upgrade, а Hub подписывает им присутствие
     const q = `project=${encodeURIComponent(projectId)}&since=${confirmed.seq}&client=${encodeURIComponent(clientId)}`
-      + (author ? `&author=${encodeURIComponent(author)}` : '') + anchorQuery() + '&proto=2';
+      + (author ? `&author=${encodeURIComponent(author)}` : '') + anchorQuery() + '&proto=2'
+      // круг 33 (DOC): присутствие комнаты — одним кадром на тик; прежний сервер параметр не знает
+      + '&presence=batch';
     if (/^wss?:/i.test(baseUrl)) return `${baseUrl}/ws?${q}`;
     if (/^https?:/i.test(baseUrl)) return `${baseUrl.replace(/^http/i, 'ws')}/ws?${q}`;
     if (typeof location !== 'undefined' && location.host) {
@@ -1811,6 +1846,8 @@ export function createSync(o) {
         notFound = false;   // проект снова есть (его вернули): обычная работа
         if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
         helloHead = isNum(msg.head_seq) ? msg.head_seq : -1;
+        // круг 33, п.3: первый hello после открытия — до его головы всё «догоняем», не новости
+        if (firstHello) { firstHello = false; if (helloHead > openHead) openHead = helloHead; }
         serverWait = 0;
         if (typeof msg.epoch === 'string' && msg.epoch) {
           // другая эпоха: если следом придёт снимок (hello.gone) — свои транзакции прежней эпохи
@@ -1851,6 +1888,7 @@ export function createSync(o) {
            то же, что та, у которой правка уже получила отказ */
         if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
         checkHealth();
+        armIdleHealth();
         break;
       }
       case 'tx':
@@ -1951,6 +1989,23 @@ export function createSync(o) {
       case 'left':
         if (msg.client && others.delete(String(msg.client))) emitPresence();
         break;
+      case 'presence_batch': {
+        /* Круг 33 (DOC): присутствие за тик одним кадром — те же presence/left по порядку; своё
+           отбрасывается по client, как и в одиночном кадре. Оболочке — одно уведомление на кадр,
+           а не по одному на участника (в комнате на 150 это 150 перерисовок рамок). */
+        const items = Array.isArray(msg.items) ? msg.items.slice(0, PRESENCE_BATCH_MAX) : [];
+        presenceHold = 0;
+        presenceHolding = true;
+        try {
+          for (const it of items) {
+            if (it && typeof it === 'object' && (it.type === 'presence' || it.type === 'left')) handleMessage(it);
+          }
+        } finally {
+          presenceHolding = false;
+        }
+        if (presenceHold) emitPresence();
+        break;
+      }
       default:
         break;
     }
@@ -1967,6 +2022,7 @@ export function createSync(o) {
   }
 
   function emitPresence() {
+    if (presenceHolding) { presenceHold += 1; return; }
     sweepOthers();
     call(o.onPresence, [...others.values()].map((p) => ({ ...p, selection: p.selection.slice() })));
   }
@@ -2080,8 +2136,9 @@ export function createSync(o) {
     if (typeof meta.command_id === 'string' && meta.command_id && meta.command_id.length <= COMMAND_ID_CHARS && isCleanText(meta.command_id)) tx.command_id = meta.command_id;
     if (meta.undo_of) tx.undo_of = String(meta.undo_of);
     if (meta.redo_of) tx.redo_of = String(meta.redo_of);
-    /* Круг 31 (K1): часть большой отмены/повтора — {i, n}. Метаданные: сервер их не хранит,
-       оболочка по ним сводит части одного шага истории. */
+    /* Круг 31 (K1): часть большой отмены/повтора — {i, n}. С круга 32 сервер её хранит и
+       отдаёт (рассылка, /history): оболочка по ней сводит части одного шага истории, а другие
+       участники видят незавершённую серию (круг 33, L2). */
     const part = meta.undo_part;
     if (part && Number.isInteger(part.i) && Number.isInteger(part.n) && part.n > 1 && part.i >= 0 && part.i < part.n) tx.undo_part = { i: part.i, n: part.n };
     let bytes = 0;
@@ -2129,7 +2186,7 @@ export function createSync(o) {
     let guard = 0;
     while (!closed) {
       try {
-        const ok = await loadFromServer();
+        const ok = await loadFromServer({ opening: true });
         if (!ok) return null;   // проекта нет — оболочке сказано через onError
         error = null;
         break;
@@ -2189,6 +2246,7 @@ export function createSync(o) {
     closed = true;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
+    if (idleHealthTimer) { clearTimeout(idleHealthTimer); idleHealthTimer = null; }
     if (presenceTimer) { clearTimeout(presenceTimer); presenceTimer = null; }
     stopHeartbeat();
     if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }

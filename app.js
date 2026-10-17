@@ -198,7 +198,7 @@ async function boot() {
     onDragCancel: ({ reason, mode } = {}) => {
       const what = mode === 'resize' ? 'Изменение размера прервано' : 'Перетаскивание прервано';
       const why = /исчез|пропал|удал/i.test(String(reason || ''))
-        ? 'узел пропал из документа'
+        ? 'слой пропал из документа'
         : 'документ изменился под рукой';
       toast(`${what}: ${why}.`, 'plain', 5000);
     },
@@ -990,9 +990,13 @@ function onSyncChange(view, info = {}) {
       const prevDoc = state.doc;
       // круг 31: имена — как на сервере до этой транзакции, а не как в своём неотправленном черновике
       const named = info.before && info.before.nodes ? info.before : prevDoc;
-      noteRemoved(info.tx, named);
+      /* Круг 33, п.3: догоняющая загрузка при открытии (seq не новее головы на момент
+         открытия) — это история проекта, а не новости: тостов «Аня отменила правку» и
+         «вместо вашей…» новичку не показываем; что было — в «Истории». */
+      const backlog = info.backlog === true;
+      if (!backlog) noteRemoved(info.tx, named);
       noteJournal(info.tx, named);
-      const overwritten = !!(info.tx && !info.mine && (info.tx.undo_of || info.tx.redo_of) && noteOverwritten(info.tx, named));
+      const overwritten = !!(!backlog && info.tx && !info.mine && (info.tx.undo_of || info.tx.redo_of) && noteOverwritten(info.tx, named));
       state.doc = view;
       // чужое переименование геометрию не трогает — решатель не зовём (круг 27, п.8)
       state.geo = info.tx && Array.isArray(info.tx.ops) ? geoAfter(info.tx.ops, prevDoc, view, prevGeo) : solve(view);
@@ -1002,7 +1006,7 @@ function onSyncChange(view, info = {}) {
       refreshSheet();
       // круг 23: транзакция агента с сервера — уже применена репликой; здесь только итог
       if (info.tx && info.tx.author_kind === 'agent') onAgentTx(info.tx, prevDoc, diff, !!info.mine);
-      if (info.tx && !info.mine && (info.tx.undo_of || info.tx.redo_of) && !overwritten) noteRemoteRewind(info.tx);
+      if (!backlog && info.tx && !info.mine && (info.tx.undo_of || info.tx.redo_of) && !overwritten) noteRemoteRewind(info.tx);
       return;
     }
     default: {
@@ -1073,7 +1077,9 @@ function noteRemoteRewind(tx) {
     if (!parts.length) return;
     const head = parts.join(' и ');
     const t1 = r.title ? ((SHELL.partBase(r.title) || {}).base || r.title) : '';
-    const one = r.undo + r.redo === 1 && t1 ? ` — ${clip(SHELL.txTitleWords(t1).replace(/^(?:Отменил|Вернул):\s*/, ''), 60)}` : '';
+    // круг 33, п.7: глагол подписи — в роде автора («— загрузила «Б»»), подпись строчной после тире
+    const what1 = t1 ? SHELL.agreeVerb(r.who, SHELL.txTitleWords(t1).replace(/^(?:Отменил|Вернул):\s*/, '')) : '';
+    const one = r.undo + r.redo === 1 && what1 ? ` — ${clip(what1.charAt(0).toLowerCase() + what1.slice(1), 60)}` : '';
     toast(`${head.charAt(0).toUpperCase()}${head.slice(1)}${one}. Что изменилось — в «Истории».`, 'plain', 8000);
   }, 900);
   rewinds.set(key, r);
@@ -1081,8 +1087,14 @@ function noteRemoteRewind(tx) {
 
 function onSyncStatus(s) {
   if (!server) return;
+  const wasHealthy = syncHealthy();
   server.status = s;
   renderSyncStatus();
+  /* Круг 33, п.4: реплика снова сохраняет — сразу спросить и Orchestrator. Иначе карточка
+     «Сервер агента не видит документ» и знак агента ждали плановой проверки (до 30 с), хотя
+     строка состояния уже говорила «всё сохранено». */
+  const h = serverAgent.health;
+  if (!wasHealthy && syncHealthy() && h && h.ok === true && h.document !== 'up') probeAgent({ force: true });
   syncDocCard();
   const opened = !!(server.sync && server.sync.view);
   /* Ни сервера, ни локальной копии: показать нечего, и говорим об этом честно. Реплика
@@ -1146,11 +1158,19 @@ function projectGoneMsg({ force = false } = {}) {
   let before = null;
   if (!left) {
     try { before = JSON.parse(sessionStorage.getItem(RESCUE_KEY) || 'null'); } catch { before = null; }
-    if (!before || before.from !== server.project.id || !before.project) before = null;
+    // круг 33 (L1): запрос создания ушёл, ответа не дождались — у задания есть create_id, проекта ещё нет
+    if (!before || before.from !== server.project.id || (!before.project && !before.create_id)) before = null;
   }
+  // круг 33, п.5: документ уходил одним запросом (total 0) — «части 1 из 0» не говорим
+  const leftTotal = left ? Number(left.total) || 0 : 0;
+  const beforeTotal = before ? Number(before.total) || 0 : 0;
   showMsg('error', w.title, {
-    note: left ? `${w.note} Прошлая попытка сохранить остановилась на части ${left.done + 1} из ${left.total} — «Сохранить» продолжит с неё.`
-      : before ? `${w.note} Сохранение, начатое до перезагрузки, успело отправить ${Math.min(Number(before.done) || 0, Number(before.total) || 0)} из ${Number(before.total) || 0} частей — «Сохранить» продолжит его в тот же новый проект.` : w.note,
+    note: left ? (leftTotal
+      ? `${w.note} Прошлая попытка сохранить остановилась на части ${left.done + 1} из ${leftTotal} — «Сохранить» продолжит с неё.`
+      : `${w.note} Прошлая попытка сохранить не завершилась — «Сохранить» повторит её в тот же новый проект.`)
+      : before ? (beforeTotal
+        ? `${w.note} Сохранение, начатое до перезагрузки, успело отправить ${Math.min(Number(before.done) || 0, beforeTotal)} из ${beforeTotal} частей — «Сохранить» продолжит его в тот же новый проект.`
+        : `${w.note} Сохранение, начатое до перезагрузки, не завершилось — «Сохранить» повторит его в тот же новый проект.`) : w.note,
     role: 'project-gone',
     actions: [
       { label: w.action, primary: true, onClick: () => saveAsNewProject() },
@@ -1210,7 +1230,7 @@ async function saveAsNewProject() {
   if (!job) job = await resumeRescue(sync, view, name);
   if (!job) {
     let plan;
-    try { plan = SHELL.rescuePlan(view, { name }); } catch (e) { toast(`Не сохранилось: ${humanError(e)}`, 'error', 9000); return; }
+    try { plan = SHELL.rescuePlan(view, { name }); } catch (e) { toast(`Не сохранилось: ${afterColon(humanError(e))}`, 'error', 9000); return; }
     if (plan.oversize.length) {
       showMsg('error', 'Работу не сохранить одним проектом', {
         note: `В документе есть ${plan.oversize.length === 1 ? 'слой' : 'слои'} больше 3,5 МБ — сервер не примет их ни в какой пачке. Экспортируйте документ в JSON (меню экспорта), чтобы не потерять работу.`,
@@ -1218,7 +1238,7 @@ async function saveAsNewProject() {
       });
       return;
     }
-    job = { from: sync, plan, project: null, seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
+    job = { from: sync, plan, project: null, createId: newCreateId(), seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
     server.rescue = job;
   }
   job.running = true;
@@ -1234,7 +1254,11 @@ async function saveAsNewProject() {
   try {
     if (!job.project) {
       progress();
-      const got = await apiJson('/api/projects', { method: 'POST', body: job.plan.body });
+      /* Круг 33 (L1): create_id — один на задание и записан ДО запроса. Ответ потерялся
+         (обрыв, перезагрузка) — повтор с тем же create_id вернёт тот же проект, а не второй. */
+      if (!job.createId) job.createId = newCreateId();
+      rememberRescue(job);
+      const got = await apiJson('/api/projects', { method: 'POST', body: { ...job.plan.body, create_id: job.createId } });
       if (!got || !got.id) throw new Error('сервер не вернул проект');
       job.project = got;
       job.seq = Number(got.head_seq) || 0;
@@ -1260,8 +1284,8 @@ async function saveAsNewProject() {
     job.failed = true;
     server.goneShown = false;
     toast(job.total && job.project
-      ? `Сохранено ${job.done} из ${job.total} частей: ${humanError(e)}`
-      : `Не сохранилось: ${humanError(e)}`, 'error', 9000);
+      ? `Сохранено ${job.done} из ${job.total} частей: ${afterColon(humanError(e))}`
+      : `Не сохранилось: ${afterColon(humanError(e))}`, 'error', 9000);
     projectGoneMsg({ force: true });
   }
   renderSyncStatus();
@@ -1277,11 +1301,18 @@ function rescueSig(plan) {
   return plan && Array.isArray(plan.batches) ? plan.batches.map((b) => b.length).join('.') + ':' + (plan.nodes || 0) : '';
 }
 
+/** create_id (L1): 8–64 символа [A-Za-z0-9_-] — сервер по нему узнаёт повтор создания. */
+function newCreateId() {
+  const raw = `cr_${CORE.uid('r')}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return raw.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+}
+
 function rememberRescue(job) {
-  if (!job || !job.project || !server || !server.project) return;
+  if (!job || (!job.project && !job.createId) || !server || !server.project) return;
   try {
     sessionStorage.setItem(RESCUE_KEY, JSON.stringify({
-      from: server.project.id, project: { id: job.project.id, name: job.project.name || '' },
+      from: server.project.id, project: job.project ? { id: job.project.id, name: job.project.name || '' } : null,
+      create_id: job.createId || '',
       done: job.done, total: job.total, sig: rescueSig(job.plan), at: Date.now(),
     }));
   } catch { /* приватный режим — продолжим только в этой загрузке */ }
@@ -1295,22 +1326,36 @@ function forgetRescue() {
 async function resumeRescue(sync, view, name) {
   let saved = null;
   try { saved = JSON.parse(sessionStorage.getItem(RESCUE_KEY) || 'null'); } catch { saved = null; }
-  if (!saved || !server || !server.project || saved.from !== server.project.id || !saved.project || typeof saved.project.id !== 'string') return null;
+  if (!saved || !server || !server.project || saved.from !== server.project.id) return null;
+  const createId = typeof saved.create_id === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(saved.create_id) ? saved.create_id : '';
+  /* Круг 33 (L1): запрос создания ушёл, а ответа вкладка не дождалась (перезагрузили). Проект
+     мог создаться — повтор с тем же create_id вернёт его, а не заведёт второй. */
+  if ((!saved.project || typeof saved.project.id !== 'string') && createId) {
+    let plan;
+    try { plan = SHELL.rescuePlan(view, { name }); } catch { return null; }
+    if (plan.oversize.length) { forgetRescue(); return null; }
+    const job = { from: sync, plan, project: null, createId, seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
+    server.rescue = job;
+    return job;
+  }
+  if (!saved.project || typeof saved.project.id !== 'string') return null;
   let head = null;
   try { head = await fetchProjectHead(saved.project.id); } catch { head = null; }
   if (!head) { forgetRescue(); return null; }   // того проекта нет — начнём заново
   let plan;
   try { plan = SHELL.rescuePlan(view, { name }); } catch { return null; }
-  if (plan.oversize.length || plan.whole) {
-    // документ стал маленьким (или с неподъёмным слоем) — обычный путь решит сам
+  if (plan.oversize.length) {
+    // неподъёмный слой — обычный путь скажет об этом сам
     forgetRescue();
     return null;
   }
+  /* Документ уходил одним запросом, и проект с ним уже есть (перезагрузили между ответом и
+     открытием): досылать нечего — открываем его, а не создаём второй (круг 33). */
   const same = rescueSig(plan) === saved.sig;
   const done = same ? Math.max(0, Math.min(plan.batches.length, Number(saved.done) || 0)) : 0;
   const job = {
     from: sync, plan, project: { id: saved.project.id, name: head.name || saved.project.name || name },
-    seq: Number(head.head_seq) || 0, done, total: plan.batches.length, running: false, failed: false,
+    createId, seq: Number(head.head_seq) || 0, done, total: plan.batches.length, running: false, failed: false,
   };
   server.rescue = job;
   return job;
@@ -1367,7 +1412,7 @@ function onSyncError(e) {
             const p = latestProject(got && got.projects) || await createProject('Новый проект');
             hideMsg();
             openProject(p);
-          } catch (err) { toast(`Не вышло: ${humanError(err)}`, 'error', 8000); }
+          } catch (err) { toast(`Не вышло: ${afterColon(humanError(err))}`, 'error', 8000); }
         } },
         { label: 'Проекты', onClick: () => { hideMsg(); openProjects(); } },
       ],
@@ -1758,7 +1803,7 @@ async function renameProject(name) {
   } catch (e) {
     server.project.name = was;
     setDocNameText(was);
-    toast(`Имя не сохранилось: ${humanError(e)}`, 'error', 8000);
+    toast(`Имя не сохранилось: ${afterColon(humanError(e))}`, 'error', 8000);
   }
   setDocNameText(server.project.name);
 }
@@ -1992,9 +2037,14 @@ function setAgentPresence(next) {
  * агента приходит по сокету Hub как любая чужая — второй раз её не применяем. Без сервера
  * (артефакт, локальная сборка) и когда Orchestrator молчит — прежний путь: brain здесь.
  */
-const agentClient = AGENT.createAgentClient({ author: () => settings.author || '' });
+const agentClient = AGENT.createAgentClient({
+  author: () => settings.author || '',
+  // круг 33 (ORCH): stop и apply — от той же вкладки, что дала команду (client реплики)
+  client: () => (server && server.sync ? server.sync.clientId : ''),
+});
 const AGENT_PROBE_MS = 30000;
-const AGENT_PROBE_MIN_MS = 10000;   // чаще не спрашиваем: статус реплики меняется на каждой правке
+const AGENT_PROBE_MIN_MS = 10000;
+const AGENT_RESTART_PROBE_MS = 1500;   // круг 33: пока сервер агента перезапускается   // чаще не спрашиваем: статус реплики меняется на каждой правке
 const serverAgent = {
   health: null,        // последний ответ /agent/health (или {ok:false})
   probing: null,
@@ -2119,7 +2169,9 @@ function onAgentHealthChanged(prev, next) {
      «снова на связи» не значит. */
   const failed = serverAgent.lastFailed;
   const restarted = role === 'agent-restart' && back
-    && (!failed || !failed.instance || !next.instance || next.instance !== failed.instance || (prev && prev.ok !== true));
+    && (!failed || !failed.instance || !next.instance || next.instance !== failed.instance
+      // «недоступен» по своей отметке о перезапуске (круг 33) — не доказательство: ждём другой процесс
+      || (prev && prev.ok !== true && prev.reason !== 'restarting'));
   /* Круг 29 (J4, п.7): «Документ снова доступен агенту» — только когда и наша реплика
      видит сервер живым: при недоступном хранилище или сервере такая карточка рядом со
      статусом «сервер не может сохранить» / «сервер недоступен» — неправда. Подождём:
@@ -2295,7 +2347,7 @@ async function runOnServer(utterance, { variants, ctrl, runId }) {
   // поток кончился штатно, а итога нет: агенту нечего было менять
   restoreCommand(utterance);
   showMsg('warn', 'Агент не нашёл, что изменить', {
-    note: 'Выделите узел или скажите, что именно поправить.',
+    note: 'Выделите слой или скажите, что именно поправить.',
     actions: [retryAction(utterance)],
   });
   return true;
@@ -2498,15 +2550,22 @@ function retryAfterProbe(utterance, { variants = false } = {}) {
  */
 function watchAgentHealth() {
   if (serverAgent.watch) return;
-  serverAgent.watch = setInterval(() => {
+  /* Круг 33 (u10b): перезапуск сервера агента — секунды; проверяем раз в 1,5 с, чтобы знак
+     агента у всех участников сменился почти разом, а не с разницей до 10 с. */
+  const next = () => {
+    const role = dom.dockmsg && !dom.dockmsg.hidden ? dom.dockmsg.dataset.role : '';
+    return role === 'agent-restart' ? AGENT_RESTART_PROBE_MS : AGENT_PROBE_MIN_MS;
+  };
+  const beat = () => {
     const role = dom.dockmsg && !dom.dockmsg.hidden ? dom.dockmsg.dataset.role : '';
     if (!server || !['model-down', 'agent-down', 'agent-restart', 'doc-down'].includes(role)) {
-      clearInterval(serverAgent.watch);
       serverAgent.watch = null;
       return;
     }
     probeAgent({ force: true });
-  }, AGENT_PROBE_MIN_MS);
+    serverAgent.watch = setTimeout(beat, next());
+  };
+  serverAgent.watch = setTimeout(beat, next());
 }
 
 /** Отказ сервера агента — тем же доком, что отказ модели в браузере. */
@@ -2583,6 +2642,12 @@ function shuttingDownMsg(e, utterance, { variants = false } = {}) {
     || (serverAgent.health && serverAgent.health.instance) || '';
   const failed = { utterance, variants, rest, instance };
   serverAgent.lastFailed = failed;
+  /* Круг 33 (u10b): сервер агента сам сказал «перезапускаюсь» — знак агента у всех участников
+     один и тот же («агент недоступен»), а не «сервер» у того, кто давно не спрашивал health, и
+     «недоступен» у того, кто спросил в паузе. Вернётся — частая проверка ниже скажет всем. */
+  serverAgent.health = { ok: false, reason: 'restarting', ...(instance ? { instance } : {}) };
+  serverAgent.healthFailedAt = Date.now();
+  agentModeChanged();
   // в строке мог остаться текст команды из очереди — она теперь в «Повторить», строке нужна текущая
   if (dom.command && rest.some((r) => r.text.trim() === dom.command.value.trim())) dom.command.value = '';
   restoreCommand(utterance);
@@ -3075,7 +3140,7 @@ async function moreProjects(btn) {
   } catch (e) {
     btn.disabled = false;
     btn.textContent = 'Показать ещё';
-    toast(`Список не догрузился: ${humanError(e)}`, 'error', 8000);
+    toast(`Список не догрузился: ${afterColon(humanError(e))}`, 'error', 8000);
   }
 }
 
@@ -3095,7 +3160,7 @@ function fillProjects(body, list, { loading } = {}) {
       toast('Открыт новый проект — имя правится в шапке.', 'plain', 6000);
     } catch (e) {
       add.disabled = false;
-      toast(`Проект не создался: ${humanError(e)}`, 'error', 8000);
+      toast(`Проект не создался: ${afterColon(humanError(e))}`, 'error', 8000);
     }
   });
   body.appendChild(add);
@@ -3195,7 +3260,7 @@ function fillProjects(body, list, { loading } = {}) {
             const got = await apiJson(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'PATCH', body: { name } });
             p.name = (got && got.name) || name;
             if (server.project && server.project.id === p.id) { server.project.name = p.name; setDocNameText(p.name); }
-          } catch (e) { toast(`Имя не сохранилось: ${humanError(e)}`, 'error', 8000); }
+          } catch (e) { toast(`Имя не сохранилось: ${afterColon(humanError(e))}`, 'error', 8000); }
         }
         // список не перечитываем: догруженные страницы остались бы за бортом
         redrawProjects();
@@ -3425,7 +3490,7 @@ function announceHuman(tx, diff) {
   if (!removed && touched < LOUD_NODES) return;
   showMsg('plain', tx.human || tx.label || 'Правка', {
     note: removed
-      ? `${removed === 1 ? 'Узел удалён' : 'Узлы удалены'} — вернуть можно здесь или по Ctrl+Z.`
+      ? `${removed === 1 ? 'Слой удалён' : 'Слои удалены'} — вернуть можно здесь или по Ctrl+Z.`
       : 'Вернуть можно здесь или по Ctrl+Z.',
     actions: [{ label: 'Отменить', onClick: () => undoTx(tx.id) }],
     undoTx: tx.id,
@@ -3627,6 +3692,11 @@ function serverStep(back, { quiet = false } = {}) {
     const said = cleanText(tx.human || SHELL.txTitleWords(tx.label) || tx.label);
     // круг 31: значение, которое шаг вернёт поверх более поздней чужой правки того же свойства
     const clash = quiet ? [] : overwriteClash(back ? tx.ops : tx.inverse, list, tx);
+    /* Круг 33, п.7: отмена (повтор) импорта меняет документ целиком — дерево слоёв и вид
+       прежнего документа к нему не относятся: ветки сворачиваем до активной доски (как после
+       импорта), выделение снимаем, а вид после отрисовки вписываем. */
+    const whole = !!tx.doc && !quiet;
+    if (whole) { state.selection = []; state.collapsed = null; }
     const r = serverCommit(list, `${what}: ${tx.label}`, 'human', {
       [back ? 'undoOf' : 'redoOf']: tx.id, quiet: true, noRender: quiet,
       title: cutText(`${back ? 'Отменил' : 'Вернул'}: ${said.charAt(0).toLowerCase()}${said.slice(1)}`, 200),
@@ -3642,8 +3712,9 @@ function serverStep(back, { quiet = false } = {}) {
       tx.undone = back;
       state.cursor += back ? -1 : 1;
       dropUndoOffer();
+      if (whole) { state.userView = false; fitSmart(); }
       if (r.partial && !quiet) {
-        toast(`${what} сделан не целиком: часть ${r.partial.at + 1} из ${r.partial.of} сервер не принимает — в ней узел больше 3,5 МБ.`, 'error', 9000);
+        toast(`${what} сделан не целиком: часть ${r.partial.at + 1} из ${r.partial.of} сервер не принимает — в ней слой больше 3,5 МБ.`, 'error', 9000);
       }
       return true;
     }
@@ -4146,7 +4217,7 @@ function scaleMark(value, scale, doc) {
 }
 
 function nodeTitle(node, doc) {
-  return node ? String(displayName(doc || state.doc, node) || 'узел') : '';
+  return node ? String(displayName(doc || state.doc, node) || 'слой') : '';
 }
 function nodeTitleById(doc, id) {
   const n = id && doc && doc.nodes ? doc.nodes[id] : null;
@@ -4331,7 +4402,7 @@ function scaleTokenPhrase(word, scale, op, doc) {
     const change = typeof was === 'number' && was !== op.value ? `${humanValue(was)} → ${now}` : now;
     const nodes = new Set(scaleRefsIn(doc, scale).filter((r) => r.index === i).map((r) => r.id)).size;
     const tail = nodes
-      ? `, переверстано ${nodes} ${plural(nodes, 'узел', 'узла', 'узлов')}`
+      ? `, переверстано ${nodes} ${plural(nodes, 'слой', 'слоя', 'слоёв')}`
       : ' — на него никто не ссылается';
     return `${word}: шаг ${change}${tail}`;
   }
@@ -4434,15 +4505,15 @@ function describeOps(opsList, doc) {
     const where = placeOf((tops[0] && tops[0].node.parent) || '');
     const tail = where ? ` в «${where}»` : '';
     if (tops.length === 1) phrases.push(`добавил «${nodeTitle(tops[0].node)}»${tail}`);
-    else if (tops.length) phrases.push(`добавил ${tops.length} ${plural(tops.length, 'узел', 'узла', 'узлов')}${tail}`);
+    else if (tops.length) phrases.push(`добавил ${tops.length} ${plural(tops.length, 'слой', 'слоя', 'слоёв')}${tail}`);
   }
   if (removes.length === 1) phrases.push(`удалил «${titleOf(removes[0].id)}»`);
-  else if (removes.length) phrases.push(`удалил ${removes.length} ${plural(removes.length, 'узел', 'узла', 'узлов')}`);
+  else if (removes.length) phrases.push(`удалил ${removes.length} ${plural(removes.length, 'слой', 'слоя', 'слоёв')}`);
   if (moves.length === 1) {
     const to = placeOf(moves[0].parent);
     phrases.push(`перенёс «${titleOf(moves[0].id)}»${to ? ` в «${to}»` : ''}`);
   } else if (moves.length) {
-    phrases.push(`перенёс ${moves.length} ${plural(moves.length, 'узел', 'узла', 'узлов')}`);
+    phrases.push(`перенёс ${moves.length} ${plural(moves.length, 'слой', 'слоя', 'слоёв')}`);
   }
 
   /* Круг 20. Ссылки в «стало» разрешаем по документу, в котором уже стоят новые шкалы этой
@@ -4471,7 +4542,7 @@ function describeOps(opsList, doc) {
   for (const g of groups.values()) {
     const uniq = [...new Set(g.nodes)];
     if (uniq.length === 1) phrases.push(`${g.label} ${g.value} в «${uniq[0]}»`);
-    else if (uniq.length > 1) phrases.push(`${g.label} ${g.value} у ${uniq.length} узлов`);
+    else if (uniq.length > 1) phrases.push(`${g.label} ${g.value} у ${uniq.length} ${plural(uniq.length, 'слоя', 'слоёв', 'слоёв')}`);
     else phrases.push(`${g.label} ${g.value}`);
   }
   for (const p of describeTokenOps(tokens, doc)) phrases.push(p);
@@ -5410,6 +5481,10 @@ function flipMoved(diff, prevGeo) {
 }
 
 function setSelection(ids, opts = {}) {
+  /* Круг 33, п.1. Человек печатает в инспекторе — выделение от агента (итог его правки)
+     не перехватывает панель: иначе поле сменялось полем другого слоя посреди слова, и
+     остаток набора уходил в имя новой доски. Рамки правки на холсте агент покажет и так. */
+  if (opts.agent === true && inspFocused()) return;
   state.selection = Array.isArray(ids) ? ids.slice() : [];
   /* Кто выделил: агент после своей же правки (selectTouched) или человек. brain по этому
      полю решает, говорить ли «правка ушла туда» — на каждой второй команде это звучало
@@ -5931,7 +6006,7 @@ function renderLayers() {
   if (lib && libOpen && !(lib.children || []).length) {
     const hint = document.createElement('div');
     hint.className = 'layers-empty lib-empty';
-    hint.textContent = 'Компонентов пока нет. Выделите узел на доске и нажмите «Сделать компонентом» — '
+    hint.textContent = 'Компонентов пока нет. Выделите слой на доске и нажмите «Сделать компонентом» — '
       + 'он переедет сюда, и его можно будет ставить на доски сколько угодно раз.';
     host.appendChild(hint);
   }
@@ -5993,7 +6068,7 @@ function deleteNodes(ids) {
   if (!roots.length) return false;
   const label = roots.length === 1
     ? `Удалить «${nodeTitleById(state.doc, roots[0])}»`
-    : `Удалить ${roots.length} ${plural(roots.length, 'узел', 'узла', 'узлов')}`;
+    : `Удалить ${roots.length} ${plural(roots.length, 'слой', 'слоя', 'слоёв')}`;
   // quiet: сообщение говорим тут сами — иначе их будет два, и разными словами (п.10)
   const r = commit(roots.map((id) => OPS.remove(id)), label, 'human', { quiet: true });
   if (!r.ok) return false;
@@ -6333,7 +6408,7 @@ function makeComponentNow(id, name, props) {
   const list = makeComponentOps(state.doc, id, { name, props: clean });
   if (!list.length) {
     const can = canMakeComponent(state.doc, id);
-    showMsg('warn', 'Компонентом это не станет', { note: `${can.reason || 'узел не годится'}.` });
+    showMsg('warn', 'Компонентом это не станет', { note: `${can.reason || 'слой не годится'}.` });
     return;
   }
   const born = list.find((o) => o.op === 'create' && o.node && o.node.type === 'instance');
@@ -6870,26 +6945,88 @@ function tagInspFields(body) {
     const n = seen.get(base) || 0;
     seen.set(base, n + 1);
     f.dataset.fkey = `${base}#${n}`;
+    // что в поле было при сборке: всё сверх этого — набор, который перерисовка не сотрёт (круг 33)
+    if ((f.tagName === 'INPUT' || f.tagName === 'TEXTAREA') && f.dataset.initial === undefined) f.dataset.initial = f.value;
   }
+}
+
+/* Круг 33, п.1. Набор в инспекторе переживает перерисовку. Пересборка панели (чужая
+   транзакция, итог агента, подтверждение своей правки) стирала недописанное: поле строилось
+   заново из документа, а фокус с кареткой возвращались в поле с прежним текстом — буквы
+   «Ани по буквам» пропадали. Хуже: если панель тем временем показывала уже ДРУГОЙ слой
+   (агент выделил новую доску), фокус возвращался в поле того слоя, и остаток набора уходил
+   в его имя. Теперь: запоминаем, какой слой правится и что в поле набрано; тот же слой —
+   набранное и каретка возвращаются; другой — фокус в чужое поле не ставится (набранное
+   записывается в свой слой); слой удалили — панель остаётся с пояснением, и обрывок набора
+   никуда не записывается. */
+let inspRebuilding = false;
+
+function inspFocused() {
+  const body = dom['insp-body'];
+  const a = typeof document !== 'undefined' ? document.activeElement : null;
+  return !!(body && a && a !== body && body.contains(a));
 }
 
 function grabInspFocus() {
   const body = dom['insp-body'];
   const a = document.activeElement;
   if (!body || !a || !body.contains(a) || !a.dataset || !a.dataset.fkey) return null;
-  const memo = { key: a.dataset.fkey, start: null, end: null };
+  const memo = { key: a.dataset.fkey, start: null, end: null, node: body.dataset.node || '', value: null, dirty: false, commit: null };
   try { memo.start = a.selectionStart; memo.end = a.selectionEnd; } catch { /* number не даёт каретку */ }
+  if ((a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && a.dataset.initial !== undefined) {
+    memo.value = a.value;
+    memo.dirty = a.value !== a.dataset.initial;
+    memo.commit = typeof a._commitNow === 'function' ? a._commitNow : null;
+  }
   return memo;
 }
 
-function restoreInspFocus(memo) {
+function restoreInspFocus(memo, nodeId) {
   const body = dom['insp-body'];
   if (!memo || !body) return;
+  // панель показывает другой слой: в его поле набор не продолжаем (буквы ушли бы туда)
+  if (memo.node && memo.node !== nodeId) {
+    // недописанное — в свой слой, одной правкой и уже после перерисовки
+    if (memo.dirty && memo.commit) queueMicrotask(memo.commit);
+    // фокус — на панель, а не на <body>: иначе Backspace удалил бы выделенное на холсте
+    if (dom.inspector && !dom.inspector.hidden) { try { dom.inspector.focus({ preventScroll: true }); } catch { /* без фокуса */ } }
+    return;
+  }
   const f = body.querySelector(`[data-fkey="${CSS.escape(memo.key)}"]`);
   if (!f) return;
+  if (memo.dirty && typeof memo.value === 'string' && f.value !== memo.value) f.value = memo.value;
   try { f.focus({ preventScroll: true }); } catch { f.focus(); }
   if (memo.start == null) return;
   try { f.setSelectionRange(memo.start, memo.end); } catch { /* тип поля не поддерживает каретку */ }
+}
+
+/**
+ * Слой, который сейчас правят в инспекторе, удалили (чужая транзакция, агент). Панель не
+ * исчезает из-под рук: поля остаются, но только для чтения, и сказано, что случилось.
+ * Набранное никуда не записывается. Уйдёт фокус из панели — она закроется.
+ */
+function orphanInspector(memo) {
+  const body = dom['insp-body'];
+  if (!body || body.dataset.orphan === memo.node) return;
+  body.dataset.orphan = memo.node;
+  /* Поля не «только для чтения»: в таком поле пробел прокручивал панель, и набор будто
+     пропадал. Поле остаётся живым (набранное видно и его можно скопировать), но ничего не
+     записывает; кнопки и списки — выключены. */
+  for (const f of body.querySelectorAll('input, textarea, select, button')) {
+    if (f.tagName === 'INPUT' || f.tagName === 'TEXTAREA') f.dataset.orphan = '1';
+    else f.disabled = true;
+  }
+  const r = removedInfo.get(memo.node);
+  const by = r && r.by ? r.by : null;
+  const who = by && by.author_kind === 'agent' ? 'Агент удалил этот слой'
+    : by && by.author ? `${SHELL.whoDid(by, 'удалил')} этот слой` : 'Этот слой удалили';
+  const note = document.createElement('p');
+  note.className = 'insp-issue';
+  note.setAttribute('role', 'status');
+  note.dataset.orphanNote = '1';
+  note.textContent = `${who} — набранное здесь не записано.`;
+  body.prepend(note);
+  body.scrollTop = 0;
 }
 
 function renderInspector() {
@@ -6897,6 +7034,12 @@ function renderInspector() {
   const keepFocus = grabInspFocus();
   const id = state.selection.length === 1 && !state.inspQuiet ? state.selection[0] : null;
   const node = id ? nodeById(state.doc, id) : null;
+  // правили слой, которого больше нет, — панель остаётся, пока в ней фокус (п.1)
+  if (keepFocus && keepFocus.node && (!node || node.id !== keepFocus.node) && !nodeById(state.doc, keepFocus.node)) {
+    dom.inspector.hidden = false;
+    orphanInspector(keepFocus);
+    return;
+  }
   if (dom.app.dataset.insp !== (node ? 'on' : 'off')) scheduleViewRecheck(240);
   dom.app.dataset.insp = node ? 'on' : 'off';
   syncPanelModes();   // инспектор занял или отдал колонку — пересчитать бюджет (круг 16, п.1)
@@ -6904,9 +7047,13 @@ function renderInspector() {
   // на узком экране лист инспектора и док вместе не оставляют холста: знакомство уступает
   if (node && isNarrow() && state.introOpen) hideMsg();
   dom.inspector.hidden = !node;
-  if (!node) return;
+  if (!node) { delete body.dataset.node; delete body.dataset.orphan; return; }
 
-  body.textContent = '';
+  // поле с фокусом сейчас вынется из документа: его blur/change не должны записать обрывок
+  inspRebuilding = true;
+  try { body.textContent = ''; } finally { inspRebuilding = false; }
+  body.dataset.node = node.id;
+  delete body.dataset.orphan;
 
   /* Одиночный клик по холсту выделяет самый глубокий узел — это поведение сцены, и мы
      его не меняем. Но выйти наружу человеку нужно: крошки ведут к кнопке, карточке,
@@ -6921,13 +7068,13 @@ function renderInspector() {
   if (chain.length) {
     const crumbs = document.createElement('nav');
     crumbs.className = 'crumbs';
-    crumbs.setAttribute('aria-label', 'Путь до узла');
+    crumbs.setAttribute('aria-label', 'Путь до слоя');
     for (const a of chain) {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'crumb';
       b.textContent = a.name || defaultName(a);
-      b.title = `Выделить «${a.name || defaultName(a)}» — узел снаружи`;
+      b.title = `Выделить «${a.name || defaultName(a)}» — слой снаружи`;
       b.addEventListener('click', () => setSelection([a.id]));
       const sep = document.createElement('span');
       sep.className = 'crumb-sep';
@@ -6959,7 +7106,7 @@ function renderInspector() {
      «Имя» не показывается вовсе, а «Имя компонента» ниже пишет оба поля одной правкой. */
   if (!isMaster(state.doc, node)) {
     body.appendChild(group('Имя', [
-      field('input', node.name || '', (v) => setProp(node.id, 'name', v), 'Имя узла'),
+      field('input', node.name || '', (v) => setProp(node.id, 'name', v), 'Имя слоя'),
     ]));
   }
 
@@ -6992,7 +7139,7 @@ function renderInspector() {
     del.addEventListener('click', () => deleteNodes([node.id]));
     body.appendChild(del);
     tagInspFields(body);
-    restoreInspFocus(keepFocus);
+    restoreInspFocus(keepFocus, node.id);
     return;
   }
 
@@ -7004,7 +7151,7 @@ function renderInspector() {
 
   if (node.type === 'text') {
     body.appendChild(group('Текст', [
-      field('textarea', node.characters || '', (v) => setProp(node.id, 'characters', v), 'Текст узла'),
+      field('textarea', node.characters || '', (v) => setProp(node.id, 'characters', v), 'Текст слоя'),
     ]));
     const st = typeof node.style === 'string' ? { token: node.style } : (node.style || {});
     body.appendChild(group('Типографика', [
@@ -7099,14 +7246,14 @@ function renderInspector() {
       body.appendChild(note);
     }
   } else {
-    del.textContent = 'Удалить узел';
+    del.textContent = 'Удалить слой';
   }
   del.addEventListener('click', () => deleteNodes([node.id]));
   body.appendChild(del);
 
   // поля получили устойчивые имена — и фокус с кареткой вернулись на своё место (п.20)
   tagInspFields(body);
-  restoreInspFocus(keepFocus);
+  restoreInspFocus(keepFocus, node.id);
 }
 
 /**
@@ -7145,7 +7292,7 @@ function makeComponentGroup(body, node) {
 function overrideGroup(node) {
   const note = document.createElement('div');
   note.className = 'note';
-  note.textContent = 'Узел отсоединён: положение задано вручную и переживает правки агента.';
+  note.textContent = 'Слой отсоединён: положение задано вручную и переживает правки агента.';
   const btn = document.createElement('button');
   btn.className = 'btn subtle small';
   btn.textContent = 'Вернуть в поток';
@@ -7211,8 +7358,23 @@ function field(kind, value, onChange, label) {
   const inp = document.createElement(kind === 'textarea' ? 'textarea' : 'input');
   inp.className = 'field';
   inp.value = value;
+  inp.dataset.initial = inp.value;
   if (label) inp.setAttribute('aria-label', label);
-  inp.addEventListener('change', () => onChange(inp.value));
+  /* Круг 33, п.1: записываем один раз и только набранное. После перерисовки набор
+     возвращается в поле программно — браузер такого текста «изменённым» не считает и
+     change на Enter не шлёт, поэтому Enter и уход из поля пишут сами. Пока панель
+     пересобирается или слой удалён, ничего не пишется. */
+  const commitNow = (force) => {
+    if (inp.readOnly || inp.dataset.orphan) return;
+    if (force !== true && (inspRebuilding || inp.isConnected === false)) return;
+    if (inp.value === inp.dataset.initial) return;
+    inp.dataset.initial = inp.value;
+    onChange(inp.value);
+  };
+  inp._commitNow = () => commitNow(true);
+  inp.addEventListener('change', () => commitNow());
+  inp.addEventListener('blur', () => commitNow());
+  if (kind !== 'textarea') inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) commitNow(); });
   return inp;
 }
 /** Число в поле: без «1e-7» и без молчаливого нуля из «1e999» или пустоты (п.26). */
@@ -7236,6 +7398,8 @@ function numberField(value, onChange, opts = {}) {
   inp.dataset.committed = inp.value;
   if (opts.label) inp.setAttribute('aria-label', opts.label);
   inp.addEventListener('change', () => {
+    // круг 33: Enter ниже и родной change — одна запись, а не две
+    if (inp.value === inp.dataset.committed || inp.readOnly || inp.dataset.orphan || inspRebuilding || inp.isConnected === false) return;
     const raw = inp.value.trim();
     const n = raw === '' ? NaN : Number(raw);
     if (!Number.isFinite(n)) {
@@ -7251,6 +7415,10 @@ function numberField(value, onChange, opts = {}) {
     inp.value = numText(clamped);
     inp.dataset.committed = inp.value;
     onChange(clamped);
+  });
+  // набор, возвращённый в поле после перерисовки, браузер изменённым не считает (круг 33)
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && inp.value !== inp.dataset.committed) inp.dispatchEvent(new Event('change'));
   });
   return inp;
 }
@@ -7360,7 +7528,7 @@ function scaleLink(scale) {
   b.type = 'button';
   b.className = 'linkish';
   b.textContent = `${SCALE_NAMES[scale].charAt(0).toUpperCase()}${SCALE_NAMES[scale].slice(1)}…`;
-  b.title = `Открыть ${SCALE_NAMES[scale].replace(/^шкала/, 'шкалу')}: значения шагов и сколько узлов на них ссылается`;
+  b.title = `Открыть ${SCALE_NAMES[scale].replace(/^шкала/, 'шкалу')}: значения шагов и сколько слоёв на них ссылается`;
   b.addEventListener('click', () => openScales(scale));
   return b;
 }
@@ -8053,7 +8221,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
     if (!res.ops || !res.ops.length) {
       restoreCommand(utterance);
       showMsg('warn', 'Агент не нашёл, что изменить', {
-        note: warnLine(res.warnings) || 'Выделите узел или скажите, что именно поправить.',
+        note: warnLine(res.warnings) || 'Выделите слой или скажите, что именно поправить.',
         details: techDetails(res.warnings, null, res.serviceNotes),
         actions: [retryAction(utterance)],
       });
@@ -8751,7 +8919,7 @@ const ERROR_HINTS = {
   rate_limited: 'Подождите несколько секунд и повторите.',
   session_expired: 'Войдите в Claude заново и повторите команду.',
   not_declared: 'Перезагрузите страницу: способность модели пропала.',
-  prompt_too_large: 'Выделите узел поменьше или скажите короче.',
+  prompt_too_large: 'Выделите слой поменьше или скажите короче.',
   refused: 'Переформулируйте команду.',
   empty_completion: 'Попробуйте сказать то же самое короче.',
   schema: 'Попробуйте сформулировать короче и конкретнее.',
@@ -8767,6 +8935,13 @@ const ERROR_WAYOUT = {
 
 /* Служебное в тексте ошибки: такую строку человеку не показываем (круг 25, п.7). */
 const NOISE_RE = /failed to fetch|networkerror|load failed|https?:\/\/|\b[1-5]\d\d\b|\bjson\b|econn|etimedout|enotfound|\b(?:tx|cmd|c|f|t|lib)_[a-z0-9]{6,}\b/i;
+
+/** После двоеточия — со строчной: «Имя не сохранилось: нет связи с сервером» (круг 33, п.7). */
+function afterColon(text) {
+  const t = String(text == null ? '' : text);
+  if (/^[A-ZА-ЯЁ]{2}/.test(t)) return t;   // аббревиатура (JSON, SVG) — как есть
+  return t.charAt(0).toLowerCase() + t.slice(1);
+}
 
 function humanError(e) {
   if (!e) return 'Что-то пошло не так';
@@ -9627,14 +9802,14 @@ function describeVariant(v) {
   }
 
   const bits = [...nums].slice(0, 2).map(([k, val]) => `${k} ${val}`);
-  if (created) bits.push(`+${created} ${plural(created, 'узел', 'узла', 'узлов')}`);
+  if (created) bits.push(`+${created} ${plural(created, 'слой', 'слоя', 'слоёв')}`);
   /* Круг 16, п.8: «1 узел правлено» — род не согласован. Ставим глагол впереди, тогда
      согласуются все три формы: «изменён 1 узел», «изменены 2 узла», «изменено 5 узлов». */
   if (changed) {
     bits.push(`${plural(changed, 'изменён', 'изменены', 'изменено')} ${changed} `
-      + plural(changed, 'узел', 'узла', 'узлов'));
+      + plural(changed, 'слой', 'слоя', 'слоёв'));
   }
-  if (removed) bits.push(`−${removed} ${plural(removed, 'узел', 'узла', 'узлов')}`);
+  if (removed) bits.push(`−${removed} ${plural(removed, 'слой', 'слоя', 'слоёв')}`);
   return bits.length ? bits.join(' · ') : 'без изменений';
 }
 
@@ -10417,6 +10592,17 @@ function bindUi() {
     });
   }
   dom['btn-insp-close'].addEventListener('click', () => setSelection([]));
+  // круг 33, п.1: панель удалённого слоя живёт, пока в ней фокус; ушёл — закрываем
+  dom['insp-body'].addEventListener('focusout', () => {
+    if (!dom['insp-body'].dataset.orphan) return;
+    setTimeout(() => {
+      if (!dom['insp-body'].dataset.orphan || inspFocused()) return;
+      delete dom['insp-body'].dataset.orphan;
+      dom['insp-body'].textContent = '';
+      delete dom['insp-body'].dataset.node;
+      renderInspector();
+    }, 0);
+  });
   dom['btn-sheet-close'].addEventListener('click', closeSheet);
   dom.sheet.addEventListener('keydown', trapSheetFocus);
   dom['btn-history'].addEventListener('click', () => openHistory());
@@ -10857,6 +11043,23 @@ function otherEditItem(t) {
   head.append(when, what, who);
   item.appendChild(head);
   const dropped = Number(t.dropped_count) || 0;
+  /* Круг 33 (L2): серия частей ещё не вся — «правка Ани в пути (1 из 3)»; новейшая часть
+     давно — «не завершена»: вкладка автора, видимо, закрылась посреди отправки. */
+  const series = SHELL.partSeriesWords(t, { mine });
+  if (series) {
+    const foot = document.createElement('div');
+    foot.className = 'hfoot';
+    const tag = document.createElement('span');
+    tag.className = 'tagpill';
+    tag.dataset.series = series.state;
+    tag.textContent = series.text;
+    tag.title = series.state === 'stale'
+      ? 'Остальные части этой большой правки так и не пришли — в документе только то, что успело дойти'
+      : 'Большая правка приходит частями — остальные ещё в пути';
+    foot.appendChild(tag);
+    item.appendChild(foot);
+    if (series.state === 'transit') armSeriesRefresh(t);
+  }
   if (otherTab && !emptyTx(t)) {
     const foot = document.createElement('div');
     foot.className = 'hfoot';
@@ -10877,6 +11080,19 @@ function otherEditItem(t) {
     item.appendChild(foot);
   }
   return item;
+}
+
+/** «в пути» станет «не завершена» и без новых частей — перерисовать открытую «Историю» к сроку. */
+let seriesTimer = null;
+function armSeriesRefresh(t) {
+  if (seriesTimer) return;
+  const at = Date.parse(t.created_at || '');
+  if (!Number.isFinite(at)) return;
+  const wait = Math.max(1000, at + SHELL.PART_STALE_MS - Date.now() + 500);
+  seriesTimer = setTimeout(() => {
+    seriesTimer = null;
+    if (state.sheetOpen === 'history' && state.sheetTab !== 'chat') refreshSheet();
+  }, wait);
 }
 
 function fillEdits(body) {
@@ -10948,7 +11164,13 @@ function fillEdits(body) {
     if (current) {
       const now = document.createElement('span');
       now.className = 'hnow';
-      now.textContent = 'документ сейчас здесь';
+      /* Круг 33, п.7: выше по ленте — правки других, сделанные позже: они в документе остаются,
+         и «документ сейчас здесь» под ними было бы неправдой. Тогда метка — про свои правки. */
+      const later = k > 0;
+      now.textContent = later ? 'ваши правки сейчас здесь' : 'документ сейчас здесь';
+      now.title = later
+        ? 'Правки других участников выше по ленте сделаны позже и остаются в документе — ваша отмена их не трогает'
+        : 'Документ сейчас в состоянии сразу после этой правки';
       foot.appendChild(now);
     } else {
       const back = document.createElement('button');
@@ -11162,7 +11384,7 @@ function scaleEditor(scale) {
 
   const total = new Set([...usage.values()].flatMap((s) => [...s])).size;
   const sub = noteEl(total
-    ? `${steps.length} ${plural(steps.length, 'шаг', 'шага', 'шагов')} · ${plural(total, 'ссылается', 'ссылаются', 'ссылаются')} ${total} ${plural(total, 'узел', 'узла', 'узлов')}`
+    ? `${steps.length} ${plural(steps.length, 'шаг', 'шага', 'шагов')} · ${plural(total, 'ссылается', 'ссылаются', 'ссылаются')} ${total} ${plural(total, 'слой', 'слоя', 'слоёв')}`
     : `${steps.length} ${plural(steps.length, 'шаг', 'шага', 'шагов')} · пока никто не ссылается`);
   sub.className = 'note scale-ed-sub';
   box.appendChild(sub);
@@ -11206,9 +11428,9 @@ function scaleRow(scale, steps, i, users) {
 
   const use = document.createElement('span');
   use.className = 'scale-use';
-  use.textContent = n ? `${n} ${plural(n, 'узел', 'узла', 'узлов')}` : 'не используется';
+  use.textContent = n ? `${n} ${plural(n, 'слой', 'слоя', 'слоёв')}` : 'не используется';
   use.title = n
-    ? `На этот шаг ссылаются ${n} ${plural(n, 'узел', 'узла', 'узлов')}: правка значения переверстает их все`
+    ? `На этот шаг ссылаются ${n} ${plural(n, 'слой', 'слоя', 'слоёв')}: правка значения переверстает их все`
     : 'На этот шаг сейчас никто не ссылается: правка ничего не сдвинет';
 
   const add = document.createElement('button');
@@ -11276,7 +11498,7 @@ async function exportPng() {
     if (fw) showMsg('warn', 'PNG может разойтись с экраном', { note: fw, ms: 11000 });
     return saved;
   } catch (e) {
-    toast(`Картинка не получилась: ${humanError(e)}`, 'error', 9000);
+    toast(`Картинка не получилась: ${afterColon(humanError(e))}`, 'error', 9000);
     return false;
   }
 }
@@ -11302,7 +11524,7 @@ async function exportSvg() {
 
   let markup = '';
   try { markup = stage.toSVG(id) || ''; }
-  catch (e) { toast(`Вектор не получился: ${humanError(e)}`, 'error', 9000); return false; }
+  catch (e) { toast(`Вектор не получился: ${afterColon(humanError(e))}`, 'error', 9000); return false; }
   if (dataIsEmpty(markup)) {
     toast('Вектор не получился: сцена не отдала разметку доски.', 'error', 9000);
     return false;
@@ -11334,12 +11556,16 @@ async function exportJson() {
 }
 
 function fillExport(body) {
-  const note = document.createElement('div');
-  note.className = 'note';
-  note.textContent = downloads
-    ? 'Файл будет предложен к сохранению — подтвердите в диалоге.'
-    : 'Сохранение файлов доступно, когда страница запущена локально или получила разрешение.';
-  body.appendChild(note);
+  /* Круг 33, п.7: в серверной сборке файл скачивается обычной ссылкой браузера — строка про
+     «запущена локально» там лишняя и сбивает с толку. Пояснение — только где оно правда. */
+  if (downloads || !server) {
+    const note = document.createElement('div');
+    note.className = 'note';
+    note.textContent = downloads
+      ? 'Файл будет предложен к сохранению — подтвердите в диалоге.'
+      : 'Сохранение файлов доступно, когда страница запущена локально или получила разрешение.';
+    body.appendChild(note);
+  }
 
   const { id: abId, rect, ok: hasBoard } = exportTarget();
   const abName = nodeTitleById(state.doc, abId);
@@ -11436,6 +11662,8 @@ async function offerFile(filename, data) {
   const a = document.createElement('a');
   a.href = url; a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
+  // браузер скачал молча — человеку нужно то же «Сохранено», что и при диалоге (круг 33)
+  toast(`Сохранено: ${filename}`, 'plain');
   return true;
 }
 function guessType(name) {
@@ -11603,12 +11831,12 @@ function treeProblem(doc) {
   const stack = [doc.root];
   let guard = Object.keys(doc.nodes).length + 8;
   while (stack.length) {
-    if (guard-- <= 0) return 'связи узлов замкнуты в кольцо';
+    if (guard-- <= 0) return 'связи слоёв замкнуты в кольцо';
     const id = stack.pop();
-    if (seen.has(id)) return 'один узел стоит в дереве дважды';
+    if (seen.has(id)) return 'один слой стоит в дереве дважды';
     seen.add(id);
     const n = doc.nodes[id];
-    if (!n) return `узел «${id}» назван ребёнком, но не описан`;
+    if (!n) return `слой «${id}» указан среди вложенных, но не описан`;
     for (const c of (n.children || [])) stack.push(c);
   }
   return null;
@@ -11627,11 +11855,11 @@ function adoptDoc(raw) {
   }
   // корень обязан быть среди узлов: иначе createDoc молча отдаст свой демо-документ,
   // и работа человека будет подменена чужим макетом (п.8)
-  if (!raw.nodes[raw.root]) throw new Error(`корневой узел «${raw.root}» не описан`);
+  if (!raw.nodes[raw.root]) throw new Error(`корень документа «${raw.root}» не описан`);
   // сначала чиним копию и считаем геометрию — состояние трогаем, только если всё сошлось
   const next = createDoc(raw);
   if (!next || !next.nodes || !next.root || !next.nodes[next.root]) {
-    throw new Error('в документе нет корневого узла');
+    throw new Error('в документе нет корня');
   }
   // и ещё раз сверяемся с тем, что пришло: у подменённого документа и корень, и узлы чужие.
   // Разобранных узлов может стать меньше (битые рёбра отбрасываются), но не больше.
@@ -11646,7 +11874,7 @@ function adoptDoc(raw) {
   const broken = firstBrokenRect(geo);
   if (broken) {
     const name = nodeTitleById(next, broken) || broken;
-    throw new Error(`размеры узла «${name}» — не числа, раскладка не считается`);
+    throw new Error(`размеры слоя «${name}» — не числа, раскладка не считается`);
   }
   if (!geo.rects[next.root] && artboards(next).length) throw new Error('раскладка не считается');
   // createDoc отбрасывает узлы, которые не починить, и пишет об этом только в консоль:
@@ -11772,7 +12000,7 @@ function importJson() {
       }
       if (server && count >= BIG_DOC) {
         // большой файл ляжет несколькими транзакциями (K1) — строку держим до конца
-        showMsg('plain', `Загружаю «${clip(f.name, 40)}»: ${count} ${plural(count, 'узел', 'узла', 'узлов')}…`);
+        showMsg('plain', `Загружаю «${clip(f.name, 40)}»: ${count} ${plural(count, 'слой', 'слоя', 'слоёв')}…`);
         await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
       }
       const r = commitDoc(taken.doc, taken.geo, `Импорт «${nowName}»`,
@@ -11788,14 +12016,14 @@ function importJson() {
       state.userView = false;
       fitSmart();
       const blank = artboards(taken.doc).length === 0;
-      const bits = [`узлов: ${count}`];
+      const bits = [`слоёв: ${count}`];
       if (taken.lost) {
-        bits.push(`не прочитал ${taken.lost} ${plural(taken.lost, 'узел', 'узла', 'узлов')}`);
+        bits.push(`не прочитал ${taken.lost} ${plural(taken.lost, 'слой', 'слоя', 'слоёв')}`);
       }
       // круг 16, п.12: узлы целы, а вложение пришлось выпрямить — молчать об этом нельзя
       if (taken.lostEdges) {
         bits.push(`не сохранил ${taken.lostEdges} `
-          + `${plural(taken.lostEdges, 'связь', 'связи', 'связей')} между узлами — вложение выпрямлено`);
+          + `${plural(taken.lostEdges, 'связь', 'связи', 'связей')} между слоями — вложение выпрямлено`);
       }
       if (blank) bits.push('досок в файле не оказалось — холст пуст');
       // круг 19, п.1: файл из прежней версии библиотеки не имел — говорим об этом словами,
@@ -11896,13 +12124,31 @@ const BOARD_PHRASES = [
 ];
 
 /** Перевод вне кавычек: имя слоя «Артборд 2» должно остаться собой. */
+/* Круг 33, п.7: человек называет их слоями (рельс «Слои»), а слова brain и сервера —
+   «подходит узлов — 4», «узел уже удалён». Тоже на границе показа и тоже вне кавычек; род у
+   «узел» и «слой» один, поэтому падежи переводятся слово в слово. */
+const LAYER_FORMS = {
+  'узел': 'слой', 'узла': 'слоя', 'узлу': 'слою', 'узлом': 'слоем', 'узле': 'слое',
+  'узлы': 'слои', 'узлов': 'слоёв', 'узлам': 'слоям', 'узлами': 'слоями', 'узлах': 'слоях',
+};
+const LAYER_RE = /(?<![А-Яа-яЁё])([Уу])(зел|зла|злу|злом|зле|злы|злов|злам|злами|злах)(?![А-Яа-яЁё])/g;
+
 function boardWords(text) {
   const s = String(text == null ? '' : text);
-  if (!/артборд/i.test(s)) return s;
+  const board = /артборд/i.test(s);
+  const layer = /[Уу]з(?:ел|л)/.test(s);
+  if (!board && !layer) return s;
   return s.split(/(«[^»]*»)/).map((part) => {
     if (part.startsWith('«')) return part;
     let out = part;
-    for (const [re, to] of BOARD_PHRASES) out = out.replace(re, to);
+    if (board) for (const [re, to] of BOARD_PHRASES) out = out.replace(re, to);
+    if (layer) {
+      out = out.replace(LAYER_RE, (m, u, rest) => {
+        const to = LAYER_FORMS[`у${rest}`];
+        if (!to) return m;
+        return u === 'У' ? to.charAt(0).toUpperCase() + to.slice(1) : to;
+      });
+    }
     return out;
   }).join('');
 }
@@ -12232,7 +12478,7 @@ async function adoptSaved(saved, from, raw) {
   // потеря узлов — разговор о документе: ему место в доке рядом с командной строкой (п.15)
   if (taken.lost) {
     showMsg('warn', 'Документ восстановлен не полностью', {
-      note: `${taken.lost} ${plural(taken.lost, 'узел', 'узла', 'узлов')} из сохранённой копии прочитать не удалось.`,
+      note: `${taken.lost} ${plural(taken.lost, 'слой', 'слоя', 'слоёв')} из сохранённой копии прочитать не удалось.`,
     });
   } else {
     toast('Документ восстановлен', 'plain', 3000);

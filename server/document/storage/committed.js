@@ -14,6 +14,8 @@ import { DROPPED_KEEP, DROPPED_OP_BYTES, DROPPED_PREVIEW_CHARS, cleanMeta, undoP
 
 /** Необязательные поля транзакции: в записи есть, только если заданы. */
 const OPTIONAL = ['undo_of', 'redo_of', 'author', 'client', 'title', 'command_id', 'command_author'];
+/** Подписи записи (метаданные, круг 31): чистятся и при чтении — у старых записей. */
+const META_FIELDS = ['author', 'title', 'command_author'];
 
 /**
  * Начало строки — не больше `n` кодовых точек: суррогатная пара не рвётся (половинка
@@ -169,6 +171,15 @@ export function toCommitted(row) {
   if (typeof row.chain === 'string') out.chain = row.chain;
   for (const k of OPTIONAL) {
     if (row[k] !== undefined && row[k] !== null) out[k] = row[k];
+  }
+  // круг 33: подписи — метаданные; у записей, сделанных до чистки (круг 31), в журнале могли
+  // остаться управляющие и bidi-символы — догон (`ops?since`, сокет) отдаёт их чистыми, как
+  // `/history`. Пустое после чистки — поля нет
+  for (const k of META_FIELDS) {
+    if (typeof out[k] !== 'string') continue;
+    const v = cleanMeta(out[k]);
+    if (v) out[k] = v;
+    else delete out[k];
   }
   // круг 32: часть большой правки (колонка 011) — только годная пара {i, n}
   const part = undoPartOf(row.undo_part);

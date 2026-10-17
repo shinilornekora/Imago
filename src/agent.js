@@ -29,6 +29,8 @@ export const STAGE_KEYS = Object.freeze(['jev', 'read', 'library', 'llm', 'valid
 
 /** Сколько ждём `/agent/health`: дольше — считаем, что агента на сервере нет. */
 const HEALTH_TIMEOUT_MS = 3000;
+/** Причины «документ недоступен» в health (L3, круг 33): база, её схема, сам сервис. */
+export const DOCUMENT_REASONS = Object.freeze(['storage', 'schema', 'unreachable']);
 /** Сколько ждём ответа на «стоп» и на выбор варианта, прежде чем сдаться. */
 const STOP_TIMEOUT_MS = 4000;
 const APPLY_TIMEOUT_MS = 60000;
@@ -268,6 +270,10 @@ export async function health(opts = {}) {
       engine: body.engine,
       llm: ['up', 'down', 'unconfigured'].includes(body.llm) ? body.llm : 'down',
       document: body.document === 'up' ? 'up' : 'down',
+      /* Круг 33 (L3): почему документ недоступен — база данных, её схема или сам сервис.
+         Без этого поля оболочка говорила «сервер документа не отвечает», когда лежала база.
+         Только из белого списка: строка сервера в текст человеку не попадает. */
+      ...(body.document !== 'up' && DOCUMENT_REASONS.includes(body.document_reason) ? { document_reason: body.document_reason } : {}),
       ...(body.model ? { model: String(body.model) } : {}),
       // круг 26: id процесса Orchestrator и время старта — смена instance значит «перезапустился»
       ...(typeof body.instance === 'string' && body.instance ? { instance: body.instance.slice(0, 64) } : {}),
@@ -278,6 +284,14 @@ export async function health(opts = {}) {
   } finally { t.done(); }
 }
 
+/**
+ * Круг 33 (ORCH): Orchestrator сверяет `client` в stop и apply с тем, что пришёл с командой, —
+ * чужую команду не остановить и не выбрать её вариант. Строка до 128 знаков; иначе поля нет.
+ */
+function clientField(client) {
+  return typeof client === 'string' && client && client.length <= 128 ? { client } : {};
+}
+
 /** `POST /agent/stop`. Не бросает: `{stopped: bool}`; сбой связи — `{stopped: false, error}`. */
 export async function stop(commandId, opts = {}) {
   let f;
@@ -285,7 +299,7 @@ export async function stop(commandId, opts = {}) {
   const t = linked(null, opts.timeoutMs || STOP_TIMEOUT_MS);
   try {
     const res = await f(joinUrl(opts.baseUrl, '/agent/stop'), {
-      method: 'POST', headers: headersFor(opts.author), body: JSON.stringify({ command_id: commandId }),
+      method: 'POST', headers: headersFor(opts.author), body: JSON.stringify({ command_id: commandId, ...clientField(opts.client) }),
       cache: 'no-store', signal: t.signal,
     });
     if (!res.ok) return { stopped: false, error: await readError(res) };
@@ -318,7 +332,7 @@ export async function apply(commandId, variant, opts = {}) {
   try {
     res = await f(joinUrl(opts.baseUrl, '/agent/apply'), {
       method: 'POST', headers: headersFor(opts.author),
-      body: JSON.stringify({ command_id: commandId, variant }),
+      body: JSON.stringify({ command_id: commandId, variant, ...clientField(opts.client) }),
       cache: 'no-store', signal: t.signal,
     });
   } catch (e) {
@@ -399,7 +413,7 @@ export async function runServerCommand(p = {}) {
     if (list.length) body.history = list;
   }
 
-  const stopQuietly = () => stop(commandId, { baseUrl: p.baseUrl, fetch: p.fetch, author: p.author });
+  const stopQuietly = () => stop(commandId, { baseUrl: p.baseUrl, fetch: p.fetch, author: p.author, client: p.client });
 
   if (signal && signal.aborted) throw cancelledError(false);
 
@@ -530,13 +544,15 @@ export async function runServerCommand(p = {}) {
 
 /**
  * Клиент с общими параметрами — чтобы оболочка не передавала адрес и автора каждый раз.
- * @param {{baseUrl?: string, fetch?: typeof fetch, author?: string | (() => string)}} [defaults]
+ * @param {{baseUrl?: string, fetch?: typeof fetch, author?: string | (() => string), client?: string | (() => string)}} [defaults]
  */
 export function createAgentClient(defaults = {}) {
   const base = () => ({
     baseUrl: defaults.baseUrl || '',
     fetch: defaults.fetch,
     author: typeof defaults.author === 'function' ? defaults.author() : defaults.author,
+    // круг 33: вкладка-автор команды — stop и apply несут тот же client, что и command
+    client: (typeof defaults.client === 'function' ? defaults.client() : defaults.client) || undefined,
   });
   return {
     health: (o = {}) => health({ ...base(), ...o }),

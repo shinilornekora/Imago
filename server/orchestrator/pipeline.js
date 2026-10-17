@@ -37,6 +37,8 @@ const LABELS = {
 };
 
 const AGENT_AUTHOR = 'Агент';
+/** /agent/apply: вариантов нет, устарели или команда чужая (круг 33) — одни и те же слова. */
+const VARIANTS_GONE = 'Варианты этой команды не найдены или устарели — попросите их заново';
 
 const INTENT_RU = { create: 'создание', edit: 'правка', theme: 'оформление', ask: 'вопрос', clarify: 'уточнение' };
 
@@ -590,11 +592,14 @@ export function createPipeline(deps) {
 
   /**
    * @param {string} commandId
-   * @param {{shutdown?: boolean}} [o] shutdown — снимает останов процесса, а не человек (круг 27, I6)
+   * @param {{shutdown?: boolean, client?: string|null}} [o] shutdown — снимает останов процесса,
+   *   а не человек (круг 27, I6); client — кто просит (круг 33: HTTP всегда передаёт поле):
+   *   не тот, что прислал команду, — false, как у неизвестной
    */
   function stop(commandId, o = {}) {
     const task = active.get(commandId);
     if (!task || task.ctrl.signal.aborted) return false;
+    if ('client' in o && !sameClient(task.cmd.client, o.client)) return false;
     if (o.shutdown) task.shutdown = true;
     task.ctrl.abort();
     if (unqueue(task)) {
@@ -613,6 +618,11 @@ export function createPipeline(deps) {
     return true;
   }
 
+  /** Круг 33: тот же клиент? Нет поля у обоих — тоже «тот же». */
+  function sameClient(own, asked) {
+    return (own || null) === (asked || null);
+  }
+
   /** Тело ошибки для события `error` потока (без служебного `error: true`). */
   function stripErr(body) {
     const { error: _e, detail: _d, ...rest } = body;
@@ -624,12 +634,14 @@ export function createPipeline(deps) {
    * @param {string} commandId
    * @param {string|number} variant ключ варианта или номер (с 0)
    */
-  async function apply(commandId, variant) {
+  async function apply(commandId, variant, o = {}) {
     const entry = variantSets.get(commandId);
     if (!entry || entry.expires < Date.now()) {
       variantSets.delete(commandId);
-      throw notFound('Варианты этой команды не найдены или устарели — попросите их заново');
+      throw notFound(VARIANTS_GONE);
     }
+    // круг 33: выбрать вариант может только автор команды (тот же client) — чужой видит 404
+    if ('client' in o && !sameClient(entry.client, o.client)) throw notFound(VARIANTS_GONE);
     const item = typeof variant === 'number'
       ? entry.items[variant]
       : entry.items.find((v) => v.key === variant) || (/^\d+$/.test(String(variant)) ? entry.items[Number(variant)] : undefined);

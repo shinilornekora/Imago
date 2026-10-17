@@ -29,6 +29,8 @@ test('умолчания — из limits.js', () => {
     tombKeepSeq: L.TOMB_KEEP_SEQ, tombPruneEvery: L.TOMB_PRUNE_EVERY, tombMax: L.TOMB_MAX,
     recentTxs: L.RECENT_TXS, recentBytes: L.RECENT_BYTES,
     writesBodyBytes: L.WRITE_BODY_BYTES, writesBodyTimeoutMs: L.BODY_TIMEOUT_MS,
+    headsBytes: L.HEADS_BYTES, importConcurrency: L.IMPORT_CONCURRENCY, importQueue: L.IMPORT_QUEUE,
+    snapshotCacheBytes: L.SNAPSHOT_CACHE_BYTES,
   });
   assert.equal(warns.length, 0);
 });

@@ -139,11 +139,26 @@ export async function backfill(client, { closing = () => false, onBatch = () => 
   return total;
 }
 
-export async function up(ctx) {
-  const { client, log } = ctx;
+/**
+ * Круг 33: шаги порознь. Под работающим экземпляром (база восстановлена из старой копии) раннер
+ * делает `ddlUp` всех ждущих миграций, затем `fillUp`: долгое дозаполнение не держит за собой
+ * 010/011 — запись тем временем идёт со всеми колонками, а сервис здоров (health 200 с
+ * `detail.backfill`). На старте процесса — `up` целиком, по порядку, как прежде.
+ */
+export async function ddlUp(ctx) {
   const progress = typeof ctx.progress === 'function' ? ctx.progress : () => {};
   progress({ step: 'ddl' });
   await ddl(ctx);
+}
+
+export async function up(ctx) {
+  await ddlUp(ctx);
+  await fillUp(ctx);
+}
+
+export async function fillUp(ctx) {
+  const { client, log } = ctx;
+  const progress = typeof ctx.progress === 'function' ? ctx.progress : () => {};
   // оценка для 503 migrating: без прохода таблицы (reltuples), дальше — по просмотренным
   const est = (await client.query("SELECT greatest(reltuples, 0)::bigint AS n FROM pg_class WHERE oid = 'operations'::regclass")).rows[0];
   const total = Number(est && est.n) || 0;
