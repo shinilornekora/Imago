@@ -418,7 +418,7 @@ export function createPipeline(deps) {
     }
     const out = await write(task, {
       project: cmd.project, base_seq: st.seq, ops: globalizeIds(res.ops), client: cmd.client,
-      title: historyTitle(res, cmd.text), command_id: cmd.command_id,
+      title: historyTitle(res, cmd.text), command_id: cmd.command_id, command_author: cmd.author,
     }, step);
     const result = resultOf(out, res, historyTitle(res, cmd.text));
     Object.assign(trace, { tx_id: out.tx_id, seq: out.seq, ops: result.applied, dropped: result.dropped.length });
@@ -450,7 +450,7 @@ export function createPipeline(deps) {
       warnings: (v.warnings || []).map((w) => llm.redact(w)),
     }));
     remember(cmd.command_id, {
-      project: cmd.project, base_seq: st.seq, client: cmd.client, text: cmd.text, items,
+      project: cmd.project, base_seq: st.seq, client: cmd.client, author: cmd.author, text: cmd.text, items,
       expires: Date.now() + variantsTtl,
     });
     trace.variants = items.length;
@@ -483,8 +483,13 @@ export function createPipeline(deps) {
     while (variantSets.size > MAX_VARIANT_SETS) variantSets.delete(variantSets.keys().next().value);
   }
 
+  /** Имя автора команды для `command_author`: строка, чистый текст, ≤ 200 символов; иначе ''. */
+  function commandAuthorOf(v) {
+    return typeof v === 'string' ? cleanText(cutText(v.trim(), 200)) : '';
+  }
+
   /** Запись транзакции агента (шаг 12/13). */
-  async function write(task, { project, base_seq, ops, client, title, command_id: commandId }, step) {
+  async function write(task, { project, base_seq, ops, client, title, command_id: commandId, command_author: commandAuthor }, step) {
     if (task.ctrl && task.ctrl.signal.aborted) throw cancelledErr();
     if (step) step('write');
     const tx = {
@@ -500,6 +505,9 @@ export function createPipeline(deps) {
       // допускает 128) не шлём вовсе — лучше без связи, чем отказ записи
       ...(typeof commandId === 'string' && commandId && commandId.length <= TX_COMMAND_ID_MAX ? { command_id: commandId } : {}),
       title: cleanText(cutText(String(title || ''), 200)),
+      // круг 30: кто дал команду (имя из /agent/command) — история подписывает «Агент · Аня» по
+      // записи, а не по памяти вкладки о присутствии; пустое — поля нет
+      ...(commandAuthorOf(commandAuthor) ? { command_author: commandAuthorOf(commandAuthor) } : {}),
       engine: ENGINE_VERSION,
     };
     // с этого места «стоп» запись не отменяет: она уже ушла, повтор идёт по тому же tx_id
@@ -612,7 +620,7 @@ export function createPipeline(deps) {
         try {
           const out = await write(task, {
             project: entry.project, base_seq: entry.base_seq, ops: item.ops, client: entry.client, title: item.title,
-            command_id: commandId,
+            command_id: commandId, command_author: entry.author,
           });
           const result = resultOf(out, { summary: item.summary, warnings: item.warnings, libraryAdded: item.libraryAdded }, item.title);
           entry.applied = { key: item.key, label: item.label, result };

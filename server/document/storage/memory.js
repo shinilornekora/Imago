@@ -228,7 +228,7 @@ export function createMemoryStorage() {
         if (r.seq >= before) continue;
         out.push({
           seq: r.seq, tx_id: String(r.tx_id), author: r.author ?? null, author_kind: r.author_kind || 'human',
-          title: r.title ?? null, created_at: r.created_at, client: r.client ?? null, command_id: r.command_id ?? null,
+          title: r.title ?? null, created_at: r.created_at, client: r.client ?? null, command_id: r.command_id ?? null, command_author: r.command_author ?? null,
           ops_count: typeof r.ops_count === 'number' ? r.ops_count : (Array.isArray(r.ops) ? r.ops.length : 0),
           dropped_count: droppedCount(r.dropped)
         });
@@ -253,7 +253,7 @@ export function createMemoryStorage() {
       if (known) return { status: 'existing', committed: toCommitted(clone(known)) };
       const cols = txColumns(tx);
       // то, чего не примет Postgres (NUL, одинокий суррогат), — отказ и здесь (→ 400)
-      const bad = pgRejects({ json: [cols.ops, cols.dropped, cols.notes], text: [cols.tx_id, cols.undo_of, cols.redo_of, cols.author, cols.client, cols.title, cols.command_id] });
+      const bad = pgRejects({ json: [cols.ops, cols.dropped, cols.notes], text: [cols.tx_id, cols.undo_of, cols.redo_of, cols.author, cols.client, cols.title, cols.command_id, cols.command_author] });
       if (bad) throw bad;
       const seq = p.head_seq + 1;
       if (expectSeq !== undefined && seq !== expectSeq) return { status: 'stale', head_seq: p.head_seq, epoch: p.epoch };

@@ -459,7 +459,14 @@ async function probeServer() {
   const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, 3000);
   try {
     const res = await fetch('/api/health', { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      /* Круг 30: сервер есть, а его хранилище лежит (J1: 503 unavailable, storage down) — это
+         серверный режим со словами «сервер не может сохранить», а не локальный демо-макет. */
+      if (res.status !== 503) return null;
+      const err = await res.json().catch(() => null);
+      return err && err.code === 'unavailable' && err.detail && err.detail.storage === 'down'
+        ? { ok: false, storage: 'down', engine: null } : null;
+    }
     const body = await res.json();
     return body && body.ok === true ? body : null;
   } catch { return null; } finally { clearTimeout(timer); }
@@ -484,6 +491,7 @@ async function apiJson(path, init = {}) {
     e.status = res.status;
     if (body && typeof body.code === 'string') e.code = body.code;
     if (body && typeof body.retryable === 'boolean') e.retryable = body.retryable;
+    if (body && body.detail && typeof body.detail === 'object') e.detail = body.detail;
     throw e;
   }
   return body;
@@ -596,7 +604,11 @@ async function initServer(health) {
   }
   server = {
     engine: health ? health.engine : null, project: null, sync: null, others: [], migrated: false, list: [], listNext: null,
-    status: { online: false, pending: 0, syncing: true, error: null },
+    status: {
+      online: false, pending: 0, syncing: true, error: null,
+      // круг 30: /api/health сказал «хранилище лежит» — так и говорим с первой отрисовки
+      ...(health && health.storage === 'down' ? { storage: 'down', label: 'сервер не может сохранить' } : {}),
+    },
     authorAsked: false, metaFresh: false, waiting: false,
   };
   if (dom['btn-projects']) dom['btn-projects'].hidden = false;
@@ -641,10 +653,17 @@ async function initServer(health) {
   } catch (e) {
     // health ответил, а список — нет (сервер упал между ними): известный проект открываем из журнала
     if (knownId) { openProject({ id: knownId, name: knownName }); return; }
-    server.status = { ...server.status, error: 'unreachable' };
+    /* Круг 30: сервер ответил, но его хранилище лежит (503 unavailable: storage/timeout) —
+       это не «сервер недоступен»: говорим те же слова, что реплика (J4). */
+    const d = e && e.detail;
+    const storageDown = !!(e && e.status === 503 && e.code === 'unavailable' && d
+      && (d.storage === 'down' || d.cause === 'storage' || d.cause === 'timeout'));
+    server.status = storageDown
+      ? { ...server.status, storage: 'down', label: 'сервер не может сохранить' }
+      : { ...server.status, error: 'unreachable' };
     renderSyncStatus();
-    showMsg('error', 'Сервер недоступен', {
-      note: `Список проектов не пришёл: ${humanError(e)}.`,
+    showMsg('error', storageDown ? 'Сервер не может прочитать проекты' : 'Сервер недоступен', {
+      note: storageDown ? 'Хранилище сервера сейчас не отвечает. Попробуйте через минуту.' : `Список проектов не пришёл: ${humanError(e)}.`,
       actions: [{ label: 'Попробовать снова', primary: true, onClick: () => location.reload() }],
     });
     return;
@@ -942,7 +961,10 @@ function onSyncStatus(s) {
   if (s.error === 'unreachable' && !opened && !server.waiting) {
     server.waiting = true;
     showMsg('error', 'Проект недоступен', {
-      note: 'Нет связи с сервером и нет локальной копии. Пробую снова…',
+      // круг 30: сервер отвечает, но его хранилище лежит — связь тут ни при чём
+      note: s.storage === 'down'
+        ? 'Хранилище сервера не отвечает, а локальной копии нет. Пробую снова…'
+        : 'Нет связи с сервером и нет локальной копии. Пробую снова…',
       role: 'server-wait',
       actions: [
         { label: 'Повторить сейчас', primary: true, onClick: () => { if (server && server.sync) server.sync.reconnect(); } },
@@ -1255,8 +1277,9 @@ function noteJournal(tx) {
   sessionJournal.unshift({
     seq: tx.seq, tx_id: tx.tx_id, author: tx.author || '', author_kind: tx.author_kind || 'human',
     title: tx.title || '', created_at: tx.created_at || new Date().toISOString(), client: tx.client || '',
-    command_id: tx.command_id || null, ops_count: Array.isArray(tx.ops) ? tx.ops.length : 0,
-    dropped_count: Array.isArray(tx.dropped) ? tx.dropped.length : 0,
+    command_id: tx.command_id || null, command_author: typeof tx.command_author === 'string' ? tx.command_author : '',
+    ops_count: Array.isArray(tx.ops) ? tx.ops.length : 0,
+    dropped_count: Array.isArray(tx.dropped) ? tx.dropped.length : 0, empty: !Array.isArray(tx.ops) || !tx.ops.length,
     mine: !!(server && server.sync && tx.client && tx.client === server.sync.clientId),
   });
   if (sessionJournal.length > JOURNAL_KEEP) sessionJournal.length = JOURNAL_KEEP;
@@ -1296,7 +1319,11 @@ function adoptClientNames(list) {
 
 /** Имя автора команды, по которой работал агент: присутствие, потом память. */
 function commandAuthorOf(t) {
-  if (!t || !t.client) return '';
+  if (!t) return '';
+  // круг 30: имя автора команды лежит в самой записи (command_author от Orchestrator)
+  const own = typeof t.command_author === 'string' ? cleanText(t.command_author).trim() : '';
+  if (own) return own;
+  if (!t.client) return '';
   const live = server && Array.isArray(server.others) ? server.others.find((p) => p && p.client === t.client) : null;
   return (live && cleanText(live.author)) || clientNames.get(t.client) || '';
 }
@@ -1520,11 +1547,13 @@ function renderSyncStatus() {
   let kind = 'off';
   const opened = !!(server.sync && server.sync.view);
   if (s.error === 'engine') { text = 'версия движка устарела — обновите страницу'; kind = 'error'; }
-  else if (s.error === 'unreachable') { text = 'сервер недоступен'; kind = 'error'; }
   else if (s.error === 'not_found') { text = s.label || 'проект не найден на сервере'; kind = 'error'; }
+  /* J4 (круг 29): сервер на связи, но его хранилище не пишет — правки ждут в очереди.
+     Круг 30: раньше «сервер недоступен» и «открываю проект…» — вкладка, открытая при лежащей
+     базе, говорит то же, что вкладка с отказом записи (слова — у реплики, `s.label`). */
+  else if (s.storage === 'down') { text = s.label || (s.pending ? 'сервер не может сохранить — правки ждут' : 'сервер не может сохранить'); kind = 'error'; }
+  else if (s.error === 'unreachable') { text = 'сервер недоступен'; kind = 'error'; }
   else if (!opened) { text = 'открываю проект…'; kind = 'busy'; }
-  // J4 (круг 29): сервер на связи, но его хранилище не пишет — правки ждут в очереди
-  else if (s.storage === 'down') { text = s.label || 'сервер не может сохранить — правки ждут'; kind = 'error'; }
   else {
     /* Слова статуса — у реплики (statusLine, SPEC §9.5): одна формулировка на всех, кто
        показывает её состояние. Оболочка добавляет лишь то, чего реплика не знает: сокет
@@ -10197,7 +10226,18 @@ function othersEdits() {
      сохранённой истории. Её тоже видно — «вы» / «Агент · вы», без кнопок: отменять её
      отсюда нечем. Служебные свои (отмена и повтор) — состояние записи стека, не строка. */
   return journalList().filter((t) => t && t.tx_id && !own.has(t.tx_id) && t.author_kind !== 'system'
-    && !(isOwnTx(t) && /^(?:Отмена|Повтор|Отменил|Вернул):/.test(cleanText(t.title))));
+    && !(isOwnTx(t) && /^(?:Отмена|Повтор|Отменил|Вернул):/.test(cleanText(t.title)))
+    // круг 30: запись без операций и без выпавших (повтор, ops: []) — документ не менялся,
+    // строка «Правка без изменений» в ленте только мешает; выпавшие — «не применилась»
+    && !(emptyTx(t) && !(Number(t.dropped_count) > 0)));
+}
+
+/**
+ * Запись журнала без операций (`empty` из /history и реплики, круг 29–30): правка получила
+ * номер, но все её операции выпали при слиянии — или их не было вовсе.
+ */
+function emptyTx(t) {
+  return !!(t && (t.empty === true || (t.empty === undefined && t.ops_count === 0)));
 }
 
 /** Своя ли транзакция журнала: отметка реплики или своя вкладка (client). */
@@ -10227,7 +10267,8 @@ function otherEditItem(t) {
   if (mine) item.dataset.who = agent ? 'agent' : 'mine';
   // отмена и повтор — своей подписью («Отменил: …»): описание операций назвало бы их новой правкой
   const rewind = /^(?:Отменил|Вернул):/.test(title);
-  const text = human((rewind ? title : described) || title || (t.ops_count
+  // круг 30: все операции выпали при слиянии — сама правка не применилась (а не «без изменений»)
+  const text = emptyTx(t) ? (title ? `${human(title)} — не применилась` : 'Правка не применилась') : human((rewind ? title : described) || title || (t.ops_count
     ? `${t.ops_count} ${plural(t.ops_count, 'изменение', 'изменения', 'изменений')}`
     : 'Правка без изменений'));
   what.textContent = text;

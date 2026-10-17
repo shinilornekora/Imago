@@ -2378,9 +2378,31 @@ export function classifyUtterance(utterance, { hasSelection = false, doc = null,
 
 const asArray = (v) => (v == null ? [] : Array.isArray(v) ? v.filter(Boolean) : [v]);
 
+/**
+ * Узел документа по id. Круг 30: только строковый id и только своё свойство словаря —
+ * документ, отравленный до исправления ядра (объект в `of`, `parent`, `children`), иначе
+ * бросал TypeError прямо в ключе (`nodes[{toString:1}]`), а `nodes.constructor` давал функцию.
+ */
 function nodeOf(doc, id) {
-  return doc && doc.nodes ? doc.nodes[id] : undefined;
+  if (!doc || !doc.nodes || typeof id !== 'string') return undefined;
+  if (!Object.prototype.hasOwnProperty.call(doc.nodes, id)) return undefined;
+  const n = doc.nodes[id];
+  return n && typeof n === 'object' ? n : undefined;
 }
+
+/* Круг 30: поля чужого документа — без приведения. Документ, записанный до того, как ядро
+   стало проверять форму каждого поля (§9.14), может нести объект в `name`, `characters`,
+   `radius`, `of`, токенах; шаблон строки и String() на `{toString: 1}` бросают TypeError —
+   выжимка, описание правки и проверки падали бы целиком. */
+/** Строковое поле: не строка — пусто. */
+const strOf = (v) => (typeof v === 'string' ? v : '');
+/** Значение для строки: строка, конечное число и булево — как есть; прочее — «?». */
+const wordOf = (v) => (typeof v === 'string' ? v
+  : (typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean' ? String(v) : '?');
+/** Число из поля: число — как есть, строка — разбором, прочее — NaN (без valueOf чужого объекта). */
+const numOf = (v) => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN);
+/** Дети узла: только массив. */
+const kidsOf = (n) => (n && Array.isArray(n.children) ? n.children : []);
 
 /**
  * Круг 18: переспрос без готовых ответов заставлял человека переписывать команду целиком.
@@ -2589,7 +2611,7 @@ export function resolveScope(doc, selection, engine, options = {}) {
   }
   const explicit = options && options.activeArtboardId;
   const fromMeta = doc.meta && doc.meta.activeArtboard;
-  const rootKids = (nodeOf(doc, doc.root) && nodeOf(doc, doc.root).children) || [];
+  const rootKids = kidsOf(nodeOf(doc, doc.root));
   const artboard = (explicit && nodeOf(doc, explicit)) ? explicit
     : (fromMeta && nodeOf(doc, fromMeta)) ? fromMeta
       : rootKids[0];
@@ -2603,12 +2625,13 @@ const SCOPE_LABELS = { selection: 'выделенная область', artboar
 export function describeTokens(doc) {
   const t = (doc && doc.tokens) || {};
   const out = [];
-  const colors = Object.entries(t.colors || {});
-  out.push(colors.length ? 'colors: ' + colors.map(([k, v]) => `${k}=${v}`).join(', ') : 'colors: (нет)');
-  const types = Object.entries(t.type || {});
+  const group = (g) => (g && typeof g === 'object' && !Array.isArray(g) ? Object.entries(g) : []);
+  const colors = group(t.colors);
+  out.push(colors.length ? 'colors: ' + colors.map(([k, v]) => `${k}=${wordOf(v)}`).join(', ') : 'colors: (нет)');
+  const types = group(t.type);
   // Круг 5, п.11: интерлиньяж не показывался вовсе, а промпт темы требовал «1.1-1.6» —
   // модель правила вслепую и в чужих единицах, хотя документ хранит пиксели (18, 22, 30).
-  const num = (v) => (v == null ? '?' : String(v));
+  const num = (v) => (v == null ? '?' : wordOf(v));
   out.push(types.length
     ? 'type (имя(кегль px/насыщенность/интерлиньяж px)): '
       + types.map(([k, v]) => `${k}(${num(v && v.fontSize)}/${num(v && v.fontWeight)}/${num(v && v.lineHeight)})`).join(', ')
@@ -2656,7 +2679,7 @@ function libraryIdOf(doc, engine) {
     } catch { /* движок без компонентов — ищем сами */ }
   }
   const root = nodeOf(doc, doc && doc.root);
-  for (const id of (root && root.children) || []) {
+  for (const id of kidsOf(root)) {
     const n = nodeOf(doc, id);
     if (n && n.type === 'page' && n.role === LIBRARY_ROLE) return id;
   }
@@ -2681,7 +2704,7 @@ function libraryIds(doc, engine) {
     const walk = (id, depth) => {
       if (out.has(id) || depth > MAX_TREE_DEPTH * 4) return;
       out.add(id);
-      for (const k of (nodeOf(doc, id) || {}).children || []) walk(k, depth + 1);
+      for (const k of kidsOf(nodeOf(doc, id))) walk(k, depth + 1);
     };
     walk(libId, 0);
   }
@@ -2730,9 +2753,11 @@ function instanceWords(doc, engine, node) {
   const name = (comp && typeof comp.name === 'string' && comp.name.trim()) || 'Компонент';
   const bits = [];
   for (const p of (comp && Array.isArray(comp.props) ? comp.props : [])) {
-    const raw = node.props ? node.props[p.name] : undefined;
-    if (raw === undefined || !p || !p.name) continue;
-    if (p.kind === 'text') bits.push(`"${raw}"`);
+    if (!p || typeof p.name !== 'string' || !p.name) continue;
+    const props = node.props && typeof node.props === 'object' ? node.props : null;
+    const raw = props && Object.prototype.hasOwnProperty.call(props, p.name) ? props[p.name] : undefined;
+    if (raw === undefined) continue;
+    if (p.kind === 'text') bits.push(`"${wordOf(raw)}"`);
     else bits.push(`${p.name}=${refWord(raw)}`);
   }
   return bits.length ? `${name} ${bits.join(' ')}` : name;
@@ -3017,7 +3042,7 @@ function scaleWord(doc, v, scale, engine) {
     return `${v}(мимо шкалы)`;
   }
   const ref = parseRef(v);
-  if (!ref) return String(v);
+  if (!ref) return wordOf(v);
   const n = scaleNum(doc, ref.ref, scale, engine);
   return n === undefined ? `${ref.ref}(нет такого шага)` : `${ref.ref}(${n})`;
 }
@@ -3151,7 +3176,7 @@ function scaleLines(doc, engine) {
   for (const scale of ['spacing', 'radii']) {
     const steps = stepsOf(doc, scale, engine);
     if (!steps.length) continue;
-    out.push(`${scale} (номер шага=значение px): ${steps.map((v, i) => `${i}=${v}`).join(' ')}`);
+    out.push(`${scale} (номер шага=значение px): ${steps.map((v, i) => `${i}=${wordOf(v)}`).join(' ')}`);
   }
   return out;
 }
@@ -3217,8 +3242,8 @@ function scalesOf(doc, engine) {
 
 const sizeWord = (spec) => {
   if (!spec || typeof spec !== 'object') return '?';
-  if (spec.mode === 'fixed') return String(spec.value);
-  return spec.mode || '?';
+  if (spec.mode === 'fixed') return wordOf(spec.value);
+  return strOf(spec.mode) || '?';
 };
 
 /** Бюджет выжимки: 20 000 знаков при 60 000 знаков бюджета всего запроса (п.3). */
@@ -3267,7 +3292,7 @@ function rectsOf(geo) {
   return first && typeof first === 'object' && 'w' in first ? geo : null;
 }
 
-const rnd = (v) => Math.round(Number(v) || 0);
+const rnd = (v) => Math.round(numOf(v) || 0);
 
 /** Подпись «такой же узел»: тип, имя без цифр, стиль, раскладка и форма детей. */
 function repeatSignature(doc, id, depth = 0) {
@@ -3276,10 +3301,10 @@ function repeatSignature(doc, id, depth = 0) {
   /* Круг 19: у экземпляра «такой же» — это ТОТ ЖЕ компонент и ТЕ ЖЕ свойства. Имя и дети
    * у экземпляров пустые, и по общему правилу три разные метки схлопывались бы в «ещё 2
    * таких же» вместе со своими текстами — то есть содержимое досок пропадало бы из выжимки. */
-  if (n.type === 'instance') return `instance|${n.of}|${JSON.stringify(n.props || {})}`;
-  const name = String(n.name || '').replace(/\d+/g, '#').trim().toLowerCase();
-  const bits = [n.type, name, typeof n.style === 'string' ? n.style : '', n.layout ? n.layout.mode : '', (n.children || []).length];
-  if (depth < 2) bits.push((n.children || []).map((k) => repeatSignature(doc, k, depth + 1)).join('~'));
+  if (n.type === 'instance') return `instance|${strOf(n.of)}|${JSON.stringify(n.props || {})}`;
+  const name = strOf(n.name).replace(/\d+/g, '#').trim().toLowerCase();
+  const bits = [strOf(n.type), name, typeof n.style === 'string' ? n.style : '', n.layout ? strOf(n.layout.mode) : '', kidsOf(n).length];
+  if (depth < 2) bits.push(kidsOf(n).map((k) => repeatSignature(doc, k, depth + 1)).join('~'));
   return bits.join('|');
 }
 
@@ -3315,8 +3340,8 @@ function digestLine(doc, id, depth, rects, engine) {
     if (own && Number.isFinite(Number(own.w))) one.push(`→ ${rnd(own.w)}×${rnd(own.h)} @${rnd(own.x)},${rnd(own.y)}`);
     return one.join(' ');
   }
-  const bits = [`${pad}#${id} ${n.type}`];
-  if (n.name) bits.push(`"${n.name}"`);
+  const bits = [`${pad}#${id} ${strOf(n.type) || '?'}`];
+  if (strOf(n.name)) bits.push(`"${n.name}"`);
   if (n.type === 'frame' && n.layout) {
     /**
      * Круг 20 (SPEC §6.6): отступы печатаются и ссылкой, и числом — «gap=spacing.6(16)». Поля —
@@ -3326,7 +3351,7 @@ function digestLine(doc, id, depth, rects, engine) {
      * 9 214 знаков числами в круге 19, 9 575 с ссылками здесь (+3,9 %).
      */
     const sw = (v) => scaleWord(doc, v == null ? 0 : v, 'spacing', engine);
-    bits.push(n.layout.mode === 'none' ? 'free' : `${n.layout.mode} gap=${sw(n.layout.gap)}`);
+    bits.push(n.layout.mode === 'none' ? 'free' : `${strOf(n.layout.mode) || '?'} gap=${sw(n.layout.gap)}`);
     const p = n.layout.padding;
     if (p && typeof p === 'object') {
       const px = (v) => scaleNum(doc, v == null ? 0 : v, 'spacing', engine);
@@ -3339,16 +3364,16 @@ function digestLine(doc, id, depth, rects, engine) {
         else bits.push(`pad=${sides.map(sw).join('/')}`);
       }
     }
-    if (n.layout.align && n.layout.align !== 'start') bits.push(`align=${n.layout.align}`);
-    if (n.layout.justify && n.layout.justify !== 'start') bits.push(`justify=${n.layout.justify}`);
+    if (n.layout.align && n.layout.align !== 'start') bits.push(`align=${wordOf(n.layout.align)}`);
+    if (n.layout.justify && n.layout.justify !== 'start') bits.push(`justify=${wordOf(n.layout.justify)}`);
     if (n.layout.wrap) bits.push('wrap');
   }
   if (n.size) bits.push(`w=${sizeWord(n.size.w)} h=${sizeWord(n.size.h)}`);
   if (n.type === 'text') {
-    const chars = String(n.characters == null ? '' : n.characters).replace(/\s+/g, ' ').trim();
+    const chars = (typeof n.characters === 'number' ? wordOf(n.characters) : strOf(n.characters)).replace(/\s+/g, ' ').trim();
     bits.push(`text="${chars.length > 60 ? cutText(chars, 57) + '…' : chars}"`);
     if (n.style) bits.push(`style=${refWord(n.style)}`);
-    if (n.align && n.align !== 'left') bits.push(`align=${n.align}`);
+    if (n.align && n.align !== 'left') bits.push(`align=${wordOf(n.align)}`);
     if (n.color) bits.push(`color=${refWord(n.color)}`);
   }
   if (n.fill) bits.push(`fill=${refWord(n.fill)}`);
@@ -3388,7 +3413,7 @@ function artboardOf(doc, id) {
 function workAreaLine(doc, work, activeArtboard, kind, brief = false, lib = null) {
   const nameOf = (id) => {
     const n = nodeOf(doc, id);
-    return `#${id} «${(n && n.name) || id}»`;
+    return `#${id} «${(n && strOf(n.name)) || id}»`;
   };
   /**
    * Круг 19, п.6: человек выделил МАСТЕРА в библиотеке — значит, речь о компоненте целиком,
@@ -3472,7 +3497,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
    * near   — область работы с потомками, предки и несколько соседей по каждому уровню пути;
    * далёкое (не near) — сворачиваем первым и агрессивнее всего. */
   const pinned = new Set(roots);
-  for (const a of (nodeOf(doc, doc.root) && nodeOf(doc, doc.root).children) || []) {
+  for (const a of kidsOf(nodeOf(doc, doc.root))) {
     if (nodeOf(doc, a) && !hidLib(a)) pinned.add(a);
   }
   const near = new Set(pinned);
@@ -3480,7 +3505,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     const n = nodeOf(doc, id);
     if (!n) return;
     near.add(id);
-    for (const k of n.children || []) addSubtree(k);
+    for (const k of kidsOf(n)) addSubtree(k);
   };
   const NEAR_SIBLINGS = 6;
   for (const id of boardWork) {
@@ -3490,7 +3515,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
       pinned.add(up);
       near.add(up);
       const parent = nodeOf(doc, (nodeOf(doc, up) || {}).parent);
-      const kids = (parent && parent.children) || [];
+      const kids = kidsOf(parent);
       const at = kids.indexOf(up);
       if (at < 0) continue;
       for (let i = Math.max(0, at - NEAR_SIBLINGS); i <= Math.min(kids.length - 1, at + NEAR_SIBLINGS); i++) near.add(kids[i]);
@@ -3511,7 +3536,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     const text = digestLine(doc, id, depth, rects, engine) + mark(id);
     const entry = { id, depth, text, children: [], collapsed: null, cost: text.length + 1, far: !near.has(id) };
     index.set(id, entry);
-    for (const kid of (nodeOf(doc, id).children || [])) {
+    for (const kid of kidsOf(nodeOf(doc, id))) {
       if (!nodeOf(doc, kid) || hidLib(kid)) continue;
       const child = build(kid, depth + 1);
       entry.children.push(child);
@@ -3527,7 +3552,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
    * иначе документ с тысячей уровней вложенности успевал израсходовать бюджет предками
    * раньше, чем доходил до второго артборда. */
   const forced = new Set([...roots, ...workSet]);
-  for (const a of (nodeOf(doc, doc.root) && nodeOf(doc, doc.root).children) || []) { if (!hidLib(a)) forced.add(a); }
+  for (const a of kidsOf(nodeOf(doc, doc.root))) { if (!hidLib(a)) forced.add(a); }
 
   /** Точный размер выжимки при текущем сворачивании: считаем, а не накапливаем. */
   const measure = () => {
@@ -4694,7 +4719,7 @@ const lowerChars = (n) => String((n && n.characters) || '').trim().toLowerCase()
  */
 const nameOrId = (doc, id) => {
   const n = nodeOf(doc, id);
-  if (n && n.name) return `«${n.name}»`;
+  if (n && strOf(n.name)) return `«${n.name}»`;
   /* Круг 19: у экземпляра своего имени обычно нет — он зовётся по компоненту (так же, как в
    * списке слоёв оболочки). Показывать вместо этого внутренний id («#i_f651jz») человеку
    * нельзя: это наше слово, а не его. Кавычки те же, что у слоя, — строка встаёт в любую
@@ -5773,24 +5798,24 @@ function valueWords(v, path, doc = null, engine = null) {
   // токен вместо внутреннего имени: «style» уже «крупный», а не «display» (круг 16, п.9)
   if (p === 'style' || p === 'style.token') {
     const token = typeof v === 'object' ? (v && v.token) : v;
-    if (token) return `«${ruToken('type', token)}»`;
+    if (token && typeof token === 'string') return `«${ruToken('type', token)}»`;
   }
   if (p === 'fill' || p === 'color' || p === 'stroke' || p === 'stroke.color') {
     const ref = colorRef(v);
     if (ref) return ref[0] === '#' ? ref : `«${ruToken('colors', ref)}»`;
   }
   if (v && typeof v === 'object' && v.mode) {
-    if (v.mode === 'fixed') return `${Math.round(Number(v.value) || 0)} px`;
+    if (v.mode === 'fixed') return `${Math.round(numOf(v.value) || 0)} px`;
     if (v.mode === 'hug') return '«по содержимому»';
     if (v.mode === 'fill') return '«во всю ширину»';
     return sizeWord(v);
   }
   if (v && typeof v === 'object' && (p === 'layout.padding' || p === 'padding')) {
-    const s = ['t', 'r', 'b', 'l'].map((k) => Math.round(Number(v[k]) || 0));
+    const s = ['t', 'r', 'b', 'l'].map((k) => Math.round(numOf(v[k]) || 0));
     return s.every((n) => n === s[0]) ? `${s[0]} px` : `${s.join('/')} px`;
   }
-  if (v && typeof v === 'object') { try { return JSON.stringify(v); } catch { return String(v); } }
-  return `«${String(v)}»`;
+  if (v && typeof v === 'object') { try { return JSON.stringify(v); } catch { return '«?»'; } }
+  return `«${wordOf(v)}»`;
 }
 
 /** Строковое значение модели → значение нужного узлу типа. ctx = {id, geo} — для проверки размеров. */
@@ -5970,9 +5995,10 @@ function colorRef(v) {
   if (v == null) return null;
   if (typeof v === 'object') {
     const pick = v.token !== undefined ? v.token : v.color !== undefined ? v.color : v.value;
-    return pick == null || pick === '' ? null : hexNorm(String(pick));
+    // круг 30: объект в token/color (документ до проверки формы) — не цвет, а не TypeError
+    return pick == null || pick === '' || (typeof pick !== 'string' && typeof pick !== 'number') ? null : hexNorm(String(pick));
   }
-  return v === '' ? null : hexNorm(String(v));
+  return v === '' || (typeof v !== 'string' && typeof v !== 'number') ? null : hexNorm(String(v));
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -9633,7 +9659,7 @@ export function checkOutcome({ doc, after, ops, utterance = '', placement = null
 function changeName(doc, born, id) {
   const n = nodeOf(doc, id) || born.get(id);
   if (!n) return 'слой';
-  if (n.name) return `«${cutText(String(n.name), 60)}»`;
+  if (strOf(n.name)) return `«${cutText(n.name, 60)}»`;
   return nameOrId(doc, id);
 }
 
@@ -9686,7 +9712,7 @@ export function describeChange(ops, doc, after = null, engine = null) {
   }
   for (const g of groups.values()) {
     const what = ruPath(g.path);
-    const from = g.from.size === 1 ? [...g.from][0] : '';
+    const from = g.from.size === 1 ? strOf([...g.from][0]) : '';
     const change = from && from !== g.to ? `${from} → ${g.to}` : g.to;
     phrases.push(g.ids.length === 1
       ? `${what} ${changeName(doc, born, g.ids[0])}: ${change}`

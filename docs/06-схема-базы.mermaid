@@ -39,6 +39,7 @@ erDiagram
         text client "clientId вкладки"
         text title "как показать в истории"
         text command_id "команда агента, породившая запись; NULL — человек (круг 25)"
+        text command_author "кто дал команду агенту (≤ 200); NULL — человек, старая запись или старый экземпляр (010, круг 30)"
         int engine
         text chain "sha256(prev_chain + tx_id + seq); CHECK not null; NULL от старого экземпляра — считает триггер"
         int ops_bytes "байты JSON ops + dropped (пишет экземпляр; старый — NULL, считает триггер по jsonb::text): окно страницы журнала без чтения jsonb (009)"

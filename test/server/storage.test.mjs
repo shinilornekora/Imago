@@ -282,7 +282,7 @@ for (const backend of list) {
       const all = await storage.recentTxMeta(p.id, { limit: 50 });
       assert.deepEqual(all.map((t) => t.seq), [3, 2, 1]);
       const [c, b, a] = all;
-      assert.deepEqual(Object.keys(a).sort(), ['author', 'author_kind', 'client', 'command_id', 'created_at', 'dropped_count', 'ops_count', 'seq', 'title', 'tx_id']);
+      assert.deepEqual(Object.keys(a).sort(), ['author', 'author_kind', 'client', 'command_author', 'command_id', 'created_at', 'dropped_count', 'ops_count', 'seq', 'title', 'tx_id']);
       assert.equal('ops' in a, false, 'операций в сводке нет');
       assert.deepEqual({ author: a.author, author_kind: a.author_kind, title: a.title, client: a.client, command_id: a.command_id, ops_count: a.ops_count, dropped_count: a.dropped_count },
         { author: 'Аня', author_kind: 'human', title: 'Цвета', client: 'c1', command_id: null, ops_count: 2, dropped_count: 0 });

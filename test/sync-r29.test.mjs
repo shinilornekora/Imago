@@ -492,3 +492,36 @@ test('sync r29 (J4): 503 unavailable от хранилища по HTTP при о
   assert.equal(b.sync.status.label, 'синхронизация…');
   await b.sync.close();
 });
+
+/* ------- круг 30: command_author и empty — в журнале реплики (живые и из /history) ------- */
+
+test('sync r30: журнал несёт command_author и empty — из /history и из живой рассылки', async () => {
+  const doc0 = seedDoc();
+  const h = harness();
+  h.fetch = async (u) => {
+    if (u.pathname === '/api/projects/p1') return { status: 200, body: { id: 'p1', snapshot: { seq: 4, doc: doc0, chain: 'c4' }, tail: [], epoch: 'e1' } };
+    if (u.pathname === '/api/projects/p1/history') {
+      return { status: 200, body: { items: [
+        item(4, { author_kind: 'agent', author: 'Агент', command_author: 'Аня', client: 'X' }),
+        item(3, { ops_count: 0, dropped_count: 2, empty: true }),
+        item(2, { command_author: null }),
+      ], more: false } };
+    }
+    return { status: 404, body: {} };
+  };
+  h.onOpen = (ws) => ws.in({ type: 'hello', head_seq: 4, engine: E, epoch: 'e1', gone: false });
+  const a = replica(h);
+  await a.sync.open();
+  await until(() => a.sync.journal().length === 3, 'история с сервера');
+  let j = a.sync.journal();
+  assert.equal(j[0].command_author, 'Аня');
+  assert.equal(j[0].empty, false);
+  assert.equal(j[1].empty, true, 'пустая запись помечена');
+  assert.equal(j[2].command_author, '', 'null — пустая строка');
+  // живая правка агента с именем и живая пустая (все операции выпали)
+  h.sockets[0].in({ type: 'tx', tx: { ...item(5, { author_kind: 'agent', author: 'Агент', command_author: 'Борис', client: 'Y' }), ops: [ops.set('ab', 'name', 'X')], dropped: [] } });
+  h.sockets[0].in({ type: 'tx', tx: { ...item(6), ops: [], dropped: [{ index: 0, reason: 'stale' }] } });
+  j = a.sync.journal();
+  assert.deepEqual(j.map((e) => [e.seq, e.command_author, e.empty]), [[6, '', true], [5, 'Борис', false], [4, 'Аня', false], [3, '', true], [2, '', false]]);
+  await a.sync.close();
+});

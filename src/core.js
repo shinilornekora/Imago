@@ -5864,7 +5864,8 @@ class Stage {
     this._drawSeen = new Set();
 
     this._vp = null;            // кеш размера вьюпорта, см. _viewport()
-    this._onResize = () => { this._vp = null; this._applyView(); this._paintUI(); };
+    this._vbBase = null;        // вид и размер вьюпорта, по которым записан viewBox (см. _keepsView)
+    this._onResize = () => this._resized();
     if (typeof ResizeObserver !== 'undefined') {
       this._ro = new ResizeObserver(this._onResize);
       this._ro.observe(this.el);
@@ -5930,6 +5931,45 @@ class Stage {
   get vw() { return this._viewport().w; }
   get vh() { return this._viewport().h; }
 
+  /**
+   * Круг 30: размер сцены сменился (ResizeObserver / resize окна).
+   *
+   * Появление колонки инспектора сужает сцену; прежде здесь всегда переписывался viewBox —
+   * и Chrome перекладывал весь SVG-текст второй раз подряд (первый — вынужденно, на новой
+   * ширине): на 10 000 узлах ещё 200–350 мс к первому выделению. Но при
+   * `preserveAspectRatio="xMinYMin slice"` масштаб картинки — max(ширина / ширина viewBox,
+   * высота / высота viewBox): сцена стала уже при той же высоте — масштаб и левый верхний
+   * угол прежние, справа просто меньше видно. viewBox тогда не трогаем (см. _keepsView);
+   * накладку (рамки, бейджи) перерисовываем, только если размер правда другой: бейджи
+   * жмутся к краю вьюпорта.
+   */
+  _resized() {
+    if (this._dead) return;
+    const was = this._vp;
+    this._vp = null;
+    const now = this._viewport();
+    if (this._keepsView(now)) {
+      if (!was || was.w !== now.w || was.h !== now.h) this._paintUI();
+      return;
+    }
+    this._applyView();
+    this._paintUI();
+  }
+
+  /**
+   * Записанный viewBox по-прежнему даёт ровно нынешний вид: зум и сдвиг те же, а вьюпорт
+   * по одной оси тот же, по другой — не больше (масштаб slice = max отношений = 1).
+   * @param {{w:number,h:number}} [vp] размер вьюпорта (по умолчанию — нынешний)
+   */
+  _keepsView(vp) {
+    const b = this._vbBase;
+    if (!b || !this._viewBox) return false;
+    if (b.z !== this.view.zoom || b.px !== this.view.pan.x || b.py !== this.view.pan.y) return false;
+    const v = vp || this._viewport();
+    if (!(v.w > 0 && v.h > 0 && b.w > 0 && b.h > 0)) return false;
+    return Math.abs(Math.max(v.w / b.w, v.h / b.h) - 1) < 1e-9;
+  }
+
   /** Экранные координаты события в координаты документа. */
   toWorld(clientX, clientY) {
     const b = this.el.getBoundingClientRect();
@@ -5947,14 +5987,19 @@ class Stage {
     const z = this.view.zoom;
     const vx = -this.view.pan.x / z;
     const vy = -this.view.pan.y / z;
-    const box = `${r2(vx)} ${r2(vy)} ${r2(this.vw / z)} ${r2(this.vh / z)}`;
-    // Круг 16, п.6: перезапись viewBox тем же значением всё равно роняет раскладку
-    // всего SVG — на 12 198 узлах это 134 мс на КАЖДОМ кадре, даже когда ни вид,
-    // ни сцена не менялись (рендер после правки, отмена, повторная отрисовка).
-    if (this._viewBox !== box) {
-      this._viewBox = box;
-      this.svg.setAttribute('viewBox', box);
-      this.svg.setAttribute('preserveAspectRatio', 'xMinYMin slice');
+    // круг 30: сцена сузилась по одной оси при том же виде — записанный viewBox даёт ту же
+    // картинку (см. _resized); переписав его, следующий рендер уронил бы раскладку всего SVG
+    if (!this._keepsView()) {
+      const box = `${r2(vx)} ${r2(vy)} ${r2(this.vw / z)} ${r2(this.vh / z)}`;
+      // Круг 16, п.6: перезапись viewBox тем же значением всё равно роняет раскладку
+      // всего SVG — на 12 198 узлах это 134 мс на КАЖДОМ кадре, даже когда ни вид,
+      // ни сцена не менялись (рендер после правки, отмена, повторная отрисовка).
+      if (this._viewBox !== box) {
+        this._viewBox = box;
+        this.svg.setAttribute('viewBox', box);
+        this.svg.setAttribute('preserveAspectRatio', 'xMinYMin slice');
+      }
+      this._vbBase = { z, px: this.view.pan.x, py: this.view.pan.y, w: this.vw, h: this.vh };
     }
     if (this._gridGroup) this._renderGrid();
     this._updateLabels();

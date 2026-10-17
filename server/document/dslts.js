@@ -159,6 +159,12 @@ export function validateTx(raw, ctx = {}) {
   if (raw.title) tx.title = cleanText(raw.title);
   // связь с командой агента (трасса): метаданные — негодное значение не губит правку, его просто нет
   if (isId(raw.command_id, MAX_COMMAND_ID)) tx.command_id = raw.command_id;
+  // круг 30: имя автора команды агента — тоже метаданные: не строка или пустая — поля нет,
+  // длиннее предела — обрезается (Orchestrator уже присылает ≤ 200 и чистым)
+  if (typeof raw.command_author === 'string') {
+    const who = cutText(cleanText(raw.command_author).trim(), MAX_NAME);
+    if (who) tx.command_author = who;
+  }
   if (raw.replay_of_epoch) {
     tx.replay_of_epoch = raw.replay_of_epoch;
     if (raw.replay_at) tx.replay_at = new Date(Date.parse(raw.replay_at)).toISOString();
@@ -709,7 +715,7 @@ export function createSequencer({
       pruneTombs(head);
       // страница ограничена и числом, и байтами: конец — только пустая страница
       for (;;) {
-        const page = await viaStorage(storage.txsAfter(projectId, head.head_seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES }));
+        const page = await viaStorage(storage.txsAfter(projectId, head.head_seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES, internal: true }));
         if (!page.length) break;
         absorbPage(head, projectId, page);
       }
@@ -774,7 +780,7 @@ export function createSequencer({
       return 'ok';
     }
     for (;;) {
-      const page = await viaStorage(storage.txsAfter(projectId, head.head_seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES }));
+      const page = await viaStorage(storage.txsAfter(projectId, head.head_seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES, internal: true }));
       if (!page.length) break;
       // цепочка проверяется до применения: целый префикс страницы ложится одной
       // пачкой и уходит сокетам, на разрыве — откат (как прежде, поштучно)
@@ -918,7 +924,7 @@ export function createSequencer({
     }
     let seq = from;
     while (seq < head.head_seq) {
-      const page = await viaStorage(storage.txsAfter(projectId, seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES }));
+      const page = await viaStorage(storage.txsAfter(projectId, seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES, internal: true }));
       const was = seq;
       for (const c of page) {
         if (c.seq > head.head_seq) break;

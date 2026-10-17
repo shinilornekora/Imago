@@ -13,7 +13,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { DROPPED_KEEP, DROPPED_OP_BYTES, DROPPED_PREVIEW_CHARS } from '../limits.js';
 
 /** Необязательные поля транзакции: в записи есть, только если заданы. */
-const OPTIONAL = ['undo_of', 'redo_of', 'author', 'client', 'title', 'command_id'];
+const OPTIONAL = ['undo_of', 'redo_of', 'author', 'client', 'title', 'command_id', 'command_author'];
 
 /**
  * Начало строки — не больше `n` кодовых точек: суррогатная пара не рвётся (половинка
@@ -263,6 +263,8 @@ export function txColumns(tx) {
     title: tx.title ?? null,
     // команда агента, породившая транзакцию (SPEC §9.11) — связь журнала с трассой
     command_id: typeof tx.command_id === 'string' && tx.command_id ? tx.command_id : null,
+    // круг 30: кто дал команду агенту (имя, ≤ 200 символов) — подпись «Агент · Аня» в истории
+    command_author: typeof tx.command_author === 'string' && tx.command_author ? tx.command_author : null,
     engine: tx.engine
   };
 }

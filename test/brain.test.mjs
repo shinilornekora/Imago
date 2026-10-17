@@ -6241,3 +6241,88 @@ test('круг27 п.6: describeChange — что сделано словами',
   ], doc, null, core27);
   assert.match(two, /^Добавил «Подзаголовок» в «.+»; стиль текста «Заголовок экрана»: «заголовок» → «крупный»$/);
 });
+
+/* ── Круг 30: описания не бросают на документе, отравленном до исправления ядра ────────
+   Документ, записанный до того, как ядро проверяло форму каждого поля (круг 29), может нести
+   объект `{toString: 1}` в name, characters, radius, of, children, токенах. Шаблон строки и
+   String() на нём бросают TypeError — выжимка для модели, описание правки и проверки падали
+   целиком, и команда агента над таким проектом не выполнялась вовсе. */
+test('круг30: describeDoc/describeChange/describeViolations/describeTokens не бросают на отравленных полях', () => {
+  const quiet = console.warn;
+  console.warn = () => {};
+  try {
+    const base = core27.createDoc();
+    const EVIL = [{ toString: 1 }, [{ toString: 1 }], { token: { toString: 1 } }, { mode: { toString: 1 }, value: { toString: 1 } }, 'constructor'];
+    const FIELDS = ['name', 'characters', 'style', 'fill', 'color', 'stroke', 'radius', 'align', 'of', 'props', 'layout', 'layout.mode', 'layout.gap', 'size', 'size.w', 'pos', 'children', 'parent', 'type'];
+    const setRaw = (obj, path, v) => {
+      const ps = path.split('.');
+      let cur = obj;
+      for (let i = 0; i < ps.length - 1; i++) {
+        if (!cur[ps[i]] || typeof cur[ps[i]] !== 'object') cur[ps[i]] = {};
+        cur = cur[ps[i]];
+      }
+      cur[ps[ps.length - 1]] = v;
+    };
+    const byType = {};
+    for (const n of Object.values(base.nodes)) byType[n.type] = byType[n.type] || n;
+    const master = Object.values(base.nodes).find((n) => n.component);
+    if (master) byType.master = master;
+    const fails = [];
+    const tryAll = (label, d, id) => {
+      let geo = null;
+      try { geo = core27.solve(d); } catch { /* решатель — не предмет этого теста */ }
+      let list = [];
+      try { list = core27.validate(d, geo); } catch { /* так же */ }
+      const ops = [
+        [{ op: 'set', id, path: 'name', value: 'x' }], [{ op: 'remove', id }],
+        [{ op: 'set', id, path: 'size.w', value: { mode: 'fixed', value: 100 } }],
+        [{ op: 'setToken', path: 'colors.accent', value: '#ff0000' }]
+      ];
+      const steps = [
+        ['describeDoc', () => describeDoc(d)],
+        ['describeDoc+engine', () => describeDoc(d, [id], { engine: core27, geo, scopeKind: 'selection' })],
+        ['describeTokens', () => describeTokens(d)],
+        ['describeViolations', () => describeViolations(list, d)],
+        ...ops.map((o) => ['describeChange ' + o[0].op, () => describeChange(o, d, null, core27)])
+      ];
+      for (const [name, fn] of steps) {
+        try {
+          const out = fn();
+          assert.equal(typeof out, 'string', name + ' — строка');
+        } catch (e) {
+          fails.push(`${name} @ ${label}: ${e.message.slice(0, 60)}`);
+        }
+      }
+    };
+    for (const [t, n] of Object.entries(byType)) {
+      for (const f of FIELDS) {
+        for (const v of EVIL) {
+          const d = JSON.parse(JSON.stringify(base));
+          setRaw(d.nodes[n.id], f, v);
+          tryAll(`${t}.${f}=${JSON.stringify(v)}`, d, n.id);
+        }
+      }
+    }
+    for (const path of ['colors', 'colors.accent', 'type', 'type.body.fontSize', 'spacing', 'spacing.3', 'radii']) {
+      for (const v of EVIL) {
+        const d = JSON.parse(JSON.stringify(base));
+        setRaw(d.tokens, path, v);
+        tryAll(`tokens.${path}=${JSON.stringify(v)}`, d, d.root);
+      }
+    }
+    assert.deepEqual(fails, []);
+
+    // и смысл не теряется: годные соседи описаны, отравленное поле — без мусора
+    const d = JSON.parse(JSON.stringify(base));
+    const text = Object.values(d.nodes).find((n) => n.type === 'text');
+    text.name = { toString: 1 };
+    text.characters = { toString: 1 };
+    d.tokens.colors.accent = { toString: 1 };
+    const digest = describeDoc(d);
+    assert.match(digest, new RegExp(`#${text.id} text w=\\S+ h=\\S+ text="" `));
+    assert.match(describeTokens(d), /accent=\?/);
+    assert.equal(describeChange([{ op: 'set', id: text.id, path: 'opacity', value: 0.5 }], d, null, core27).includes('[object'), false);
+  } finally {
+    console.warn = quiet;
+  }
+});

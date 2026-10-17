@@ -1149,7 +1149,11 @@ export function createSync(o) {
           title: typeof it.title === 'string' ? it.title : '',
           created_at: typeof it.created_at === 'string' ? it.created_at : '', client,
           command_id: typeof it.command_id === 'string' ? it.command_id : '',
+          // круг 30: кто дал команду агенту — «Агент · Аня» без памяти о присутствии
+          command_author: typeof it.command_author === 'string' ? it.command_author : '',
           ops_count: isNum(it.ops_count) ? it.ops_count : 0, dropped_count: isNum(it.dropped_count) ? it.dropped_count : 0,
+          // круг 30: запись без операций (все выпали при слиянии, повтор) — оболочка не рисует пустую строку
+          empty: it.empty === true || (isNum(it.ops_count) && it.ops_count === 0),
           mine: !!client && client === clientId,
         },
         created: [], leaves: [], removed: [],
@@ -1356,7 +1360,7 @@ export function createSync(o) {
   /** Транзакция агента из рассылки — в форме Tx для переигрывания (применённые операции). */
   function agentTx(c) {
     const tx = { tx_id: c.tx_id, base_seq: isNum(c.base_seq) ? c.base_seq : 0, ops: Array.isArray(c.ops) ? c.ops : [], engine: core.ENGINE_VERSION, client: clientId, author_kind: 'agent' };
-    for (const k of ['author', 'title', 'command_id', 'undo_of', 'redo_of']) if (typeof c[k] === 'string' && c[k]) tx[k] = c[k];
+    for (const k of ['author', 'title', 'command_id', 'command_author', 'undo_of', 'redo_of']) if (typeof c[k] === 'string' && c[k]) tx[k] = c[k];
     return tx;
   }
 
@@ -1429,7 +1433,9 @@ export function createSync(o) {
       author_kind: c.author_kind || 'human', title: typeof c.title === 'string' ? c.title : '',
       created_at: typeof c.created_at === 'string' ? c.created_at : '', client: typeof c.client === 'string' ? c.client : '',
       command_id: typeof c.command_id === 'string' ? c.command_id : '',
-      ops_count: Array.isArray(c.ops) ? c.ops.length : 0, dropped_count: droppedCount(c.dropped), mine: !!own,
+      command_author: typeof c.command_author === 'string' ? c.command_author : '',
+      ops_count: Array.isArray(c.ops) ? c.ops.length : 0, dropped_count: droppedCount(c.dropped),
+      empty: !Array.isArray(c.ops) || c.ops.length === 0, mine: !!own,
     };
     const created = [];
     const leaves = [];

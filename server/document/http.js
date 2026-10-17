@@ -280,27 +280,34 @@ function treeDepth(doc, limit) {
 }
 
 /**
- * Ответ `core.checkImportDoc` (J7, круг 29) → текст ошибки или null. Форму ответа движок
- * выбирает сам: null/undefined/true/`{ok:true}` — годен; строка, `{error}`, `{ok:false}`
- * или исключение — нет.
+ * Ответ `core.checkImportDoc(d, {maxNodes})` (J7, круг 29) → `{message, limit?, max?}` или null.
+ * Предел узлов — тот же, что у сервиса (`MAX_DOC_NODES`). Форму ответа движок выбирает
+ * сам: null/undefined/true/`{ok:true}` — годен; строка, `{error}`, `{ok:false}`, `{code,
+ * message}` или исключение — нет. `limit`/`max` движка (`'depth'|'nodes'`) переходят в
+ * `detail` ответа 400 (круг 30); без них — `limit: 'import'`.
  */
-function importDocError(d) {
+function importDocError(d, maxNodes) {
   if (typeof core.checkImportDoc !== 'function') return null;
   let r;
   try {
-    r = core.checkImportDoc(d);
+    r = core.checkImportDoc(d, { maxNodes });
   } catch (e) {
-    return e && typeof e.message === 'string' ? e.message : 'документ не прошёл проверку';
+    return { message: e && typeof e.message === 'string' ? e.message : 'документ не прошёл проверку' };
   }
   if (r === null || r === undefined || r === true) return null;
-  if (typeof r === 'string') return r || null;
-  if (r === false) return 'документ не прошёл проверку';
+  if (typeof r === 'string') return r ? { message: r } : null;
+  if (r === false) return { message: 'документ не прошёл проверку' };
   if (typeof r === 'object') {
-    const err = r.error !== undefined ? r.error : r.ok === false ? (r.message || r.reason || true) : null;
+    if (r.ok === true) return null;
+    const err = r.error !== undefined ? r.error
+      : r.ok === false ? (r.message || r.reason || true)
+        : typeof r.code === 'string' ? (r.message || true) : null;
     if (err === null || err === undefined || err === false) return null;
-    if (typeof err === 'string') return err;
-    if (err && typeof err === 'object' && typeof err.message === 'string') return err.message;
-    return 'документ не прошёл проверку';
+    const out = { message: typeof err === 'string' ? err
+      : err && typeof err === 'object' && typeof err.message === 'string' ? err.message : 'документ не прошёл проверку' };
+    if (typeof r.limit === 'string' && /^[a-z_]{1,32}$/.test(r.limit)) out.limit = r.limit;
+    if (Number.isFinite(r.max)) out.max = r.max;
+    return out;
   }
   return null;
 }
@@ -324,6 +331,8 @@ function historyItem(m) {
     author: m.author ?? null, author_kind: m.author_kind || 'human', title: m.title ?? null,
     created_at: m.created_at instanceof Date ? m.created_at.toISOString() : m.created_at,
     client: m.client ?? null, command_id: m.command_id ?? null,
+    // круг 30: кто дал команду агенту (подпись «Агент · Аня»); у человеческой и старой записи — null
+    command_author: typeof m.command_author === 'string' && m.command_author ? m.command_author : null,
     ops_count: Number(m.ops_count) || 0, dropped_count: Number(m.dropped_count) || 0
   };
   if (out.ops_count === 0) out.empty = true;
@@ -553,8 +562,12 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       if (Object.keys(d.nodes).length > MAX_DOC_NODES) throw tooLarge(`doc: не больше ${MAX_DOC_NODES} узлов`, { detail: { limit: 'doc_nodes', max: MAX_DOC_NODES } });
       // J7 (круг 29): глубина и типы полей — проверка движка до приведения; без неё документ
       // глубже предела ложился снимком, и потом каждая операция над ним шла по краю
-      const why = importDocError(d);
-      if (why) throw badRequest(`doc: ${why}`, { detail: { limit: 'import' } });
+      const why = importDocError(d, MAX_DOC_NODES);
+      if (why) {
+        throw badRequest(`doc: ${why.message}`, {
+          detail: { limit: why.limit || 'import', ...(why.max !== undefined ? { max: why.max } : {}) }
+        });
+      }
       try {
         doc = createDoc(d);
       } catch (e) {
