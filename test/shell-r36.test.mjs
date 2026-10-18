@@ -13,7 +13,6 @@ import { fileURLToPath } from 'node:url';
 
 import * as SHELL from '../src/shell.js';
 import * as core from '../src/core.js';
-import { classify } from '../server/orchestrator/jev/index.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (f) => readFileSync(join(root, f), 'utf8');
@@ -25,19 +24,21 @@ function fold(node, list) {
   return n;
 }
 
-test('r36: «просмотр» — команда оболочки по обе стороны сети, без модели', () => {
+test('r36: «просмотр» — команда оболочки из таблицы (§13), без модели; слэш-форма — тоже', () => {
   for (const [said, on] of [
     ['просмотр', true], ['режим просмотра', true], ['включи режим просмотра', true],
     ['выйди из просмотра', false], ['выйти из режима просмотра', false], ['закрой просмотр', false],
+    ['/просмотр', true], ['/просмотр выкл', false], ['/preview вкл', true],
   ]) {
     assert.deepEqual(SHELL.shellIntent(said), { kind: 'preview', on }, `«${said}»`);
-    const v = classify(said, {});
-    assert.equal(v.kind, 'shell', `«${said}» на сервере: ${JSON.stringify(v)}`);
-    assert.deepEqual(SHELL.shellIntentFromServer({ action: v.action, args: v.args }), { kind: 'preview', on });
+    // явная команда редактора и без документа: Orchestrator модели её не отдаёт
+    assert.equal(SHELL.isShellCommandText(said), true, `«${said}»`);
+    assert.equal(SHELL.commandIdOf(SHELL.shellIntent(said)), 'preview');
   }
   // работа для модели — не перехватывается
   for (const said of ['добавь экран просмотра', 'оживи кнопки', 'добавь микроанимации']) {
     assert.equal(SHELL.shellIntent(said), null, `«${said}»`);
+    assert.equal(SHELL.isShellCommandText(said), false, `«${said}»`);
   }
   // сервер без args — включить; on:false — выключить
   assert.deepEqual(SHELL.shellIntentFromServer({ action: 'preview' }), { kind: 'preview', on: true });

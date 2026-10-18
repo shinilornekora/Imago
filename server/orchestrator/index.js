@@ -46,7 +46,6 @@ import { createLlm } from './llm/index.js';
 import { createTraces } from './traces.js';
 import { createPipeline } from './pipeline.js';
 import { createRequestHandler, applyServerTimeouts } from './http.js';
-import jev from './jev/index.js';
 import { SHUTDOWN_GRACE_MS, SHUTDOWN_FLUSH_MS, SHUTDOWN_HARD_MS, BODY_TIMEOUT_MS } from './limits.js';
 
 const num = (v) => (v === undefined || v === null || v === '' ? undefined : Number(v));
@@ -104,7 +103,7 @@ export async function start(opts = {}) {
   const instance = opts.instance || 'orch_' + randomBytes(6).toString('hex');
   const startedAt = new Date().toISOString();
   const pipeline = createPipeline({
-    dslr, dslts, duil, dslv, llm, traces, jev, log, instance, startedAt,
+    dslr, dslts, duil, dslv, llm, traces, log, instance, startedAt,
     docHealth: () => doc.health(),
     docHealthDetail: () => doc.healthDetail(),
     maxQueue: opts.queueMax !== undefined ? opts.queueMax : num(env.QUEUE_MAX),

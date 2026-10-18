@@ -1,22 +1,22 @@
 /**
- * Словарь оболочки — один на клиент и сервер (круг 24, SPEC §7, §10.5).
+ * Таблица команд оболочки — одна, в клиенте (круг 24; круг 38, SPEC §13).
  *
- * Таблица «фраза → намерение» проверяется дважды: словарём оболочки (`shellIntent` из
- * src/shell.js — его зовёт app.js) и JEV сервера (`classify` из server/orchestrator/jev),
- * чьё событие `shell {action, args}` оболочка переводит обратно `shellIntentFromServer`.
- * Ответ обязан совпасть: фраза значит одно и то же по обе стороны сети.
+ * Таблица «фраза → намерение» проверяется `shellIntent` из src/shell.js — его зовёт app.js.
+ * Закрытого классификатора на сервере больше нет (круг 38): команды оболочки узнаёт и
+ * исполняет клиент; без документа (`isShellCommandText` — так спрашивает Orchestrator)
+ * формы с именами слоёв и досок молчат. Событие `shell {action, args}` сервера прежней
+ * версии оболочка ещё понимает (`shellIntentFromServer`) — круг туда-обратно проверяется.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   shellIntent, shellEventOf, shellIntentFromServer, historyForServer, tooLargeWords,
-  stoppedWriteWords, normSaid, numSaid,
+  stoppedWriteWords, normSaid, numSaid, isShellCommandText, SHELL_COMMANDS, helpGroups,
 } from '../src/shell.js';
-import { classify } from '../server/orchestrator/jev/index.js';
 import * as core from '../src/core.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -61,7 +61,7 @@ const TABLE = [
   ['как в системе', { kind: 'theme', mode: 'auto' }],
   ['переключи тему', { kind: 'theme', mode: 'ask' }],
   ['новая доска', { kind: 'new-board' }],
-  // круг 36 (SPEC §11.3): режим «Просмотр» — без модели, по обе стороны сети
+  // круг 36 (SPEC §11.3): режим «Просмотр» — без модели
   ['просмотр', { kind: 'preview', on: true }],
   ['режим просмотра', { kind: 'preview', on: true }],
   ['Включи просмотр', { kind: 'preview', on: true }],
@@ -73,11 +73,11 @@ const TABLE = [
   ['покажи второй экран', { kind: 'artboard', index: 1 }],
   ['покажи следующую доску', { kind: 'artboard', step: 1 }],
   ['вернись на предыдущий', { kind: 'artboard', step: -1 }],
-  // нужны имена из документа клиента: сервер без него отдаёт их модели
+  // нужны имена из документа клиента: без него (isShellCommandText) — не команда
   ['покажи сводку недели', { kind: 'artboard', id: week.id }, true],
   ['открой маршрут дня', { kind: 'artboard', id: route.id }, true],
   ['выдели заголовок экрана', { kind: 'select', ids: [titleId], name: 'Заголовок экрана' }, true],
-  // работа для модели — по обе стороны
+  // работа для модели
   ['повтори шапку три раза', null],
   ['добавь сводку недели', null],
   ['покажи три варианта шапки', null],
@@ -99,36 +99,48 @@ test('словарь оболочки: таблица фраз → намере�
   }
 });
 
-test('JEV сервера понимает те же фразы так же — через событие shell {action, args}', () => {
+test('без документа: те же фразы — те же намерения; формы с именами молчат (isShellCommandText)', () => {
   for (const [said, want, needsDoc] of TABLE) {
-    const v = classify(said, {});
     if (!want || needsDoc) {
-      // без документа клиента формы с именами молчат: оболочка узнаёт их сама до сети
-      assert.notEqual(v.kind, 'shell', `«${said}» на сервере стал командой оболочки: ${JSON.stringify(v)}`);
+      assert.equal(isShellCommandText(said), false, `«${said}» без документа стал командой оболочки`);
       continue;
     }
-    assert.equal(v.kind, 'shell', `«${said}»: ${JSON.stringify(v)}`);
-    assert.deepEqual(shellIntentFromServer({ action: v.action, args: v.args }), want, `«${said}» через сервер`);
-    // и без документа клиент даёт то же самое
+    assert.equal(isShellCommandText(said), true, `«${said}»`);
     assert.deepEqual(shellIntent(said), want, `«${said}» без документа`);
   }
 });
 
-test('JEV с документом узнаёт и формы с именами — тем же словарём', () => {
-  for (const [said, want, needsDoc] of TABLE) {
-    if (!needsDoc) continue;
-    const v = classify(said, { doc, board: route.id });
-    assert.equal(v.kind, 'shell', `«${said}»`);
-    assert.deepEqual(shellIntentFromServer({ action: v.action, args: v.args }), want, `«${said}»`);
+test('слэш-формы: точные, на русском и латиницей, неизвестное имя — тоже команда оболочки', () => {
+  const SLASH = [
+    ['/масштаб 150', { kind: 'zoom', to: 1.5 }],
+    ['/zoom 150', { kind: 'zoom', to: 1.5 }],
+    ['/Масштаб 75 %', { kind: 'zoom', to: 0.75 }],
+    ['/тема тёмная', { kind: 'theme', mode: 'dark' }],
+    ['/тема', { kind: 'theme', mode: 'cycle' }],
+    ['/удалить', { kind: 'delete' }],
+    ['/выровнять влево', { kind: 'align', how: 'left' }],
+    ['/отменить 3', { kind: 'undo', times: 3 }],
+    ['/undo', { kind: 'undo', times: 1 }],
+    ['/вписать всё', { kind: 'fit', all: true }],
+    ['/вписать', { kind: 'fit' }],
+    ['/доска 2', { kind: 'artboard', index: 1 }],
+    ['/экспорт png', { kind: 'export', what: 'png' }],
+    ['/помощь', { kind: 'help' }],
+    ['/', { kind: 'palette' }],
+  ];
+  for (const [said, want] of SLASH) {
+    assert.deepEqual(shellIntent(said, CTX), want, said);
+    assert.equal(isShellCommandText(said), true, said);
   }
-});
-
-test('JEV: режим вариантов и варианты словами — мимо словаря оболочки', () => {
-  assert.equal(classify('стоп', { mode: 'variants' }).kind, 'variants');
-  const v = classify('покажи два варианта шапки', {});
-  assert.equal(v.kind, 'variants');
-  assert.equal(v.n, 2);
-  assert.equal(classify('покажи варианты', {}).kind, 'variants');
+  // по имени — с документом
+  assert.deepEqual(shellIntent('/доска сводка недели', CTX), { kind: 'artboard', id: week.id });
+  assert.deepEqual(shellIntent('/выделить заголовок экрана', CTX), { kind: 'select', ids: [titleId], name: 'Заголовок экрана' });
+  // ошибки набора — честно, агенту не уходят
+  assert.equal(shellIntent('/масштаб много', CTX).kind, 'slash-bad');
+  assert.equal(shellIntent('/масштаб 5000', CTX).kind, 'slash-bad');
+  assert.equal(shellIntent('/дублировать 2', CTX).kind, 'slash-bad');
+  assert.deepEqual(shellIntent('/взлетай', CTX), { kind: 'slash-unknown', name: 'взлетай' });
+  assert.equal(isShellCommandText('/взлетай'), true);
 });
 
 test('намерение → событие → намерение: круг без потерь для всей таблицы', () => {
@@ -142,18 +154,32 @@ test('намерение → событие → намерение: круг б�
   assert.equal(shellEventOf(null), null);
 });
 
-test('один словарь: ни app.js, ни JEV не держат своей копии регулярок', () => {
+test('одна таблица: ни app.js, ни сервер не держат своей копии регулярок; справка — из SHELL_COMMANDS', () => {
   const app = readFileSync(join(root, 'app.js'), 'utf8');
-  const jev = readFileSync(join(root, 'server/orchestrator/jev/index.js'), 'utf8');
-  for (const name of ['RE_UNDO_BARE', 'RE_REDO_N', 'RE_STOP_BARE', 'RE_STOP', 'RE_THEME_DARK', 'RE_PICK', 'RE_SHOW']) {
-    assert.ok(!new RegExp(`const ${name}\\b`).test(app), `app.js снова держит ${name}`);
-    assert.ok(!new RegExp(`const ${name}\\b`).test(jev), `JEV снова держит ${name}`);
-  }
+  const NAMES = ['RE_UNDO_BARE', 'RE_REDO_N', 'RE_STOP_BARE', 'RE_STOP', 'RE_THEME_DARK', 'RE_PICK', 'RE_SHOW', 'RE_NEW_BOARD', 'RE_PREVIEW_ON', 'NATURAL', 'SLASH_NAMES'];
+  for (const name of NAMES) assert.ok(!new RegExp(`const ${name}\\b`).test(app), `app.js снова держит ${name}`);
   assert.match(app, /SHELL\.shellIntent\(/);
-  assert.match(jev, /from '\.\.\/\.\.\/\.\.\/src\/shell\.js'/);
-  // словарь без DOM и без состояния оболочки
+  // сервер: ни одного своего словаря оболочки (закрытого классификатора больше нет)
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.js') ? [join(dir, e.name)] : []));
+  for (const f of walk(join(root, 'server'))) {
+    const src = readFileSync(f, 'utf8');
+    for (const name of NAMES) assert.ok(!new RegExp(`const ${name}\\b`).test(src), `${f} держит ${name}`);
+    assert.ok(!/впиши вс[её]|отмени два раза|сними выделение/.test(src), `${f} держит фразы оболочки`);
+  }
+  // справка и палитра строятся из таблицы: в app.js нет ручного списка команд
+  assert.match(app, /SHELL\.helpGroups\(\)/);
+  assert.match(app, /SHELL\.paletteRows\(/);
+  for (const c of SHELL_COMMANDS) {
+    if (!c.edit) continue;
+    assert.ok(!app.includes(`'${c.hint}'`), `app.js дублирует подсказку команды ${c.id}`);
+  }
+  assert.deepEqual(helpGroups().map((g) => g.group), ['Вид', 'Выделение', 'Правка', 'Доски', 'Панели', 'Файл', 'История', 'Агент', 'Справка']);
+  // таблица без DOM и без состояния оболочки
   const shell = readFileSync(join(root, 'src/shell.js'), 'utf8');
   assert.ok(!/\b(document|window|state)\./.test(shell), 'src/shell.js обращается к DOM или state');
+  // круг 38: о закрытом классификаторе в оболочке больше ни слова
+  assert.ok(!/JEV/.test(shell), 'src/shell.js упоминает JEV');
+  assert.ok(!/JEV/.test(app), 'app.js упоминает JEV');
 });
 
 test('normSaid и numSaid: числа словом, цифрой и порядковые без ложных основ', () => {

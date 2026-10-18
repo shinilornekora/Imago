@@ -950,6 +950,79 @@ button, input, textarea { font: inherit; color: inherit; }
 }
 .hint:hover { color: var(--accent); border-color: var(--accent); }
 
+/* Круг 38 (SPEC §13). Палитра команд оболочки — над строкой команд, тем же языком, что
+   сообщение агента: панель, кант, мягкая тень. Строка команд при этом — поле поиска. */
+.palette {
+  width: min(var(--dock-w), 100%);
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line-strong); border-radius: 12px;
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+  animation: worklog-in .14s ease;
+}
+.palette[hidden] { display: none; }
+.palette-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 9px 12px 7px 14px; border-bottom: 1px solid var(--line-soft);
+}
+.palette-title { font-size: var(--t-xs); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+.palette-keys { font-size: var(--t-xs); color: var(--muted); white-space: nowrap; }
+.palette-list {
+  list-style: none; margin: 0; padding: 4px;
+  max-height: min(340px, 42vh); overflow: auto; overscroll-behavior: contain;
+}
+.pal-group {
+  padding: 8px 10px 3px; font-size: var(--t-xs); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.pal-row {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 6px 10px; border-radius: 8px; cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.pal-row:hover { background: var(--panel-2); }
+.pal-row[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 13%, var(--panel));
+  border-left-color: var(--accent);
+}
+.pal-main { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+.pal-title { font-size: var(--t-md); color: var(--text); white-space: nowrap; }
+.pal-ex {
+  min-width: 0; font-size: var(--t-sm); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pal-empty { padding: 10px 12px; font-size: var(--t-sm); color: var(--muted); }
+.palette kbd, .cmd-help kbd {
+  flex: none; font-family: var(--mono); font-size: var(--t-xs); line-height: 1;
+  padding: 3px 5px; border-radius: 5px; color: var(--muted);
+  border: 1px solid var(--line-strong); background: var(--panel-2);
+}
+.palette-keys kbd { padding: 2px 4px; margin: 0 1px; }
+.palette-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 7px 12px 8px 14px; border-top: 1px solid var(--line-soft);
+  font-size: var(--t-xs); color: var(--muted);
+}
+.palette-foot .linkish { align-self: auto; flex: none; }
+@media (max-width: 600px) {
+  .palette-keys, .palette-tip { display: none; }
+  .pal-main { flex-direction: column; gap: 0; }
+}
+.app[data-voice="on"] .palette { display: none; }
+
+/* Справка «Команды» в шторке: строки таблицы по группам, тем же языком, что «История». */
+.cmd-help {
+  display: flex; flex-direction: column; gap: 3px; width: 100%;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-2); color: var(--text); text-align: left; cursor: pointer; font: inherit;
+}
+.cmd-help:hover { border-color: var(--line-strong); }
+.cmd-help-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.cmd-help-title { font-size: var(--t-md); flex: 1; min-width: 0; }
+.cmd-help-slash { font-family: var(--mono); font-size: var(--t-xs); color: var(--accent); white-space: nowrap; }
+.cmd-help-ex { font-size: var(--t-sm); color: var(--muted); line-height: 1.35; overflow-wrap: anywhere; }
+
 /* Пустое состояние: главная строка serif и указание вниз, к командной строке. */
 .empty-state {
   position: absolute; inset: 0; z-index: 4;
@@ -1773,3 +1846,5 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   border-left: 2px solid var(--accent);
 }
 .path-edit-title { font-size: var(--t-sm); font-weight: 600; color: var(--text); }
+/* круг 38: пока открыта палитра, чипы-подсказки над ней не нужны — у неё свой список */
+.dock:has(.palette:not([hidden])) .hints { display: none; }

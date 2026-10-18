@@ -1,5 +1,13 @@
 /**
- * Конвейер одной команды (SPEC §8.2 шаги 3–13, §10): JEV → DSLR → DUIL → (LLM ↔ DSLV) → DSLTS.
+ * Конвейер одной команды (SPEC §8.2 шаги 3–13, §10): intent → DSLR → DUIL → (LLM ↔ DSLV) → DSLTS.
+ *
+ * Круг 38: JEV (классификатор «оболочка или модель») из архитектуры исключён. Команды
+ * оболочки — открытая таблица в клиенте (`src/shell.js`, SHELL_COMMANDS): клиент исполняет их
+ * сам, без сети. Orchestrator их не узнаёт для исполнения и событие `shell` не шлёт. Первая
+ * стадия — `intent` («Разбираю запрос»): вид работы для выбора промпта (`classifyUtterance`
+ * brain), варианты (`recognizeVariants`), местные ответы brain без модели. Реплика, которая
+ * всё же оказалась явной командой редактора (старый клиент, внешний вызов API), получает
+ * `result` без записи с честным текстом — без модели, очереди и чтения документа.
  *
  * Очередь на проект: команды агента одного проекта выполняются по одной (модель
  * рассуждает над стейтом, который вторая команда уже меняет, §8.3); ждущих не больше
@@ -14,7 +22,11 @@
 import * as core from '../../src/core.js';
 import { OrchError, toOrchError, INTERNAL_MESSAGE, notFound, badRequest, llmDown, llmUnconfigured, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
 import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS, SHUTDOWN_GRACE_MS, SHUTDOWN_ABORT_WAIT_MS } from './limits.js';
-import { isInternalError } from '../../src/brain.js';
+import {
+  isInternalError, recognizeAction, recognizeVariants, recognizeUndoDoubt, recognizeComponentIntent,
+  classifyUtterance, hasWords,
+} from '../../src/brain.js';
+import * as shell from '../../src/shell.js';
 
 const { ENGINE_VERSION, uid, cutText, cleanText } = core;
 /** Длина `command_id` транзакции, которую хранит Document service (круг 25). */
@@ -27,7 +39,7 @@ const BRAIN_STAGE = {
 };
 
 const LABELS = {
-  jev: 'Разбираю запрос',
+  intent: 'Разбираю запрос',
   read: 'Читаю документ',
   library: 'Смотрю библиотеки',
   llm: 'Думаю',
@@ -41,6 +53,73 @@ const AGENT_AUTHOR = 'Агент';
 const VARIANTS_GONE = 'Варианты этой команды не найдены или устарели — попросите их заново';
 
 const INTENT_RU = { create: 'создание', edit: 'правка', theme: 'оформление', ask: 'вопрос', clarify: 'уточнение', illustration: 'иллюстрация' };
+
+/** Круг 38: ответ на явную команду редактора, пришедшую агенту (её исполняет клиент сам). */
+export const EDITOR_COMMAND_TEXT = 'Это команда редактора — выполните её в строке команд';
+
+/** Сколько вариантов просят словами: «покажи два варианта» → 2. */
+function variantsCount(text) {
+  const m = /(\d|один|одну|два|две|три|четыре|пять|шесть)\s+вариант/.exec(shell.normSaid(text));
+  const n = m ? shell.numSaid(m[1]) : null;
+  return n ? Math.max(1, Math.min(6, n)) : null;
+}
+
+/**
+ * Явная команда редактора по одной лишь фразе (без документа): отмена/возврат (`recognizeAction`
+ * brain), слэш-форма («/zoom 100», «/тема тёмная») или фраза из открытой таблицы оболочки
+ * (`isShellCommandText` из src/shell.js; у прежней оболочки — `shellIntent(text, {})`).
+ * Только проверка: исполнять команду Orchestrator не умеет и не должен.
+ * @param {string} text
+ */
+export function isEditorCommand(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) return false;
+  if (recognizeAction(s)) return true;
+  // слэш-форма — синтаксис строки команд, а не речь для модели (даже неизвестное имя)
+  if (/^\/\p{L}/u.test(s)) return true;
+  try {
+    if (typeof shell.isShellCommandText === 'function') return !!shell.isShellCommandText(s);
+    return !!shell.shellIntent(s, {});
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Стадия `intent` (круг 38, вместо JEV): какую работу просят — это выбор пути и промпта
+ * агента, а не привратник «оболочка или модель».
+ *   {kind:'editor'}                       — явная команда редактора: ответ без модели и записи;
+ *   {kind:'variants', n, of}              — режим вариантов или «покажи три варианта»;
+ *   {kind:'model', needsModel, intent}    — работа агента; `needsModel:false` — brain ответит
+ *                                           сам (пустая реплика, двусмысленная отмена, «сделай
+ *                                           компонент»), проверка модели перед стартом не нужна.
+ * Порядок: отмена/возврат → просьба о вариантах → команда редактора → режим вариантов → модель.
+ * @param {string} text
+ * @param {{hasSelection?: boolean, mode?: 'run'|'variants', n?: number}} [ctx]
+ */
+export function intentOf(text, ctx = {}) {
+  if (recognizeAction(text)) return { kind: 'editor' };
+  const wantVariants = recognizeVariants(text);
+  if (wantVariants || (ctx.mode === 'variants' && !isEditorCommand(text))) {
+    return {
+      kind: 'variants',
+      n: ctx.n || variantsCount(text) || 3,
+      of: wantVariants ? wantVariants.variantsOf || '' : '',
+    };
+  }
+  if (isEditorCommand(text)) return { kind: 'editor' };
+  const local = !hasWords(text) || !!recognizeUndoDoubt(text) || !!recognizeComponentIntent(text);
+  const guess = classifyUtterance(text, { hasSelection: !!ctx.hasSelection });
+  return { kind: 'model', needsModel: !local, intent: guess.intent };
+}
+
+/** Итог без записи на команду редактора (событие `result`, §10.5 «result без записи»). */
+function editorReply() {
+  return {
+    tx_id: null, seq: null, applied: 0, dropped: [],
+    summary: EDITOR_COMMAND_TEXT, warnings: [], editorCommand: true,
+  };
+}
 
 /**
  * Глобальные id для узлов, созданных агентом (§8.3: id генерирует клиент, глобально
@@ -91,12 +170,12 @@ export function globalizeIds(ops) {
 /**
  * @param {{
  *   dslr: object, dslts: object, duil: object, dslv: object, llm: object, traces: object,
- *   docHealth: () => Promise<'up'|'down'>, jev: {classify: Function},
+ *   docHealth: () => Promise<'up'|'down'>,
  *   maxQueue?: number, variantsTtlMs?: number, log?: object, instance?: string, startedAt?: string
  * }} deps
  */
 export function createPipeline(deps) {
-  const { dslr, dslts, duil, dslv, llm, traces, docHealth, jev } = deps;
+  const { dslr, dslts, duil, dslv, llm, traces, docHealth } = deps;
   /* Круг 31 (K2): здоровье документа с причиной; без docHealthDetail — из docHealth, причина
      тогда неизвестна (unreachable). */
   const docHealthDetail = deps.docHealthDetail || (async () => {
@@ -214,7 +293,7 @@ export function createPipeline(deps) {
   /* ── команда ─────────────────────────────────────────────────────────── */
 
   /**
-   * Принять команду: JEV, проверка, очередь. Ошибки до открытия потока — исключением
+   * Принять команду: стадия intent, проверка, очередь. Ошибки до открытия потока — исключением
    * (HTTP-ответ с кодом); дальше всё идёт событиями в sink.
    * @param {object} cmd проверенное тело команды
    * @param {() => {send: Function, end: Function}} openSink открыть поток (вызывается один раз, когда команда принята)
@@ -223,17 +302,19 @@ export function createPipeline(deps) {
   async function command(cmd, openSink) {
     if (active.has(cmd.command_id)) throw badRequest('Команда с таким command_id уже выполняется');
     const t0 = Date.now();
-    const verdict = jev.classify(cmd.text, { hasSelection: cmd.selection.length > 0, mode: cmd.mode, n: cmd.n });
+    const verdict = intentOf(cmd.text, { hasSelection: cmd.selection.length > 0, mode: cmd.mode, n: cmd.n });
 
-    if (verdict.kind === 'shell') {
+    /* Круг 38: явная команда редактора — не работа агента. Её исполняет клиент по своей
+       таблице; здесь — честный ответ без модели, без очереди и без чтения документа. */
+    if (verdict.kind === 'editor') {
       const sink = openSink();
-      sink.send('stage', { key: 'jev', label: LABELS.jev, at: Date.now() });
-      sink.send('shell', { action: verdict.action, args: verdict.args || {} });
+      sink.send('stage', { key: 'intent', label: LABELS.intent, at: Date.now(), detail: 'команда редактора' });
+      sink.send('result', editorReply());
       sink.send('done', {});
       sink.end();
       traces.record({
-        command_id: cmd.command_id, project: cmd.project, mode: cmd.mode, kind: 'shell', status: 'shell',
-        started_at: new Date(t0).toISOString(), ms: Date.now() - t0, steps: [{ key: 'jev', ms: Date.now() - t0 }],
+        command_id: cmd.command_id, project: cmd.project, mode: cmd.mode, kind: 'editor', status: 'ok',
+        started_at: new Date(t0).toISOString(), ms: Date.now() - t0, steps: [{ key: 'intent', ms: Date.now() - t0 }],
         engine: ENGINE_VERSION,
       });
       return { finished: Promise.resolve() };
@@ -258,7 +339,8 @@ export function createPipeline(deps) {
   }
 
   async function execute(task) {
-    const { cmd, verdict, ctrl, sink } = task;
+    const { cmd, ctrl, sink } = task;
+    let { verdict } = task;
     const signal = ctrl.signal;
     const steps = [];
     let curStep = null;
@@ -279,11 +361,23 @@ export function createPipeline(deps) {
 
     try {
       guard();
-      step('jev', LABELS.jev, verdict.kind === 'variants' ? 'варианты' : INTENT_RU[verdict.intent] || '');
+      step('intent', LABELS.intent, verdict.kind === 'variants' ? 'варианты' : INTENT_RU[verdict.intent] || '');
       guard();
       step('read');
       const st = await dslr.read(cmd.project, { signal });
       guard();
+      /* Круг 38: просьбу о вариантах, которую видно только по документу (предмет назван
+         именем слоя), brain раньше отдавал оболочке действием `variants`. События `shell`
+         больше нет — Orchestrator сам переходит в режим вариантов. */
+      if (verdict.kind === 'model' && verdict.needsModel) {
+        const want = recognizeVariants(cmd.text, { doc: st.doc });
+        if (want) {
+          verdict = { kind: 'variants', n: cmd.n || variantsCount(cmd.text) || 3, of: want.variantsOf || '' };
+          task.verdict = verdict;
+          trace.mode = 'variants';
+          trace.kind = 'variants';
+        }
+      }
       step('library');
       const lib = await duil.slice({ exclude: cmd.project, signal });
       trace.libraries = lib.libraries.length;
@@ -445,9 +539,10 @@ export function createPipeline(deps) {
   async function finishRun(task, st, res, trace, step) {
     const { sink, cmd } = task;
     if (res.error) throw brainError(res.error);
+    // круг 38: отмену/возврат brain узнаёт сам, без модели; исполняет их редактор, не агент
     if (res.action) {
-      sink.send('shell', { action: res.action, args: res.variantsOf ? { of: res.variantsOf } : {} });
-      trace.status = 'shell';
+      sink.send('result', editorReply());
+      trace.kind = 'editor';
       return;
     }
     // «менять нечего» / «правка ни на что не повлияла» (§10.5): brain возвращает и сами
@@ -469,7 +564,7 @@ export function createPipeline(deps) {
     const { sink, cmd } = task;
     const all = list.filter(Boolean);
     const act = all.find((v) => v.action === 'undo' || v.action === 'redo');
-    if (act) { sink.send('shell', { action: act.action, args: {} }); trace.status = 'shell'; return; }
+    if (act) { sink.send('result', editorReply()); trace.kind = 'editor'; return; }
     const talk = all.find((v) => v.clarify || ((v.answer || v.cannot) && (!v.ops || !v.ops.length)));
     if (talk) { sink.send('result', replyOf(talk)); return; }
     const ok = all.filter((v) => v.ops && v.ops.length && !v.error);

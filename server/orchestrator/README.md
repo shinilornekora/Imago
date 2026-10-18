@@ -11,8 +11,7 @@ SPEC §10 (нормативен и для клиента `src/agent.js`; доп�
 server/orchestrator/
   index.js        вход: окружение, сборка модулей, SIGTERM/SIGINT; export start(opts)
   http.js         маршруты §10.2, SSE §10.3, лимит тела 1 МБ, единое тело ошибки
-  pipeline.js     шаги jev → read → library → llm/validate → write → result; очередь на проект; стоп; варианты + apply
-  jev/            «оболочка или модель»: словарь оболочки `src/shell.js` (shellIntent — один на app.js и JEV) + recognizeVariants из brain
+  pipeline.js     шаги intent → read → library → llm/validate → write → result; очередь на проект; стоп; варианты + apply
   dslr/           чтение стейта: кеш {seq, doc, chain, epoch}, хвост ops?since=&tip=&epoch= по `more`, сброс при откате базы
   duil/           срез библиотек: проекты kind=library → внешний словарь в прогон brain (library)
   dslv/           пул worker_threads: прогон brain (план → патч → операции → раскладка → validate → починка)
@@ -72,11 +71,24 @@ curl -N -X POST localhost:8090/agent/command -H 'content-type: application/json'
 
 ## Как устроено
 
-* **Порядок команды.** `jev` (без сети) → проверка перед стартом (Document service жив;
+* **Порядок команды.** `intent` (без сети) → проверка перед стартом (Document service жив;
   модель жива, если нужна — иначе HTTP `503` с `Retry-After` до открытия потока) → очередь
   проекта (`queued {position, scope:'project'}`) → `read` → `library` → `llm`/`validate`/`repair` (стадии brain
-  из воркера) → `write` → `result` → `done`. Команда оболочки: `stage jev` → `shell` → `done`,
-  модель не зовётся, очередь не занимается.
+  из воркера) → `write` → `result` → `done`.
+* **Без JEV** (круг 38). Классификатора «оболочка или модель» в архитектуре больше нет:
+  команды оболочки — открытая таблица в клиенте (`src/shell.js`, `SHELL_COMMANDS`), клиент
+  исполняет их сам и агенту не шлёт. Orchestrator команд оболочки не исполняет и события
+  `shell` не шлёт. Стадия `intent` («Разбираю запрос», `detail` — вид работы по
+  `classifyUtterance`: «правка», «создание», «иллюстрация»…, или «варианты») — часть конвейера
+  агента (`intentOf` в `pipeline.js`): выбор пути и промпта, а не привратник. Варианты
+  (`mode:'variants'` или «покажи три варианта» — `recognizeVariants`; по имени слоя — после
+  `read`) и местные ответы brain без модели (пустая реплика, двусмысленная отмена, «сделай
+  компонент») — как раньше. Если реплика всё же явная команда редактора (старый клиент, внешний
+  вызов API: «отмени», «впиши всё», «/zoom 100» — `recognizeAction` brain, слэш-форма,
+  `isShellCommandText` таблицы оболочки), ответ — `stage intent` (`detail: 'команда редактора'`)
+  → `result {tx_id: null, seq: null, applied: 0, summary: 'Это команда редактора — выполните её
+  в строке команд', editorCommand: true}` → `done`: модель не зовётся, документ не читается,
+  очередь не занимается, трасса `kind:'editor'`.
 * **Воркеры.** `runCommand` монолитен (раскладка и проверка между вызовами модели), поэтому
   в воркере идёт весь прогон brain. Модель воркер **не зовёт сам**: его провайдер — посредник,
   вызов уходит сообщением в главный поток, где ключ, сеть, кеш здоровья и общий AbortSignal

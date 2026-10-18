@@ -1,5 +1,5 @@
 /**
- * Клиент Orchestrator (src/agent.js) и словарь оболочки (src/shell.js) — SPEC §10.
+ * Клиент Orchestrator (src/agent.js) и слова оболочки (src/shell.js) — SPEC §10.
  * Сервер агента здесь поддельный: node:http на случайном порту отдаёт SSE так, как
  * его отдаёт настоящий, — кусками, с разрывами, с ошибками единого формата.
  */
@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import {
   createSSEParser, parseRetryAfter, runServerCommand, stop, apply, health,
-  newCommandId, AgentError, isUpstreamDown, createAgentClient,
+  newCommandId, AgentError, isUpstreamDown, createAgentClient, STAGE_KEYS, stageKey,
 } from '../src/agent.js';
 import {
   decideAgentMode, serverStageRec, shellIntentFromServer, normalizeResult,
@@ -101,13 +101,36 @@ test('id команды: префикс и 12 знаков base36, без пов
 
 /* ------------------------------ команда целиком ------------------------------ */
 
+test('круг 38: стадия jev сервера прежней версии понимается как intent; ключи по порядку', async (t) => {
+  assert.deepEqual([...STAGE_KEYS], ['intent', 'read', 'library', 'llm', 'validate', 'repair', 'write']);
+  assert.equal(stageKey('jev'), 'intent');
+  assert.equal(stageKey('read'), 'read');
+  assert.equal(stageKey(undefined), '');
+  const srv = await fakeServer({
+    'POST /agent/command': async (req, body, res) => {
+      streamHead(res);
+      res.write(sse('stage', { key: 'jev', label: 'Разбираю запрос' }));
+      res.write(sse('stage', { key: 'read' }));
+      res.write(sse('result', { tx_id: 'tx_1', seq: 1, applied: 1, dropped: [], summary: 'ok' }));
+      res.write(sse('done', {}));
+      res.end();
+    },
+  });
+  t.after(() => srv.close());
+  const seen = [];
+  const out = await runServerCommand({ baseUrl: srv.baseUrl, project: 'p', text: 'x', onEvent: (e) => { if (e.type === 'stage') seen.push(e.data.key); } });
+  assert.deepEqual(out.stages.map((s) => s.key), ['intent', 'read']);
+  assert.deepEqual(seen, ['intent', 'read'], 'оболочка получает уже нынешний ключ');
+  assert.equal(out.shell, null, 'новый сервер не шлёт shell — клиент его и не ждёт');
+});
+
 test('команда: тело по контракту, стадии по порядку, итог и done', async (t) => {
   const srv = await fakeServer({
     'POST /agent/command': async (req, body, res) => {
       streamHead(res);
       res.write(sse('queued', { position: 1 }));
       await wait(10);
-      for (const key of ['jev', 'read', 'llm', 'validate', 'write']) {
+      for (const key of ['intent', 'read', 'llm', 'validate', 'write']) {
         // кусками: событие пополам
         const s = sse('stage', { key, label: key, at: new Date().toISOString() });
         res.write(s.slice(0, 7));
@@ -129,7 +152,7 @@ test('команда: тело по контракту, стадии по пор
   assert.equal(out.result.tx_id, 'tx_abc');
   assert.deepEqual(out.result.select, ['n1']);
   assert.equal(out.queued, 1);
-  assert.deepEqual(out.stages.map((s) => s.key), ['jev', 'read', 'llm', 'validate', 'write']);
+  assert.deepEqual(out.stages.map((s) => s.key), ['intent', 'read', 'llm', 'validate', 'write']);
   assert.deepEqual(events, ['queued', 'stage', 'stage', 'stage', 'stage', 'stage', 'result', 'done']);
   const req = srv.log[0];
   assert.equal(req.body.project, 'p1');
@@ -533,7 +556,7 @@ test('стадии и очередь словами', () => {
   assert.equal(presenceAgentWords({ busy: true, queued: true }), 'Без имени ждёт агента…');
 });
 
-test('команды оболочки от JEV — в намерения оболочки', () => {
+test('событие shell сервера прежней версии — в намерения оболочки (совместимость)', () => {
   assert.deepEqual(shellIntentFromServer({ action: 'undo', args: { times: 3 } }), { kind: 'undo', times: 3 });
   assert.deepEqual(shellIntentFromServer({ action: 'redo' }), { kind: 'redo', times: 1 });
   assert.deepEqual(shellIntentFromServer({ action: 'select', args: { ids: ['a', 1, 'b'] } }), { kind: 'select', ids: ['a', 'b'] });

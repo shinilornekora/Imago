@@ -1,6 +1,6 @@
 /**
  * Orchestrator (SPEC §10) поверх настоящего Document service в памяти и поддельной
- * OpenAI-совместимой модели: команда → транзакция агента в журнале, оболочка без модели,
+ * OpenAI-совместимой модели: команда → транзакция агента в журнале, команда редактора без модели,
  * очередь проекта, «стоп», разрыв потока, варианты + выбор, отказы сервисов, форма HTTP.
  */
 
@@ -35,7 +35,7 @@ test('команда для модели: транзакция агента в �
   const names = r.events.map((e) => e.event);
   assert.equal(names[names.length - 1], 'done', 'последним всегда done');
   const keys = r.events.filter((e) => e.event === 'stage').map((e) => e.data.key);
-  for (const k of ['jev', 'read', 'library', 'llm', 'validate', 'write']) assert.ok(keys.includes(k), `стадия ${k}: ${keys}`);
+  for (const k of ['intent', 'read', 'library', 'llm', 'validate', 'write']) assert.ok(keys.includes(k), `стадия ${k}: ${keys}`);
   assert.ok(keys.indexOf('read') < keys.indexOf('llm') && keys.indexOf('llm') < keys.indexOf('write'));
   for (const s of r.events.filter((e) => e.event === 'stage')) {
     assert.equal(typeof s.data.label, 'string');
@@ -92,43 +92,43 @@ test('команда для модели: транзакция агента в �
   assert.ok(tr[0].steps.some((s) => s.key === 'llm' && typeof s.ms === 'number'));
 });
 
-test('команда оболочки: событие shell, модель не зовётся, журнал не трогается', async (t) => {
+test('круг 38: команда редактора — result без записи, модель не зовётся, события shell нет', async (t) => {
   const document = await startDocument();
   const llm = await startFakeLlm(SCRIPT);
   const orch = await startOrch({ document, llm: { baseUrl: llm.base } });
-  // и без модели, и без Document service команда оболочки работает
+  // и без модели, и без Document service ответ на команду редактора приходит
   const bare = await startOrch({});
   t.after(async () => { await orch.close(); await bare.close(); await document.close(); await llm.close(); });
   const p = await createProject(document);
 
-  const cases = [
-    ['отмени', 'undo', { times: 1 }],
-    ['отмени три раза', 'undo', { times: 3 }],
-    ['верни обратно', 'redo', { times: 1 }],
-    ['стоп', 'stop', {}],
-    ['впиши всё', 'fit', { all: true }],
-    ['масштаб 150%', 'zoom', { to: 1.5 }],
-    ['сними выделение', 'select', { ids: [] }],
-  ];
-  for (const [text, action, args] of cases) {
+  for (const text of ['отмени', 'отмени три раза', 'верни обратно', 'стоп', 'впиши всё', 'масштаб 150%', 'сними выделение', '/zoom 100']) {
     const r = await command(orch.url, { command_id: cid(), project: p.id, text });
     assert.equal(r.status, 200, text);
-    const shell = r.events.find((e) => e.event === 'shell');
-    assert.ok(shell, `${text}: ${JSON.stringify(r.events)}`);
-    assert.equal(shell.data.action, action, text);
-    assert.deepEqual(shell.data.args, args, text);
+    assert.ok(!r.events.some((e) => e.event === 'shell'), `${text}: события shell больше нет`);
+    const stages = r.events.filter((e) => e.event === 'stage');
+    assert.deepEqual(stages.map((e) => e.data.key), ['intent'], text);
+    assert.equal(stages[0].data.label, 'Разбираю запрос');
+    const res = r.events.find((e) => e.event === 'result');
+    assert.ok(res, `${text}: ${JSON.stringify(r.events)}`);
+    assert.equal(res.data.tx_id, null, text);
+    assert.equal(res.data.seq, null, text);
+    assert.equal(res.data.applied, 0, text);
+    assert.equal(res.data.editorCommand, true, text);
+    assert.match(res.data.summary, /команда редактора/, text);
     assert.equal(r.events[r.events.length - 1].event, 'done');
-    assert.ok(!r.events.some((e) => e.event === 'result' || e.event === 'error'));
+    assert.ok(!r.events.some((e) => e.event === 'error'));
   }
   const r = await command(bare.url, { command_id: cid(), project: 'p1', text: 'отмени' });
   assert.equal(r.status, 200);
-  assert.equal(r.events.find((e) => e.event === 'shell').data.action, 'undo');
+  assert.equal(r.events.find((e) => e.event === 'result').data.editorCommand, true);
 
   assert.equal(llm.completions().length, 0, 'модель не звалась');
   assert.equal((await journal(document, p.id)).head_seq, 0);
   // «повтори шапку три раза» — работа для модели, а не перемотка истории
   const busy = await command(orch.url, { command_id: cid(), project: p.id, text: 'повтори шапку три раза' });
   assert.ok(!busy.events.some((e) => e.event === 'shell'));
+  assert.ok(!busy.events.some((e) => e.event === 'result' && e.data.editorCommand));
+  assert.ok(llm.completions().length > 0, 'а эта реплика ушла модели');
 });
 
 test('очередь проекта: две команды по одной, вторая видит запись первой; полна — 429', async (t) => {
@@ -459,7 +459,7 @@ test('трассы: POST /api/internal/traces с X-Internal-Token; нет энд
   assert.equal(tr.status, 'ok');
   assert.equal(tr.model_calls, 2);
   assert.ok(tr.steps.length >= 5);
-  assert.equal(got[1].body.kind, 'shell');
+  assert.equal(got[1].body.kind, 'editor');
   const text = JSON.stringify(got);
   assert.ok(!text.includes('sk-trace-secret'));
   assert.ok(!/messages|prompt"|Выберите тариф/.test(text), 'без промптов и ответов модели');

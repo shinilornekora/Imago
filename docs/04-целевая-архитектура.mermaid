@@ -3,8 +3,8 @@ flowchart LR
     U(("Человек"))
     NGINX["NGINX"]
     CLIENT["CLIENT<br/>оболочка + движок · реплика с локальным журналом"]
-    ORCH["Orchestrator<br/>процесс «агент» · знает только сервисы"]
-    JEV["JEV<br/>команда оболочки?"]
+    CMDS["Таблица команд оболочки<br/>SHELL_COMMANDS · палитра Ctrl/⌘+K и «/» · справка «Команды»"]
+    ORCH["Orchestrator<br/>процесс «агент» · знает только сервисы<br/>intent → read → library → llm/validate → write"]
     DUIL["DUIL<br/>Design UI Library — срез проекта-библиотеки"]
     DSLR["DSLR<br/>DSL Reader — снимок + хвост журнала"]
     LLM["LLM"]
@@ -18,9 +18,9 @@ flowchart LR
     DSLR -->|"0 · снимок + хвост, номер головы"| CLIENT
     U -->|"1 · HTTPS"| NGINX
     NGINX -->|"2"| CLIENT
-    CLIENT -->|"3 · команда агенту"| ORCH
-    ORCH -->|"4"| JEV
-    JEV -->|"5 · да → событие shell, клиент исполняет команду оболочки сам / нет"| ORCH
+    CLIENT -->|"3s · реплика — сначала таблица"| CMDS
+    CMDS -->|"узнала: клиент исполняет сам, без сети и модели; правка — стрелкой M"| CLIENT
+    CLIENT -->|"3 · не узнала — команда агенту"| ORCH
     ORCH -->|"4a"| DSLR
     DSLR -->|"5a · стейт + номер"| ORCH
     ORCH -->|"6"| DUIL
@@ -38,7 +38,7 @@ flowchart LR
     DSLTS -->|"12b · каждая транзакция"| HUB
     HUB -->|"всем подписчикам проекта, автору тоже"| CLIENT
     DB -->|"снимок + хвост"| DSLR
-    ORCH -->|"7b · стадии по ходу работы; команды оболочки — событием shell"| CLIENT
+    ORCH -->|"7b · стадии по ходу работы, итог"| CLIENT
     ORCH -->|"T · трасса команды (POST, X-Internal-Token)"| TR
     TR -->|"таблица traces"| DB
 
@@ -48,7 +48,7 @@ flowchart LR
     classDef svc fill:#ffb08a,stroke:#ff6b3d,color:#14161c
     classDef docsvc fill:#ffd9c2,stroke:#ff6b3d,color:#14161c
     classDef model fill:#5b6270,stroke:#5b6270,color:#fff
-    classDef jev fill:#2f3a4a,stroke:#38d6b0,color:#fff
+    classDef table fill:#2f3a4a,stroke:#38d6b0,color:#fff
     classDef store fill:#38d6b0,stroke:#38d6b0,color:#14161c
     class U,CLIENT human
     class NGINX infra
@@ -56,8 +56,9 @@ flowchart LR
     class DUIL,DSLV svc
     class DSLR,DSLTS,HUB,TR docsvc
     class LLM model
-    class JEV jev
+    class CMDS table
     class DB store
 
-    %% Два процесса: Document service = DSLR + DSLTS + Hub + приём трасс (светлые), Orchestrator = JEV + DUIL + DSLV + LLM-клиент.
+    %% Два процесса: Document service = DSLR + DSLTS + Hub + приём трасс (светлые), Orchestrator = DUIL + DSLV + LLM-клиент.
+    %% Круг 38 (SPEC §13): закрытого классификатора команд оболочки нет — открытая таблица команд живёт в клиенте.
     %% К базе ходит только Document service: DUIL читает библиотеки через DSLR по HTTP (круг 25 — схема приведена к коду).

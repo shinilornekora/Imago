@@ -1,16 +1,23 @@
 /**
- * Imago Studio — словарь оболочки (SPEC §7, §10; круги 23–24).
+ * Imago Studio — таблица команд оболочки и слова оболочки (SPEC §7, §10, §13; круги 23–24, 38).
  *
  * Чистые функции без DOM:
- *   • словарь команд оболочки `shellIntent` — один на клиент (app.js) и сервер (JEV,
- *     server/orchestrator/jev): «отмени два раза», «впиши всё», «покажи второй экран»…;
- *     `shellEventOf`/`shellIntentFromServer` — перевод в событие `shell {action, args}` и обратно;
+ *   • открытая таблица команд оболочки `SHELL_COMMANDS` (круг 38, §13): каждая команда описана
+ *     явно — имя, группа, фразы, слэш-форма, клавиша, аргументы; по ней строятся палитра
+ *     (Ctrl/⌘+K, «/» в строке команд) и справка «Команды». Узнаёт команду `shellIntent` —
+ *     слэш-форму (`/масштаб 150`) точно, естественную фразу («отмени два раза», «впиши всё»)
+ *     целиком. Исполняет команду клиент сам, без сети и без модели; всё, что таблица не
+ *     узнала, — работа агента. Правки команд (дублировать, обернуть в рамку, выровнять детей…)
+ *     собираются здесь операциями ядра и уходят обычной транзакцией;
+ *   • `shellIntentFromServer` — событие `shell {action, args}` старого сервера (совместимость);
  *   • слова серверного агента: где он работает, как назвать стадию, ошибку, вариант.
- * Тесты: test/shell.test.mjs (словарь, одинаковый по обе стороны), test/agent.test.mjs.
+ * Тесты: test/shell*.test.mjs (таблица, слэш-формы, правки), test/agent.test.mjs.
  */
 
 import {
   artboards, isArtboard, subtreeIds, placeholderName,
+  ops as OPS, ancestors, cloneSubtree, resolveLayout, normalizeLayout, uid,
+  scaleSteps, scaleRef, parseScaleRef, resolveScale,
 } from './core.js';
 // круг 25: cutText/cleanText появляются в core параллельно — берём оттуда, если уже есть
 import * as CORE_NS from './core.js';
@@ -163,7 +170,7 @@ export function detachedLostWords(utterance, why = 'restarted') {
 
 /** Стадии §10.3 словами человека — когда сервер не прислал свою подпись. */
 export const STAGE_WORDS = Object.freeze({
-  jev: 'Разбираю запрос',
+  intent: 'Разбираю запрос',
   read: 'Читаю документ',
   library: 'Смотрю библиотеку компонентов',
   llm: 'Думаю над правкой',
@@ -177,7 +184,8 @@ export const STAGE_WORDS = Object.freeze({
  * у brain в браузере свои стадии и своя разметка шагов, и путать их нельзя.
  */
 export function serverStageRec(data = {}) {
-  const key = typeof data.key === 'string' ? data.key : '';
+  // круг 38: первая стадия теперь `intent`; `jev` от сервера прежней версии — она же
+  const key = data.key === 'jev' ? 'intent' : typeof data.key === 'string' ? data.key : '';
   const label = String(data.label || STAGE_WORDS[key] || 'Агент работает').trim();
   const rec = { stage: `srv:${key || 'stage'}`, label };
   if (data.variant != null) rec.variant = data.variant;
@@ -237,9 +245,10 @@ export function retryLabel(waitMs, code = '', extra = null) {
 }
 
 /**
- * Команда оболочки, которую узнал JEV (`shell {action, args}`) → намерение в терминах
- * оболочки (те же `kind`, что у её словаря). Неизвестное — null: оболочка попробует
- * свой словарь и, если и он молчит, скажет об этом.
+ * Событие `shell {action, args}` от сервера прежней версии (до круга 38 сервер сам узнавал
+ * команды оболочки) → намерение в терминах таблицы оболочки (те же `kind`, что у
+ * `shellIntent`). Новый сервер такого события не шлёт; принимаем его ради совместимости
+ * одной версии. Неизвестное — null: оболочка попробует свою таблицу.
  */
 export function shellIntentFromServer(shell) {
   if (!shell || typeof shell !== 'object') return null;
@@ -1258,7 +1267,7 @@ function plural(n, one, few, many) {
   return many;
 }
 
-/* ------------------- словарь оболочки: одна таблица на клиент и сервер ------------------- */
+/* ------------------- естественные фразы команд оболочки (часть таблицы §13) ------------------- */
 /**
  * Человек наблюдает за макетом и говорит. Но переключить видимый артборд, вписать,
  * приблизить, выделить слой, экспортировать, открыть историю голосом было нельзя — всё
@@ -1268,10 +1277,11 @@ function plural(n, one, few, many) {
  * и выбирать её надо словами.
  *
  * Круг 24: словарь вынесен из app.js сюда, без DOM и без состояния оболочки — документ и
- * активная доска приходят аргументом. Его же зовёт JEV на сервере (server/orchestrator/jev):
- * узкой копии там больше нет, и фраза значит одно и то же по обе стороны сети
- * (test/shell.test.mjs). Расширять его новыми формами не нужно (§7) — следующий шаг —
- * классификатор.
+ * активная доска приходят аргументом. Круг 38 (§13): закрытого классификатора «оболочка или
+ * модель» в системе больше нет — ни на сервере, ни в планах. Команды оболочки — открытая
+ * таблица `SHELL_COMMANDS` ниже: её видит человек (палитра, справка «Команды»), её фразы и
+ * слэш-формы узнаёт `shellIntent`, исполняет клиент. Копий регулярок нет ни в app.js, ни на
+ * сервере (test/shell.test.mjs).
  */
 
 /** Реплика в один вид: без знаков, в нижнем регистре, одиночные пробелы. */
@@ -1433,9 +1443,11 @@ const RE_PREVIEW_OFF = /^(?:выйди|выйти|выход|выходи) из 
  * Правила узкие нарочно: «покажи сводку недели» — переключение (артборд с таким именем
  * есть), «добавь сводку недели» — работа для модели.
  *
- * Круг 24: один словарь на клиент и на JEV сервера (SPEC §7, §10.5). Без документа
- * (`ctx.doc` нет — так зовёт JEV) формы, которым нужны имена слоёв и досок, молчат:
- * их оболочка узнаёт сама до сети. Номер и «следующая доска» документа не требуют.
+ * Круг 38 (§13): слэш-форма (`/масштаб 150`, `/zoom 150`, `/выровнять влево`) разбирается
+ * точно по таблице `SHELL_COMMANDS`; незнакомое имя после «/» — тоже команда оболочки
+ * (`slash-unknown`), агенту она не уходит. Без документа (`ctx.doc` нет —
+ * `isShellCommandText`) естественные формы, которым нужны имена слоёв и досок, молчат.
+ * Номер и «следующая доска» документа не требуют.
  *
  * @param {string} said реплика
  * @param {{doc?: object|null, activeArtboardId?: string|null}} [ctx]
@@ -1444,6 +1456,8 @@ const RE_PREVIEW_OFF = /^(?:выйди|выйти|выход|выходи) из 
 export function shellIntent(said, ctx = {}) {
   const doc = ctx && ctx.doc && ctx.doc.nodes ? ctx.doc : null;
   const activeId = ctx && ctx.activeArtboardId ? ctx.activeArtboardId : null;
+  // круг 38: слэш-форма — точная и предсказуемая, раньше всех естественных фраз
+  if (/^\s*\//.test(String(said || ''))) return slashIntent(said, { doc, activeId });
   const t = normSaid(said);
   if (!t || t.length > 140) return null;
 
@@ -1474,6 +1488,10 @@ export function shellIntent(said, ctx = {}) {
   if (RE_THEME_AUTO.test(t)) return { kind: 'theme', mode: 'auto' };
   if (RE_THEME_UI.test(t)) return { kind: 'theme', mode: 'cycle' };
   if (RE_THEME_ASK.test(t)) return { kind: 'theme', mode: 'ask' };
+
+  /* — круг 38 (§13): новые команды таблицы — целиковые фразы, без модели — */
+  const fresh = naturalIntent(t, said);
+  if (fresh) return fresh;
 
   /* — отмена и возврат, в том числе «отмени два раза» — */
   if (RE_UNDO_BARE.test(t)) return { kind: 'undo', times: 1 };
@@ -1581,8 +1599,9 @@ export function shellIntent(said, ctx = {}) {
 }
 
 /**
- * Намерение оболочки → событие `shell {action, args}` (§10.3, §10.5). Обратное —
- * `shellIntentFromServer`; круг туда-обратно возвращает то же намерение (тест сверяет).
+ * Намерение оболочки → событие `shell {action, args}` в форме сервера прежней версии
+ * (совместимость, §10.5). Обратное — `shellIntentFromServer`; круг туда-обратно возвращает
+ * то же намерение (тест сверяет).
  * @param {{kind: string}} intent
  * @returns {{action: string, args: object}|null}
  */
@@ -1590,6 +1609,874 @@ export function shellEventOf(intent) {
   if (!intent || typeof intent !== 'object' || !intent.kind) return null;
   const { kind, ...args } = intent;
   return { action: kind, args };
+}
+
+/* ================= круг 38 (SPEC §13): открытая таблица команд оболочки ================= */
+/*
+ * Решение руководителя: закрытого классификатора «оболочка или модель» в системе нет.
+ * Вместо него — большой ЯВНЫЙ набор команд оболочки: каждая описана здесь одной записью,
+ * её видно человеку (палитра Ctrl/⌘+K и «/», справка «Команды»), её исполняет клиент сам —
+ * без сети и без модели. Всё, что таблица не узнала, — работа агента.
+ *
+ * Запись: {id, group, title, hint, slash:[имена после «/»], phrases:[примеры фраз],
+ *   keys?, args?:[{name, kind:'number'|'text'|'enum', values?, optional?}], edit,
+ *   needs?:'selection', example?:'/слэш аргументы', bare?, byAgent?, inPalette?}
+ *   edit — команда меняет документ (обычная транзакция, отмена одним шагом);
+ *   needs — без выделения не выполняется: честная подсказка, агенту не уходит;
+ *   bare — у команды с необязательным аргументом есть смысл и без него (строка палитры);
+ *   byAgent — фразы этой команды понимает агент (варианты считает модель), палитра и
+ *   слэш-форма запускают их напрямую.
+ */
+
+/** Группы справки и палитры — в этом порядке. */
+export const SHELL_GROUPS = Object.freeze(['Вид', 'Выделение', 'Правка', 'Доски', 'Панели', 'Файл', 'История', 'Агент', 'Справка']);
+
+const ON_OFF = ['вкл', 'выкл'];
+const SHOW_HIDE = ['показать', 'скрыть'];
+const ALIGN_VALUES = ['влево', 'по центру', 'вправо', 'вверх', 'вниз', 'растянуть'];
+
+const deepFreeze = (list) => Object.freeze(list.map((c) => Object.freeze({
+  ...c,
+  slash: Object.freeze([...(c.slash || [])]),
+  phrases: Object.freeze([...(c.phrases || [])]),
+  ...(c.args ? { args: Object.freeze(c.args.map((a) => Object.freeze({ ...a, ...(a.values ? { values: Object.freeze([...a.values]) } : {}) }))) } : {}),
+  edit: !!c.edit,
+})));
+
+/** Все команды оболочки. Порядок внутри группы — порядок в палитре и справке. */
+export const SHELL_COMMANDS = deepFreeze([
+  /* — Вид — */
+  { id: 'zoom', group: 'Вид', title: 'Масштаб', hint: 'Масштаб холста в процентах, от 10 до 600', slash: ['масштаб', 'zoom', 'зум'], args: [{ name: 'проценты', kind: 'number' }], example: '/масштаб 150', phrases: ['масштаб 150%', 'зум 200'] },
+  { id: 'zoom-in', group: 'Вид', title: 'Крупнее', hint: 'Приблизить холст на шаг', slash: ['крупнее', 'zoom-in'], phrases: ['приблизь', 'увеличь масштаб'] },
+  { id: 'zoom-out', group: 'Вид', title: 'Мельче', hint: 'Отдалить холст на шаг', slash: ['мельче', 'zoom-out'], phrases: ['отдали', 'уменьши масштаб'] },
+  { id: 'zoom-reset', group: 'Вид', title: 'Масштаб 100 %', hint: 'Реальный размер', slash: ['100', 'сто'], phrases: ['сто процентов', 'реальный размер'] },
+  { id: 'fit', group: 'Вид', title: 'Вписать', hint: 'Как кнопка «Вписать»: доску или всё — по обстановке', slash: ['вписать', 'fit'], phrases: ['впиши', 'вписать в окно'] },
+  { id: 'fit-all', group: 'Вид', title: 'Вписать всё', hint: 'Показать все доски разом', slash: ['вписать всё', 'всё', 'fit all'], phrases: ['впиши всё', 'покажи всё', 'общий вид'] },
+  { id: 'fit-board', group: 'Вид', title: 'Вписать доску', hint: 'Показать активную доску целиком', slash: ['вписать доску', 'fit board'], phrases: ['впиши доску', 'покажи эту доску'] },
+  { id: 'fit-selection', group: 'Вид', title: 'Вписать выделенное', hint: 'Приблизить к выделенным слоям', slash: ['вписать выделенное', 'к выделенному', 'fit selection'], phrases: ['впиши выделенное', 'покажи выделенное', 'приблизь к выделенному'], needs: 'selection' },
+  { id: 'preview', group: 'Вид', title: 'Режим просмотра', hint: 'Наведение и нажатие на холсте проигрывают состояния', slash: ['просмотр', 'preview'], keys: 'P', args: [{ name: 'режим', kind: 'enum', values: ON_OFF, optional: true }], example: '/просмотр вкл', phrases: ['просмотр', 'выйди из просмотра'] },
+  { id: 'theme', group: 'Вид', title: 'Тема интерфейса', hint: 'Тёмная, светлая или как в системе; без слова — следующая', slash: ['тема', 'theme'], args: [{ name: 'какая', kind: 'enum', values: ['тёмная', 'светлая', 'системная'], optional: true }], bare: true, example: '/тема тёмная', phrases: ['тёмная тема интерфейса', 'светлый интерфейс', 'как в системе'] },
+
+  /* — Выделение — */
+  { id: 'select-all', group: 'Выделение', title: 'Выделить всё на доске', hint: 'Верхние слои активной доски, кроме скрытых и запертых', slash: ['выделить всё', 'select all'], keys: '⌘A', phrases: ['выдели всё', 'выбери всё на доске'] },
+  { id: 'deselect', group: 'Выделение', title: 'Снять выделение', hint: '', slash: ['снять выделение', 'снять', 'deselect'], keys: 'Esc', phrases: ['сними выделение', 'убери выделение'] },
+  { id: 'select-parent', group: 'Выделение', title: 'Выделить родителя', hint: 'Рамку, в которой лежит выделенный слой', slash: ['родитель', 'parent'], phrases: ['выдели родителя', 'на уровень выше'], needs: 'selection' },
+  { id: 'select-children', group: 'Выделение', title: 'Выделить детей', hint: 'Слои внутри выделенной рамки', slash: ['дети', 'children'], phrases: ['выдели детей', 'на уровень ниже'], needs: 'selection' },
+  { id: 'select-next', group: 'Выделение', title: 'Следующий сосед', hint: 'Следующий слой в том же родителе', slash: ['следующий', 'next'], phrases: ['следующий слой', 'выдели следующий'], needs: 'selection' },
+  { id: 'select-prev', group: 'Выделение', title: 'Предыдущий сосед', hint: 'Предыдущий слой в том же родителе', slash: ['предыдущий', 'prev'], phrases: ['предыдущий слой', 'выдели предыдущий'], needs: 'selection' },
+  { id: 'select-name', group: 'Выделение', title: 'Выделить по имени', hint: 'Слой, чьё имя похоже на сказанное', slash: ['выделить', 'select'], args: [{ name: 'имя', kind: 'text' }], example: '/выделить заголовок', phrases: ['выдели заголовок экрана'] },
+
+  /* — Правка: обычные транзакции, отмена одним шагом — */
+  { id: 'delete', group: 'Правка', title: 'Удалить', hint: 'Удалить выделенные слои', slash: ['удалить', 'delete'], keys: 'Del', phrases: ['удали выделенное', 'удалить выбранное'], edit: true, needs: 'selection' },
+  { id: 'duplicate', group: 'Правка', title: 'Дублировать', hint: 'Копия рядом с оригиналом', slash: ['дублировать', 'копия', 'duplicate'], keys: '⌘D', phrases: ['дублируй', 'сделай копию'], edit: true, needs: 'selection' },
+  { id: 'rename', group: 'Правка', title: 'Переименовать', hint: 'Новое имя выделенного слоя', slash: ['переименовать', 'имя', 'rename'], args: [{ name: 'новое имя', kind: 'text' }], example: '/переименовать Шапка', phrases: ['переименуй в «Шапка»'], edit: true, needs: 'selection' },
+  { id: 'hide', group: 'Правка', title: 'Скрыть', hint: 'Сделать слой невидимым — он остаётся в списке слоёв', slash: ['скрыть', 'hide'], phrases: ['скрой выделенное', 'сделай невидимым'], edit: true, needs: 'selection' },
+  { id: 'show', group: 'Правка', title: 'Показать', hint: 'Вернуть видимость скрытому слою', slash: ['показать', 'show'], phrases: ['сделай видимым', 'верни видимость'], edit: true, needs: 'selection' },
+  { id: 'lock', group: 'Правка', title: 'Закрепить', hint: 'Запереть слой: на холсте его не выделить и не сдвинуть, только в списке слоёв', slash: ['закрепить', 'запереть', 'lock'], phrases: ['закрепи', 'запри'], edit: true, needs: 'selection' },
+  { id: 'unlock', group: 'Правка', title: 'Открепить', hint: 'Снять замок со слоя', slash: ['открепить', 'отпереть', 'unlock'], phrases: ['открепи', 'отопри'], edit: true, needs: 'selection' },
+  { id: 'raise', group: 'Правка', title: 'Поднять в порядке', hint: 'На место раньше среди соседей — выше в списке слоёв', slash: ['выше', 'поднять', 'up'], phrases: ['подними', 'выше в списке'], edit: true, needs: 'selection' },
+  { id: 'lower', group: 'Правка', title: 'Опустить в порядке', hint: 'На место позже среди соседей — ниже в списке слоёв', slash: ['ниже', 'опустить', 'down'], phrases: ['опусти', 'ниже в списке'], edit: true, needs: 'selection' },
+  { id: 'to-start', group: 'Правка', title: 'В начало', hint: 'Первым среди соседей', slash: ['в начало', 'first'], phrases: ['перемести в начало', 'поставь первым'], edit: true, needs: 'selection' },
+  { id: 'to-end', group: 'Правка', title: 'В конец', hint: 'Последним среди соседей', slash: ['в конец', 'last'], phrases: ['перемести в конец', 'поставь последним'], edit: true, needs: 'selection' },
+  { id: 'wrap', group: 'Правка', title: 'Обернуть в рамку', hint: 'Сгруппировать выделенных соседей в новую рамку', slash: ['обернуть', 'группа', 'group'], keys: '⌘G', phrases: ['оберни в рамку', 'сгруппируй'], edit: true, needs: 'selection' },
+  { id: 'ungroup', group: 'Правка', title: 'Разгруппировать', hint: 'Достать детей из рамки и убрать саму рамку', slash: ['разгруппировать', 'ungroup'], keys: '⇧⌘G', phrases: ['разгруппируй', 'разбери группу'], edit: true, needs: 'selection' },
+  { id: 'align', group: 'Правка', title: 'Выровнять детей', hint: 'Как стоят дети в выделенной рамке', slash: ['выровнять', 'align'], args: [{ name: 'как', kind: 'enum', values: ALIGN_VALUES }], example: '/выровнять влево', phrases: ['выровняй детей по центру', 'выровнять содержимое влево'], edit: true, needs: 'selection' },
+  { id: 'direction', group: 'Правка', title: 'Направление', hint: 'Дети рамки — строкой или колонкой', slash: ['направление', 'поток', 'direction'], args: [{ name: 'как', kind: 'enum', values: ['строка', 'колонка'] }], example: '/направление строка', phrases: ['расположи в строку', 'в колонку'], edit: true, needs: 'selection' },
+  { id: 'gap-more', group: 'Правка', title: 'Зазор больше', hint: 'Зазор между детьми рамки — на шаг шкалы отступов больше', slash: ['зазор больше', 'зазор+', 'gap+'], phrases: ['увеличь зазор', 'зазор больше'], edit: true, needs: 'selection' },
+  { id: 'gap-less', group: 'Правка', title: 'Зазор меньше', hint: 'Зазор между детьми рамки — на шаг шкалы отступов меньше', slash: ['зазор меньше', 'зазор-', 'gap-'], phrases: ['уменьши зазор', 'зазор меньше'], edit: true, needs: 'selection' },
+
+  /* — Доски — */
+  { id: 'board', group: 'Доски', title: 'К доске', hint: 'Доска по номеру или имени — с ней работает агент', slash: ['доска', 'board'], args: [{ name: 'номер или имя', kind: 'text' }], example: '/доска 2', phrases: ['покажи второй экран', 'открой маршрут дня'] },
+  { id: 'board-next', group: 'Доски', title: 'Следующая доска', hint: '', slash: ['следующая доска', 'next board'], phrases: ['покажи следующую доску'] },
+  { id: 'board-prev', group: 'Доски', title: 'Предыдущая доска', hint: '', slash: ['предыдущая доска', 'prev board'], phrases: ['вернись на предыдущий', 'покажи предыдущую доску'] },
+
+  /* — Панели — */
+  { id: 'layers', group: 'Панели', title: 'Слои', hint: 'Панель слоёв слева', slash: ['слои', 'layers'], keys: 'L', args: [{ name: 'как', kind: 'enum', values: SHOW_HIDE, optional: true }], example: '/слои скрыть', phrases: ['покажи слои', 'спрячь слои'] },
+  { id: 'inspector', group: 'Панели', title: 'Инспектор', hint: 'Свойства выделенного слоя справа', slash: ['инспектор', 'inspector'], args: [{ name: 'как', kind: 'enum', values: SHOW_HIDE, optional: true }], example: '/инспектор скрыть', phrases: ['покажи инспектор', 'скрой инспектор'] },
+  { id: 'history', group: 'Панели', title: 'История правок', hint: 'Все правки с отменой до любой из них', slash: ['история', 'history'], keys: 'H', phrases: ['история', 'что менялось'] },
+  { id: 'chat', group: 'Панели', title: 'Диалог с агентом', hint: 'Что вы сказали и что ответил агент', slash: ['диалог', 'chat'], phrases: ['покажи диалог', 'переписка'] },
+  { id: 'scales', group: 'Панели', title: 'Шкалы и токены', hint: 'Шаги отступов и скруглений документа', slash: ['шкалы', 'токены', 'scales'], phrases: ['шкалы', 'покажи токены'] },
+  { id: 'settings', group: 'Панели', title: 'Настройки агента', hint: '', slash: ['настройки', 'settings'], phrases: ['настройки', 'открой настройки'] },
+
+  /* — Файл — */
+  { id: 'export', group: 'Файл', title: 'Экспорт', hint: 'SVG, PNG или JSON; без формата — окно экспорта', slash: ['экспорт', 'export'], args: [{ name: 'формат', kind: 'enum', values: ['svg', 'png', 'json'], optional: true }], bare: true, example: '/экспорт png', phrases: ['экспорт png', 'экспортируй в svg'] },
+  { id: 'import', group: 'Файл', title: 'Импорт JSON', hint: 'Открыть документ из файла', slash: ['импорт', 'import'], phrases: ['импорт', 'импортируй файл'] },
+  { id: 'new-board', group: 'Файл', title: 'Новая доска', hint: 'Пустая доска рядом с остальными', slash: ['новая доска', 'new board'], phrases: ['новая доска', 'пустая доска'] },
+
+  /* — История — */
+  { id: 'undo', group: 'История', title: 'Отменить', hint: 'Последнюю правку или несколько', slash: ['отменить', 'отмена', 'undo'], keys: '⌘Z', args: [{ name: 'сколько', kind: 'number', optional: true }], bare: true, example: '/отменить 3', phrases: ['отмени', 'отмени три раза'] },
+  { id: 'redo', group: 'История', title: 'Повторить', hint: 'Вернуть отменённое', slash: ['повторить', 'redo'], keys: '⇧⌘Z', args: [{ name: 'сколько', kind: 'number', optional: true }], bare: true, example: '/повторить 2', phrases: ['верни обратно', 'вперёд два раза'] },
+
+  /* — Агент — */
+  { id: 'stop', group: 'Агент', title: 'Стоп', hint: 'Остановить работу агента', slash: ['стоп', 'stop'], phrases: ['стоп', 'хватит'] },
+  { id: 'variants', group: 'Агент', title: 'Три варианта', hint: 'Три варианта последней команды — их считает агент', slash: ['варианты', 'variants'], phrases: ['три варианта', 'покажи варианты'], byAgent: true },
+  { id: 'variants-close', group: 'Агент', title: 'Закрыть варианты', hint: 'Макет остаётся прежним', slash: ['закрыть варианты'], phrases: ['закрой варианты', 'ни один не подходит'] },
+
+  /* — Справка — */
+  { id: 'help', group: 'Справка', title: 'Команды', hint: 'Справка: все команды оболочки по группам', slash: ['помощь', 'команды', 'help', '?'], phrases: ['команды', 'что ты умеешь'] },
+  { id: 'palette', group: 'Справка', title: 'Палитра команд', hint: 'Поиск команды по названию, «/» или фразе', slash: [], keys: '⌘K', phrases: [], inPalette: false },
+]);
+
+const CMD_BY_ID = new Map(SHELL_COMMANDS.map((c) => [c.id, c]));
+
+/** Запись таблицы по id. */
+export function shellCommand(id) {
+  return CMD_BY_ID.get(id) || null;
+}
+
+/** Ключ слэш-имени: нижний регистр, «ё» как «е», одиночные пробелы. */
+function slashKey(s) {
+  return String(s == null ? '' : s).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+}
+
+/* Слэш-имена: длинные раньше коротких — «/вписать всё» не должно стать «/вписать» с хвостом. */
+const SLASH_NAMES = SHELL_COMMANDS
+  .flatMap((c) => c.slash.map((name) => ({ key: slashKey(name), name, cmd: c })))
+  .sort((a, b) => b.key.length - a.key.length);
+
+/** Главная слэш-форма команды: «/масштаб». */
+export function slashOf(cmd) {
+  const c = typeof cmd === 'string' ? CMD_BY_ID.get(cmd) : cmd;
+  return c && c.slash.length ? `/${c.slash[0]}` : '';
+}
+
+/** Что сказать, когда аргумент негоден: пример из таблицы. */
+function usageOf(cmd) {
+  if (cmd.example) return `Например: ${cmd.example}`;
+  const a = cmd.args && cmd.args[0];
+  if (a && a.values) return `Например: /${cmd.slash[0]} ${a.values[0]}`;
+  return `Например: /${cmd.slash[0]}`;
+}
+
+const bad = (cmd, say) => ({ kind: 'slash-bad', id: cmd.id, say, usage: usageOf(cmd) });
+
+/** Число аргумента: «150», «150%», «150 %», «три». */
+function argNum(rest) {
+  const s = slashKey(rest).replace(/\s*%$/, '').replace(/\s*процент[а-яё]*$/, '');
+  if (/^\d{1,4}$/.test(s)) return Number(s);
+  const n = numSaid(s);
+  return n == null ? null : n;
+}
+
+/** Значение перечня по словам аргумента; null — не узнали. */
+function argPick(rest, table) {
+  const s = slashKey(rest);
+  for (const [value, re] of table) if (re.test(s)) return value;
+  return null;
+}
+
+const ON_WORDS = [[true, /^(вкл|включить|включи|on|да|показать|покажи|открыть|открой)$/], [false, /^(выкл|выключить|выключи|off|нет|скрыть|скрой|спрятать|спрячь|закрыть|закрой)$/]];
+const ALIGN_WORDS = [
+  ['left', /^(влево|слева|лево|left|по левому краю|по левому)$/],
+  ['center', /^(по центру|центр|в центр|посередине|center|middle)$/],
+  ['right', /^(вправо|справа|право|right|по правому краю|по правому)$/],
+  ['top', /^(вверх|сверху|верх|top|по верху|по верхнему краю)$/],
+  ['bottom', /^(вниз|снизу|низ|bottom|по низу|по нижнему краю)$/],
+  ['stretch', /^(растянуть|растяни|растянуто|stretch|во всю ширину|по ширине)$/],
+];
+const DIRECTION_WORDS = [['row', /^(строка|строкой|в строку|ряд|row|горизонтально)$/], ['column', /^(колонка|колонкой|в колонку|столбец|column|вертикально)$/]];
+const THEME_WORDS = [['dark', /^(т[её]мн[а-я]*|dark)$/], ['light', /^(светлая|светл[а-я]*|light)$/], ['auto', /^(системная|как в системе|авто|auto|system)$/]];
+const EXPORT_WORDS = [['svg', /^(svg|свг|вектор[а-я]*)$/], ['png', /^(png|пнг|картинк[а-я]*|изображение)$/], ['json', /^(json|джейсон|документ)$/]];
+/** Слова выравнивания для фраз и подписей правки. */
+export const ALIGN_HOW_WORDS = Object.freeze({ left: 'влево', center: 'по центру', right: 'вправо', top: 'вверх', bottom: 'вниз', stretch: 'растянуть' });
+
+/** Намерение по записи таблицы без аргументов (id → то, что исполняет оболочка). */
+const PLAIN_INTENTS = {
+  'zoom-in': () => ({ kind: 'zoom', by: 1.25 }),
+  'zoom-out': () => ({ kind: 'zoom', by: 1 / 1.25 }),
+  'zoom-reset': () => ({ kind: 'zoom', to: 1 }),
+  fit: () => ({ kind: 'fit' }),
+  'fit-all': () => ({ kind: 'fit', all: true }),
+  'fit-board': () => ({ kind: 'fit', all: false }),
+  'fit-selection': () => ({ kind: 'fit-selection' }),
+  'select-all': () => ({ kind: 'select-all' }),
+  deselect: () => ({ kind: 'select', ids: [] }),
+  'select-parent': () => ({ kind: 'select-rel', rel: 'parent' }),
+  'select-children': () => ({ kind: 'select-rel', rel: 'children' }),
+  'select-next': () => ({ kind: 'select-rel', rel: 'next' }),
+  'select-prev': () => ({ kind: 'select-rel', rel: 'prev' }),
+  delete: () => ({ kind: 'delete' }),
+  duplicate: () => ({ kind: 'duplicate' }),
+  hide: () => ({ kind: 'visible', on: false }),
+  show: () => ({ kind: 'visible', on: true }),
+  lock: () => ({ kind: 'lock', on: true }),
+  unlock: () => ({ kind: 'lock', on: false }),
+  raise: () => ({ kind: 'order', to: 'up' }),
+  lower: () => ({ kind: 'order', to: 'down' }),
+  'to-start': () => ({ kind: 'order', to: 'first' }),
+  'to-end': () => ({ kind: 'order', to: 'last' }),
+  wrap: () => ({ kind: 'wrap' }),
+  ungroup: () => ({ kind: 'ungroup' }),
+  'gap-more': () => ({ kind: 'gap', step: 1 }),
+  'gap-less': () => ({ kind: 'gap', step: -1 }),
+  'board-next': () => ({ kind: 'artboard', step: 1 }),
+  'board-prev': () => ({ kind: 'artboard', step: -1 }),
+  history: () => ({ kind: 'sheet', what: 'history', tab: 'edits' }),
+  chat: () => ({ kind: 'sheet', what: 'history', tab: 'chat' }),
+  scales: () => ({ kind: 'sheet', what: 'scales' }),
+  settings: () => ({ kind: 'sheet', what: 'settings' }),
+  import: () => ({ kind: 'import' }),
+  'new-board': () => ({ kind: 'new-board' }),
+  stop: () => ({ kind: 'stop' }),
+  variants: () => ({ kind: 'variants' }),
+  'variants-close': () => ({ kind: 'variants-close' }),
+  help: () => ({ kind: 'help' }),
+};
+
+/** Разбор аргументов у команд, которым они нужны: (хвост, хвост как набран, ctx) → намерение. */
+const SLASH_ARGS = {
+  zoom(rest, raw, ctx, cmd) {
+    const n = argNum(rest);
+    if (n == null) return bad(cmd, 'Масштаб — числом в процентах');
+    if (n < 10 || n > 600) return bad(cmd, 'Масштаб — от 10 до 600 %');
+    return { kind: 'zoom', to: n / 100 };
+  },
+  preview(rest, raw, ctx, cmd) {
+    if (!rest) return { kind: 'preview', on: true };
+    const on = argPick(rest, ON_WORDS);
+    return on == null ? bad(cmd, 'Просмотр: «вкл» или «выкл»') : { kind: 'preview', on };
+  },
+  theme(rest, raw, ctx, cmd) {
+    if (!rest) return { kind: 'theme', mode: 'cycle' };
+    const mode = argPick(rest, THEME_WORDS);
+    return mode ? { kind: 'theme', mode } : bad(cmd, 'Тема: тёмная, светлая или системная');
+  },
+  'select-name'(rest, raw, ctx, cmd) {
+    if (!rest) return bad(cmd, 'Скажите, какой слой выделить');
+    if (!ctx.doc) return { kind: 'select-name', name: cleanText(raw) };
+    const hits = nodesByName(ctx.doc, rest, { activeId: ctx.activeId });
+    if (!hits.length) return bad(cmd, `Слоя «${cutText(cleanText(raw), 40, { ellipsis: true })}» не нашёл`);
+    const best = hits[0].score;
+    const same = hits.filter((h) => h.score >= best - 0.01).slice(0, 12);
+    return { kind: 'select', ids: same.map((h) => h.id), name: same[0].node.name || placeholderName(ctx.doc, same[0].node) };
+  },
+  rename(rest, raw, ctx, cmd) {
+    const name = renameValue(raw);
+    return name ? { kind: 'rename', name } : bad(cmd, 'Скажите новое имя');
+  },
+  align(rest, raw, ctx, cmd) {
+    const how = argPick(rest, ALIGN_WORDS);
+    return how ? { kind: 'align', how } : bad(cmd, 'Выровнять: влево, по центру, вправо, вверх, вниз или растянуть');
+  },
+  direction(rest, raw, ctx, cmd) {
+    const mode = argPick(rest, DIRECTION_WORDS);
+    return mode ? { kind: 'direction', mode } : bad(cmd, 'Направление: строка или колонка');
+  },
+  board(rest, raw, ctx, cmd) {
+    if (!rest) return bad(cmd, 'Скажите номер доски или её имя');
+    const n = argNum(rest);
+    if (n != null && /^\d+$|^[а-яё]+$/.test(slashKey(rest)) && n >= 1) return { kind: 'artboard', index: n - 1 };
+    if (!ctx.doc) return { kind: 'artboard', name: cleanText(raw) };
+    const hits = artboardsByName(ctx.doc, rest);
+    if (hits.length === 1) return { kind: 'artboard', id: hits[0].id };
+    if (hits.length > 1) return { kind: 'artboard', list: hits.map((a) => a.id) };
+    return bad(cmd, `Доски «${cutText(cleanText(raw), 40, { ellipsis: true })}» нет`);
+  },
+  layers(rest, raw, ctx, cmd) {
+    if (!rest) return { kind: 'rail', on: true };
+    const on = argPick(rest, ON_WORDS);
+    return on == null ? bad(cmd, 'Слои: «показать» или «скрыть»') : { kind: 'rail', on };
+  },
+  inspector(rest, raw, ctx, cmd) {
+    if (!rest) return { kind: 'inspector', on: true };
+    const on = argPick(rest, ON_WORDS);
+    return on == null ? bad(cmd, 'Инспектор: «показать» или «скрыть»') : { kind: 'inspector', on };
+  },
+  export(rest, raw, ctx, cmd) {
+    if (!rest) return { kind: 'export', what: '' };
+    const what = argPick(rest, EXPORT_WORDS);
+    return what ? { kind: 'export', what } : bad(cmd, 'Экспорт: svg, png или json');
+  },
+  undo(rest, raw, ctx, cmd) {
+    if (!rest) return { kind: 'undo', times: 1 };
+    const n = argNum(rest);
+    return n ? { kind: 'undo', times: Math.max(1, Math.min(20, n)) } : bad(cmd, 'Сколько правок отменить — числом');
+  },
+  redo(rest, raw, ctx, cmd) {
+    if (!rest) return { kind: 'redo', times: 1 };
+    const n = argNum(rest);
+    return n ? { kind: 'redo', times: Math.max(1, Math.min(20, n)) } : bad(cmd, 'Сколько правок вернуть — числом');
+  },
+};
+
+/** Новое имя из «в «Шапка»», «"Шапка"», «Шапка»: без кавычек и краёв, не длиннее 120. */
+function renameValue(raw) {
+  let s = cleanText(raw);
+  const q = /^[«"“„'](.*)[»"”“']$/.exec(s);
+  if (q) s = q[1].trim();
+  return cutText(s, 120);
+}
+
+/**
+ * Слэш-форма → намерение. Имя ищется по таблице (длинные раньше), хвост — аргументы.
+ * Незнакомое имя — `slash-unknown`: это команда оболочки, только такой нет.
+ * @returns {object} намерение; не бывает null — «/» уже сказал, что это команда редактора
+ */
+function slashIntent(said, { doc = null, activeId = null } = {}) {
+  const rawBody = String(said || '').replace(/^\s*\/+/, '').trim();
+  const body = slashKey(rawBody);
+  if (!body) return { kind: 'palette' };
+  const hit = SLASH_NAMES.find((s) => body === s.key || body.startsWith(`${s.key} `));
+  if (!hit) return { kind: 'slash-unknown', name: cutText(cleanText(rawBody.split(/\s+/)[0]), 40, { ellipsis: true }) };
+  const cmd = hit.cmd;
+  const words = hit.key.split(' ').length;
+  const raw = rawBody.split(/\s+/).slice(words).join(' ');
+  const rest = slashKey(raw);
+  const parse = SLASH_ARGS[cmd.id];
+  if (parse) return parse(rest, raw, { doc, activeId }, cmd);
+  if (cmd.id === 'palette') return { kind: 'palette' };
+  // у команды без аргументов хвост — ошибка набора, а не «сделай что-то ещё»
+  if (rest) return bad(cmd, `У команды ${slashOf(cmd)} нет аргументов`);
+  return PLAIN_INTENTS[cmd.id] ? PLAIN_INTENTS[cmd.id]() : { kind: 'slash-unknown', name: cmd.slash[0] };
+}
+
+/* Естественные фразы новых команд (круг 38). Только целиковые: «удали выделенное» — команда,
+   «удали шапку» — работа агента. Порядок важен: раньше выделения по имени и показа доски. */
+const NATURAL = [
+  ['select-all', /^(?:выдели|выделить|выделите|выбери|выбрать) вс[её](?: на доске| на экране| слои)?$/],
+  ['select-parent', /^(?:(?:выдели|выделить|выбери|выбрать) родител[а-яё]*|к родителю|(?:на )?уровень выше)$/],
+  ['select-children', /^(?:(?:выдели|выделить|выбери|выбрать) (?:детей|дочерние|дочерних|вложенные|содержимое)|(?:на )?уровень ниже)$/],
+  ['select-next', /^(?:следующий (?:слой|сосед|элемент)|(?:выдели|выбери) следующий(?: слой)?)$/],
+  ['select-prev', /^(?:предыдущий (?:слой|сосед|элемент)|(?:выдели|выбери) предыдущий(?: слой)?)$/],
+  ['fit-selection', /^(?:впиши|вписать|покажи|показать) выделенное$|^(?:приблизь|приблизить) к выделенному$|^к выделенному$/],
+  ['delete', /^(?:удали|удалить|удалите) (?:выделенное|выделенные|выбранное|выбранные)$/],
+  ['duplicate', /^(?:дублируй|дублировать|продублируй|продублировать|дубль|(?:сделай|создай|сделать) копию|дублируй выделенное)$/],
+  ['hide', /^(?:(?:скрой|скрыть|спрячь|спрятать) (?:выделенное|выбранное|это)|сделай невидимым|сделай невидимыми|сделать невидимым)$/],
+  ['show', /^(?:сделай видимым|сделай видимыми|сделать видимым|верни видимость|(?:покажи|показать) скрытое)$/],
+  ['lock', /^(?:закрепи|закрепить|запри|запереть|заблокируй|заблокировать)(?: выделенное| это| слой)?$/],
+  ['unlock', /^(?:открепи|открепить|отопри|отпереть|разблокируй|разблокировать)(?: выделенное| это| слой)?$/],
+  ['raise', /^(?:подними|поднять|подними выше|выше в списке|на место раньше|раньше в порядке|подними в порядке)$/],
+  ['lower', /^(?:опусти|опустить|опусти ниже|ниже в списке|на место позже|позже в порядке|опусти в порядке)$/],
+  ['to-start', /^(?:в начало|(?:перемести|переставь|поставь) в начало|(?:поставь|сделай) первым)$/],
+  ['to-end', /^(?:в конец|(?:перемести|переставь|поставь) в конец|(?:поставь|сделай) последним)$/],
+  ['wrap', /^(?:(?:оберни|обернуть|заверни|завернуть|объедини|объединить) в рамку|сгруппируй|сгруппировать|в группу)$/],
+  ['ungroup', /^(?:разгруппируй|разгруппировать|(?:разбери|разобрать) группу)$/],
+  ['gap-more', /^(?:увеличь|увеличить|прибавь) зазор$|^зазор (?:больше|шире)$|^больше зазор$/],
+  ['gap-less', /^(?:уменьши|уменьшить|убавь) зазор$|^зазор (?:меньше|уже)$|^меньше зазор$/],
+  ['inspector', /^(?:(?:покажи|открой|показать|открыть) )?инспектор$/, () => ({ kind: 'inspector', on: true })],
+  ['inspector', /^(?:скрой|скрыть|спрячь|спрятать|закрой|закрыть|убери|сверни) инспектор$/, () => ({ kind: 'inspector', on: false })],
+  ['scales', /^(?:(?:покажи|открой|показать|открыть) )?(?:шкалы|токены|шкалы отступов)$/],
+  ['import', /^(?:импорт|импортировать|импортируй)(?: файл| json| документ)?$|^(?:загрузи|загрузить) файл$/],
+  ['help', /^(?:команды|какие есть команды|список команд|(?:покажи|открой) команды|что ты умеешь|что умеешь|что ты можешь|помощь|справка)$/],
+];
+
+/** Направление и выравнивание детей — с аргументом внутри фразы. */
+const RE_DIRECTION = /^(?:(?:расположи|расположить|поставь|сделай|выстрой|перестрой)\s+)?(в строку|строкой|в колонку|колонкой|в столбец)$/;
+const RE_ALIGN_KIDS = /^(?:выровняй|выровнять)\s+(?:детей|содержимое|вложенные|дочерние)\s+(.+)$/;
+const RE_RENAME = /^\s*(?:переименуй|переименовать|переименуйте)(?:\s+(?:слой|это|выделенное|его|её))?\s+в\s+(.+?)\s*$/i;
+
+/** Новые фразы таблицы → намерение; null — не они. */
+function naturalIntent(t, said) {
+  for (const [id, re, make] of NATURAL) {
+    if (re.test(t)) return make ? make() : PLAIN_INTENTS[id]();
+  }
+  const dir = RE_DIRECTION.exec(t);
+  if (dir) return { kind: 'direction', mode: /строк/.test(dir[1]) ? 'row' : 'column' };
+  const al = RE_ALIGN_KIDS.exec(t);
+  if (al) {
+    const how = argPick(al[1], ALIGN_WORDS);
+    if (how) return { kind: 'align', how };
+  }
+  const rn = RE_RENAME.exec(String(said || ''));
+  if (rn) {
+    const name = renameValue(rn[1]);
+    if (name) return { kind: 'rename', name };
+  }
+  return null;
+}
+
+/**
+ * Явная ли это команда оболочки — без документа (круг 38). Всякая слэш-форма — да; фраза —
+ * если таблица узнаёт её без имён слоёв и досок. Orchestrator зовёт это, чтобы не
+ * отдавать модели «отмени» от старого клиента; исполнять команду он не должен.
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isShellCommandText(text) {
+  const s = String(text == null ? '' : text);
+  if (/^\s*\/\S?/.test(s)) return true;
+  return !!shellIntent(s);
+}
+
+/**
+ * Какая запись таблицы стоит за намерением (палитра, справка, тесты). null — не из таблицы.
+ * @param {{kind: string}} intent
+ * @returns {string|null}
+ */
+export function commandIdOf(intent) {
+  if (!intent || typeof intent !== 'object') return null;
+  switch (intent.kind) {
+    case 'zoom':
+      if (intent.by) return intent.by > 1 ? 'zoom-in' : 'zoom-out';
+      return intent.to === 1 ? 'zoom-reset' : 'zoom';
+    case 'fit': return intent.all == null ? 'fit' : intent.all ? 'fit-all' : 'fit-board';
+    case 'fit-selection': return 'fit-selection';
+    case 'preview': return 'preview';
+    case 'theme': return 'theme';
+    case 'select-all': return 'select-all';
+    case 'select': return (intent.ids || []).length || intent.name ? 'select-name' : 'deselect';
+    case 'select-name': return 'select-name';
+    case 'select-rel': return { parent: 'select-parent', children: 'select-children', next: 'select-next', prev: 'select-prev' }[intent.rel] || null;
+    case 'delete': return 'delete';
+    case 'duplicate': return 'duplicate';
+    case 'rename': return 'rename';
+    case 'visible': return intent.on ? 'show' : 'hide';
+    case 'lock': return intent.on ? 'lock' : 'unlock';
+    case 'order': return { up: 'raise', down: 'lower', first: 'to-start', last: 'to-end' }[intent.to] || null;
+    case 'wrap': return 'wrap';
+    case 'ungroup': return 'ungroup';
+    case 'align': return 'align';
+    case 'direction': return 'direction';
+    case 'gap': return intent.step > 0 ? 'gap-more' : 'gap-less';
+    case 'artboard':
+      if (intent.step) return intent.step > 0 ? 'board-next' : 'board-prev';
+      return 'board';
+    case 'rail': return 'layers';
+    case 'inspector': return 'inspector';
+    case 'sheet':
+      if (intent.what === 'settings') return 'settings';
+      if (intent.what === 'scales') return 'scales';
+      return intent.tab === 'chat' ? 'chat' : 'history';
+    case 'export': return 'export';
+    case 'import': return 'import';
+    case 'new-board': return 'new-board';
+    case 'undo': return 'undo';
+    case 'redo': return 'redo';
+    case 'stop': return 'stop';
+    case 'variants': return 'variants';
+    case 'variants-close': return 'variants-close';
+    case 'help': return 'help';
+    case 'palette': return 'palette';
+    default: return null;
+  }
+}
+
+/** Нужен ли команде выделенный слой (без него — подсказка, а не агент). */
+export function needsSelection(intent) {
+  const c = CMD_BY_ID.get(commandIdOf(intent));
+  return !!(c && c.needs === 'selection');
+}
+
+/** Справка «Команды»: группы по порядку, внутри — записи таблицы. Одна истина — таблица. */
+export function helpGroups() {
+  return SHELL_GROUPS
+    .map((group) => ({ group, commands: SHELL_COMMANDS.filter((c) => c.group === group) }))
+    .filter((g) => g.commands.length);
+}
+
+/** Пример команды для человека: слэш-форма и первая фраза. */
+export function commandExample(cmd) {
+  const slash = cmd.example || slashOf(cmd);
+  const phrase = cmd.phrases[0] ? `«${cmd.phrases[0]}»` : '';
+  return [slash, phrase].filter(Boolean).join(' · ');
+}
+
+/**
+ * Строки палитры. Команда с перечнем значений — строкой на значение («Выровнять детей:
+ * по центру»); с числом или именем — строкой, которая дописывает «/имя » в строку команд.
+ * У каждой: {key, id, group, title, hint, example, keys, run?: текст команды, fill?: заготовка}.
+ */
+function paletteBase() {
+  const rows = [];
+  for (const c of SHELL_COMMANDS) {
+    if (c.inPalette === false) continue;
+    const slash = slashOf(c);
+    const a = c.args && c.args[0];
+    const base = { id: c.id, group: c.group, hint: c.hint || '', keys: c.keys || '', phrases: c.phrases };
+    if (!a || a.optional && (c.bare || a.kind !== 'enum')) {
+      rows.push({ ...base, key: c.id, title: c.title, example: commandExample(c), run: slash });
+    }
+    if (a && a.kind === 'enum') {
+      for (const v of a.values) {
+        rows.push({ ...base, key: `${c.id}:${v}`, title: `${c.title}: ${v}`, example: `${slash} ${v}`, run: `${slash} ${v}`, value: v });
+      }
+    } else if (a && !a.optional) {
+      rows.push({ ...base, key: c.id, title: `${c.title}…`, example: commandExample(c), fill: `${slash} ` });
+    }
+  }
+  return rows;
+}
+const PALETTE_BASE = Object.freeze(paletteBase().map((r) => Object.freeze(r)));
+
+/**
+ * Поиск по палитре: по названию, слэш-имени, фразам и значениям. Пустой запрос — всё по
+ * порядку таблицы. Запрос, который целиком разбирается командой (`/масштаб 150`), даёт
+ * первой строкой её саму — Enter исполняет ровно набранное.
+ * @param {string} query текст строки команд (с «/» или без)
+ * @param {{doc?: object|null, activeArtboardId?: string|null, limit?: number}} [ctx]
+ * @returns {object[]}
+ */
+export function paletteRows(query, ctx = {}) {
+  const rawQ = String(query == null ? '' : query).replace(/^\s*\/+/, '');
+  const q = slashKey(rawQ);
+  const limit = Number.isFinite(ctx.limit) ? ctx.limit : 200;
+  if (!q) return PALETTE_BASE.slice(0, limit);
+  const out = [];
+  const exact = slashIntent(`/${rawQ}`, { doc: ctx.doc || null, activeId: ctx.activeArtboardId || null });
+  const exactId = commandIdOf(exact);
+  const qWords = q.split(' ');
+  for (const r of PALETTE_BASE) {
+    const c = CMD_BY_ID.get(r.id);
+    const title = slashKey(r.title);
+    let score = 0;
+    for (const s of c.slash) {
+      const k = slashKey(s);
+      if (r.value ? slashKey(`${k} ${r.value}`) === q : k === q) score = Math.max(score, 100);
+      else if (k.startsWith(q) || (r.value && slashKey(`${k} ${r.value}`).startsWith(q))) score = Math.max(score, 80);
+    }
+    if (!score && title.split(/[\s:]+/).some((w) => w.startsWith(q))) score = 60;
+    if (!score && title.includes(q)) score = 50;
+    if (!score && c.phrases.some((p) => slashKey(p).includes(q))) score = 40;
+    if (!score && r.value && slashKey(r.value).startsWith(q)) score = 35;
+    if (!score && qWords.length > 1) {
+      const hay = slashKey([r.title, ...c.slash, ...c.phrases, r.value || '', c.hint || ''].join(' '));
+      if (qWords.every((w) => hay.includes(w))) score = 30;
+    }
+    if (!score && slashKey(c.group).startsWith(q)) score = 20;
+    if (!score && slashKey(c.hint || '').includes(q) && q.length >= 3) score = 10;
+    if (score) out.push({ r, score });
+  }
+  out.sort((a, b) => b.score - a.score);
+  const rows = out.map((o) => o.r);
+  // набрано целиком и с аргументом: «/масштаб 150» — первой строкой ровно это
+  const complete = exactId && exact.kind !== 'slash-bad' && exact.kind !== 'slash-unknown' && exact.kind !== 'palette';
+  if (complete && /\s/.test(q) && !rows.some((r) => slashKey(r.run || '') === slashKey(`/${rawQ}`))) {
+    const c = CMD_BY_ID.get(exactId);
+    const tail = rawQ.split(/\s+/).slice(1).join(' ');
+    rows.unshift({
+      key: `typed:${q}`, id: exactId, group: c.group, hint: c.hint || '', keys: c.keys || '', phrases: c.phrases,
+      title: `${c.title}: ${cutText(cleanText(tail), 40, { ellipsis: true })}`, example: `/${cleanText(rawQ)}`, run: `/${cleanText(rawQ)}`, typed: true,
+    });
+  }
+  return rows.slice(0, limit);
+}
+
+/* ------------- правки команд таблицы: операции ядра, документ не меняют ------------- */
+
+const r2 = (v) => Math.round(v * 100) / 100;
+const nodeOf = (doc, id) => (doc && doc.nodes && Object.prototype.hasOwnProperty.call(doc.nodes, id) ? doc.nodes[id] : null);
+const titleOf = (doc, id) => {
+  const n = nodeOf(doc, id);
+  return n ? (n.name || placeholderName(doc, n) || 'слой') : 'слой';
+};
+const quoted = (doc, ids) => (ids.length === 1 ? `«${cutText(titleOf(doc, ids[0]), 60, { ellipsis: true })}»` : `${ids.length} ${plural(ids.length, 'слой', 'слоя', 'слоёв')}`);
+
+/** Выделенные без потомков уже выделенного — как у удаления и дублирования на холсте. */
+export function selectionRoots(doc, ids) {
+  const list = [...new Set((ids || []).filter((id) => nodeOf(doc, id) && nodeOf(doc, id).type !== 'page'))];
+  return list.filter((id) => !ancestors(doc, id).some((a) => list.includes(a.id)));
+}
+
+/** Дублировать: копия поддерева рядом, со сдвигом там, где места задаёт pos (как Ctrl+D). */
+export function duplicateOps(doc, ids) {
+  const roots = selectionRoots(doc, ids);
+  const list = [];
+  const newIds = [];
+  for (const id of roots) {
+    const node = nodeOf(doc, id);
+    const parent = node && nodeOf(doc, node.parent);
+    if (!parent) continue;
+    const clone = cloneSubtree(doc, id);
+    if (!clone.rootId) continue;
+    const index = (parent.children || []).indexOf(id) + 1;
+    clone.nodes.forEach((n, i) => {
+      const flat = { ...n };
+      if (flat.children) flat.children = [];
+      if (i === 0) {
+        flat.name = `${flat.name || titleOf(doc, id)} копия`;
+        const L = resolveLayout(doc, parent.layout);
+        if (parent.id === doc.root || L.mode === 'none') {
+          const pos = flat.pos || { x: 0, y: 0 };
+          flat.pos = { x: r2((pos.x || 0) + 16), y: r2((pos.y || 0) + 16) };
+        } else if (flat.override) {
+          flat.override = { ...flat.override, x: r2(flat.override.x + 16), y: r2(flat.override.y + 16) };
+        }
+        list.push(OPS.create(flat, index));
+        newIds.push(flat.id);
+      } else list.push(OPS.create(flat));
+    });
+  }
+  if (!list.length) return { error: 'Копировать нечего' };
+  return { ops: list, ids: newIds, words: `Дублировал ${quoted(doc, roots)}` };
+}
+
+/** Переименовать выделенные (обычно один слой). */
+export function renameOps(doc, ids, name) {
+  const t = cutText(cleanText(name), 120);
+  if (!t) return { error: 'Имя пустое' };
+  const list = (ids || []).filter((id) => nodeOf(doc, id) && nodeOf(doc, id).type !== 'page' && nodeOf(doc, id).name !== t);
+  if (!list.length) return { error: `Слой уже называется «${t}»` };
+  const was = quoted(doc, list);
+  return { ops: list.map((id) => OPS.set(id, 'name', t)), words: `Переименовал ${was} в «${t}»` };
+}
+
+/** Скрыть / показать: `visible: false` — скрыт, поля нет — виден (§1.2). */
+export function visibleOps(doc, ids, on) {
+  const list = selectionRoots(doc, ids).filter((id) => (nodeOf(doc, id).visible === false) === !!on);
+  if (!list.length) return { error: on ? 'Выделенное и так видно' : 'Выделенное уже скрыто' };
+  return {
+    ops: list.map((id) => OPS.set(id, 'visible', on ? undefined : false)),
+    words: `${on ? 'Показал' : 'Скрыл'} ${quoted(doc, list)}`,
+  };
+}
+
+/** Закрепить / открепить: поле `locked` модели (§1.2) — на холсте слой не выделяется и не двигается. */
+export function lockOps(doc, ids, on) {
+  const list = selectionRoots(doc, ids).filter((id) => !!nodeOf(doc, id).locked !== !!on);
+  if (!list.length) return { error: on ? 'Выделенное уже закреплено' : 'Выделенное и не было закреплено' };
+  return {
+    ops: list.map((id) => OPS.set(id, 'locked', on ? true : undefined)),
+    words: `${on ? 'Закрепил' : 'Открепил'} ${quoted(doc, list)}`,
+  };
+}
+
+/* Перестановка внутри родителя: целевой порядок, затем ходы `move`. Ходы проверяются
+   прогоном на копии списка: если короткий путь не сходится, переставляются все дети
+   по порядку — это верно всегда. */
+function movesTo(parentId, cur, target, moved) {
+  const tryOrder = (order) => {
+    const sim = cur.slice();
+    const list = [];
+    for (const id of order) {
+      const t = target.indexOf(id);
+      sim.splice(sim.indexOf(id), 1);
+      sim.splice(t, 0, id);
+      list.push(OPS.move(id, parentId, t));
+    }
+    return sim.join('\u0001') === target.join('\u0001') ? list : null;
+  };
+  const asc = moved.slice().sort((a, b) => target.indexOf(a) - target.indexOf(b));
+  return tryOrder(asc) || tryOrder(asc.slice().reverse()) || tryOrder(target.slice());
+}
+
+/**
+ * Поднять / опустить / в начало / в конец среди соседей (move внутри родителя). «Выше» —
+ * раньше в списке детей, как в панели слоёв.
+ * @param {'up'|'down'|'first'|'last'} to
+ */
+export function reorderOps(doc, ids, to) {
+  const roots = selectionRoots(doc, ids);
+  const byParent = new Map();
+  for (const id of roots) {
+    const p = nodeOf(doc, id).parent;
+    if (!nodeOf(doc, p)) continue;
+    if (!byParent.has(p)) byParent.set(p, []);
+    byParent.get(p).push(id);
+  }
+  const list = [];
+  const movedAll = [];
+  for (const [p, sel] of byParent) {
+    const cur = (nodeOf(doc, p).children || []).slice();
+    const isSel = new Set(sel);
+    let target = cur.slice();
+    if (to === 'first') target = [...cur.filter((c) => isSel.has(c)), ...cur.filter((c) => !isSel.has(c))];
+    else if (to === 'last') target = [...cur.filter((c) => !isSel.has(c)), ...cur.filter((c) => isSel.has(c))];
+    else if (to === 'up') {
+      for (let i = 1; i < target.length; i++) {
+        if (isSel.has(target[i]) && !isSel.has(target[i - 1])) [target[i - 1], target[i]] = [target[i], target[i - 1]];
+      }
+    } else if (to === 'down') {
+      for (let i = target.length - 2; i >= 0; i--) {
+        if (isSel.has(target[i]) && !isSel.has(target[i + 1])) [target[i + 1], target[i]] = [target[i], target[i + 1]];
+      }
+    }
+    if (target.join('\u0001') === cur.join('\u0001')) continue;
+    const moved = target.filter((id, i) => cur[i] !== id && isSel.has(id));
+    const ops = movesTo(p, cur, target, moved.length ? moved : sel);
+    for (const op of ops) list.push(op);
+    for (const id of sel) movedAll.push(id);
+  }
+  const where = { up: 'выше', down: 'ниже', first: 'в начало', last: 'в конец' }[to] || '';
+  if (!list.length) return { error: { up: 'Выше некуда — слой и так первый', down: 'Ниже некуда — слой и так последний', first: 'Слой и так первый', last: 'Слой и так последний' }[to] || 'Порядок не изменился' };
+  const verb = to === 'up' ? 'Поднял' : to === 'down' ? 'Опустил' : 'Переставил';
+  return { ops: list, words: `${verb} ${quoted(doc, movedAll)}${to === 'up' || to === 'down' ? ' в порядке' : ` ${where}`}` };
+}
+
+/** Рамка без свободной раскладки: у неё есть дети и поток. */
+const isFlowFrame = (n) => !!n && n.type === 'frame' && ['row', 'column'].includes(normalizeLayout(n.layout).mode);
+
+/**
+ * Обернуть выделенных соседей в новую рамку. В потоке рамка встаёт на место первого и
+ * повторяет поток родителя (направление, зазор, выравнивание), размер — по содержимому.
+ * В свободной рамке и на доске со свободной раскладкой — рамка по общим границам, дети
+ * сохраняют места на холсте.
+ * @param {{rects?: object, name?: string}} [o] rects — геометрия решателя (для свободной рамки)
+ */
+export function wrapOps(doc, ids, { rects = null, name = 'Группа' } = {}) {
+  const roots = selectionRoots(doc, ids);
+  if (!roots.length) return { error: 'Оборачивать нечего' };
+  if (roots.some((id) => isArtboard(doc, id))) return { error: 'Доску обернуть нельзя — она верхний уровень документа' };
+  const parents = new Set(roots.map((id) => nodeOf(doc, id).parent));
+  if (parents.size !== 1) return { error: 'Обернуть можно соседей одного родителя — выделите слои в одной рамке' };
+  const pid = [...parents][0];
+  const parent = nodeOf(doc, pid);
+  if (!parent || parent.type !== 'frame') return { error: 'Здесь рамку не поставить' };
+  const kids = parent.children || [];
+  const order = roots.slice().sort((a, b) => kids.indexOf(a) - kids.indexOf(b));
+  const index = kids.indexOf(order[0]);
+  const raw = normalizeLayout(parent.layout);
+  // ноль — тоже шаг шкалы (§6): рамка оболочки не заводит чисел «мимо шкалы»
+  const zi = scaleSteps(doc, 'spacing').indexOf(0);
+  const zero = zi >= 0 ? scaleRef('spacing', zi) : 0;
+  const pad0 = { t: zero, r: zero, b: zero, l: zero };
+  const id = uid('f');
+  const ri = scaleSteps(doc, 'radii').indexOf(0);
+  const frame = { type: 'frame', id, name, parent: pid, children: [], radius: ri >= 0 ? scaleRef('radii', ri) : 0 };
+  const list = [];
+  const moves = [];
+  if (raw.mode === 'none') {
+    const pr = rects && rects[pid];
+    const rs = order.map((k) => rects && rects[k]);
+    if (!pr || rs.some((r) => !r)) return { error: 'Раскладка ещё не посчитана — повторите через мгновение' };
+    const x1 = Math.min(...rs.map((r) => r.x));
+    const y1 = Math.min(...rs.map((r) => r.y));
+    const x2 = Math.max(...rs.map((r) => r.x + r.w));
+    const y2 = Math.max(...rs.map((r) => r.y + r.h));
+    frame.layout = { mode: 'none', gap: zero, padding: pad0, align: 'start', justify: 'start', wrap: false };
+    frame.size = { w: { mode: 'fixed', value: r2(x2 - x1) }, h: { mode: 'fixed', value: r2(y2 - y1) } };
+    frame.pos = { x: r2(x1 - pr.x), y: r2(y1 - pr.y) };
+    order.forEach((k, i) => {
+      moves.push(OPS.move(k, id, i));
+      moves.push(OPS.set(k, 'pos', { x: r2(rs[i].x - x1), y: r2(rs[i].y - y1) }));
+    });
+  } else {
+    frame.layout = { mode: raw.mode, gap: raw.gap, padding: pad0, align: raw.align, justify: 'start', wrap: false };
+    frame.size = { w: { mode: 'hug' }, h: { mode: 'hug' } };
+    order.forEach((k, i) => moves.push(OPS.move(k, id, i)));
+  }
+  list.push(OPS.create(frame, index));
+  for (const op of moves) list.push(op);
+  return { ops: list, id, words: `Обернул ${quoted(doc, order)} в рамку «${name}»` };
+}
+
+/**
+ * Разгруппировать: дети рамки встают на её место в родителе, рамка уходит. В свободном
+ * родителе дети сохраняют места на холсте (pos по геометрии решателя).
+ */
+export function ungroupOps(doc, ids, { rects = null } = {}) {
+  const roots = selectionRoots(doc, ids);
+  const id = roots.find((k) => nodeOf(doc, k).type === 'frame');
+  if (!id) return { error: 'Разгруппировать можно рамку — выделите её' };
+  if (isArtboard(doc, id)) return { error: 'Доску разгруппировать нельзя — выделите рамку внутри неё' };
+  const node = nodeOf(doc, id);
+  const parent = nodeOf(doc, node.parent);
+  if (!parent || parent.type !== 'frame') return { error: 'Эту рамку разгруппировать нельзя' };
+  const kids = (node.children || []).filter((k) => nodeOf(doc, k));
+  const at = (parent.children || []).indexOf(id);
+  const free = normalizeLayout(parent.layout).mode === 'none';
+  const pr = rects && rects[parent.id];
+  const list = [];
+  kids.forEach((k, i) => {
+    list.push(OPS.move(k, parent.id, at + i));
+    const r = rects && rects[k];
+    if (free && pr && r) list.push(OPS.set(k, 'pos', { x: r2(r.x - pr.x), y: r2(r.y - pr.y) }));
+  });
+  list.push(OPS.remove(id));
+  return { ops: list, ids: kids, words: `Разгруппировал «${cutText(titleOf(doc, id), 60, { ellipsis: true })}»` };
+}
+
+/**
+ * Выровнять детей рамки. Поле — как его зовёт ядро: `layout.align` (поперёк потока) и
+ * `layout.justify` (вдоль). В колонке «влево/вправо/по центру» — поперёк, «вверх/вниз» —
+ * вдоль; в строке наоборот. «Растянуть» — `align: stretch`.
+ * @param {'left'|'center'|'right'|'top'|'bottom'|'stretch'} how
+ */
+export function alignOps(doc, ids, how) {
+  const frames = selectionRoots(doc, ids).filter((id) => isFlowFrame(nodeOf(doc, id)));
+  if (!frames.length) {
+    const one = nodeOf(doc, (ids || [])[0]);
+    if (one && one.type === 'frame') return { error: 'У свободной рамки нет выравнивания — дети стоят по своим местам' };
+    return { error: 'Выравнивание детей — у рамки с раскладкой. Выделите рамку' };
+  }
+  const list = [];
+  for (const id of frames) {
+    const L = normalizeLayout(nodeOf(doc, id).layout);
+    const col = L.mode === 'column';
+    const cross = col ? { left: 'start', center: 'center', right: 'end', stretch: 'stretch' } : { top: 'start', center: 'center', bottom: 'end', stretch: 'stretch' };
+    const main = col ? { top: 'start', bottom: 'end' } : { left: 'start', right: 'end' };
+    if (cross[how] && L.align !== cross[how]) list.push(OPS.set(id, 'layout.align', cross[how]));
+    else if (main[how] && L.justify !== main[how]) list.push(OPS.set(id, 'layout.justify', main[how]));
+  }
+  if (!list.length) return { error: 'Дети уже так выровнены' };
+  return { ops: list, words: `Выровнял детей ${quoted(doc, [...new Set(list.map((o) => o.id))])} ${ALIGN_HOW_WORDS[how] || ''}`.trim() };
+}
+
+/** Направление потока рамки: строка или колонка (`layout.mode`). */
+export function directionOps(doc, ids, mode) {
+  const frames = selectionRoots(doc, ids).filter((id) => nodeOf(doc, id).type === 'frame' && !isArtboardFree(doc, id));
+  if (!frames.length) return { error: 'Направление — у рамки. Выделите рамку' };
+  const list = frames.filter((id) => normalizeLayout(nodeOf(doc, id).layout).mode !== mode)
+    .map((id) => OPS.set(id, 'layout.mode', mode));
+  if (!list.length) return { error: mode === 'row' ? 'Дети уже стоят строкой' : 'Дети уже стоят колонкой' };
+  return { ops: list, words: `${mode === 'row' ? 'Выстроил строкой' : 'Выстроил колонкой'} детей ${quoted(doc, list.map((o) => o.id))}` };
+}
+/* Доска со свободной раскладкой — холст, а не поток: направление ей не задаём. */
+function isArtboardFree(doc, id) {
+  return isArtboard(doc, id) && normalizeLayout(nodeOf(doc, id).layout).mode === 'none';
+}
+
+/** Зазор на шаг шкалы отступов больше/меньше (§6: пишется ссылка 'spacing.N'). */
+export function gapStepOps(doc, ids, step) {
+  const frames = selectionRoots(doc, ids).filter((id) => isFlowFrame(nodeOf(doc, id)));
+  if (!frames.length) return { error: 'Зазор — у рамки с раскладкой. Выделите рамку' };
+  const steps = scaleSteps(doc, 'spacing');
+  const list = [];
+  const said = [];
+  for (const id of frames) {
+    const raw = normalizeLayout(nodeOf(doc, id).layout).gap;
+    const now = resolveScale(doc, raw, 'spacing');
+    const cur = Number.isFinite(now) ? now : 0;
+    const ref = parseScaleRef(raw);
+    let next = -1;
+    if (ref && ref.scale === 'spacing' && Number.isFinite(steps[ref.index])) next = ref.index + step;
+    else if (step > 0) next = steps.findIndex((v) => v > cur);
+    else for (let i = steps.length - 1; i >= 0; i--) if (steps[i] < cur) { next = i; break; }
+    if (next < 0 || next >= steps.length || !Number.isFinite(steps[next])) continue;
+    list.push(OPS.set(id, 'layout.gap', scaleRef('spacing', next)));
+    said.push(`${cur} → ${steps[next]} px`);
+  }
+  if (!list.length) return { error: step > 0 ? 'Зазор уже самый большой на шкале отступов' : 'Зазор уже самый маленький на шкале отступов' };
+  return { ops: list, words: `Зазор ${quoted(doc, list.map((o) => o.id))}: ${said[0]}` };
+}
+
+/* ------------------ выделение командами таблицы: только ids, без правки ------------------ */
+
+/** «Выделить всё на доске»: верхние слои доски, кроме скрытых и запертых. */
+export function selectAllIds(doc, boardId) {
+  const board = nodeOf(doc, boardId);
+  if (!board || !isArtboard(doc, boardId)) return artboards(doc).map((a) => a.id);
+  const out = (board.children || []).filter((k) => {
+    const n = nodeOf(doc, k);
+    return n && n.visible !== false && !n.locked;
+  });
+  return out.length ? out : [boardId];
+}
+
+/**
+ * Родитель, дети, соседи выделенного. {ids} или {error} словами.
+ * @param {'parent'|'children'|'next'|'prev'} rel
+ */
+export function relatedIds(doc, ids, rel) {
+  const sel = (ids || []).filter((id) => nodeOf(doc, id));
+  if (!sel.length) return { error: 'Сначала выделите слой' };
+  if (rel === 'parent') {
+    const out = [...new Set(sel.map((id) => nodeOf(doc, id).parent).filter((p) => {
+      const n = nodeOf(doc, p);
+      return n && p !== doc.root && n.type !== 'page';
+    }))];
+    return out.length ? { ids: out } : { error: 'Выше доски слоёв нет' };
+  }
+  if (rel === 'children') {
+    const out = sel.flatMap((id) => (nodeOf(doc, id).children || []).filter((k) => nodeOf(doc, k)));
+    return out.length ? { ids: out } : { error: `У ${quoted(doc, sel)} нет вложенных слоёв` };
+  }
+  const id = sel[sel.length - 1];
+  const node = nodeOf(doc, id);
+  const sibs = isArtboard(doc, id) ? artboards(doc).map((a) => a.id) : ((nodeOf(doc, node.parent) || {}).children || []);
+  const i = sibs.indexOf(id);
+  const j = rel === 'next' ? i + 1 : i - 1;
+  if (i < 0 || j < 0 || j >= sibs.length) return { error: rel === 'next' ? 'Это последний слой среди соседей' : 'Это первый слой среди соседей' };
+  return { ids: [sibs[j]] };
 }
 
 /* ---------------- круг 36 (SPEC §11): состояния и движение словами ---------------- */

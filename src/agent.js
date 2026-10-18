@@ -2,7 +2,8 @@
  * Imago Studio — клиент Orchestrator (SPEC §10, стрелки 3 и 7b).
  *
  * Оболочка отправляет команду агента на сервер (`POST /agent/command`) и читает поток
- * событий SSE: `queued`, `stage`, `shell`, `variants`, `result`, `error`, `done`.
+ * событий SSE: `queued`, `stage`, `variants`, `result`, `error`, `done` (и `shell` — только от
+ * сервера прежней версии: круг 38 убрал с сервера узнавание команд оболочки).
  * EventSource не годится — ему нужен GET, а команда уходит телом POST; поэтому поток
  * разбирается вручную из `fetch` + `ReadableStream`.
  *
@@ -24,8 +25,21 @@
 /** Типы событий потока §10.3 — остальные игнорируются (вперёд совместимо). */
 export const AGENT_EVENTS = Object.freeze(['queued', 'stage', 'shell', 'variants', 'result', 'error', 'done']);
 
-/** Ключи стадий §10.3 — по порядку конвейера. */
-export const STAGE_KEYS = Object.freeze(['jev', 'read', 'library', 'llm', 'validate', 'repair', 'write']);
+/**
+ * Ключи стадий §10.3 — по порядку конвейера. Круг 38: первая стадия — `intent` («Разбираю
+ * запрос»: вид работы агента — правка, создание, иллюстрация); закрытого классификатора
+ * команд оболочки на сервере больше нет, их узнаёт и исполняет клиент (SPEC §13).
+ */
+export const STAGE_KEYS = Object.freeze(['intent', 'read', 'library', 'llm', 'validate', 'repair', 'write']);
+
+/** Ключи стадий сервера прежней версии → нынешние (совместимость одной версии). */
+const STAGE_ALIASES = Object.freeze({ jev: 'intent' });
+
+/** Ключ стадии от сервера в нынешнем виде: `jev` прежнего сервера — это `intent`. */
+export function stageKey(key) {
+  const k = typeof key === 'string' ? key : '';
+  return Object.prototype.hasOwnProperty.call(STAGE_ALIASES, k) ? STAGE_ALIASES[k] : k;
+}
 
 /** Сколько ждём `/agent/health`: дольше — считаем, что агента на сервере нет. */
 const HEALTH_TIMEOUT_MS = 3000;
@@ -467,7 +481,11 @@ export async function runServerCommand(p = {}) {
     const data = parseData(raw);
     switch (event) {
       case 'queued': out.queued = Number.isFinite(data.position) ? data.position : 0; break;
-      case 'stage': out.stages.push(data); break;
+      case 'stage':
+        if (data && typeof data === 'object' && data.key !== undefined) data.key = stageKey(data.key);
+        out.stages.push(data);
+        break;
+      // событие `shell` шлёт только сервер прежней версии (до круга 38): принимаем, но не ждём
       case 'shell': out.shell = data; terminal = true; break;
       case 'variants': out.variants = Array.isArray(data.items) ? data.items : []; terminal = true; break;
       case 'result': out.result = data; terminal = true; break;

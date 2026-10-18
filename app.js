@@ -411,6 +411,8 @@ function cacheDom() {
     'agent-status',
     // круг 25: соавторы в шапке — аватарки и «+N» вместо списка имён
     'people',
+    // круг 38: палитра команд
+    'palette', 'palette-list', 'btn-palette-help',
   ]) dom[id] = el(id);
   dom.dockmsg.setAttribute('role', 'status');
   dom.dockmsg.setAttribute('aria-live', 'polite');
@@ -2699,8 +2701,9 @@ function retryFailed(failed) {
 }
 
 /**
- * Команда оболочки, которую узнал JEV: исполняем здесь тем же кодом, что исполняет
- * словарь оболочки. Модель не звалась, документ не менялся.
+ * Событие `shell` от сервера прежней версии (до круга 38 он сам узнавал команды оболочки):
+ * исполняем здесь тем же кодом, что исполняет таблица команд оболочки. Модель не звалась,
+ * документ не менялся. Новый сервер такого события не шлёт — оболочка его и не ждёт.
  */
 function applyServerShell(shell, utterance) {
   const intent = shellIntentFromServer(shell);
@@ -2717,7 +2720,7 @@ function applyServerShell(shell, utterance) {
     return;
   }
   if (intent && applyShellIntent(intent, utterance)) return;
-  // сервер знает слово, которого не знает этот клиент: пробуем свой словарь
+  // сервер знает слово, которого не знает этот клиент: пробуем свою таблицу
   const local = shellIntent(utterance);
   if (local && applyShellIntent(local, utterance)) return;
   showMsg('plain', 'Эту команду оболочки клиент пока не умеет', {
@@ -3400,7 +3403,7 @@ function setRunnable(ok) {
   updateAgentDot();
   // длинный пример обрезался на полуслове — примеры живут в чипах-подсказках
   dom.command.placeholder = ok
-    ? (isNarrow() ? 'Что построить?' : 'Что построить или изменить?')
+    ? (isNarrow() ? 'Что построить?' : 'Что построить или изменить? «/» — команды')
     : 'Агент не подключён — откройте настройки';
 }
 
@@ -8564,7 +8567,12 @@ function submitCommand(opts = {}) {
  * подвинуть вид, открыть шторку. Документ и область работы агента при этом не трогаем —
  * «отмени» и «покажи второй экран» по-прежнему спрашивают, доделать или заменить.
  */
-const SHELL_WHILE_BUSY = new Set(['stop', 'variants-close', 'fit', 'zoom', 'sheet', 'rail', 'theme', 'export', 'preview']);
+/* Круг 38: справка, палитра, ошибки набора «/…», выделение и вид — тоже не ждут агента. Правки
+   командами таблицы — те же ручные правки (стрелка M, мимо очереди агента): холст во время работы
+   агента правится руками, значит, и командой. */
+const SHELL_WHILE_BUSY = new Set(['stop', 'variants-close', 'fit', 'zoom', 'sheet', 'rail', 'theme', 'export', 'preview',
+  'help', 'palette', 'slash-unknown', 'slash-bad', 'fit-selection', 'inspector', 'select', 'select-all', 'select-rel',
+  'delete', 'duplicate', 'rename', 'visible', 'lock', 'order', 'wrap', 'ungroup', 'align', 'direction', 'gap']);
 
 /** Вернуть текст в строку — но только если человек не набрал туда своё (п.8). */
 function restoreCommand(text, { focus = false } = {}) {
@@ -10687,8 +10695,9 @@ function svgToElement(markup) {
  * и выбирать её надо словами.
  */
 
-/* Словарь оболочки живёт в src/shell.js — один на клиент и на JEV сервера (круг 24).
-   Здесь — только привязка к документу и активной доске этой вкладки. */
+/* Таблица команд оболочки живёт в src/shell.js (`SHELL_COMMANDS`, круг 38, SPEC §13) — одна
+   на всё: фразы, слэш-формы, палитра и справка «Команды». Здесь — только привязка к
+   документу и активной доске этой вкладки и исполнение команд. */
 const normSaid = SHELL.normSaid;
 const numSaid = SHELL.numSaid;
 const RE_VARIANTS_BARE = SHELL.RE_VARIANTS_BARE;
@@ -10839,6 +10848,7 @@ function applyShellIntent(intent, said) {
     }
     case 'sheet': {
       if (intent.what === 'settings') openSettings();
+      else if (intent.what === 'scales') openScales();
       else openHistory(intent.tab || 'edits');
       return true;
     }
@@ -10886,7 +10896,363 @@ function applyShellIntent(intent, said) {
       }
       return false;
     }
+    default: return applyTableCommand(intent, said);
+  }
+}
+
+/* ------------- круг 38 (SPEC §13): новые команды таблицы оболочки ------------- */
+
+/** Выделенные слои, которые ещё есть в документе. */
+function liveSelection() {
+  return state.selection.filter((id) => nodeById(state.doc, id));
+}
+
+/** Команде нужен выделенный слой, а его нет: честная подсказка — агенту такое не уходит. */
+function needSelectionMsg(intent) {
+  const c = SHELL.shellCommand(SHELL.commandIdOf(intent));
+  showMsg('plain', 'Сначала выделите слой', {
+    note: c ? `«${c.title}» работает с выделенным: щёлкните слой на холсте или в списке слоёв.` : 'Щёлкните слой на холсте или в списке слоёв.',
+    ms: 7000,
+  });
+  return true;
+}
+
+/**
+ * Правка командой таблицы — обычная транзакция тем же путём, что ручная (commit), с
+ * подписью словами (J6) и «Отменить» одним шагом.
+ * @param {{ops?: object[], error?: string, words?: string, ids?: string[], id?: string}} r
+ * @param {{kind: string}} intent намерение — по нему из таблицы берётся имя действия
+ */
+function commitTableEdit(r, intent, { select = null } = {}) {
+  // имя действия — из таблицы: своего списка названий у оболочки нет
+  const c = SHELL.shellCommand(SHELL.commandIdOf(intent));
+  const label = c ? c.title : 'Правка';
+  if (!r || r.error || !r.ops || !r.ops.length) {
+    showMsg('plain', (r && r.error) || 'Править нечего', { ms: 6000 });
+    return true;
+  }
+  const res = commit(r.ops, label, 'human', { human: r.words, quiet: true });
+  if (!res || !res.ok) return true;
+  if (select && select.length) setSelection(select.filter((id) => nodeById(state.doc, id)));
+  const said = (res.tx && res.tx.human) || r.words || label;
+  showMsg('plain', said, {
+    note: 'Вернуть можно здесь или по Ctrl+Z.',
+    ms: 7000,
+    transient: true,
+    ...(res.tx ? { actions: [{ label: 'Отменить', onClick: () => undoTx(res.tx.id) }], undoTx: res.tx.id } : {}),
+  });
+  return true;
+}
+
+/** Выполнить команду таблицы, которой нет среди прежних видов намерений. */
+function applyTableCommand(intent, said) {
+  const doc = state.doc;
+  const sel = liveSelection();
+  if (SHELL.needsSelection(intent) && !sel.length) return needSelectionMsg(intent);
+  const rects = (state.geo && state.geo.rects) || {};
+  switch (intent.kind) {
+    case 'palette': openPalette(); return true;
+    case 'help': openCommandsHelp(); return true;
+    case 'slash-unknown': {
+      showMsg('plain', `Команды «/${intent.name}» нет`, {
+        note: 'Все команды — в палитре (Ctrl+K или «/») и в справке «Команды».',
+        actions: [{ label: 'Все команды', onClick: () => { hideMsg(); openCommandsHelp(); } }],
+        ms: 8000,
+      });
+      return true;
+    }
+    case 'slash-bad': {
+      showMsg('plain', intent.say || 'Команда набрана не так', { note: intent.usage || '', ms: 8000 });
+      return true;
+    }
+    case 'fit-selection': {
+      state.fitAll = false;
+      state.userView = true;
+      fitView(sel);
+      updateFitButton();
+      toast('Вписано выделенное', 'plain', 3000);
+      return true;
+    }
+    case 'select-all': {
+      const ids = SHELL.selectAllIds(doc, activeArtboardId());
+      setSelection(ids);
+      toast(ids.length ? `Выделено ${ids.length} ${plural(ids.length, 'слой', 'слоя', 'слоёв')}` : 'Выделять нечего', 'plain', 3500);
+      return true;
+    }
+    case 'select-rel': {
+      const r = SHELL.relatedIds(doc, sel, intent.rel);
+      if (r.error) { showMsg('plain', r.error, { ms: 5000 }); return true; }
+      setSelection(r.ids);
+      const many = r.ids.length > 1 ? ` и ещё ${r.ids.length - 1}` : '';
+      toast(`Выделено «${nodeTitleById(doc, r.ids[0])}»${many}`, 'plain', 3500);
+      return true;
+    }
+    case 'select-name':
+    case 'artboard-name':
+      return false;
+    case 'delete': deleteNodes(sel); return true;
+    case 'duplicate': {
+      const r = SHELL.duplicateOps(doc, sel);
+      return commitTableEdit(r, intent, { select: r.ids });
+    }
+    case 'rename': return commitTableEdit(SHELL.renameOps(doc, sel, intent.name), intent);
+    case 'visible': return commitTableEdit(SHELL.visibleOps(doc, sel, intent.on), intent);
+    case 'lock': return commitTableEdit(SHELL.lockOps(doc, sel, intent.on), intent);
+    case 'order': return commitTableEdit(SHELL.reorderOps(doc, sel, intent.to), intent);
+    case 'wrap': {
+      const r = SHELL.wrapOps(doc, sel, { rects });
+      return commitTableEdit(r, intent, { select: r.id ? [r.id] : null });
+    }
+    case 'ungroup': {
+      const r = SHELL.ungroupOps(doc, sel, { rects });
+      return commitTableEdit(r, intent, { select: r.ids });
+    }
+    case 'align': return commitTableEdit(SHELL.alignOps(doc, sel, intent.how), intent);
+    case 'direction': return commitTableEdit(SHELL.directionOps(doc, sel, intent.mode), intent);
+    case 'gap': return commitTableEdit(SHELL.gapStepOps(doc, sel, intent.step), intent);
+    case 'inspector': {
+      if (intent.on) {
+        if (sel.length !== 1) return needSelectionMsg(intent);
+        state.inspQuiet = false;
+      } else state.inspQuiet = true;
+      renderInspector();
+      return true;
+    }
+    case 'import': importJson(); return true;
+    case 'variants': {
+      // варианты считает агент: команда таблицы только запускает их к последней команде
+      if (said) addChat('you', said);
+      const src = lastHumanUtterance(said);
+      if (src) chainAfterRun(src, { variants: true, note: `Считаю варианты к «${clip(src, 60)}»` });
+      else askVariants({ variantsSubject: '' }, said);
+      return true;
+    }
     default: return false;
+  }
+}
+
+/* ------------- круг 38 (SPEC §13): палитра команд и справка «Команды» ------------- */
+/*
+ * Палитра — список под рукой у строки команд: Ctrl/⌘+K или «/» в начале строки. Ищет по
+ * названию, слэш-имени и фразам; строки и их порядок даёт таблица (SHELL.paletteRows) —
+ * своего списка команд у оболочки нет. Строка команд при этом — поле поиска (combobox),
+ * список — listbox с aria-activedescendant: всё доступно с клавиатуры.
+ */
+const palette = { rows: [], active: 0, draft: null };
+
+function paletteOpen() { return !!(dom.palette && !dom.palette.hidden); }
+
+/** Открыть палитру. Набранное в строке не теряется: вернётся, когда палитра закроется. */
+function openPalette() {
+  if (!dom.palette) return;
+  if (dom.app.dataset.voice === 'on' && typeof toggleVoice === 'function') toggleVoice();
+  if (!dom.sheet.hidden) closeSheet();   // палитра — у строки команд, шторка-диалог ей мешала бы
+  const cur = dom.command.value;
+  if (!/^\s*\//.test(cur)) {
+    palette.draft = cur;
+    dom.command.value = '/';
+  } else if (palette.draft == null) palette.draft = '';
+  palette.active = 0;
+  dom.palette.hidden = false;
+  dom.command.setAttribute('aria-expanded', 'true');
+  dom.command.focus();
+  const end = dom.command.value.length;
+  try { dom.command.setSelectionRange(end, end); } catch { /* поле без выделения */ }
+  renderPalette();
+}
+
+/**
+ * Закрыть палитру. restore — вернуть в строку то, что было набрано до неё (Esc, щелчок мимо);
+ * после исполнения команды строку чистит сама команда.
+ */
+function closePalette({ restore = true } = {}) {
+  if (!dom.palette || dom.palette.hidden) return;
+  dom.palette.hidden = true;
+  dom.command.setAttribute('aria-expanded', 'false');
+  dom.command.removeAttribute('aria-activedescendant');
+  if (restore && /^\s*\//.test(dom.command.value)) dom.command.value = palette.draft || '';
+  palette.draft = null;
+}
+
+function renderPalette() {
+  const list = dom['palette-list'];
+  if (!list) return;
+  const q = dom.command.value;
+  const rows = SHELL.paletteRows(q, { doc: state.doc, activeArtboardId: activeArtboardId() });
+  palette.rows = rows;
+  palette.active = Math.max(0, Math.min(rows.length - 1, palette.active));
+  list.textContent = '';
+  const grouped = !q.replace(/^\s*\/+/, '').trim();
+  let lastGroup = '';
+  rows.forEach((r, i) => {
+    if (grouped && r.group !== lastGroup) {
+      lastGroup = r.group;
+      const h = document.createElement('li');
+      h.className = 'pal-group';
+      h.setAttribute('role', 'presentation');
+      h.textContent = r.group;
+      list.appendChild(h);
+    }
+    const li = document.createElement('li');
+    li.className = 'pal-row';
+    li.id = `pal-opt-${i}`;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', String(i === palette.active));
+    li.dataset.cmd = r.id;
+    const main = document.createElement('span');
+    main.className = 'pal-main';
+    const title = document.createElement('span');
+    title.className = 'pal-title';
+    title.textContent = r.title;
+    const ex = document.createElement('span');
+    ex.className = 'pal-ex';
+    ex.textContent = r.example || '';
+    main.append(title, ex);
+    li.appendChild(main);
+    if (r.keys) {
+      const k = document.createElement('kbd');
+      k.className = 'pal-key';
+      k.textContent = r.keys;
+      li.appendChild(k);
+    }
+    if (r.hint) li.title = r.hint;
+    li.addEventListener('pointerdown', (e) => e.preventDefault());   // фокус остаётся в строке
+    li.addEventListener('click', () => { palette.active = i; runPaletteRow(r); });
+    list.appendChild(li);
+  });
+  if (!rows.length) {
+    const li = document.createElement('li');
+    li.className = 'pal-empty';
+    li.setAttribute('role', 'presentation');
+    li.textContent = 'Такой команды нет. Enter — подсказка, «/помощь» — все команды. Просьбу к агенту наберите без «/».';
+    list.appendChild(li);
+  }
+  if (rows.length) {
+    dom.command.setAttribute('aria-activedescendant', `pal-opt-${palette.active}`);
+    const cur = list.querySelector(`#pal-opt-${palette.active}`);
+    if (cur && typeof cur.scrollIntoView === 'function') cur.scrollIntoView({ block: 'nearest' });
+  } else dom.command.removeAttribute('aria-activedescendant');
+}
+
+function movePalette(d) {
+  const n = palette.rows.length;
+  if (!n) return;
+  palette.active = (palette.active + d + n) % n;
+  for (const li of dom['palette-list'].querySelectorAll('.pal-row')) {
+    li.setAttribute('aria-selected', String(li.id === `pal-opt-${palette.active}`));
+  }
+  dom.command.setAttribute('aria-activedescendant', `pal-opt-${palette.active}`);
+  const cur = dom['palette-list'].querySelector(`#pal-opt-${palette.active}`);
+  if (cur && typeof cur.scrollIntoView === 'function') cur.scrollIntoView({ block: 'nearest' });
+}
+
+/** Исполнить строку палитры — тем же путём, что набранную команду (submitCommand). */
+function runPaletteRow(r) {
+  if (!r) return;
+  if (r.fill) {
+    // команде нужен аргумент: дописываем «/масштаб » и ждём число
+    dom.command.value = r.fill;
+    dom.command.focus();
+    palette.active = 0;
+    renderPalette();
+    return;
+  }
+  runShellText(r.run);
+}
+
+/** Команда таблицы текстом «/…»: как будто её набрали и нажали Enter; набранное до палитры — вернуть. */
+function runShellText(text) {
+  const draft = palette.draft;
+  closePalette({ restore: false });
+  dom.command.value = text;
+  submitCommand();
+  if (draft && !dom.command.value.trim()) dom.command.value = draft;
+}
+
+/** Клавиши строки команд, пока открыта палитра. true — нажатие забрала палитра. */
+function paletteKey(e) {
+  if (!paletteOpen() || e.isComposing) return false;
+  if (e.key === 'ArrowDown') { e.preventDefault(); movePalette(1); return true; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); movePalette(-1); return true; }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePalette(); return true; }
+  if (e.key === 'Tab' && !e.shiftKey && palette.rows[palette.active]) {
+    // Tab дописывает команду в строку, не исполняя
+    e.preventDefault();
+    const r = palette.rows[palette.active];
+    dom.command.value = r.fill || r.run;
+    palette.active = 0;
+    renderPalette();
+    return true;
+  }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    const r = palette.rows[palette.active];
+    if (r) runPaletteRow(r);
+    else runShellText(dom.command.value.trim());   // «/взлетай» — честный ответ оболочки
+    return true;
+  }
+  return false;
+}
+
+/** Справка «Команды» — из таблицы по группам: одна истина, без ручного списка. */
+function openCommandsHelp() {
+  closePalette();
+  openSheet('Команды', fillCommandsHelp, { key: 'commands' });
+}
+
+function fillCommandsHelp(body) {
+  const note = document.createElement('p');
+  note.className = 'note';
+  note.textContent = 'Эти команды оболочка выполняет сама — без агента и без сети. Наберите «/» в строке команд '
+    + 'или нажмите Ctrl+K: откроется поиск. Всё, чего здесь нет, скажите словами — это работа агента.';
+  body.appendChild(note);
+  for (const g of SHELL.helpGroups()) {
+    const rows = g.commands.map((c) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cmd-help';
+      b.dataset.cmd = c.id;
+      const head = document.createElement('span');
+      head.className = 'cmd-help-head';
+      const title = document.createElement('span');
+      title.className = 'cmd-help-title';
+      title.textContent = c.title;
+      head.appendChild(title);
+      if (c.slash.length) {
+        const sl = document.createElement('code');
+        sl.className = 'cmd-help-slash';
+        sl.textContent = c.example || SHELL.slashOf(c);
+        head.appendChild(sl);
+      }
+      if (c.keys) {
+        const k = document.createElement('kbd');
+        k.textContent = c.keys;
+        head.appendChild(k);
+      }
+      b.appendChild(head);
+      const what = [c.hint, c.phrases[0] ? `«${c.phrases[0]}»` : ''].filter(Boolean).join(' · ');
+      if (what) {
+        const ex = document.createElement('span');
+        ex.className = 'cmd-help-ex';
+        ex.textContent = what;
+        b.appendChild(ex);
+      }
+      const a = c.args && c.args[0];
+      b.title = c.id === 'palette' ? 'Открыть палитру' : (a && !a.optional ? `Набрать ${SHELL.slashOf(c)} …` : `Выполнить ${SHELL.slashOf(c)}`);
+      b.addEventListener('click', () => {
+        closeSheet();
+        if (c.id === 'palette') { openPalette(); return; }
+        if (a && !a.optional) {
+          palette.draft = dom.command.value && !/^\s*\//.test(dom.command.value) ? dom.command.value : '';
+          dom.command.value = `${SHELL.slashOf(c)} `;
+          openPalette();
+          return;
+        }
+        runShellText(SHELL.slashOf(c));
+      });
+      return b;
+    });
+    body.appendChild(group(g.group, rows));
   }
 }
 
@@ -11282,10 +11648,29 @@ function bindUi() {
   // Enter в строке — отправка, и только она: неявная отправка формы нажимала «Стоп»
   // и обрывала первую команду вместе с набранным текстом (п.8)
   dom.command.addEventListener('keydown', (e) => {
+    // круг 38: пока открыта палитра, стрелки, Enter, Tab и Esc — её
+    if (paletteKey(e)) return;
     if (e.key !== 'Enter' || e.isComposing || e.shiftKey) return;
     e.preventDefault();
     submitOnce();
   });
+  // «/» в начале строки открывает палитру, стёртый «/» — закрывает
+  dom.command.addEventListener('input', () => {
+    const slash = /^\s*\//.test(dom.command.value);
+    if (slash && !paletteOpen()) openPalette();
+    else if (slash) { palette.active = 0; renderPalette(); }
+    else if (paletteOpen()) closePalette({ restore: false });
+  });
+  if (dom['btn-palette-help']) {
+    dom['btn-palette-help'].addEventListener('pointerdown', (e) => e.preventDefault());
+    dom['btn-palette-help'].addEventListener('click', () => openCommandsHelp());
+  }
+  // щелчок мимо палитры и строки — закрыть, вернув набранное
+  document.addEventListener('pointerdown', (e) => {
+    if (!paletteOpen()) return;
+    if (dom.palette.contains(e.target) || dom.commandbar.contains(e.target)) return;
+    closePalette();
+  }, true);
   dom.commandbar.addEventListener('submit', (e) => {
     e.preventDefault();
     if (runHoldFired) { runHoldFired = false; return; }   // долгое нажатие уже запустило варианты
@@ -11424,7 +11809,8 @@ function bindUi() {
     // одиночная буква — только когда фокус не на органе управления: иначе «l» и «h»
     // срабатывали с любой кнопки, по которой человек только что щёлкнул (круг 9, п.15)
     const bare = !typing && bareKeyOk();
-    if (e.key === '/' && !typing) { e.preventDefault(); dom.command.focus(); }
+    // круг 38: «/» вне полей — палитра команд (строка команд с «/» в начале)
+    if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); openPalette(); return; }
     /* Круг 18, п.4. Во время голосовой сессии командной строки не видно, и Escape —
        самый короткий путь обратно к печати: он гасит микрофон, а строка возвращается
        вместе с фокусом. Стоит раньше прочих Escape нарочно: шторки в этот момент
@@ -11459,7 +11845,19 @@ function bindUi() {
     if (e.key.toLowerCase() === 'v' && bare && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (toggleVoice) { e.preventDefault(); toggleVoice(); }
     }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); dom.command.focus(); }
+    // круг 38 (SPEC §13): Ctrl/⌘+K — палитра команд, повторно — закрыть
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      if (paletteOpen()) closePalette();
+      else openPalette();
+      return;
+    }
+    // ⌘G — обернуть выделенное в рамку, ⇧⌘G — разгруппировать (команды таблицы)
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'g' && !typing && !e.defaultPrevented) {
+      e.preventDefault();
+      applyShellIntent({ kind: e.shiftKey ? 'ungroup' : 'wrap' }, '');
+      return;
+    }
     /* Ctrl+A вне холста выделял весь текст страницы, хотя после «выделить всё» человек
        ждёт узлы (круг 11, п.14). Сцена ловит своё событие раньше и ставит defaultPrevented —
        значит сюда доходит только случай «фокус не на холсте». */

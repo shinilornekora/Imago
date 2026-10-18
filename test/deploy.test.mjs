@@ -496,7 +496,7 @@ test('nginx -t на настоящем конфиге и живые маршру
         return;
       }
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' });
-      res.write('event: stage\ndata: {"key":"jev"}\n\n');
+      res.write('event: stage\ndata: {"key":"intent"}\n\n');
       await new Promise((r) => setTimeout(r, 700));
       res.write('event: result\ndata: {"tx_id":"t"}\n\nevent: done\ndata: {}\n\n');
       res.end();

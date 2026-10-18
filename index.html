@@ -139,13 +139,29 @@
 
       <div class="hints" id="hints"></div>
 
+      <!-- Круг 38 (SPEC §13). Палитра команд оболочки: Ctrl/⌘+K или «/» в начале строки команд.
+           Строка команд — поле поиска (combobox), список — listbox; строки строит таблица
+           SHELL_COMMANDS (src/shell.js), своего списка у разметки нет. -->
+      <div class="palette" id="palette" hidden>
+        <div class="palette-head">
+          <span class="palette-title">Команды оболочки</span>
+          <span class="palette-keys" aria-hidden="true"><kbd>↑</kbd><kbd>↓</kbd> выбрать · <kbd>Enter</kbd> выполнить · <kbd>Esc</kbd> закрыть</span>
+        </div>
+        <ul class="palette-list" id="palette-list" role="listbox" aria-label="Команды оболочки"></ul>
+        <div class="palette-foot">
+          <span class="palette-tip">Чего нет в списке — скажите словами без «/»: это работа агента.</span>
+          <button type="button" class="linkish palette-help" id="btn-palette-help">Все команды</button>
+        </div>
+      </div>
+
       <form class="commandbar" id="commandbar" autocomplete="off">
         <button type="button" class="mic" id="btn-mic" title="Голосовая команда: нажмите или клавиша V" aria-label="Голосовая команда" aria-pressed="false">
           <span class="i" data-icon="mic"></span>
         </button>
         <span class="mic-live" id="mic-live" role="status" hidden>Слушаю</span>
         <input class="command-input" id="command" type="text" spellcheck="false"
-               aria-label="Команда агенту" placeholder="Что построить или изменить?">
+               aria-label="Команда агенту" placeholder="Что построить или изменить? «/» — команды"
+               role="combobox" aria-autocomplete="list" aria-controls="palette-list" aria-expanded="false">
         <!-- Кнопки одной группой: на узком холсте вся группа переходит на вторую строку
              командной строки, а поле остаётся полной ширины (круг 16, п.1). -->
         <div class="cmd-actions">
