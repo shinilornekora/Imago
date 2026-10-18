@@ -25,7 +25,9 @@
  *     и документы, прочитанные целиком и ещё нужные командам, — не больше `fullBytes` (длина JSON;
  *     команда держит свою долю до конца расчёта — `lease`); ждущим — `onQueued(position)`
  *     (событие `queued {scope:'read'}`); ждущих больше `fullQueue` — сразу 503 `busy`;
- *   • всё чтение — в бюджете `readBudgetMs` (очередь, повтор после таймаута, Retry-After);
+ *   • ответ сервиса — в бюджете `readBudgetMs` (повтор после таймаута, Retry-After); круг 41:
+ *     ожидание в своей очереди — отдельно, в сроке `queueWaitMs`; отказ из-за неё — `busy` с
+ *     причиной `agent` («Агент занят чтением других документов…»);
  *     503 busy сервиса ждётся по его Retry-After; сервис так и не ответил в срок — 503 `busy`
  *     («перегружен, повторите»). `document_down` остаётся для «нет связи» и 5xx без признаков
  *     перегрузки.
@@ -33,11 +35,11 @@
 
 import { createHash } from 'node:crypto';
 import { applyBatches } from '../../../src/core.js';
-import { notFound, OrchError, documentBusy, cancelled } from '../errors.js';
+import { notFound, OrchError, documentBusy, agentBusy, agentReadBusy, cancelled } from '../errors.js';
 import {
   DSLR_CACHE_PROJECTS, DSLR_CACHE_BYTES, DOC_PAGE_LIMIT, DSLR_MAX_PAGES, DSLR_FULL_ATTEMPTS, DOC_RETRY_AFTER_MAX_S,
   DOC_TIMEOUT_MS, DOC_FULL_TIMEOUT_MS, DSLR_FULL_CONCURRENCY, DSLR_FULL_BYTES, DSLR_FULL_QUEUE, DSLR_READ_BUDGET_MS,
-  DSLR_TIMEOUT_RETRIES, DSLR_READ_ESTIMATE_BYTES, DSLR_SIZE_MEMO,
+  DSLR_TIMEOUT_RETRIES, DSLR_READ_ESTIMATE_BYTES, DSLR_SIZE_MEMO, DSLR_QUEUE_WAIT_MS,
 } from '../limits.js';
 
 /**
@@ -114,6 +116,8 @@ export function createReadGate({ max = DSLR_FULL_CONCURRENCY, bytes = DSLR_FULL_
   /**
    * @param {number} need оценка размера (байтов JSON)
    * @param {{signal?: AbortSignal, deadline?: number, onQueued?: (position: number) => void}} [o]
+   *   deadline — срок ожидания в очереди (круг 41: свой, не бюджет ответа сервиса); не дождались
+   *   или очередь полна — 503 `busy` с причиной `agent`
    * @returns {Promise<{done: Function, resize: Function, free: Function}>}
    */
   function acquire(need, { signal, deadline, onQueued } = {}) {
@@ -122,7 +126,7 @@ export function createReadGate({ max = DSLR_FULL_CONCURRENCY, bytes = DSLR_FULL_
     if ((n === 0 ? !waiting.some((w) => w.need === 0) : !waiting.some((w) => w.need > 0)) && fits(n)) return Promise.resolve(grant(n));
     if (waiting.length >= queue) {
       stats.refused++;
-      return Promise.reject(documentBusy(5, { cause: 'очередь полных чтений агента полна' }));
+      return Promise.reject(agentReadBusy(10, { queue: 'full' }));
     }
     stats.waited++;
     return new Promise((resolve, reject) => {
@@ -138,8 +142,8 @@ export function createReadGate({ max = DSLR_FULL_CONCURRENCY, bytes = DSLR_FULL_
       const timer = setTimeout(() => {
         off();
         stats.expired++;
-        reject(documentBusy(5, { cause: 'полное чтение не дождалось очереди' }));
-      }, Math.max(1, (deadline || Date.now() + DSLR_READ_BUDGET_MS) - Date.now()));
+        reject(agentReadBusy(10, { queue: 'wait' }));
+      }, Math.max(1, (deadline || Date.now() + DSLR_QUEUE_WAIT_MS) - Date.now()));
       w.take = () => { off(); resolve(grant(n)); };
       w.at = (pos) => {
         if (pos === told || !onQueued) return;
@@ -205,7 +209,7 @@ export function createDslrClient({
   doc: net, log = console, cacheSize = DSLR_CACHE_PROJECTS, cacheBytes = DSLR_CACHE_BYTES, pageLimit = DOC_PAGE_LIMIT,
   fullConcurrency = DSLR_FULL_CONCURRENCY, fullBytes = DSLR_FULL_BYTES, fullQueue = DSLR_FULL_QUEUE,
   fullTimeoutMs = DOC_FULL_TIMEOUT_MS, pageTimeoutMs = DOC_TIMEOUT_MS, readBudgetMs = DSLR_READ_BUDGET_MS,
-  timeoutRetries = DSLR_TIMEOUT_RETRIES, retryAfterMaxS = DOC_RETRY_AFTER_MAX_S, estimateBytes: estimateDefault = DSLR_READ_ESTIMATE_BYTES,
+  timeoutRetries = DSLR_TIMEOUT_RETRIES, queueWaitMs = DSLR_QUEUE_WAIT_MS, retryAfterMaxS = DOC_RETRY_AFTER_MAX_S, estimateBytes: estimateDefault = DSLR_READ_ESTIMATE_BYTES,
 }) {
   /** Круг 39: семафор полных чтений (число и байты). */
   const gate = createReadGate({ max: fullConcurrency, bytes: fullBytes, queue: fullQueue });
@@ -371,7 +375,9 @@ export function createDslrClient({
     stats.overloaded++;
     const cause = e && e.detail && e.detail.cause ? e.detail.cause : 'бюджет чтения исчерпан';
     log.warn(`[orchestrator/dslr] ${url}: сервис документов перегружен (${cause}) — команде busy`);
-    return documentBusy(e && e.docRetryAfter ? e.docRetryAfter : 5, { cause: e && e.ownLag ? 'agent' : 'document' });
+    // круг 41: опаздывал наш собственный цикл событий — перегружен агент, не сервис
+    if (e && e.ownLag) return agentBusy(5);
+    return documentBusy(e && e.docRetryAfter ? e.docRetryAfter : 5, { cause: 'document' });
   }
 
   /**
@@ -445,14 +451,17 @@ export function createDslrClient({
   async function fresh(id, opts) {
     const leased = !!(opts.lease && typeof opts.lease === 'object');
     const need = leased ? sizes.get(id) || estimateDefault : 0;
-    const ticket = await gate.acquire(need, { signal: opts.signal, deadline: opts.deadline, onQueued: opts.onQueued });
+    // круг 41 (D5): ожидание места — в своём сроке очереди; бюджет ответа сервиса — с мига,
+    // когда место получено (раньше очередь съедала его, и хвост читался с остатком в доли секунды)
+    const ticket = await gate.acquire(need, { signal: opts.signal, deadline: opts.queueDeadline, onQueued: opts.onQueued });
+    const o = { ...opts, deadline: Date.now() + readBudgetMs };
     let kept = false;
     try {
       if (opts.onStart) { try { opts.onStart(); } catch { /* ignore */ } }
       let last = null;
       for (let i = 0; i < DSLR_FULL_ATTEMPTS; i++) {
         try {
-          const st = await full(id, opts, leased ? ticket : null);
+          const st = await full(id, o, leased ? ticket : null);
           if (leased) {
             opts.lease.release = () => ticket.free();
             kept = true;
@@ -509,8 +518,9 @@ export function createDslrClient({
    */
   function read(id, opts = {}) {
     const prev = lanes.get(id) || Promise.resolve();
-    // круг 39: бюджет всего чтения считается с его начала (с очередью проекта и семафором)
-    const o = { ...opts, deadline: opts.deadline || Date.now() + readBudgetMs };
+    /* Круг 39: бюджет ответа сервиса; круг 41 (D5): ожидание в своей очереди полных чтений — свой
+       срок (`queueWaitMs`), а полное чтение получает бюджет заново, когда дождалось места. */
+    const o = { ...opts, deadline: opts.deadline || Date.now() + readBudgetMs, queueDeadline: opts.queueDeadline || Date.now() + queueWaitMs };
     const run = prev.catch(() => {}).then(() => readNow(id, o)).catch((e) => {
       if (e && e.code === 'not_found') drop(id);
       throw e;

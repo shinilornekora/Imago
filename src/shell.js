@@ -16,12 +16,14 @@
 
 import {
   artboards, isArtboard, subtreeIds, placeholderName,
-  ops as OPS, ancestors, normalizeLayout, uid,
+  ops as OPS, ancestors, normalizeLayout, resolveLayout, uid,
   scaleSteps, scaleRef, parseScaleRef, resolveScale,
 } from './core.js';
 // круг 25: cutText/cleanText появляются в core параллельно — берём оттуда, если уже есть
 import * as CORE_NS from './core.js';
 import { recognizeAction } from './brain.js';
+// круг 41: причины отброшенного — одна истина со словами реплики (§9.10)
+import { DROP_WORDS } from './sync.js';
 
 /* ------------------------------ строки человеку ------------------------------ */
 
@@ -113,6 +115,7 @@ export function agentModeTitle(mode, health, providerWords = '') {
     const why = h ? 'модель на сервере сейчас не отвечает' : 'сервер агента не отвечает';
     return `Команды агента выполняются в этом браузере${providerWords ? ` (${providerWords})` : ''}: ${why}`;
   }
+  if (health && health.reason === 'offline') return 'Нет сети — команды агента не выполняются. Правки руками ждут во вкладке';
   return 'Сервер агента не отвечает — команды агента не выполняются. Правки руками сохраняются';
 }
 
@@ -125,17 +128,23 @@ export function agentModeTitle(mode, health, providerWords = '') {
  * @param {{hasProvider?: boolean}} [o]
  * @returns {{text: string, kind: 'plain'|'error', back?: boolean}|null}
  */
-export function agentHealthNotice(prev, next, { hasProvider = false } = {}) {
+export function agentHealthNotice(prev, next, { hasProvider = false, editsWait = false } = {}) {
   if (!prev || !next) return null;
   const was = prev.ok === true ? (prev.document !== 'up' ? 'nodoc' : prev.llm !== 'up' ? 'nollm' : 'up') : 'down';
   const now = next.ok === true ? (next.document !== 'up' ? 'nodoc' : next.llm !== 'up' ? 'nollm' : 'up') : 'down';
   if (was === now) return null;
   const local = hasProvider ? ' Команды пока выполняются в браузере.' : '';
   if (now === 'up') {
+    // круг 41 (UX): пропажа была из-за сети компьютера — и возвращается сеть, а не сервер
+    if (was === 'down' && prev.reason === 'offline') return { text: 'Сеть вернулась — агент снова на связи.', kind: 'plain', back: true };
     const text = { down: 'Сервер агента снова на связи.', nodoc: 'Сервер документа снова на связи — агент работает.', nollm: 'Модель на сервере снова отвечает.' }[was];
     return { text, kind: 'plain', back: true };
   }
-  if (now === 'down') return { text: `Сервер агента не отвечает.${local || ' Правки руками сохраняются.'}`, kind: 'plain' };
+  /* круг 41 (UX): нет сети у компьютера — так и говорим: сервер агента тут ни при чём, правки
+     ждут во вкладке (а не «сохраняются») */
+  if (now === 'down' && next.reason === 'offline') return { text: `Нет сети — агент недоступен.${local || ' Правки руками ждут во вкладке и уйдут, когда сеть вернётся.'}`, kind: 'plain' };
+  // круг 41: сервер документов тоже недоступен (реплика не в сети) — правки не «сохраняются», а ждут
+  if (now === 'down') return { text: `Сервер агента не отвечает.${local || (editsWait ? ' Правки руками ждут во вкладке.' : ' Правки руками сохраняются.')}`, kind: 'plain' };
   if (now === 'nodoc') {
     // K2: причина — база данных, а не сервис документа
     // круг 32: 'schema' — база догоняет схему после восстановления из копии (обычно секунды)
@@ -467,6 +476,15 @@ export function agentErrorWords(err) {
     const nameIt = e.hint === 'name_layer' || !!(e.detail && typeof e.detail === 'object' && e.detail.hint === 'name_layer');
     return { title: why ? `${title}: ${why.charAt(0).toLowerCase()}${why.slice(1)}` : title, note: nameIt ? hint.replace(/\s*[.]\s*$/, '') : '', waitMs: 0 };
   }
+  /* Круг 41: Orchestrator сверил версию движка вкладки (426 engine, detail.cause). Вкладка
+     старее — обновить страницу; сервер агента старее — ждать его обновления; повтор сейчас
+     ничего не даст, поэтому ни «повторите», ни срока. */
+  if (e.code === 'engine' && e.detail && e.detail.cause === 'client_old') {
+    return { title: 'Вышла новая версия редактора — обновите страницу', note: 'Сервер агента работает с новой версией, эта вкладка — с прежней. Команда не выполнена, текст остался в строке', waitMs: 0, engine: 'client_old' };
+  }
+  if (e.code === 'engine' && e.detail && e.detail.cause === 'server_old') {
+    return { title: 'Сервер агента ещё не обновился — команда не выполнена', note: 'Он на прежней версии редактора, повтор сейчас не поможет. Текст команды остался в строке — выполните её, когда сервер обновят', waitMs: 0, engine: 'server_old' };
+  }
   // K2: документ недоступен агенту из-за базы данных — так и говорим, а не «сервер документа не отвечает»
   if ((e.code === 'document_down' || e.code === 'document_failed') && storageReason(e)) {
     const waitMs = Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0 ? e.retryAfterMs : 0;
@@ -596,6 +614,52 @@ function droppedSubject(op, nameOf) {
   }
 }
 
+/**
+ * Круг 41 (арх. Н2): почему «Сохранить как новый проект» не удалось — словами оболочки по коду
+ * и статусу ответа; текст сервера (create_id, тело запроса…) человеку не показываем.
+ * @param {{status?: number, code?: string, detail?: object, retryable?: boolean}|Error} e
+ * @returns {string} строчными, без точки
+ */
+export function rescueFailWords(e) {
+  const x = e && typeof e === 'object' ? e : {};
+  const d = x.detail && typeof x.detail === 'object' ? x.detail : {};
+  const st = Number(x.status) || 0;
+  if (st === 0 && (x instanceof TypeError || /fetch|network|сеть|связ/i.test(String(x.message || '')))) return 'нет связи с сервером';
+  if (st === 409) return 'сервер уже создал проект по прошлой попытке, а документ с тех пор изменился';
+  if (st === 413 || x.code === 'too_large') return 'документ больше, чем сервер принимает за раз';
+  if (d.limit === 'expand_nodes' || x.limit === 'expand_nodes') return 'в документе слишком много вложенных экземпляров';
+  if (d.limit === 'doc_nodes' || x.limit === 'doc_nodes') return 'документ упёрся в предел числа слоёв';
+  if (st === 400) return 'сервер не принял документ';
+  if (st === 503 && (d.cause === 'storage' || d.storage === 'down' || d.cause === 'timeout')) return 'база данных сервера недоступна';
+  if (st === 503 && d.cause === 'schema') return 'сервер обновляет базу данных';
+  if (st === 503 && d.cause === 'engine') return 'сервер ещё на прежней версии редактора';
+  if (st === 503 || st === 429 || x.code === 'busy') return 'сервер занят';
+  if (st === 426) return 'вышла новая версия редактора — обновите страницу';
+  if (st >= 500) return 'сервер не ответил как надо';
+  if (x.retryable === false && x.message && !isJargon(x.message)) return cleanText(x.message).replace(/[.\s]+$/u, '');
+  return 'сервер не ответил как надо';
+}
+
+/** «52 008» — тысячи через неразрывный пробел. */
+export function countWords(n) {
+  return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
+}
+
+/**
+ * Круг 41 (UX Д6): документ сверх предела раскрытия экземпляров (core.expandProblem) — отказ
+ * импорта словами, как у сервиса: до записи, документ прежний.
+ * @param {{cost?: number, max?: number}} p
+ */
+export function expandLimitWords(p = {}) {
+  const cost = Number.isFinite(p.cost) ? p.cost : null;
+  const max = Number.isFinite(p.max) ? p.max : null;
+  return {
+    title: 'Файл не загружен: слишком много вложенных экземпляров',
+    note: `${cost && max ? `Экземпляры компонентов раскрылись бы в ${countWords(cost)} слоёв — больше предела ${countWords(max)}. ` : ''}`
+      + 'Документ остался прежним. Удалите из файла лишние экземпляры или разберите тяжёлый компонент.',
+  };
+}
+
 /** Причина отказа словами; who — кто помешал (для removed/orphan). */
 function droppedReason(d, who, many) {
   const reason = d && (d.limit || d.reason);
@@ -613,13 +677,10 @@ function droppedReason(d, who, many) {
     case 'stale':
       return who
         ? `с тех пор ${whoDid(who, 'изменил')} то же самое, а эта правка сделана до восстановления базы из резервной копии`
-        : 'она сделана до восстановления базы из резервной копии, а документ с тех пор другой';
-    case 'doc_nodes': return 'документ упёрся в предел числа слоёв';
-    case 'doc_bytes': return 'документ упёрся в предел размера';
-    case 'merge_budget': return 'сервер не успел её разобрать';
-    case 'ops_per_tx': return 'в ней слишком много операций';
-    case 'tx_bytes': return 'она слишком большая';
-    default: return 'она не подошла к документу';
+        : 'правка сделана до восстановления базы из резервной копии, а документ с тех пор другой';
+    /* Круг 41 (UX Д5): пределы и «не подошла» — словами реплики (DROP_WORDS, одна истина),
+       без местоимения: подлежащее бывает «Добавление», «Перенос», «Правка» — «она» не про всех. */
+    default: return DROP_WORDS[reason] || DROP_WORDS.invalid;
   }
 }
 
@@ -668,6 +729,16 @@ export function droppedWords({ dropped = [], applied = 0, nameOf = null, whoOf =
   const notes = [];
   if (applied > 0) notes.push('Остальное в правке применено.');
   if (stale) notes.push('Посмотрите на холст и при необходимости сделайте правку заново.');
+  // круг 41 (UX Д5): предел раскрытия экземпляров — что делать
+  if (real.some((d) => reasonOf(d) === 'expand_nodes')) {
+    const d = real.find((x) => reasonOf(x) === 'expand_nodes');
+    const cost = d && Number.isFinite(d.cost) ? d.cost : null;
+    const max = d && Number.isFinite(d.max) ? d.max : null;
+    const lim = max || CORE_NS.MAX_EXPANDED_NODES;
+    const nums = cost && max ? `Раскрытие дало бы ${countWords(cost)} слоёв — предел ${countWords(max)}. `
+      : lim ? `Экземпляры компонентов раскрываются в слои, и их не может быть больше ${countWords(lim)}. ` : '';
+    notes.push(`${nums}Удалите лишние экземпляры или разберите тяжёлый компонент.`);
+  }
   return { title, note: notes.join(' '), stale };
 }
 
@@ -1392,10 +1463,28 @@ function nameStems(name) {
   const key = String(name || '');
   let got = STEMS_CACHE.get(key);
   if (got) return got;
-  got = saidWords(key, false).map(stemWord).filter(Boolean);
+  // слова уже в нижнем регистре и без знаков (saidWords) — основа сразу, без второй чистки
+  got = [];
+  for (const w of saidWords(key, false)) if (w) got.push(w.length > 4 ? w.slice(0, w.length - 2) : w);
   if (STEMS_CACHE.size >= STEMS_CACHE_MAX) STEMS_CACHE.clear();
   STEMS_CACHE.set(key, got);
   return got;
+}
+/**
+ * Круг 41: основы имён слоёв — заранее, частями в простое (оболочка зовёт после перерисовки),
+ * чтобы первое «/выделить …» на большом документе не считало их все разом.
+ * @param {object} doc
+ * @param {{from?: number, count?: number, ids?: string[]}} [o] ids — список (тот же между частями)
+ * @returns {{ids: string[], next: number}} next — с какого продолжить (= ids.length — всё)
+ */
+export function warmNameStems(doc, { from = 0, count = 2000, ids = null } = {}) {
+  const list = ids || (doc && doc.nodes ? Object.keys(doc.nodes) : []);
+  const end = Math.min(list.length, from + count);
+  for (let i = from; i < end; i++) {
+    const n = doc.nodes[list[i]];
+    if (n && n.type !== 'page' && typeof n.name === 'string' && n.name) nameStems(n.name);
+  }
+  return { ids: list, next: end };
 }
 function stemsMatch(have, want) {
   if (!want.length) return 0;
@@ -1423,16 +1512,36 @@ export function nodesByName(doc, phrase, { activeId = null, artboardsToo = true 
   if (!doc || !doc.nodes) return [];
   const want = wantStems(phrase);
   if (!want.length) return [];
-  const inside = activeId && doc.nodes[activeId] ? new Set(subtreeIds(doc, activeId)) : new Set();
+  /* Круг 41: «внутри активной доски» — по цепочке родителей только у совпавших узлов (с
+     памятью по родителям), а не множеством всего поддерева доски: на 20 тыс. слоёв это
+     было большей частью времени `/выделить …`. */
+  const nodes = doc.nodes;
+  const own = (id) => (Object.prototype.hasOwnProperty.call(nodes, id) ? nodes[id] : null);
+  const under = new Map();
+  const isInside = (id) => {
+    if (!activeId || !own(activeId)) return false;
+    const path = [];
+    let cur = id;
+    let res = false;
+    for (let k = 0; cur && k < 512; k++) {
+      if (cur === activeId) { res = true; break; }
+      if (under.has(cur)) { res = under.get(cur); break; }
+      path.push(cur);
+      const n = own(cur);
+      cur = n ? n.parent : null;
+    }
+    for (const p of path) under.set(p, res);
+    return res;
+  };
   const out = [];
-  for (const id in doc.nodes) {
-    if (!Object.prototype.hasOwnProperty.call(doc.nodes, id)) continue;
-    const n = doc.nodes[id];
+  for (const id in nodes) {
+    if (!Object.prototype.hasOwnProperty.call(nodes, id)) continue;
+    const n = nodes[id];
     if (!n || n.type === 'page') continue;
     if (!artboardsToo && isArtboard(doc, id)) continue;
     const score = stemsMatch(nameStems(n.name || placeholderName(doc, n)), want);
     if (!score) continue;
-    out.push({ id, node: n, score: score + (inside.has(id) ? 0.5 : 0) });
+    out.push({ id, node: n, score: score + (isInside(id) ? 0.5 : 0) });
   }
   out.sort((a, b) => b.score - a.score);
   return out;
@@ -2346,9 +2455,11 @@ export function lockOps(doc, ids, on) {
   };
 }
 
-/* Перестановка внутри родителя: целевой порядок, затем ходы `move`. Ходы проверяются
-   прогоном на копии списка: если короткий путь не сходится, переставляются все дети
-   по порядку — это верно всегда. */
+/* Перестановка внутри родителя: целевой порядок, затем ходы `move` — выбранные по
+   возрастанию целевого места или в обратном порядке; ходы проверяются прогоном на копии
+   списка. Круг 41: запасной «переставить всех детей» убран — он недостижим (подъём,
+   опускание, в начало и в конец всегда сходятся одним из двух путей, 200 тыс. случаев,
+   notes-r39-CORE); не сошлось — пусто, и команда честно говорит «порядок не изменился». */
 function movesTo(parentId, cur, target, moved) {
   const tryOrder = (order) => {
     const sim = cur.slice();
@@ -2362,7 +2473,7 @@ function movesTo(parentId, cur, target, moved) {
     return sim.join('\u0001') === target.join('\u0001') ? list : null;
   };
   const asc = moved.slice().sort((a, b) => target.indexOf(a) - target.indexOf(b));
-  return tryOrder(asc) || tryOrder(asc.slice().reverse()) || tryOrder(target.slice());
+  return tryOrder(asc) || tryOrder(asc.slice().reverse()) || [];
 }
 
 /**
@@ -2456,7 +2567,9 @@ export function wrapOps(doc, ids, { rects = null, name = 'Группа' } = {}) 
     const y2 = Math.max(...rs.map((r) => r.y + r.h));
     frame.layout = { mode: 'none', gap: zero, padding: pad0, align: 'start', justify: 'start', wrap: false };
     frame.size = { w: { mode: 'fixed', value: r2(x2 - x1) }, h: { mode: 'fixed', value: r2(y2 - y1) } };
-    frame.pos = { x: r2(x1 - pr.x), y: r2(y1 - pr.y) };
+    // круг 41 (D4): pos в свободной рамке отсчитывается от её отступа — как у решателя и сцены
+    const pad = resolveLayout(doc, parent.layout).padding;
+    frame.pos = { x: r2(x1 - pr.x - (pad.l || 0)), y: r2(y1 - pr.y - (pad.t || 0)) };
     order.forEach((k, i) => moves.push(OPS.set(k, 'pos', { x: r2(rs[i].x - x1), y: r2(rs[i].y - y1) })));
   } else {
     frame.layout = { mode: raw.mode, gap: raw.gap, padding: pad0, align: raw.align, justify: 'start', wrap: false };
@@ -2469,7 +2582,30 @@ export function wrapOps(doc, ids, { rects = null, name = 'Группа' } = {}) 
   frame.children = order.slice();
   list.push(OPS.create(frame, index));
   for (const op of moves) list.push(op);
-  return { ops: list, id, words: `Обернул ${quoted(doc, order)} в рамку «${name}»` };
+  return { ops: list, id, words: wrapWords(doc, order, name) };
+}
+
+/** «Обернул «Шапка» в рамку «Группа»» / «Обернул 2 слоя в рамку …» — и после слияния (круг 41). */
+export function wrapWords(doc, ids, name = 'Группа') {
+  return `Обернул ${quoted(doc, ids)} в рамку «${cutText(cleanText(name), 60, { ellipsis: true }) || 'Группа'}»`;
+}
+
+/**
+ * Круг 41 (UX): «Обернуть» подтверждена в другой форме — соавтор успел удалить часть слоёв, и
+ * слияние вычеркнуло их из списка детей. Подпись правки — по тому, что легло на самом деле.
+ * @param {object} doc документ после подтверждения
+ * @param {object[]} ops применённая форма транзакции
+ * @param {string} id рамка
+ * @param {string[]} asked какие слои оборачивали
+ * @returns {null|{words: string, lost: number}} null — легло как просили (или рамки нет)
+ */
+export function wrapSettledWords(doc, ops, id, asked) {
+  const c = (Array.isArray(ops) ? ops : []).find((o) => o && o.op === 'create' && o.node && o.node.id === id);
+  if (!c || !Array.isArray(c.node.children) || !Array.isArray(asked)) return null;
+  const kids = c.node.children;
+  const lost = asked.filter((k) => !kids.includes(k)).length;
+  if (!lost || !kids.length) return null;
+  return { words: wrapWords(doc, kids, c.node.name), lost };
 }
 
 /**
@@ -2488,11 +2624,13 @@ export function ungroupOps(doc, ids, { rects = null } = {}) {
   const at = (parent.children || []).indexOf(id);
   const free = normalizeLayout(parent.layout).mode === 'none';
   const pr = rects && rects[parent.id];
+  // круг 41 (D4): отступ свободного родителя — pos детей отсчитывается от него
+  const pad = resolveLayout(doc, parent.layout).padding;
   const list = [];
   kids.forEach((k, i) => {
     list.push(OPS.move(k, parent.id, at + i));
     const r = rects && rects[k];
-    if (free && pr && r) list.push(OPS.set(k, 'pos', { x: r2(r.x - pr.x), y: r2(r.y - pr.y) }));
+    if (free && pr && r) list.push(OPS.set(k, 'pos', { x: r2(r.x - pr.x - (pad.l || 0)), y: r2(r.y - pr.y - (pad.t || 0)) }));
   });
   list.push(OPS.remove(id));
   return { ops: list, ids: kids, words: `Разгруппировал «${cutText(titleOf(doc, id), 60, { ellipsis: true })}»` };

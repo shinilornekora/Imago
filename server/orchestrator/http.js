@@ -2,7 +2,8 @@
  * HTTP-транспорт Orchestrator (SPEC §10.2) на node:http, без фреймворков.
  *
  *   GET  /agent/health    {ok, engine, llm, document, document_reason?, model?} (document_reason — круг 31: storage|unreachable; круг 32: schema)
- *   POST /agent/command   SSE §10.3 (ошибки до старта потока — JSON с кодом)
+ *   POST /agent/command   SSE §10.3 (ошибки до старта потока — JSON с кодом); круг 41: `engine`
+ *                         тела или `X-Engine` ≠ версии агента — 426 engine (так же у apply)
  *   POST /agent/stop      {command_id, client?} → {stopped}
  *   POST /agent/apply     {command_id, variant, client?} → событие result одним JSON
  *
@@ -15,7 +16,7 @@
  */
 
 import { OrchError, badRequest, toOrchError } from './errors.js';
-import { cutText } from '../../src/core.js';
+import { cutText, ENGINE_VERSION } from '../../src/core.js';
 import {
   MAX_BODY_BYTES, MAX_TEXT, MAX_ID, MAX_SELECTION, MAX_HISTORY, MAX_HISTORY_CHARS, MAX_AUTHOR,
   MAX_VARIANTS, SSE_PING_MS, BODY_TIMEOUT_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
@@ -200,6 +201,32 @@ function openSse(req, res) {
 }
 
 /**
+ * Круг 41: версия движка клиента — поле `engine` тела или заголовок `X-Engine`. Не та, что у
+ * агента, — 426 `engine`, как у Document service: вкладка прежней версии не должна выполнять
+ * команды агента над документом, который её движок не понимает (и наоборот — новая вкладка
+ * у агента, который ещё не обновился). Нет ни поля, ни заголовка — как прежде (внешний вызов API).
+ * Остановка (`/agent/stop`) версию не сверяет: остановить можно всегда.
+ */
+export function checkClientEngine(req, body) {
+  let raw = body && body.engine !== undefined && body.engine !== null ? body.engine : undefined;
+  if (raw === undefined) {
+    const h = req.headers['x-engine'];
+    if (typeof h === 'string' && h.trim()) raw = /^\d{1,6}$/.test(h.trim()) ? Number(h.trim()) : h;
+  }
+  if (raw === undefined) return;
+  if (!Number.isInteger(raw) || raw < 1) throw badRequest('engine: целое ≥ 1 — версия движка клиента');
+  if (raw === ENGINE_VERSION) return;
+  const clientOld = raw < ENGINE_VERSION;
+  throw new OrchError(426, 'engine', clientOld
+    ? 'Вышла новая версия редактора — обновите страницу. Команда агенту не выполнена.'
+    : 'Сервер агента ещё не обновился до этой версии редактора — команда не выполнена. Повторите чуть позже.', {
+    retryable: !clientOld,
+    ...(clientOld ? {} : { retryAfter: 30 }),
+    detail: { engine: ENGINE_VERSION, found: raw, cause: clientOld ? 'client_old' : 'server_old' },
+  });
+}
+
+/**
  * @param {{pipeline: ReturnType<import('./pipeline.js').createPipeline>, redact: (s:string)=>string, log?: object, testHooks?: boolean}} deps
  */
 export function createRequestHandler({ pipeline, redact, log = console, testHooks = false, bodyTimeoutMs = BODY_TIMEOUT_MS }) {
@@ -236,6 +263,7 @@ export function createRequestHandler({ pipeline, redact, log = console, testHook
 
     if (path === '/agent/apply') {
       if (!isId(body.command_id)) throw badRequest('command_id: строка');
+      checkClientEngine(req, body);
       if (!optStr(body.client, MAX_ID)) throw badRequest('client: строка до 128 символов');
       const v = body.variant;
       if (!((typeof v === 'string' && v.length > 0 && v.length <= MAX_ID) || (Number.isInteger(v) && v >= 0 && v < 100))) {
@@ -248,6 +276,7 @@ export function createRequestHandler({ pipeline, redact, log = console, testHook
 
     // /agent/command
     const cmd = parseCommand(body, { testHooks });
+    checkClientEngine(req, body);
     let sink = null;
     await pipeline.command(cmd, () => {
       sink = openSse(req, res);

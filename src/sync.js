@@ -66,7 +66,8 @@ const PRESENCE_GAP = 100;         // присутствие — не чаще 10
 const PRESENCE_TTL = 90 * 1000;   // чужое присутствие без вестей столько — считаем ушедшим
 const ACK_TIMEOUT = 8 * 1000;     // подтверждение не пришло — дослать (идемпотентно), потом переподключиться
 const OPS_PAGE = 500;             // сколько транзакций просить за один GET …/ops
-const FIRST_CONNECT_MS = 6 * 1000;   // круг 39: первое подключение дольше — уже не «подключаюсь», а честное «недоступен»
+const FIRST_CONNECT_MS = 6 * 1000;
+const ENGINE_RECHECK_MS = 15 * 1000;  // круг 41: сервер старее клиента — так часто спрашиваем /api/health, не обновился ли   // круг 39: первое подключение дольше — уже не «подключаюсь», а честное «недоступен»
 const HELLO_TIMEOUT = 8 * 1000;   // сокет открыт, а hello нет — это не сервер (или зомби): закрыть и подключиться заново
 const MINE_KEEP = 200;            // своих подтверждённых транзакций помним столько — переиграть после отката базы
 const MINE_BYTES = 4 * 1024 * 1024; // …и не больше стольких байт JSON (старые вытесняются первыми)
@@ -158,8 +159,9 @@ export function engineWords(serverEngine, ownEngine) {
     return {
       newer: false,
       status: 'сервер ещё на прежней версии — правки ждут',
-      title: 'Сервер ещё не обновился',
-      note: 'Редактор новее сервера документов — правки ждут в этой вкладке. Обновите страницу чуть позже, когда сервер обновится.',
+      title: 'Сервер ещё не обновился — правки ждут во вкладке',
+      // круг 41: обновлять страницу не нужно — реплика сама перепроверяет сервер и отправит правки
+      note: 'Редактор новее сервера документов. Правки ждут в этой вкладке и уйдут сами, как только сервер обновят, — перезагружать страницу не нужно. Команды агента подождут вместе с ними.',
     };
   }
   return {
@@ -252,7 +254,11 @@ export const STORAGE_DOWN_LABEL = 'сервер не может сохранит
  */
 export function statusLine(s) {
   if (!s) return '';
-  if (s.error === 'engine') return engineWords(s.engine, s.ownEngine).status;
+  if (s.error === 'engine') {
+    const w = engineWords(s.engine, s.ownEngine);
+    // сервер старее, а ждать нечему — без «правки ждут» (круг 41)
+    return !w.newer && !s.pending ? 'сервер ещё на прежней версии редактора' : w.status;
+  }
   if (s.error === 'not_found') return 'проект не найден на сервере';
   if (s.storage === 'down') return s.pending ? STORAGE_DOWN_LABEL : 'сервер не может сохранить';
   if (!s.online) {
@@ -585,6 +591,7 @@ export function createSync(o) {
   const epochReopenMs = isNum(o.epochReopenMs) ? o.epochReopenMs : EPOCH_REOPEN_MS;
   const idleHealthMs = isNum(o.idleHealthMs) ? o.idleHealthMs : IDLE_HEALTH_MS;
   const firstConnectMs = isNum(o.firstConnectMs) && o.firstConnectMs > 0 ? o.firstConnectMs : FIRST_CONNECT_MS;
+  const engineRecheckMs = isNum(o.engineRecheckMs) && o.engineRecheckMs > 0 ? o.engineRecheckMs : ENGINE_RECHECK_MS;
   const heartbeatMs = isNum(o.presenceHeartbeatMs) ? o.presenceHeartbeatMs : LIMITS.presenceHeartbeatMs;
   const presenceTtl = isNum(o.presenceTtl) ? o.presenceTtl : PRESENCE_TTL;
   // прореживание надгробий (круг 29): числа сервера; опции — для тестов и для сервиса с другими
@@ -626,6 +633,9 @@ export function createSync(o) {
   let connectFailed = false;
   let connectGrace = null;
   let serverEngine = null;     // версия движка сервера из hello (для слов об отказе по версии)
+  let engineTimer = null;      // круг 41: перепроверка «сервер обновился?» (/api/health), пока он старее
+  let staleOpen = false;       // открытие отказано 503 engine (снимок не отдан) — повтор открытия
+  let engineSaid = '';         // о каком отказе по версии уже сказали оболочке (один раз на состояние)
   let helloTimer = null;
   let openRetry = null;        // ожидание повтора в open() без сервера — reconnect() будит его раньше срока
   let inflight = null;         // tx_id отправленной и ещё не подтверждённой транзакции
@@ -730,6 +740,75 @@ export function createSync(o) {
     const s = status();
     return { ...s, label: statusLine(s) };
   }
+  /* ---- версия движка (N1, круг 41) ---- */
+
+  /** Сервер ещё на прежней версии (старее клиента): правки ждут, а не «обновите страницу». */
+  function olderServer() {
+    return halted && error === 'engine' && isNum(serverEngine) && serverEngine < core.ENGINE_VERSION;
+  }
+
+  /**
+   * Отказ по версии: 426 / hello с другим движком / 503 `cause:'engine'` (проект записан
+   * движком новее этого экземпляра). Очередь стоит; сервер старее — перепроверяем его версию,
+   * клиент старее — поможет только перезагрузка. Оболочке — один раз на состояние.
+   * @param {number|null} se версия, с которой сравнивать свою: сервера, а для «устаревшего»
+   *   проекта — найденная в журнале, если она новее нашей
+   */
+  function markEngine(se) {
+    halted = true;
+    error = 'engine';
+    if (isNum(se)) serverEngine = se;
+    const key = String(serverEngine);
+    if (engineSaid !== key) {
+      engineSaid = key;
+      call(o.onError, { code: 'engine', message: engineWords(serverEngine, core.ENGINE_VERSION).status, engine: serverEngine });
+    }
+    armEngineCheck();
+    emitStatus();
+  }
+
+  /** Тело 503 «проект записан более новой версией» → версия для сравнения (см. markEngine). */
+  function staleEngineOf(body) {
+    const d = body && typeof body === 'object' && body.detail && typeof body.detail === 'object' ? body.detail : null;
+    if (!d || d.cause !== 'engine' || String(body.code || 'unavailable') !== 'unavailable') return undefined;
+    // проект записан движком новее нас — устарели мы; иначе устарел экземпляр
+    if (isNum(d.found) && d.found > core.ENGINE_VERSION) return d.found;
+    if (isNum(d.engine)) return Math.min(d.engine, core.ENGINE_VERSION - 1);
+    return core.ENGINE_VERSION - 1;
+  }
+
+  /** Сервер обновился (hello/health с нашим движком): очередь снова уходит. */
+  function engineCaughtUp() {
+    if (!halted || error !== 'engine') return false;
+    halted = false;
+    error = null;
+    serverEngine = null;
+    engineSaid = '';
+    if (engineTimer) { clearTimeout(engineTimer); engineTimer = null; }
+    return true;
+  }
+
+  function armEngineCheck() {
+    if (closed || engineTimer || !olderServer() || !fetchImpl) return;
+    engineTimer = setT(async () => {
+      engineTimer = null;
+      if (closed || !olderServer()) return;
+      let r = null;
+      try { r = await httpOnce('/api/health'); } catch { r = null; }
+      const eng = r && r.body && isNum(r.body.engine) ? r.body.engine : null;
+      if (eng === core.ENGINE_VERSION && olderServer()) {
+        /* экземпляр обновился: сокет прежнего — закрыть и подключиться заново (hello решит);
+           без сокета — разбудить открытие */
+        attempt = 0;
+        if (openRetry) { const wake = openRetry; openRetry = null; wake(); }
+        const ws = socket;
+        if (ws && (ws.readyState === 0 || ws.readyState === 1)) { try { ws.close(); } catch { /* уже закрыт */ } }
+        else if (opened && view) connect();
+      }
+      armEngineCheck();
+    }, jitter(engineRecheckMs));
+  }
+
   function emitStatus() {
     const s = status();
     const key = JSON.stringify(s);
@@ -1101,7 +1180,7 @@ export function createSync(o) {
    */
   async function http(path, init) {
     let r = await httpOnce(path, init);
-    for (let i = 0; i < HTTP_RETRIES && (r.status === 503 || r.status === 429) && !closed; i++) {
+    for (let i = 0; i < HTTP_RETRIES && (r.status === 503 || r.status === 429) && staleEngineOf(r.body) === undefined && !closed; i++) {
       // J4: хранилище лежит — сказать сразу, а не после всех повторов
       if (r.status === 503 && storageFailure(r.body)) markStorageDown();
       // Retry-After — не раньше срока (плюс разброс до половины); без него — экспонента с разбросом
@@ -1254,6 +1333,9 @@ export function createSync(o) {
   async function loadFromServer({ opening = false } = {}) {
     const r = await http(`/api/projects/${encodeURIComponent(projectId)}`);
     if (r.status === 404) { markNotFound(); return false; }
+    // круг 41 (UX Д7): проект записан более новой версией редактора, этот сервер её не читает
+    const stale = r.status === 503 ? staleEngineOf(r.body) : undefined;
+    if (stale !== undefined) throw Object.assign(new Error('проект записан другой версией движка'), { status: 503, engine: stale });
     if (!r.ok || !r.body || !r.body.snapshot || !r.body.snapshot.doc) throw Object.assign(new Error(`GET /api/projects: ${r.status}`), { status: r.status });
     const moved = !!(epoch && typeof r.body.epoch === 'string' && r.body.epoch !== epoch);
     if (notFound) { notFound = false; if (error === 'not_found') error = null; }
@@ -1438,7 +1520,9 @@ export function createSync(o) {
     scheduleWrite();
     /* круг 31: `before` — подтверждённый документ до этой транзакции (без своих неподтверждённых
        правок): подписи «Аня удалила «Ярлыки»» — по имени на сервере, а не по своему черновику */
-    if (!opts.silent) call(o.onChange, view, { reason: 'remote', tx: c, mine: !!c.client && c.client === clientId, before, ...(c.seq <= openHead ? { backlog: true } : {}) });
+    /* круг 41 (UX): догон после разрыва — hello сказал голову, хвост идёт по одной транзакции;
+       `more` — за этой ещё будут до головы hello: оболочка может не рисовать промежуточных кадров */
+    if (!opts.silent) call(o.onChange, view, { reason: 'remote', tx: c, mine: !!c.client && c.client === clientId, before, ...(c.seq <= openHead ? { backlog: true } : {}), ...(isNum(c.seq) && c.seq < helloHead ? { more: true } : {}) });
   }
 
   /** Транзакция агента из рассылки — в форме Tx для переигрывания (применённые операции). */
@@ -1911,14 +1995,12 @@ export function createSync(o) {
             epoch = msg.epoch;
           }
         }
+        /* Круг 41 (арх. Н1): сервер с нашим движком — отказ по версии позади (скользящее
+           обновление: прежний экземпляр сменился новым), очередь снова уходит */
+        if (msg.engine === core.ENGINE_VERSION) engineCaughtUp();
         // сервер ответил — «недоступен» и «разошлись» больше не про него; отказ по версии остаётся
         if (!halted) error = null;
-        if (isNum(msg.engine) && msg.engine !== core.ENGINE_VERSION) {
-          halted = true;
-          error = 'engine';
-          serverEngine = msg.engine;
-          call(o.onError, { code: 'engine', message: engineWords(msg.engine, core.ENGINE_VERSION).status, engine: msg.engine });
-        }
+        if (isNum(msg.engine) && msg.engine !== core.ENGINE_VERSION) markEngine(msg.engine);
         // журнал впереди сервера (базу пересоздали): своя копия ничего не стоит — берём снимок.
         // Сервер круга 23 (с эпохой) сам пришлёт gone — второй снимок по HTTP не нужен
         if (helloHead >= 0 && helloHead < confirmed.seq && typeof msg.epoch !== 'string') {
@@ -1973,11 +2055,15 @@ export function createSync(o) {
         if (code === 'not_found' || code === 'not-found') { markNotFound(); break; }
         const i = msg.tx_id ? pending.findIndex((p) => p.tx_id === msg.tx_id) : -1;
         const tx = i >= 0 ? pending[i] : null;
-        if (/engine|426/i.test(code)) {
-          halted = true;
-          error = 'engine';
-          const se = isNum(msg.engine) ? msg.engine : msg.detail && isNum(msg.detail.engine) ? msg.detail.engine : null;
-          if (se !== null) serverEngine = se;
+        // круг 41 (UX Д7): проект записан движком новее экземпляра — 503 cause:'engine', не «недоступен»
+        const stale = staleEngineOf(msg);
+        if (stale !== undefined || /engine|426/i.test(code)) {
+          // правка не отвергнута, а ждёт версии: в очереди, «в полёте» не числится (уйдёт после)
+          if (tx && inflight === tx.tx_id) clearInflight();
+          const se = stale !== undefined ? stale
+            : isNum(msg.engine) ? msg.engine : msg.detail && isNum(msg.detail.engine) ? msg.detail.engine : null;
+          markEngine(se);
+          break;
         }
         // прежний сервер не говорил retryable — тогда судим по коду
         const retryable = typeof msg.retryable === 'boolean' ? msg.retryable : /unavailable|busy|internal|timeout/i.test(code);
@@ -2246,6 +2332,8 @@ export function createSync(o) {
       try {
         const ok = await loadFromServer({ opening: true });
         if (!ok) return null;   // проекта нет — оболочке сказано через onError
+        // проект снова читается (экземпляр обновился) — отказ по версии позади; hello подтвердит
+        if (error === 'engine' && staleOpen) { engineCaughtUp(); staleOpen = false; }
         error = null;
         break;
       } catch (e) {
@@ -2254,9 +2342,15 @@ export function createSync(o) {
         if (e && (Number.isFinite(e.status) || e instanceof TypeError)) {
           if (!guard) { try { console.warn(`[sync:open] сервер не отдал проект (${e.status || 'нет связи'}) — пробую снова`); } catch { /* консоли нет */ } }
         } else report('open', e);
-        error = 'unreachable';
+        // круг 41 (UX Д7): проект записан другой версией движка — это не «недоступен»
+        const byEngine = !!(e && e.engine !== undefined);
+        if (byEngine) { markEngine(e.engine); staleOpen = true; }
+        else error = 'unreachable';
         emitStatus();
-        const delay = Math.max(jitter(Math.min(reconnectMax, reconnectMin * Math.pow(2, Math.min(guard++, 12)))), serverWait);
+        /* версия: сервер старее — перепроверка health разбудит открытие (armEngineCheck), а
+           повтор открытия — не чаще раза в engineRecheckMs; клиент старее — так же редко */
+        const delay = byEngine ? jitter(engineRecheckMs)
+          : Math.max(jitter(Math.min(reconnectMax, reconnectMin * Math.pow(2, Math.min(guard++, 12)))), serverWait);
         serverWait = 0;
         await new Promise((r) => {
           openRetry = () => { openRetry = null; r(); };
@@ -2303,6 +2397,7 @@ export function createSync(o) {
 
   function close() {
     closed = true;
+    if (engineTimer) { clearTimeout(engineTimer); engineTimer = null; }
     if (connectGrace) { clearTimeout(connectGrace); connectGrace = null; }
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }

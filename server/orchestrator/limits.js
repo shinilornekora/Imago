@@ -71,6 +71,13 @@ export const DSLR_READ_ESTIMATE_BYTES = 1024 * 1024;
 export const DSLR_FULL_QUEUE = 64;
 export const DOC_FULL_TIMEOUT_MS = 30000;
 export const DSLR_READ_BUDGET_MS = 60000;
+/**
+ * Круг 41 (D5): ожидание в СВОЕЙ очереди полных чтений — отдельно от бюджета ответа сервиса
+ * (DSLR_READ_BUDGET_MS считается с мига, когда чтение получило место). Срок щедрый: очередь
+ * движется, пока команды впереди досчитывают; клиент о ней знает (`queued {scope:'read'}`), а
+ * пульс SSE держит поток. Не дождалась — 503 `busy` с причиной `agent`.
+ */
+export const DSLR_QUEUE_WAIT_MS = 180000;
 /** Круг 39: повторов чтения после таймаута (в пределах бюджета). */
 export const DSLR_TIMEOUT_RETRIES = 1;
 /** Круг 39: сколько проектов помнить по размеру (для оценки до чтения). */

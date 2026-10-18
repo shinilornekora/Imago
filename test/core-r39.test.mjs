@@ -434,7 +434,16 @@ test('круг39 N2: rebase — те же отказы expand_nodes, что у �
     const list = randomOps(doc, seed, 40);
     const ref = referenceDecisions(doc, list);
     const rb = quiet(() => rebase(doc, clone(list)));
-    const got = rb.dropped.filter((x) => x.limit === 'expand_nodes').map((x) => x.index);
+    // круг 41: операции в мастер, чей create отброшен за предел, уходят вслед с той же
+    // причиной (эталон видит их как «родителя нет») — сравниваем первичные отказы
+    const lost = new Set();
+    const got = [];
+    for (const x of rb.dropped) {
+      const o = x.op;
+      const follows = o.op === 'create' ? lost.has(o.node.parent) : lost.has(o.id) || lost.has(o.parent);
+      if (follows) { if (o.op === 'create') lost.add(o.node.id); continue; }
+      if (x.limit === 'expand_nodes') { got.push(x.index); if (o.op === 'create') lost.add(o.node.id); }
+    }
     assert.deepEqual(got, ref.expandIdx, `seed ${seed}: отказы expand_nodes`);
     const a = quiet(() => applyOps(doc, rb.ops));
     assert.equal(a.error, undefined, `seed ${seed}: оставленное ложится applyOps`);

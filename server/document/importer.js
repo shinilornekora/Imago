@@ -15,7 +15,7 @@ import * as core from '../../src/core.js';
 import { createDoc } from '../../src/core.js';
 import { DocError, badRequest, tooLarge } from './errors.js';
 import { MAX_DOC_NODES, MAX_DOC_BYTES, MAX_VALUE_DEPTH, cleanMeta, cutText, cleanDeep, showValue } from './limits.js';
-import { EXPAND_LIMIT, expandOver } from './expand.js';
+import { EXPAND_LIMIT, expandOver, expandCostOf } from './expand.js';
 
 const PROJECT_KINDS = new Set(['design', 'library']);
 const MAX_PROJECT_NAME = 200;
@@ -91,6 +91,7 @@ export function importDocError(d, maxNodes) {
     // предел раскрытия движок может назвать по-своему ('expand') — наружу один код (круг 39)
     if (typeof r.limit === 'string' && /^[a-z_]{1,32}$/.test(r.limit)) out.limit = /^expand/.test(r.limit) ? EXPAND_LIMIT : r.limit;
     if (Number.isFinite(r.max)) out.max = r.max;
+    if (Number.isFinite(r.cost)) out.cost = Math.round(r.cost);
     return out;
   }
   return null;
@@ -137,8 +138,14 @@ export function prepareProject(body, { maxNodes = MAX_DOC_NODES, maxDocBytes = M
     // J7 (круг 29): глубина и типы полей — проверка движка до приведения
     const why = importDocError(d, maxNodes);
     if (why) {
+      // круг 41: отказ за предел раскрытия называет и стоимость (§9.17) — движок её в checkImportDoc
+      // не отдаёт, считаем сами (Infinity — счёт оборван: поля нет)
+      if (why.limit === EXPAND_LIMIT && why.cost === undefined) {
+        const c = expandCostOf(d);
+        if (Number.isFinite(c)) why.cost = Math.round(c);
+      }
       throw badRequest(`doc: ${why.message}`, {
-        detail: { limit: why.limit || 'import', ...(why.max !== undefined ? { max: why.max } : {}) }
+        detail: { limit: why.limit || 'import', ...(why.max !== undefined ? { max: why.max } : {}), ...(why.cost !== undefined ? { cost: why.cost } : {}) }
       });
     }
     try {
@@ -185,7 +192,8 @@ export function prepareProject(body, { maxNodes = MAX_DOC_NODES, maxDocBytes = M
  */
 export function createHashOf(body) {
   const b = body && typeof body === 'object' ? body : {};
-  const name = b.name === undefined || b.name === null ? '' : projectName(b.name);
+  // круг 41: пробелы по краям имени не делают тело «другим» (повтор «Первый » и «Первый» — тот же)
+  const name = b.name === undefined || b.name === null ? '' : projectName(b.name).trim();
   const kind = b.kind === undefined || b.kind === null ? 'design' : String(b.kind);
   const norm = { v: 1, name, kind, demo: b.demo === true, doc: b.doc === undefined || b.doc === null ? null : b.doc };
   const h = createHash('sha256');

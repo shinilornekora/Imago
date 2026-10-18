@@ -938,39 +938,7 @@ describe('круг 39 (N1): запись движка новее экземпл�
         await svc.close();
       }
     });
-
-    it(`запись, которую движок не применяет, — голова «с пропуском» снимков не пишет никогда · ${b.name}`, { skip: !b.available }, async () => {
-      const box = logBox();
-      const svc = await startFor(b.name, { verifyMs: 0, snapshotEvery: 4, log: box.log });
-      try {
-        const h = api(svc.url);
-        const P = (await h.post('/api/projects', { name: 'пропуск' })).body.id;
-        const root = (await h.get(`/api/projects/${P}`)).body.snapshot.doc.root;
-        const page = (await h.get(`/api/projects/${P}`)).body.snapshot.doc.nodes[root].children[0];
-        assert.equal((await h.post(`/api/projects/${P}/tx`, tx(0, [{ op: 'set', id: root, path: 'name', value: 'a' }]))).status, 201);
-        // та же версия, а движок запись не применяет (журнал разошёлся с движком)
-        const bad = await svc.storage.commitTx(P, { tx_id: uid('tx'), base_seq: 1, ops: [{ op: 'create', node: { type: 'нет_такого_типа', id: 'z_bad', parent: page } }], dropped: [], notes: [], engine: CODE_ENGINE, author_kind: 'human' });
-        assert.equal(bad.status, 'committed');
-        for (let i = 2; i < 13; i++) {
-          const r = await h.post(`/api/projects/${P}/tx`, tx(i, [{ op: 'set', id: root, path: 'name', value: 'v' + i }]));
-          assert.equal(r.status, 201, r.text);
-        }
-        await svc.dslts.flush();
-        assert.equal(svc.dslts.isHoley(P), true);
-        assert.deepEqual(await svc.storage.snapshotSeqs(P), [0], 'снимков с головы с пропуском нет (4, 8, 12)');
-        // голова поднята заново из журнала — снова с пропуском, снова без снимков
-        await svc.dslts.unload(P);
-        for (let i = 13; i < 17; i++) assert.equal((await h.post(`/api/projects/${P}/tx`, tx(i, [{ op: 'set', id: root, path: 'name', value: 'w' + i }]))).status, 201);
-        await svc.dslts.flush();
-        assert.equal(svc.dslts.isHoley(P), true);
-        assert.deepEqual(await svc.storage.snapshotSeqs(P), [0]);
-        assert.ok(box.lines.some((l) => /голова с пропуском/.test(l)));
-        // работа идёт: чтение и запись
-        assert.equal((await h.get(`/api/projects/${P}`)).status, 200);
-      } finally {
-        await svc.close();
-      }
-    });
+    // голова «с пропуском» и наследные записи — round41.test.mjs (круг 41, Н3)
   }
 });
 

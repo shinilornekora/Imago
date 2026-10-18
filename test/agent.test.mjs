@@ -3,6 +3,7 @@
  * Сервер агента здесь поддельный: node:http на случайном порту отдаёт SSE так, как
  * его отдаёт настоящий, — кусками, с разрывами, с ошибками единого формата.
  */
+import { ENGINE_VERSION } from '../src/core.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -424,7 +425,8 @@ test('apply(): итог — голым JSON или обёрнутым; ошиб�
   assert.equal(a.tx_id, 'tx_v');
   const b = await apply('cmd_x', 'wrapped', { baseUrl: srv.baseUrl });
   assert.equal(b.tx_id, 'tx_v');
-  assert.deepEqual(srv.log[0].body, { command_id: 'cmd_x', variant: 'a' });
+  // круг 41: версия движка вкладки — Orchestrator сверяет её (426 engine)
+  assert.deepEqual(srv.log[0].body, { command_id: 'cmd_x', variant: 'a', engine: ENGINE_VERSION });
   await assert.rejects(apply('cmd_x', 'bad', { baseUrl: srv.baseUrl }), (e) => e.code === 'not_found' && e.retryable === false);
 });
 
@@ -732,7 +734,7 @@ test('круг 33 (ORCH): stop и apply несут client той вкладки,
   await client.stop('cmd_v');
   const ap = srv.log.filter((r) => r.path === '/agent/apply').at(-1);
   const st2 = srv.log.filter((r) => r.path === '/agent/stop').at(-1);
-  assert.deepEqual(ap.body, { command_id: 'cmd_v', variant: 'a', client: 'c_tab' });
+  assert.deepEqual(ap.body, { command_id: 'cmd_v', variant: 'a', engine: ENGINE_VERSION, client: 'c_tab' });
   assert.deepEqual(st2.body, { command_id: 'cmd_v', client: 'c_tab' });
   // нет client — поля нет (сервер сверит с null)
   cid = '';

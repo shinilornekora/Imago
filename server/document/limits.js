@@ -141,6 +141,11 @@ export const BODY_TIMEOUT_MS = 30000;
  * (`detail.limit:'body_first_byte'`) через 5 с, а не через 30 (BODY_TIMEOUT_MS).
  */
 export const BODY_FIRST_BYTE_MS = 5000;
+/**
+ * Круг 41: тело начало приходить и замолчало — 408 (`detail.limit:'body_idle'`) через столько без
+ * байтов; прочитанное сразу освобождает бюджет тел (WRITE_BODY_BYTES), а не через BODY_TIMEOUT_MS.
+ */
+export const BODY_IDLE_MS = 10000;
 /** Таймауты http.Server: заголовки и запрос целиком (тело) — node сам отвечает 408. */
 export const HEADERS_TIMEOUT_MS = 20000;
 export const REQUEST_TIMEOUT_MS = 35000;

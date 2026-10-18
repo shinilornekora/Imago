@@ -56,6 +56,14 @@ export const documentDown = (message = 'Сервис документов нед
 export const DOCUMENT_BUSY_MESSAGE = 'Сервис документов перегружен — команда не выполнена. Правки не потеряны; повторите через несколько секунд.';
 export const documentBusy = (retryAfter = 5, detail) =>
   new OrchError(503, 'busy', DOCUMENT_BUSY_MESSAGE, { retryable: true, retryAfter: Math.max(1, Math.min(60, Math.ceil(retryAfter || 5))), ...(detail ? { detail } : {}) });
+/**
+ * Круг 41 (D5): полное чтение не дождалось СВОЕЙ очереди агента (семафор полных чтений полон или
+ * ожидание в нём вышло за свой срок). Document service при этом отвечал — это перегрузка агента,
+ * а не «сервис документов перегружен».
+ */
+export const AGENT_READ_QUEUE_MESSAGE = 'Агент занят чтением других документов — команда не выполнена. Правки не потеряны; повторите через несколько секунд.';
+export const agentReadBusy = (retryAfter = 10, detail = {}) =>
+  new OrchError(503, 'busy', AGENT_READ_QUEUE_MESSAGE, { retryable: true, retryAfter: Math.max(1, Math.min(60, Math.ceil(retryAfter || 10))), detail: { cause: 'agent', ...detail } });
 /** Круг 39 (N5а): занят главный поток самого агента (опаздывают его таймеры) — не сервис документов. */
 export const AGENT_BUSY_MESSAGE = 'Агент перегружен — команда не выполнена. Правки не потеряны; повторите через несколько секунд.';
 export const agentBusy = (retryAfter = 5) =>

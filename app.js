@@ -1005,6 +1005,7 @@ function onSyncChange(view, info = {}) {
     case 'confirmed': {
       settleHistory(info);
       state.doc = view;
+      settleWrapWords(info);
       // сервер применил ровно то, что мы предсказали, — геометрия та же, рисовать нечего
       if (info.same) { refreshSheet(); return; }
       state.geo = solve(view);
@@ -1025,10 +1026,20 @@ function onSyncChange(view, info = {}) {
       noteJournal(info.tx, named);
       const overwritten = !!(!backlog && info.tx && !info.mine && (info.tx.undo_of || info.tx.redo_of) && noteOverwritten(info.tx, named));
       state.doc = view;
+      /* Круг 41 (UX): догон после разрыва — за этой транзакцией идут ещё (до головы hello):
+         промежуточных кадров не рисуем, один кадр на последней (или через CATCHUP_MS). */
+      if (info.more === true && !(info.tx && info.tx.author_kind === 'agent')) {
+        pruneSelection();
+        holdCatchup();
+        // слова о чужих отменах — как без отложенного кадра (свод серии — у noteRemoteRewind)
+        if (!backlog && info.tx && !info.mine && (info.tx.undo_of || info.tx.redo_of) && !overwritten) noteRemoteRewind(info.tx);
+        return;
+      }
+      const caught = flushCatchupTimer();
       // чужое переименование геометрию не трогает — решатель не зовём (круг 27, п.8)
-      state.geo = info.tx && Array.isArray(info.tx.ops) ? geoAfter(info.tx.ops, prevDoc, view, prevGeo) : solve(view);
+      state.geo = !caught && info.tx && Array.isArray(info.tx.ops) ? geoAfter(info.tx.ops, prevDoc, view, prevGeo) : solve(view);
       pruneSelection();
-      const diff = info.tx && Array.isArray(info.tx.ops) ? diffOf(info.tx.ops, prevGeo) : null;
+      const diff = !caught && info.tx && Array.isArray(info.tx.ops) ? diffOf(info.tx.ops, prevGeo) : null;
       renderAll(diff ? { diff, prevGeo } : {});
       refreshSheet();
       // круг 23: транзакция агента с сервера — уже применена репликой; здесь только итог
@@ -1044,6 +1055,29 @@ function onSyncChange(view, info = {}) {
       refreshSheet();
     }
   }
+}
+
+/* Круг 41: отложенный кадр догона — если последняя транзакция до головы не пришла за CATCHUP_MS
+   (связь снова оборвалась), рисуем то, что есть. */
+const CATCHUP_MS = 400;
+let catchupTimer = null;
+function holdCatchup() {
+  if (catchupTimer) return;
+  catchupTimer = setTimeout(() => {
+    catchupTimer = null;
+    if (!server || !state.doc) return;
+    state.geo = solve(state.doc);
+    pruneSelection();
+    renderAll();
+    refreshSheet();
+  }, CATCHUP_MS);
+}
+/** Был ли отложенный кадр догона (тогда геометрию — решателем целиком, без рамок одной правки). */
+function flushCatchupTimer() {
+  if (!catchupTimer) return false;
+  clearTimeout(catchupTimer);
+  catchupTimer = null;
+  return true;
 }
 
 /** Реплика видит сервер живым и сохраняющим (J4): в сети, без ошибки, хранилище не лежит. */
@@ -1120,6 +1154,14 @@ function onSyncStatus(s) {
   renderSyncStatus();
   // круг 39 (N6а): первое подключение кончилось — приглашение пустого холста (если оно к месту)
   if (!!prev.connecting !== !!s.connecting) { renderEmptyState(); setDocNameText(docTitle()); }
+  /* Круг 41 (арх. Н1): сервер обновился — реплика сама отпустила очередь; карточка о версии
+     больше не правда. */
+  if (s.error === 'engine' && prev.error !== 'engine' && !(server.sync && server.sync.view)) renderLayers();
+  if (prev.error === 'engine' && s.error !== 'engine') {
+    if (dom.dockmsg && !dom.dockmsg.hidden && dom.dockmsg.dataset.role === 'engine') hideMsg();
+    toast(s.pending ? 'Сервер обновился — ждавшие правки отправляю.' : 'Сервер обновился — работаем дальше.', 'plain', 6000);
+    if (!(server.sync && server.sync.view)) renderLayers();
+  }
   /* Круг 39 (UX): связь с сервером пропала — Orchestrator за тем же NGINX, скорее всего, тоже
      недоступен: спросить его сразу, а не ждать плановой проверки (до 30 с «агент: сервер»). */
   if (prev.online && !s.online && !s.connecting) probeAgent({ force: true });
@@ -1204,7 +1246,7 @@ function projectGoneMsg({ force = false } = {}) {
       : `${w.note} Прошлая попытка сохранить не завершилась — «Сохранить» повторит её в тот же новый проект.`)
       : before ? (beforeTotal
         ? `${w.note} Сохранение, начатое до перезагрузки, успело отправить ${Math.min(Number(before.done) || 0, beforeTotal)} из ${beforeTotal} частей — «Сохранить» продолжит его в тот же новый проект.`
-        : `${w.note} Сохранение, начатое до перезагрузки, не завершилось — «Сохранить» повторит его в тот же новый проект.`) : w.note,
+        : `${w.note} Сохранение, начатое до перезагрузки, не завершилось — «Сохранить» повторит его.`) : w.note,
     role: 'project-gone',
     actions: [
       { label: w.action, primary: true, onClick: () => saveAsNewProject() },
@@ -1239,6 +1281,25 @@ function noProjectCommandMsg(utterance) {
   });
 }
 
+/** Круг 41: реплика стоит из-за версии движка (сервер старее или страница старее). */
+function engineHalted() {
+  return !!(server && server.status && server.status.error === 'engine');
+}
+
+/** Команда агенту, пока версии разошлись: не отправлена — словами про версию, не «повторите». */
+function engineCommandMsg(utterance) {
+  restoreCommand(utterance);
+  const s = server.status || {};
+  const w = engineWords(s.engine, s.ownEngine || CORE.ENGINE_VERSION);
+  showMsg(w.newer ? 'error' : 'warn', w.newer ? 'Вышла новая версия редактора — команда не отправлена' : 'Сервер ещё не обновился — команда не отправлена', {
+    note: w.newer
+      ? 'Обновите страницу: сервер принимает правки только от новой версии. Текст команды остался в строке.'
+      : 'Агент работает с проектом на сервере, а сервер ещё на прежней версии редактора. Текст команды остался в строке — выполните её, когда сервер обновится; правки руками ждут во вкладке.',
+    role: 'engine',
+    actions: w.newer ? [{ label: 'Обновить страницу', primary: true, onClick: () => location.reload() }] : [],
+  });
+}
+
 /** Пропал ли открытый проект с сервера, а работа его — во вкладке (круг 29). */
 function projectGone() {
   return !!(server && server.status && server.status.error === 'not_found' && server.sync && server.sync.view);
@@ -1264,7 +1325,7 @@ async function saveAsNewProject() {
   if (!job) job = await resumeRescue(sync, view, name);
   if (!job) {
     let plan;
-    try { plan = SHELL.rescuePlan(view, { name }); } catch (e) { toast(`Не сохранилось: ${afterColon(humanError(e))}`, 'error', 9000); return; }
+    try { plan = SHELL.rescuePlan(view, { name }); } catch (e) { toast(`Не сохранилось: ${SHELL.rescueFailWords(e)}.`, 'error', 9000); return; }
     if (plan.oversize.length) {
       showMsg('error', 'Работу не сохранить одним проектом', {
         note: `В документе есть ${plan.oversize.length === 1 ? 'слой' : 'слои'} больше 3,5 МБ — сервер не примет их ни в какой пачке. Экспортируйте документ в JSON (меню экспорта), чтобы не потерять работу.`,
@@ -1272,7 +1333,7 @@ async function saveAsNewProject() {
       });
       return;
     }
-    job = { from: sync, plan, project: null, createId: newCreateId(), seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
+    job = { from: sync, plan, project: null, createId: newCreateId(), bodySig: rescueBodySig(plan), seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
     server.rescue = job;
   }
   job.running = true;
@@ -1291,8 +1352,20 @@ async function saveAsNewProject() {
       /* Круг 33 (L1): create_id — один на задание и записан ДО запроса. Ответ потерялся
          (обрыв, перезагрузка) — повтор с тем же create_id вернёт тот же проект, а не второй. */
       if (!job.createId) job.createId = newCreateId();
+      if (!job.bodySig) job.bodySig = rescueBodySig(job.plan);
       rememberRescue(job);
-      const got = await apiJson('/api/projects', { method: 'POST', body: { ...job.plan.body, create_id: job.createId } });
+      let got;
+      try {
+        got = await apiJson('/api/projects', { method: 'POST', body: { ...job.plan.body, create_id: job.createId } });
+      } catch (e) {
+        /* Круг 41 (арх. Н2): 409 — этот create_id уже занят проектом с другим телом (первая
+           попытка создала его, ответ потерялся, документ с тех пор изменился). Тот же ключ
+           повторять бесполезно: новый ключ, один раз; проект первой попытки остаётся пустым. */
+        if (!(e && e.status === 409)) throw e;
+        job.createId = newCreateId();
+        rememberRescue(job);
+        got = await apiJson('/api/projects', { method: 'POST', body: { ...job.plan.body, create_id: job.createId } });
+      }
       if (!got || !got.id) throw new Error('сервер не вернул проект');
       job.project = got;
       job.seq = Number(got.head_seq) || 0;
@@ -1317,9 +1390,10 @@ async function saveAsNewProject() {
     job.running = false;
     job.failed = true;
     server.goneShown = false;
+    // круг 41 (арх. Н2): причина — словами оболочки, текст сервера человеку не показываем
     toast(job.total && job.project
-      ? `Сохранено ${job.done} из ${job.total} частей: ${afterColon(humanError(e))}`
-      : `Не сохранилось: ${afterColon(humanError(e))}`, 'error', 9000);
+      ? `Сохранено ${job.done} из ${job.total} частей: ${SHELL.rescueFailWords(e)}. «Сохранить» продолжит.`
+      : `Не сохранилось: ${SHELL.rescueFailWords(e)}. «Сохранить» повторит.`, 'error', 9000);
     projectGoneMsg({ force: true });
   }
   renderSyncStatus();
@@ -1330,6 +1404,11 @@ async function saveAsNewProject() {
    документ поменялся — пачки другие, и досылка идёт с начала (повторы create сервер отбросит
    как exists), но в тот же проект. */
 const RESCUE_KEY = 'imago.rescue.v1';
+
+/** Отпечаток тела создания (имя и документ): тот же create_id — только с тем же телом (§9.17). */
+function rescueBodySig(plan) {
+  try { return plan && plan.body ? hash36(JSON.stringify(plan.body), 16) : ''; } catch { return ''; }
+}
 
 function rescueSig(plan) {
   return plan && Array.isArray(plan.batches) ? plan.batches.map((b) => b.length).join('.') + ':' + (plan.nodes || 0) : '';
@@ -1346,7 +1425,7 @@ function rememberRescue(job) {
   try {
     sessionStorage.setItem(RESCUE_KEY, JSON.stringify({
       from: server.project.id, project: job.project ? { id: job.project.id, name: job.project.name || '' } : null,
-      create_id: job.createId || '',
+      create_id: job.createId || '', body_sig: job.bodySig || '',
       done: job.done, total: job.total, sig: rescueSig(job.plan), at: Date.now(),
     }));
   } catch { /* приватный режим — продолжим только в этой загрузке */ }
@@ -1368,7 +1447,12 @@ async function resumeRescue(sync, view, name) {
     let plan;
     try { plan = SHELL.rescuePlan(view, { name }); } catch { return null; }
     if (plan.oversize.length) { forgetRescue(); return null; }
-    const job = { from: sync, plan, project: null, createId, seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
+    /* Круг 41 (арх. Н2): тот же create_id годится только с тем же телом. Документ с тех пор
+       изменился (правки после потерянного ответа) — сервер ответил бы 409 навсегда: новый ключ
+       (проект первой попытки, если создался, останется пустым — лучше, чем тупик). */
+    const bodySig = rescueBodySig(plan);
+    const same = typeof saved.body_sig === 'string' && saved.body_sig && saved.body_sig === bodySig;
+    const job = { from: sync, plan, project: null, createId: same ? createId : newCreateId(), bodySig, seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
     server.rescue = job;
     return job;
   }
@@ -1428,11 +1512,16 @@ function onSyncError(e) {
   if (e.code === 'engine') {
     // круг 39 (N1): 426 / hello с другой версией движка — слова у реплики (engineWords)
     const w = engineWords(e.engine, CORE.ENGINE_VERSION);
-    showMsg(w.newer ? 'error' : 'warn', w.title, {
-      note: w.note,
+    // круг 41 (UX Д7): сервер старее — перезагрузка не поможет, кнопки «Обновить страницу» нет
+    const noDoc = !(server.sync && server.sync.view);
+    showMsg(w.newer ? 'error' : 'warn', !w.newer && noDoc ? 'Сервер ещё не обновился — проект откроется сам' : w.title, {
+      note: !w.newer && noDoc
+        ? 'Проект записан более новой версией редактора, а сервер документов ещё на прежней. Как только сервер обновят, проект откроется сам — перезагружать страницу не нужно.'
+        : w.note,
       role: 'engine',
-      actions: [{ label: 'Обновить страницу', primary: true, onClick: () => location.reload() }],
+      actions: w.newer ? [{ label: 'Обновить страницу', primary: true, onClick: () => location.reload() }] : [],
     });
+    agentModeChanged();
     return;
   }
   /* Коды сервера — snake_case (SPEC §9.8): not_found, too_large, bad_request… Прежнее
@@ -1732,6 +1821,29 @@ function settleHistory(info) {
     }
     owner.pending = false;
   }
+}
+
+/**
+ * Круг 41 (UX): «Обернуть» легла не целиком — часть слоёв соавтор удалил раньше (слияние их
+ * вычеркнуло). Подпись шага истории и карточки — по тому, что легло, и слово о пропавших.
+ */
+function settleWrapWords(info) {
+  const c = info && info.tx;
+  if (!c) return;
+  const entry = state.history.find((t) => t.id === c.tx_id);
+  if (!entry || !entry.wrapOf || !Array.isArray(entry.wrapKids)) return;
+  const w = SHELL.wrapSettledWords(state.doc, c.ops, entry.wrapOf, entry.wrapKids);
+  if (!w) return;
+  entry.human = w.words;
+  entry.wrapKids = null;
+  refreshSheet();
+  const note = `${w.lost} ${plural(w.lost, 'слой', 'слоя', 'слоёв')} в рамку не ${w.lost === 1 ? 'вошёл' : 'вошли'}: ${w.lost === 1 ? 'его' : 'их'} уже удалили.`;
+  if (msgUndoTx === entry.id) {
+    showMsg('plain', w.words, {
+      note, ms: 9000, transient: true,
+      actions: [{ label: 'Отменить', onClick: () => undoTx(entry.id) }], undoTx: entry.id,
+    });
+  } else toast(`${w.words}. ${note}`, 'plain', 8000);
 }
 
 /** 12 знаков base36 от строки — детерминированный id, когда два клиента должны сойтись на одном. */
@@ -2179,6 +2291,8 @@ function probeAgent({ force = false } = {}) {
   serverAgent.probedAt = Date.now();
   const prev = serverAgent.health;
   serverAgent.probing = agentClient.health().then((h) => {
+    // круг 41: health не дошёл, а у браузера нет сети — причина «нет сети», не «сервер не отвечает»
+    if (h && !h.ok && (h.reason === 'network' || h.reason === 'timeout') && browserOffline()) h = { ...h, reason: 'offline' };
     serverAgent.health = h;
     if (h && !h.ok && h.status === 404) {
       serverAgent.absent = true;
@@ -2187,7 +2301,8 @@ function probeAgent({ force = false } = {}) {
     if (h && !h.ok) serverAgent.healthFailedAt = Date.now();
     return h;
   }).catch(() => {
-    serverAgent.health = { ok: false, reason: 'network' };
+    // круг 41: нет сети у самого компьютера — другая причина и другие слова
+    serverAgent.health = { ok: false, reason: browserOffline() ? 'offline' : 'network' };
     serverAgent.healthFailedAt = Date.now();
     return serverAgent.health;
   }).finally(() => {
@@ -2206,8 +2321,12 @@ function probeAgent({ force = false } = {}) {
  * Тоста нет — о сбое уже говорит карточка команды; следующая проверка health скажет, когда
  * он вернётся.
  */
+function browserOffline() {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
 function markAgentDown() {
-  serverAgent.health = { ok: false, reason: 'network' };
+  serverAgent.health = { ok: false, reason: browserOffline() ? 'offline' : 'network' };
   serverAgent.healthFailedAt = Date.now();
   agentModeChanged();
 }
@@ -2237,7 +2356,7 @@ function dropHealthToast() {
 
 function onAgentHealthChanged(prev, next) {
   if (!server) return;
-  const words = agentHealthNotice(prev, next, { hasProvider: !!state.provider });
+  const words = agentHealthNotice(prev, next, { hasProvider: !!state.provider, editsWait: !syncHealthy() });
   const role = dom.dockmsg && !dom.dockmsg.hidden ? dom.dockmsg.dataset.role : '';
   const back = next && next.ok === true && next.document === 'up' && next.llm === 'up';
   /* Круг 27, I6: перезапуск кончился, когда ответил уже другой процесс (instance сменился)
@@ -2305,6 +2424,26 @@ function renderAgentStatus() {
   /* Круг 39 (N6а): «агент недоступен» — только по ответу /agent/health. Пока его нет (первая
      проверка в пути), знака нет вовсе: про подключение уже говорит строка синхронизации. */
   if (!serverAgent.health && !state.provider) { host.hidden = true; return; }
+  /* Круг 41 (UX Д7): версии разошлись — команды агента не выполняются (engineCommandMsg),
+     зелёное «агент: сервер» было бы неправдой. */
+  if (engineHalted()) {
+    const s = server.status || {};
+    const older = !engineWords(s.engine, s.ownEngine || CORE.ENGINE_VERSION).newer;
+    host.hidden = false;
+    host.dataset.state = 'off';
+    host.textContent = '';
+    const dot = document.createElement('span');
+    dot.className = 'sync-dot';
+    dot.dataset.state = 'error';
+    const label = document.createElement('span');
+    label.className = 'sync-text';
+    label.textContent = AGENT_MODE_WORDS.off;
+    host.append(dot, label);
+    const why = older ? 'Сервер документов ещё на прежней версии — команды агента подождут его обновления' : 'Вышла новая версия редактора — обновите страницу';
+    host.title = why;
+    host.setAttribute('aria-label', `${AGENT_MODE_WORDS.off}. ${why}`);
+    return;
+  }
   const mode = agentMode();
   const words = AGENT_MODE_WORDS[mode];
   const title = agentModeTitle(mode, serverAgent.health, AGENT_KIND_WORDS[state.providerKind] || '');
@@ -2676,6 +2815,20 @@ function showServerAgentError(e, utterance, { variants = false } = {}) {
   }
   // связь пропала у самого компьютера, а не у сервера агента (круг 27, п.7)
   if (e && (e.code === 'network' || AGENT.isUpstreamDown(e)) && isOffline()) { offlineMsg(utterance, { variants }); return; }
+  /* Круг 41: Orchestrator сверил версию движка вкладки (426 engine). Те же слова и поведение,
+     что у отказа по версии от сервиса документов: без «Повторить» — повтор ничего не изменит;
+     вкладка старее — «Обновить страницу». */
+  const cause = AGENT.engineCause(e);
+  if (cause) {
+    const w = agentErrorWords(e);
+    restoreCommand(utterance);
+    showMsg(cause === 'client_old' ? 'error' : 'warn', w.title, {
+      note: w.note,
+      role: 'engine',
+      actions: cause === 'client_old' ? [{ label: 'Обновить страницу', primary: true, onClick: () => location.reload() }] : [],
+    });
+    return;
+  }
   /* K2 (круг 31): документ не виден агенту из-за базы данных — это знает ошибка, health
      Orchestrator или своя реплика («сервер не может сохранить»). */
   const words = agentErrorWords(docDownWhy(e));
@@ -3171,14 +3324,14 @@ function freshProjectName(list) {
   return base;
 }
 
-/** «16.10 в 23:20» — точное время (различает проекты с одинаковым именем). */
-function exactWhen(iso) {
+/** «в 06:22:55» сегодня, «18.10 в 06:22» раньше — уточнение к «менялся … назад». */
+function exactClock(iso) {
   const t = Date.parse(iso || '');
   if (!Number.isFinite(t)) return '';
   const d = new Date(t);
-  const day = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+  const today = new Date().toDateString() === d.toDateString();
   const time = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: Date.now() - t < 3600 * 1000 ? '2-digit' : undefined });
-  return `${day} в ${time}`;
+  return today ? `в ${time}` : `${d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })} в ${time}`;
 }
 
 /** Строка пропавшего с сервера проекта в шторке «Проекты»: имя и путь к спасению. */
@@ -3326,11 +3479,14 @@ function fillProjects(body, list, { loading } = {}) {
     const twin = names.get(p.name || '') > 1;
     /* Круг 39 (UX): в одном списке не смешиваем «18.10 в 02:10:40» и «2 минуты назад» — у всех
        «менялся … назад»; одноимённым к этому — точное время и число правок. */
+    /* Круг 41 (UX): «только что · 18.10 в 06:22:55» — одно время двумя словами; одноимённым —
+       одна фраза «менялся только что, в 06:22:55» (время — уточнение), и число правок. */
     const when = whenWords(p.updated_at || p.created_at);
-    const exact = twin ? exactWhen(p.updated_at || p.created_at) : '';
+    const exact = twin ? exactClock(p.updated_at || p.created_at) : '';
     const edits = twin && Number.isFinite(Number(p.head_seq))
       ? (Number(p.head_seq) ? `${p.head_seq} ${plural(Number(p.head_seq), 'правка', 'правки', 'правок')}` : 'без правок') : '';
-    meta.textContent = [p.id === current ? 'открыт' : '', p.kind === 'library' ? 'библиотека' : '', when ? `менялся ${when}` : '', exact, edits].filter(Boolean).join(' · ');
+    const whenLine = when ? `менялся ${when}${exact ? `, ${exact}` : ''}` : (exact ? `менялся ${exact}` : '');
+    meta.textContent = [p.id === current ? 'открыт' : '', p.kind === 'library' ? 'библиотека' : '', whenLine, edits].filter(Boolean).join(' · ');
     const rename = document.createElement('button');
     rename.type = 'button';
     rename.className = 'btn ghost small';
@@ -5473,7 +5629,13 @@ function issueText(note) {
      («на 58 px по ширине»). */
   const t = humanizePaths(shellWord(String((note && note.message) || note || '')))
     .replace(/на\s+(\d+(?:[.,]\d+)?)\s*[×x]\s*(\d+(?:[.,]\d+)?)/g,
-      (all, w2, h2) => sizeWords(Number(String(w2).replace(',', '.')), Number(String(h2).replace(',', '.'))));
+      (all, w2, h2) => sizeWords(Number(String(w2).replace(',', '.')), Number(String(h2).replace(',', '.'))))
+    /* Круг 41 (UX): «нулевой размер (0×0)» — запись разработчика; человеку — что видно */
+    .replace(/(«[^»]*»):\s*нулевой размер\s*\((\d+(?:[.,]\d+)?)\s*[×x]\s*(\d+(?:[.,]\d+)?)\)/g, (all, who, w2, h2) => {
+      const w0 = Number(String(w2).replace(',', '.')) === 0;
+      const h0 = Number(String(h2).replace(',', '.')) === 0;
+      return `${who}: ${w0 && h0 ? 'пустой слой — ни ширины, ни высоты' : w0 ? 'слой без ширины' : 'слой без высоты'}, его не видно`;
+    });
   if (!state.doc || !state.doc.nodes) return t;
   return t.replace(/«([A-Za-z0-9_]+)»/g, (all, id) => (
     state.doc.nodes[id] ? `«${nodeTitleById(state.doc, id)}»` : all));
@@ -5552,8 +5714,30 @@ function docIsHeavy() {
   return !!(dom.app && dom.app.dataset.heavy === 'on');
 }
 
+/* Круг 41: основы имён слоёв для «/выделить …» — частями в простое после перерисовки (на 20 тыс.
+   слоёв первое выделение по имени иначе считало их все разом, ~0,1 с на Enter). */
+let nameWarm = null;
+function warmNamesSoon() {
+  const doc = state.doc;
+  if (!doc || !doc.nodes || (nameWarm && nameWarm.doc === doc)) return;
+  if (nameWarm && nameWarm.handle) (globalThis.cancelIdleCallback || clearTimeout)(nameWarm.handle);
+  const job = { doc, ids: null, next: 0, handle: null };
+  nameWarm = job;
+  const idle = globalThis.requestIdleCallback || ((fn) => setTimeout(() => fn({ timeRemaining: () => 8 }), 50));
+  const step = () => {
+    job.handle = null;
+    if (nameWarm !== job) return;
+    const r = SHELL.warmNameStems(job.doc, { from: job.next, count: 1500, ids: job.ids });
+    job.ids = r.ids;
+    job.next = r.next;
+    if (job.next < job.ids.length) job.handle = idle(step);
+  };
+  job.handle = idle(step);
+}
+
 function renderAll(opts = {}) {
   markHeavy();
+  warmNamesSoon();
   // та же геометрия (переименование) — раскладка та же: проверку досчитаем в простое
   if (state.geo && state.geo === issuesGeo) refreshIssuesSoon();
   else state.issues = layoutIssues(state.doc, state.geo);
@@ -6023,7 +6207,8 @@ function renderLayers() {
   if (serverBooting || (server && !(server.sync && server.sync.view))) {
     const note = document.createElement('div');
     note.className = 'layers-empty';
-    note.textContent = server && server.listWait ? 'Проект не открыт.' : 'Подключаюсь к проекту…';
+    note.textContent = server && server.listWait ? 'Проект не открыт.'
+      : engineHalted() ? 'Проект пока не открыть: сервер ещё на прежней версии редактора.' : 'Подключаюсь к проекту…';
     host.appendChild(note);
     host.removeAttribute('aria-activedescendant');
     return;
@@ -8944,6 +9129,8 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
   /* Круг 29 (UX Д3): проекта на сервере нет — агенту его не прочитать и не записать.
      Команду не отправляем (она вернулась бы «проект не найден»), а говорим, что делать. */
   if (server && projectGone()) { projectGoneCommandMsg(utterance); return; }
+  // круг 41 (UX Д7): версии разошлись — агент правку не запишет; не отправляем и говорим почему
+  if (server && engineHalted()) { engineCommandMsg(utterance); return; }
   /* Круг 31 (m2/m3): проект не открылся — список проектов не пришёл. Агенту нечего читать и
      некуда писать: команду не отправляем, текст остаётся в строке. */
   if (server && !server.project) { noProjectCommandMsg(utterance); return; }
@@ -10875,8 +11062,20 @@ function openArtboard(id, { say = true } = {}) {
 /**
  * Выполнить намерение оболочки. false — не смогли, и тогда реплика уйдёт агенту.
  */
+/**
+ * Круг 41 (UX): справочное сообщение дока («Активная доска: …», «Сначала выделите слой») к
+ * следующей команде устарело — не держим его под новым действием. Карточки с отменой, вопросы
+ * и ошибки с ролью живут, сколько им положено.
+ */
+function dropStaleInfoCard() {
+  const h = dom.dockmsg;
+  if (!h || h.hidden || msgUndoTx || msgTransient || h.dataset.role) return;
+  if (h.dataset.kind === 'plain' || h.dataset.kind === 'answer') hideMsg();
+}
+
 function applyShellIntent(intent, said) {
   if (!intent) return false;
+  dropStaleInfoCard();
   switch (intent.kind) {
     case 'stop': {
       if (state.running) stopAgent();
@@ -11045,7 +11244,7 @@ function needSelectionMsg(intent) {
  * @param {{ops?: object[], error?: string, words?: string, ids?: string[], id?: string}} r
  * @param {{kind: string}} intent намерение — по нему из таблицы берётся имя действия
  */
-function commitTableEdit(r, intent, { select = null } = {}) {
+function commitTableEdit(r, intent, { select = null, extra = null } = {}) {
   // имя действия — из таблицы: своего списка названий у оболочки нет
   const c = SHELL.shellCommand(SHELL.commandIdOf(intent));
   const label = c ? c.title : 'Правка';
@@ -11056,6 +11255,7 @@ function commitTableEdit(r, intent, { select = null } = {}) {
   // круг 39 (UX): отмена возвращает выделение, с которым команду дали (копию сняли — снова оригинал)
   const res = commit(r.ops, label, 'human', {
     human: r.words, quiet: true, selBefore: liveSelection(), ...(select && select.length ? { selAfter: select.slice() } : {}),
+    ...(extra || {}),
   });
   if (!res || !res.ok) return true;
   if (select && select.length) setSelection(select.filter((id) => nodeById(state.doc, id)));
@@ -11128,8 +11328,9 @@ function applyTableCommand(intent, said) {
       const r = SHELL.wrapOps(doc, sel, { rects });
       /* дети перечислены в самом create (SHELL.wrapOps): если соавтор успел удалить их все,
          слияние отбросит и рамку (core.rebase, круг 39) — пустой «Группы» не будет нигде,
-         второй транзакцией убирать нечего */
-      return commitTableEdit(r, intent, { select: r.id ? [r.id] : null });
+         второй транзакцией убирать нечего; часть удалил — подпись поправит settleWrapWords */
+      const kids = r.ops ? ((r.ops.find((o) => o.op === 'create') || {}).node || {}).children : null;
+      return commitTableEdit(r, intent, { select: r.id ? [r.id] : null, extra: r.id ? { wrapOf: r.id, wrapKids: Array.isArray(kids) ? kids.slice() : [] } : null });
     }
     case 'ungroup': {
       const r = SHELL.ungroupOps(doc, sel, { rects });
@@ -13384,6 +13585,19 @@ function importJson() {
         return;
       }
       const taken = adoptDoc(raw);
+      /* Круг 41 (UX Д6): предел раскрытия экземпляров — до записи, тем же правилом, что у
+         сервиса (400 на импорт): иначе ядро молча не раскрывало лишнее, а сервер отбрасывал
+         create, и человек читал «Загружен документ» без части слоёв. */
+      const over = typeof CORE.expandProblem === 'function' ? CORE.expandProblem(taken.doc) : null;
+      if (over) {
+        closeSheet();
+        const w = SHELL.expandLimitWords(over);
+        showMsg('error', w.title, {
+          note: w.note,
+          actions: [{ label: 'Выбрать другой файл', primary: true, onClick: () => importJson() }],
+        });
+        return;
+      }
       const wasName = docName(state.doc);
       const nowName = docName(taken.doc);
       // свёрнутые ветки старого документа к новому не относятся; пустой список означал бы

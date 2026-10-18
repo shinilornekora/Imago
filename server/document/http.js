@@ -22,7 +22,7 @@ import { cleanBody as cleanBodyOf, projectName as projectNameOf, prepareProject 
 import {
   MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX,
   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, PROJECTS_PAGE, PROJECTS_PAGE_MAX,
-  WRITE_BODY_BYTES, BODY_TIMEOUT_MS, BODY_FIRST_BYTE_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
+  WRITE_BODY_BYTES, BODY_TIMEOUT_MS, BODY_FIRST_BYTE_MS, BODY_IDLE_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
   HISTORY_PAGE, HISTORY_PAGE_MAX, HEALTH_PING_MS, HEALTH_CACHE_MS,
   isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue, undoPartOf
 } from './limits.js';
@@ -95,16 +95,18 @@ export function applyServerTimeouts(server) {
  * повторить.
  * @returns {Promise<Buffer|null>}
  */
-function readBody(req, max = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS, onChunk = null, firstByteMs = 0) {
+function readBody(req, max = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS, onChunk = null, firstByteMs = 0, idleMs = 0) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     let done = false;
     let timer = null;
+    let idle = null;
     const finish = (fn, v) => {
       if (done) return;
       done = true;
       if (timer) clearTimeout(timer);
+      if (idle) clearTimeout(idle);
       fn(v);
     };
     const stop = (e) => {
@@ -151,6 +153,14 @@ function readBody(req, max = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS, onChun
         }
       }
       chunks.push(chunk);
+      // круг 41: тело начало приходить и замолчало посреди — 408 через idleMs без байтов (прочитанное
+      // освобождает бюджет тел сразу, а не через общий срок тела: 16 соединений по 4 МБ − 1 байт
+      // держали бы бюджет все 30 с)
+      if (idleMs > 0 && (!(timeoutMs > 0) || idleMs < timeoutMs)) {
+        if (idle) clearTimeout(idle);
+        idle = setTimeout(() => stop(new DocError(408, 'timeout', `тело запроса замолчало посреди: ${Math.round(idleMs / 1000)} с без данных`, { retryable: true, detail: { limit: 'body_idle', ms: idleMs } })), idleMs);
+        if (idle.unref) idle.unref();
+      }
     });
     req.on('end', () => {
       req.bodyBytes = size;
@@ -323,7 +333,7 @@ function historyItem(m) {
 
 /**
  * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, internalToken?: string, log?: object,
- *   writes?: {max?: number, queue?: number, retryAfter?: number, bodyBytes?: number, bodyTimeoutMs?: number, firstByteMs?: number}}} deps
+ *   writes?: {max?: number, queue?: number, retryAfter?: number, bodyBytes?: number, bodyTimeoutMs?: number, firstByteMs?: number, idleMs?: number}}} deps
  *   `writes` — запись по HTTP (`POST …/tx`, `POST /api/projects`, `PATCH`): семафор (одновременно и в
  *   очереди; сверх — 503 busy), бюджет байт читаемых тел на экземпляр, таймаут тела;
  *   `importer` — пул подготовки импорта (import-pool.js, круг 33); нет — подготовка здесь же
@@ -343,6 +353,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
   const bodyBudget = writes.bodyBytes > 0 ? writes.bodyBytes : WRITE_BODY_BYTES;
   const bodyTimeoutMs = writes.bodyTimeoutMs !== undefined ? writes.bodyTimeoutMs : BODY_TIMEOUT_MS;
   const firstByteMs = writes.firstByteMs !== undefined ? writes.firstByteMs : BODY_FIRST_BYTE_MS;
+  const bodyIdleMs = writes.idleMs !== undefined ? writes.idleMs : BODY_IDLE_MS;
   let bodyBytesUsed = 0;
 
   /**
@@ -369,7 +380,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       held += n;
     };
     try {
-      const buf = await readBody(req, max, bodyTimeoutMs, take, firstByteMs);
+      const buf = await readBody(req, max, bodyTimeoutMs, take, firstByteMs, bodyIdleMs);
       // круг 33: тяжёлая подготовка тела (импорт) — до слота записи: слот держит только запись
       if (prepare) {
         const prep = await prepare(buf);

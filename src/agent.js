@@ -22,6 +22,9 @@
  * Модуль не знает о DOM и работает в node так же, как в браузере (тесты — test/agent.test.mjs).
  */
 
+// круг 41: версия движка клиента — Orchestrator сверяет её (426 engine, client_old/server_old)
+import { ENGINE_VERSION } from './core.js';
+
 /** Типы событий потока §10.3 — остальные игнорируются (вперёд совместимо). */
 export const AGENT_EVENTS = Object.freeze(['queued', 'stage', 'shell', 'variants', 'result', 'error', 'done']);
 
@@ -164,6 +167,20 @@ export function createSSEParser(onEvent) {
 }
 
 /** Тело ошибки → AgentError. Понимает единый формат §10.2, ответ nginx и голый текст. */
+/**
+ * Круг 41: 426 `engine` от Orchestrator — чья версия старее: `client_old` (эта вкладка — нужна
+ * перезагрузка) или `server_old` (сервер агента ещё не обновился). '' — не про версию клиента
+ * (прежний смысл `engine`: разошлись сервер агента и сервис документов).
+ * @param {{code?: string, status?: number, detail?: object}} e
+ * @returns {'client_old'|'server_old'|''}
+ */
+export function engineCause(e) {
+  const d = e && e.detail && typeof e.detail === 'object' ? e.detail : null;
+  if (!e || e.code !== 'engine' || !d) return '';
+  if (d.cause === 'client_old' || d.cause === 'server_old') return d.cause;
+  return '';
+}
+
 export async function readError(res, { accepted = false } = {}) {
   let body = null;
   let text = '';
@@ -224,7 +241,7 @@ function joinUrl(base, path) {
 }
 
 function headersFor(author, extra = {}) {
-  const h = { 'content-type': 'application/json', ...extra };
+  const h = { 'content-type': 'application/json', 'x-engine': String(ENGINE_VERSION), ...extra };
   // заголовки — latin1: имя по-русски уходит процентно закодированным, как в /api (§9.7)
   if (author) h['x-author'] = encodeURIComponent(String(author));
   return h;
@@ -346,7 +363,7 @@ export async function apply(commandId, variant, opts = {}) {
   try {
     res = await f(joinUrl(opts.baseUrl, '/agent/apply'), {
       method: 'POST', headers: headersFor(opts.author),
-      body: JSON.stringify({ command_id: commandId, variant, ...clientField(opts.client) }),
+      body: JSON.stringify({ command_id: commandId, variant, engine: ENGINE_VERSION, ...clientField(opts.client) }),
       cache: 'no-store', signal: t.signal,
     });
   } catch (e) {
@@ -404,7 +421,7 @@ export async function runServerCommand(p = {}) {
   const maxWait = Number.isFinite(p.maxRetryWaitMs) ? p.maxRetryWaitMs : RETRY_WAIT_MAX_MS;
   const idleMs = Number.isFinite(p.idleMs) ? p.idleMs : IDLE_MS;
 
-  const body = { command_id: commandId, project: p.project, text: p.text };
+  const body = { command_id: commandId, project: p.project, text: p.text, engine: ENGINE_VERSION };
   if (Array.isArray(p.selection)) body.selection = p.selection.slice();
   /* Круг 27, I6: кто поставил выделение. 'agent' — его оставил прошлый итог агента, и
      человек его не трогал: «а теперь синее» относится к сделанному, а не к выбору человека. */

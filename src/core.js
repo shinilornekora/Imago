@@ -4932,6 +4932,10 @@ function withIndex(draft, op, parent, selfId) {
 const okAfter = (v) => v === undefined || v === null || typeof v === 'string';
 /** Позиция `index`: нет, `null` или число (не конечное — как отсутствие, как раньше). */
 const okIndex = (v) => v === undefined || v === null || typeof v === 'number';
+/** Круг 41: поля, которые «обернуть» пишет ребёнку в координатах новой рамки. */
+const LOST_GEOMETRY = new Set(['pos', 'size', 'override']);
+/** Голова пути set (строка или число) — '' для мусора. */
+const pathHead = (p) => (typeof p === 'string' ? p.split('.')[0] : isNum(p) ? String(p) : '');
 /** Сколько операций сливать между взглядами на часы (Date.now не бесплатен). */
 const BUDGET_CHECK_EVERY = 32;
 
@@ -5017,6 +5021,23 @@ function rebase(doc, opList, opts) {
     }
     return null;
   };
+  /* Круг 41: create, отброшенный слиянием, тянет за собой операции той же пачки,
+     вычисленные относительно него. «Обернуть» в свободной рамке — это create рамки
+     с детьми и set pos/size детей в координатах НОВОЙ рамки; отбросили create
+     (cycle/removed/orphan/invalid) — set pos лёг бы в старом родителе, и ребёнок
+     прыгал в (0,0). Поэтому:
+       lostNodes: id не созданного узла → причина (операции над ним, create/move в
+         него — dropped с той же причиной, а не «removed»/«orphan»);
+       lostKids: ребёнок, которого такой create должен был принять (или которого
+         вычеркнули из списка как цикл), → причина: его set pos/size/override —
+         dropped с той же причиной, пока пачка сама не переложит его move. */
+  const lostNodes = new Map();
+  const lostKids = new Map();
+  const loseCreate = (node, why) => {
+    if (!node || typeof node !== 'object') return;
+    if (isNodeId(node.id) && !alive(node.id)) lostNodes.set(node.id, why);
+    if (Array.isArray(node.children)) for (const c of node.children) if (isNodeId(c)) lostKids.set(c, why);
+  };
   for (let i = 0; i < list.length; i++) {
     const raw = list[i];
     if (deadline !== Infinity && i % BUDGET_CHECK_EVERY === 0 && Date.now() > deadline) {
@@ -5024,11 +5045,23 @@ function rebase(doc, opList, opts) {
       break;
     }
     const drop = (reason) => out.dropped.push({ index: i, op: raw, reason });
+    const dropAs = (why) => out.dropped.push({ index: i, op: raw, reason: why.reason, ...(why.limit ? { limit: why.limit } : {}) });
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { drop('invalid'); continue; }
     let op = raw;
     // «removed» — про узел, которого больше нет; операция без id — мусор, и
     // автору об этом стоит сказать иначе, чем «узел уже удалён»
     const hasId = isNodeId(op.id);
+    if (lostNodes.size || lostKids.size) {
+      const why = (op.op === 'set' || op.op === 'remove' || op.op === 'move') && hasId && lostNodes.get(op.id)
+        || (op.op === 'move' && isNodeId(op.parent) && lostNodes.get(op.parent))
+        || (op.op === 'create' && op.node && typeof op.node === 'object' && isNodeId(op.node.parent) && lostNodes.get(op.node.parent))
+        || (op.op === 'set' && hasId && LOST_GEOMETRY.has(pathHead(op.path)) && lostKids.get(op.id));
+      if (why) {
+        if (op.op === 'create') loseCreate(op.node, why);
+        dropAs(why);
+        continue;
+      }
+    }
     switch (op.op) {
       case 'set':
       case 'remove':
@@ -5052,7 +5085,7 @@ function rebase(doc, opList, opts) {
           if (!isNodeId(parentId)) { drop('invalid'); continue; }
           if (!alive(parentId)) {
             const alt = liveAncestor(parentId);
-            if (!alt) { drop('orphan'); continue; }
+            if (!alt) { loseCreate(node, { reason: 'orphan' }); drop('orphan'); continue; }
             // место у старого родителя ничего не значит у нового — в конец
             op = { ...op, node: { ...node, parent: alt } };
             delete op.after;
@@ -5076,10 +5109,16 @@ function rebase(doc, opList, opts) {
                отказывает остальным операциям пачки). */
             if (!kids.length && op.node.children.length && !filledLater(node.id, i)) {
               const was = op.node.children;
-              drop(!was.every(isNodeId) ? 'invalid' : was.some((c) => alive(c)) ? 'cycle' : 'removed');
+              const reason = !was.every(isNodeId) ? 'invalid' : was.some((c) => alive(c)) ? 'cycle' : 'removed';
+              loseCreate(node, { reason });
+              drop(reason);
               continue;
             }
-            if (kids.length !== op.node.children.length) op = { ...op, node: { ...op.node, children: kids } };
+            if (kids.length !== op.node.children.length) {
+              // вычеркнутый как цикл ребёнок остаётся, где был: его геометрия «в новой рамке» не ложится
+              for (const c of op.node.children) if (isNodeId(c) && chain.has(c) && alive(c)) lostKids.set(c, { reason: 'cycle' });
+              op = { ...op, node: { ...op.node, children: kids } };
+            }
           }
           op = withIndex(cur, op, alive(parentId), null);
         } else if (op.after !== undefined) {
@@ -5115,10 +5154,16 @@ function rebase(doc, opList, opts) {
     if (err) {
       // круг 27: нарушенный предел (глубина) — в dropped с limit, как merge_budget
       // (круг 39: и раскрытие экземпляров — limit 'expand_nodes')
+      if (op.op === 'create') loseCreate(op.node, err.limit ? { reason: 'invalid', limit: err.limit } : { reason: 'invalid' });
       if (err.limit) out.dropped.push({ index: i, op: raw, reason: 'invalid', limit: err.limit });
       else drop('invalid');
       continue;
     }
+    // легло: узел создан или ребёнок переложен — дальше пачка считает от настоящего места
+    if (op.op === 'create') {
+      lostNodes.delete(op.node.id);
+      if (Array.isArray(op.node.children)) for (const c of op.node.children) lostKids.delete(c);
+    } else if (op.op === 'move') lostKids.delete(op.id);
     out.ops.push(op);
   }
   return out;

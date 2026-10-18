@@ -174,7 +174,8 @@ test('r39 (N6е): «Обернуть», чьи слои удалил соавт�
   assert.deepEqual(m1.nodes[w.id].children, [sel[1]]);
   // второй транзакции «убрать пустую рамку» у оболочки больше нет
   const app = read('app.js');
-  assert.doesNotMatch(app, /dropEmptyWrap|emptyWrapOps|wrapOf/);
+  // пустую рамку убирает слияние (ядро), второй транзакции оболочки нет; wrapOf — только для подписи (круг 41)
+  assert.doesNotMatch(app, /dropEmptyWrap|emptyWrapOps/);
   assert.equal(SHELL.emptyWrapOps, undefined);
 });
 

@@ -256,7 +256,7 @@ test('dropped словами: что не применилось, почему �
   // правка устарела после восстановления базы — свои слова
   const stale = droppedWords({ dropped: [{ index: 0, op: rename, reason: 'stale' }], nameOf: () => 'Шапка' });
   assert.ok(stale.stale);
-  assert.match(stale.title, /^Переименование «Шапка» не применилось — она сделана до восстановления базы/);
+  assert.match(stale.title, /^Переименование «Шапка» не применилось — правка сделана до восстановления базы/);
   assert.match(stale.note, /заново/);
   assert.match(droppedWords({ dropped: [{ index: 0, op: rename, reason: 'stale', by: { author: 'Аня' } }], nameOf: () => 'Шапка' }).title,
     /не применилось — с тех пор Аня изменила то же самое, а эта правка сделана до восстановления базы/);

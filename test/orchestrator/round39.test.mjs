@@ -15,7 +15,7 @@ import * as core from '../../src/core.js';
 import { intentOf, RECOGNIZE_MAX } from '../../server/orchestrator/pipeline.js';
 import { createReadGate, createDslrClient } from '../../server/orchestrator/dslr/index.js';
 import { createDocClient } from '../../server/orchestrator/docclient.js';
-import { DOCUMENT_BUSY_MESSAGE } from '../../server/orchestrator/errors.js';
+import { DOCUMENT_BUSY_MESSAGE, AGENT_READ_QUEUE_MESSAGE } from '../../server/orchestrator/errors.js';
 import {
   startDocument, startFakeLlm, startOrch, command, commandStream, createProject, journal, call, cid, quiet,
   PLAN_CREATE, TREE_OK,
@@ -129,10 +129,10 @@ test('круг 39 N5а: семафор полных чтений — число,
 test('круг 39 N5а: семафор — срок ожидания и «стоп»: busy (перегружен) и cancelled, место не теряется', async () => {
   const gate = createReadGate({ max: 1, bytes: 10, queue: 1 });
   const a = await gate.acquire(5);
-  await assert.rejects(gate.acquire(1, { deadline: Date.now() + 50 }), (e) => e.code === 'busy' && e.status === 503 && e.message === DOCUMENT_BUSY_MESSAGE);
+  await assert.rejects(gate.acquire(1, { deadline: Date.now() + 50 }), (e) => e.code === 'busy' && e.status === 503 && e.message === AGENT_READ_QUEUE_MESSAGE && e.detail.cause === 'agent');
   const ctl = new AbortController();
   const p = gate.acquire(1, { signal: ctl.signal });
-  await assert.rejects(gate.acquire(1), (e) => e.code === 'busy', 'ждущих больше предела — сразу busy');
+  await assert.rejects(gate.acquire(1), (e) => e.code === 'busy' && e.detail.cause === 'agent', 'ждущих больше предела — сразу busy (агент)');
   ctl.abort();
   await assert.rejects(p, (e) => e.code === 'cancelled');
   assert.equal(gate.waiting, 0);
