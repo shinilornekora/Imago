@@ -12,6 +12,7 @@ import http from 'node:http';
 import { startOrch, command, call, cid } from './helpers.mjs';
 import { describeViolations } from '../../src/brain.js';
 import { createDoc } from '../../src/core.js';
+import { ENGINE_VERSION } from '../../src/core.js';
 
 test('K2 (круг 32): /agent/health — document_reason schema, пока база сервиса догоняет схему', async (t) => {
   let state = 'schema';
@@ -27,7 +28,7 @@ test('K2 (круг 32): /agent/health — document_reason schema, пока ба�
       return;
     }
     if (req.url === '/api/health') {
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, engine: 1, storage: 'up' }));
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, engine: ENGINE_VERSION, storage: 'up' }));
       return;
     }
     res.writeHead(404).end();

@@ -21,6 +21,7 @@ import {
 } from './helpers.mjs';
 import { createDslv } from '../../server/orchestrator/dslv/index.js';
 import { failureReasons, overflowWords, MODEL_REJECTED } from '../../src/brain.js';
+import { ENGINE_VERSION } from '../../src/core.js';
 
 const SCRIPT = { plan: PLAN_CREATE, tree: TREE_OK };
 
@@ -172,7 +173,7 @@ test('J1: Document service отвечает на /api/health 503 (хранили
       return;
     }
     if (req.url === '/api/health') {
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, engine: 1, storage: 'up' }));
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, engine: ENGINE_VERSION, storage: 'up' }));
       return;
     }
     res.writeHead(404).end();

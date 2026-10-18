@@ -887,41 +887,76 @@ const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const optStr = (o, k) => o[k] === undefined || typeof o[k] === 'string';
 const optNum = (o, k, lo, hi) => o[k] === undefined || (isNum(o[k]) && o[k] >= lo && o[k] <= hi);
 
+/**
+ * Круг 43: известные ключи стиля текста (поле `style` узла и запись `tokens.type.*`)
+ * — таблица, по которой идут И проверка (textStyleFieldsProblem), И отпечаток
+ * формата (formatSignature). str — строка; num — число в [min, max] (`gt` —
+ * строго больше min); note — хвост сообщения.
+ */
+const TEXT_STYLE_FIELDS = Object.freeze({
+  token: { str: true },
+  font: { str: true },
+  fontFamily: { str: true },
+  fontSize: { min: 0, gt: true, max: 1000 },
+  lineHeight: { min: 0, gt: true, max: 1000 },
+  fontWeight: { min: 100, max: 900, note: ' 100..900' },
+  letterSpacing: { min: -1000, max: 1000 }
+});
+/** Ключи записи `tokens.type.<имя>` (без token/fontFamily — запись сама и есть токен). */
+const TYPE_ENTRY_FIELDS = Object.freeze(['font', 'fontSize', 'lineHeight', 'fontWeight', 'letterSpacing']);
+
+/** Ключи стиля по таблице TEXT_STYLE_FIELDS. @returns {string|null} */
+function textStyleFieldsProblem(v, keys, what) {
+  for (const k of keys) {
+    const rule = TEXT_STYLE_FIELDS[k];
+    const x = v[k];
+    if (x === undefined) continue;
+    if (rule.str) { if (typeof x !== 'string') return `${what}.${k} должен быть строкой`; continue; }
+    const ok = isNum(x) && (rule.gt ? x > rule.min : x >= rule.min) && x <= rule.max;
+    if (!ok) return `${what}.${k} вне диапазона${rule.note || ''}`;
+  }
+  return null;
+}
+
 /** Стиль текста: имя токена или объект; известные ключи — своего вида. */
 function styleProblem(v) {
   if (typeof v === 'string') return null;
   if (!isObj(v)) return 'text: style — имя токена или объект';
-  if (!optStr(v, 'token')) return 'style.token должен быть строкой';
-  if (!optStr(v, 'font')) return 'style.font должен быть строкой';
-  if (!optStr(v, 'fontFamily')) return 'style.fontFamily должен быть строкой';
-  for (const k of ['fontSize', 'lineHeight']) {
-    const x = v[k];
-    if (x !== undefined && (!isNum(x) || x <= 0 || x > 1000)) return `style.${k} вне диапазона`;
-  }
-  if (!optNum(v, 'fontWeight', 100, 900)) return 'style.fontWeight вне диапазона 100..900';
-  if (!optNum(v, 'letterSpacing', -1000, 1000)) return 'style.letterSpacing вне диапазона';
-  return null;
+  return textStyleFieldsProblem(v, Object.keys(TEXT_STYLE_FIELDS), 'style');
 }
 
+
+/** Круг 43: ключи обводки-объекта: краска, строки, число в границах (таблица проверки и отпечатка). */
+const STROKE_FIELDS = Object.freeze({ color: 'paint', token: 'str', value: 'str', width: Object.freeze([0, 1000]) });
 
 /** Обводка: null, строка или {color|token|value, width}; color — краска (круг 37: и градиент). */
 function strokeProblem(v, noGradient) {
   if (v === null || typeof v === 'string') return null;
   if (!isObj(v)) return 'stroke: строка или объект';
   if (v.gradient !== undefined) return 'stroke: градиент обводки — в stroke.color';
-  if (v.color !== undefined) {
-    const err = paintProblem(v.color, 'stroke.color', noGradient);
-    if (err) return err;
+  for (const k of Object.keys(STROKE_FIELDS)) {
+    const rule = STROKE_FIELDS[k];
+    if (v[k] === undefined) continue;
+    if (rule === 'paint') {
+      const err = paintProblem(v[k], 'stroke.' + k, noGradient);
+      if (err) return err;
+    } else if (rule === 'str') {
+      if (typeof v[k] !== 'string') return `stroke.${k} должен быть строкой`;
+    } else if (!optNum(v, k, rule[0], rule[1])) return `stroke.${k} вне диапазона ${rule[0]}..${rule[1]}`;
   }
-  for (const k of ['token', 'value']) if (!optStr(v, k)) return `stroke.${k} должен быть строкой`;
-  if (!optNum(v, 'width', 0, 1000)) return 'stroke.width вне диапазона 0..1000';
   return null;
 }
+
+/** Круг 43: оси размера и рамок (size, override, viewBox — w/h; pos — x/y). */
+const SIZE_AXES = Object.freeze(['w', 'h']);
+const POS_AXES = Object.freeze(['x', 'y']);
+/** Ключи viewBox вектора: x, y необязательны, w, h — обязательны. */
+const VIEWBOX_KEYS = Object.freeze(['x', 'y', 'w', 'h']);
 
 /** Размер: объект осей, ось — объект с режимом-строкой и числом. Перечни режимов — в checkNode. */
 function sizeShapeProblem(v) {
   if (!isObj(v)) return 'size: нужен объект';
-  for (const ax of ['w', 'h']) {
+  for (const ax of SIZE_AXES) {
     const s = v[ax];
     if (s === undefined) continue;
     if (!isObj(s)) return `size.${ax}: нужен объект`;
@@ -931,12 +966,16 @@ function sizeShapeProblem(v) {
   return null;
 }
 
+/** Круг 43: ключи раскладки — перечисления (таблица проверки и отпечатка) и прочие. */
+const LAYOUT_ENUMS = Object.freeze({ mode: LAYOUT_MODES, align: ALIGNS, justify: JUSTIFIES });
+const LAYOUT_KEYS = Object.freeze(['mode', 'align', 'justify', 'wrap', 'gap', 'padding']);
+
 /** Раскладка: объект; известные ключи — своего вида (у фрейма она к тому же нормализована). */
 function layoutShapeProblem(v) {
   if (!isObj(v)) return 'layout должен быть объектом';
-  if (v.mode !== undefined && !LAYOUT_MODES.has(v.mode)) return `layout.mode: «${shown(v.mode)}»`;
-  if (v.align !== undefined && !ALIGNS.has(v.align)) return `layout.align: «${shown(v.align)}»`;
-  if (v.justify !== undefined && !JUSTIFIES.has(v.justify)) return `layout.justify: «${shown(v.justify)}»`;
+  for (const k of Object.keys(LAYOUT_ENUMS)) {
+    if (v[k] !== undefined && !LAYOUT_ENUMS[k].has(v[k])) return `layout.${k}: «${shown(v[k])}»`;
+  }
   if (v.wrap !== undefined && typeof v.wrap !== 'boolean') return 'layout.wrap: нужно true или false';
   if (v.gap !== undefined && !isNum(v.gap) && !parseScaleRef(v.gap)) return 'layout.gap вне диапазона';
   const p = v.padding;
@@ -958,7 +997,8 @@ function layoutShapeProblem(v) {
 function rawLayoutProblem(l) {
   if (l === undefined || l === null || typeof l !== 'object') return null;   // нормализация даст умолчание
   if (Array.isArray(l)) return 'layout должен быть объектом';
-  for (const k of ['mode', 'align', 'justify', 'wrap', 'gap']) {
+  for (const k of LAYOUT_KEYS) {
+    if (k === 'padding') continue;
     if (l[k] !== null && typeof l[k] === 'object') return `layout.${k}: нужно простое значение`;
   }
   const p = l.padding;
@@ -994,6 +1034,8 @@ const STATE_NAME_SET = new Set(STATE_NAMES);
 const STATE_KEYS = Object.freeze(['fill', 'color', 'stroke', 'opacity', 'scale', 'lift', 'shadow']);
 const STATE_KEY_SET = new Set(STATE_KEYS);
 const MOTION_KEYS = new Set(['duration', 'easing', 'delay', 'follow']);
+/** Значения motion.follow. */
+const MOTION_FOLLOW = Object.freeze(['self', 'parent']);
 /** Пределы (SPEC §11.1). */
 const STATE_LIMITS = Object.freeze({ scale: [0.8, 1.2], lift: [-24, 24], duration: [0, 2000], delay: [0, 1000] });
 /** Длительность, выше которой микроанимация уже не «микро» (motion-slow). */
@@ -1108,7 +1150,7 @@ function motionProblem(v) {
     return `motion.easing: одна из ${Object.keys(EASINGS).join(', ')}`;
   }
   if (!optNum(v, 'delay', STATE_LIMITS.delay[0], STATE_LIMITS.delay[1])) return `motion.delay: мс ${STATE_LIMITS.delay[0]}..${STATE_LIMITS.delay[1]}`;
-  if (v.follow !== undefined && v.follow !== 'self' && v.follow !== 'parent') return "motion.follow: 'self' или 'parent'";
+  if (v.follow !== undefined && !MOTION_FOLLOW.includes(v.follow)) return "motion.follow: 'self' или 'parent'";
   return null;
 }
 
@@ -1187,6 +1229,9 @@ function gradientProblem(g, what) {
   return null;
 }
 
+/** Круг 43: ключи обёртки краски-цвета (кроме {gradient}) — строки. */
+const PAINT_WRAP_KEYS = Object.freeze(['token', 'color', 'value']);
+
 /**
  * Краска (fill, color, stroke.color, контуры): null, строка, обёртка
  * {token|color|value: строка} или (круг 37) {gradient}. В патчах состояний
@@ -1202,7 +1247,7 @@ function paintProblem(v, what, noGradient) {
     if (Object.keys(v).length !== 1) return `${what}: у градиента других ключей нет — {gradient:{…}}`;
     return gradientProblem(v.gradient, what);
   }
-  for (const k of ['token', 'color', 'value']) if (!optStr(v, k)) return `${what}.${k} должен быть строкой`;
+  for (const k of PAINT_WRAP_KEYS) if (!optStr(v, k)) return `${what}.${k} должен быть строкой`;
   return null;
 }
 
@@ -1405,9 +1450,9 @@ function pathsProblem(v) {
 /** Поле viewBox вектора. @returns {string|null} */
 function viewBoxProblem(v) {
   if (!isObj(v)) return 'viewBox: нужен объект {x?, y?, w, h}';
-  for (const k of Object.keys(v)) if (k !== 'x' && k !== 'y' && k !== 'w' && k !== 'h') return `viewBox.${k}: поля — x, y, w, h`;
-  for (const k of ['w', 'h']) if (!isNum(v[k]) || v[k] <= 0 || v[k] > MAX_SIZE) return `viewBox.${k}: число больше 0 и до ${MAX_SIZE}`;
-  for (const k of ['x', 'y']) if (!optNum(v, k, -MAX_SIZE, MAX_SIZE)) return `viewBox.${k}: число ±${MAX_SIZE}`;
+  for (const k of Object.keys(v)) if (!VIEWBOX_KEYS.includes(k)) return `viewBox.${k}: поля — ${VIEWBOX_KEYS.join(', ')}`;
+  for (const k of SIZE_AXES) if (!isNum(v[k]) || v[k] <= 0 || v[k] > MAX_SIZE) return `viewBox.${k}: число больше 0 и до ${MAX_SIZE}`;
+  for (const k of POS_AXES) if (!optNum(v, k, -MAX_SIZE, MAX_SIZE)) return `viewBox.${k}: число ±${MAX_SIZE}`;
   return null;
 }
 
@@ -1664,6 +1709,50 @@ function fitVector(paths, opts) {
 }
 
 /**
+ * Круг 43: поля узла с собственной формой — ЕДИНСТВЕННАЯ таблица и для проверки
+ * (fieldProblem), и для отпечатка формата (formatSignature → тест «формат меняется
+ * только вместе с ENGINE_VERSION»). Новое поле, новый тип узла, новое значение
+ * перечисления — сюда (или в таблицы, на которые тут ссылаются), и отпечаток
+ * изменится сам. Поля вне таблиц — простые данные (plainProblem).
+ * only — поле бывает только у этих типов, not — не бывает у этих; typeMsg — отказ.
+ */
+const FIELD_RULES = Object.freeze({
+  style: { check: (v) => styleProblem(v) },
+  fill: { check: (v, n, k) => paintProblem(v, k) },
+  color: { check: (v, n, k) => paintProblem(v, k) },
+  stroke: { check: (v) => strokeProblem(v) },
+  align: {
+    check: (v, node) => (node.type === 'text' ? (TEXT_ALIGNS.has(v) ? null : 'text.align') : (typeof v === 'string' ? null : 'align должен быть строкой'))
+  },
+  opacity: { check: (v) => (isNum(v) && v >= 0 && v <= 1 ? null : 'opacity вне 0..1') },
+  radius: { check: (v) => checkRadiusValue(v) },
+  size: { check: (v) => sizeShapeProblem(v) },
+  layout: { check: (v) => layoutShapeProblem(v) },
+  pos: { check: (v) => (isObj(v) && POS_AXES.every((a) => isNum(v[a])) ? null : 'pos: нужны числа x,y') },
+  override: {
+    check: (v) => {
+      if (v !== null && !(isObj(v) && POS_AXES.every((a) => isNum(v[a])))) return 'override: нужны числа x,y';
+      if (v && SIZE_AXES.some((a) => !optNum(v, a, 0, MAX_SIZE))) return 'override: w и h — числа';
+      return null;
+    }
+  },
+  // круг 36 (SPEC §11): состояния и движение; у страницы состояний нет
+  // (state-on-page: на импорт — отказ, create/set — bad-node)
+  states: { not: Object.freeze(['page']), typeMsg: 'states: у страницы состояний не бывает', check: (v) => statesProblem(v) },
+  motion: { check: (v) => motionProblem(v) },
+  shadow: { check: (v) => shadowRefProblem(v, 'shadow') },
+  props: { check: (v) => (isObj(v) ? null : 'props экземпляра: нужен объект') },
+  component: { check: (v) => (isObj(v) ? null : 'component должен быть объектом') },
+  // круг 37 (SPEC §12.1): поворот — у всех, кроме страницы; контуры и viewBox — только у вектора
+  rotate: {
+    not: Object.freeze(['page']), typeMsg: 'rotate: страницу не поворачивают',
+    check: (v) => (isNum(v) && v >= -ROTATE_LIMIT && v <= ROTATE_LIMIT ? null : `rotate: градусы −${ROTATE_LIMIT}..${ROTATE_LIMIT}`)
+  },
+  viewBox: { only: Object.freeze(['vector']), typeMsg: 'viewBox бывает только у vector', check: (v) => viewBoxProblem(v) },
+  paths: { only: Object.freeze(['vector']), typeMsg: 'paths бывают только у vector', check: (v) => pathsProblem(v) }
+});
+
+/**
  * Форма ОДНОГО поля узла. Структурные поля (id, type, parent, children) — не
  * здесь: их проверяет checkNode. Обязательность поля (size у фрейма,
  * characters у текста) — тоже там.
@@ -1677,41 +1766,11 @@ function fieldProblem(node, k) {
   let err = null;
   if (STRING_FIELDS.has(k)) err = typeof v === 'string' ? null : `${k} должен быть строкой`;
   else if (BOOL_FIELDS.has(k)) err = typeof v === 'boolean' ? null : `${k}: нужно true или false`;
-  else {
-    switch (k) {
-      case 'style': err = styleProblem(v); break;
-      case 'fill': case 'color': err = paintProblem(v, k); break;
-      case 'stroke': err = strokeProblem(v); break;
-      case 'align':
-        err = node.type === 'text' ? (TEXT_ALIGNS.has(v) ? null : 'text.align') : (typeof v === 'string' ? null : 'align должен быть строкой');
-        break;
-      case 'opacity': err = isNum(v) && v >= 0 && v <= 1 ? null : 'opacity вне 0..1'; break;
-      case 'radius': err = checkRadiusValue(v); break;
-      case 'size': err = sizeShapeProblem(v); break;
-      case 'layout': err = layoutShapeProblem(v); break;
-      case 'pos':
-        err = isObj(v) && isNum(v.x) && isNum(v.y) ? null : 'pos: нужны числа x,y';
-        break;
-      case 'override':
-        if (v !== null && !(isObj(v) && isNum(v.x) && isNum(v.y))) err = 'override: нужны числа x,y';
-        else if (v && (!optNum(v, 'w', 0, MAX_SIZE) || !optNum(v, 'h', 0, MAX_SIZE))) err = 'override: w и h — числа';
-        break;
-      // круг 36 (SPEC §11): состояния и движение; у страницы состояний нет
-      // (state-on-page: на импорт — отказ, create/set — bad-node)
-      case 'states': err = node.type === 'page' ? 'states: у страницы состояний не бывает' : statesProblem(v); break;
-      case 'motion': err = motionProblem(v); break;
-      case 'shadow': err = shadowRefProblem(v, 'shadow'); break;
-      case 'props': err = isObj(v) ? null : 'props экземпляра: нужен объект'; break;
-      case 'component': err = isObj(v) ? null : 'component должен быть объектом'; break;
-      // круг 37 (SPEC §12.1): поворот — у всех, кроме страницы; контуры и viewBox — только у вектора
-      case 'rotate':
-        err = node.type === 'page' ? 'rotate: страницу не поворачивают'
-          : isNum(v) && v >= -ROTATE_LIMIT && v <= ROTATE_LIMIT ? null : `rotate: градусы −${ROTATE_LIMIT}..${ROTATE_LIMIT}`;
-        break;
-      case 'viewBox': err = node.type === 'vector' ? viewBoxProblem(v) : 'viewBox бывает только у vector'; break;
-      case 'paths': err = node.type === 'vector' ? pathsProblem(v) : 'paths бывают только у vector'; break;
-      default: break;
-    }
+  else if (hasOwnProp.call(FIELD_RULES, k)) {
+    const rule = FIELD_RULES[k];
+    if (rule.only && !rule.only.includes(node.type)) err = rule.typeMsg;
+    else if (rule.not && rule.not.includes(node.type)) err = rule.typeMsg;
+    else err = rule.check(v, node, k);
   }
   if (err) return err;
   const plain = plainProblem(v, 0);
@@ -3831,13 +3890,8 @@ const tokensShapeOk = (t) => !!(t && t.colors && t.type && Array.isArray(t.spaci
 /** Тип-токен: объект; шрифт — строка, числа — в границах (те же, что у style узла). */
 function typeEntryProblem(v, what) {
   if (!isObj(v)) return `${what}: нужен объект`;
-  if (!optStr(v, 'font')) return `${what}.font должен быть строкой`;
-  for (const k of ['fontSize', 'lineHeight']) {
-    const x = v[k];
-    if (x !== undefined && (!isNum(x) || x <= 0 || x > 1000)) return `${what}.${k} вне диапазона`;
-  }
-  if (!optNum(v, 'fontWeight', 100, 900)) return `${what}.fontWeight вне диапазона 100..900`;
-  if (!optNum(v, 'letterSpacing', -1000, 1000)) return `${what}.letterSpacing вне диапазона`;
+  const err = textStyleFieldsProblem(v, TYPE_ENTRY_FIELDS, what);
+  if (err) return err;
   const plain = plainProblem(v, 1);
   return plain ? `${what}: ${plain}` : null;
 }
@@ -3856,87 +3910,112 @@ const stepOk = (x) => isNum(x) && x >= 0 && x <= MAX_SIZE;
  * @param {object} tokens токены ДО записи — нужна длина шкалы
  * @returns {string|null}
  */
+function tokenColorsProblem(parts, value) {
+  const n = parts.length;
+  const del = value === undefined;
+  if (n === 1) {
+    if (del) return null;   // структуру сторожит tokensShapeOk
+    if (!isObj(value)) return 'colors: нужен объект';
+    for (const k of Object.keys(value)) if (typeof value[k] !== 'string') return `colors.${k} должен быть строкой`;
+    return null;
+  }
+  if (n > 2) return `${parts.slice(0, 2).join('.')}: цвет — строка`;
+  return del || typeof value === 'string' ? null : `colors.${parts[1]} должен быть строкой`;
+}
+
+function tokenTypeProblem(parts, value, tokens) {
+  const n = parts.length;
+  const del = value === undefined;
+  if (n === 1) {
+    if (del) return null;
+    if (!isObj(value)) return 'type: нужен объект';
+    for (const k of Object.keys(value)) {
+      const err = typeEntryProblem(value[k], 'type.' + k);
+      if (err) return err;
+    }
+    return null;
+  }
+  if (n === 2) return del ? null : typeEntryProblem(value, 'type.' + parts[1]);
+  if (n === 3 && del) return null;   // поля стиля необязательны
+  if (n > 3) {
+    const plain = del ? null : plainProblem(value, n - 1);
+    if (plain) return `${parts.join('.')}: ${plain}`;
+  }
+  /* Круг 33: проверяется ИТОГОВОЕ поле записи, а не только записываемое
+     значение. `type.body.fontSize.x = 16` раньше проходило (глубже трёх —
+     «простые данные») и превращало число fontSize в объект {x:16}: документ
+     после этого не импортировался. Знакомые поля (font, fontSize, …) — скаляры,
+     путь глубже них даёт объект и отклоняется typeEntryProblem; незнакомые
+     поля — простые данные любой формы. Соседние поля записи не смотрим. */
+  const group = tokens && isObj(tokens.type) ? tokens.type : {};
+  const entryNow = isObj(group[parts[1]]) ? group[parts[1]] : {};
+  const field = n === 3
+    ? value
+    : setPath(isObj(entryNow[parts[2]]) ? entryNow[parts[2]] : {}, parts.slice(3).join('.'), value);
+  return typeEntryProblem({ [parts[2]]: field }, 'type.' + parts[1]);
+}
+
+function tokenStepsProblem(parts, value, tokens) {
+  const [group] = parts;
+  const n = parts.length;
+  const del = value === undefined;
+  /* Круг 36 (SPEC §11.1): шкалы движения и теней — у них три именованных шага
+     (motion: fast/base/slow — мс; shadow: sm/md/lg — «dx dy blur цвет»). Пишут
+     шаг или группу целиком; снять можно и шаг (ссылка на него станет мёртвой —
+     dead-motion-ref, отрисовка возьмёт умолчание), и группу (документ вернётся
+     к умолчаниям ядра). */
+  const steps = group === 'motion' ? MOTION_STEPS : SHADOW_STEPS;
+  const ok = group === 'motion' ? motionStepOk : shadowStepOk;
+  const want = group === 'motion'
+    ? `мс ${STATE_LIMITS.duration[0]}..${STATE_LIMITS.duration[1]}`
+    : "описание тени «dx dy blur цвет» (px; цвет #hex или rgba()) или 'none'";
+  if (n === 1) {
+    if (del) return null;
+    if (!isObj(value)) return `${group}: нужен объект {${steps.join(', ')}}`;
+    for (const k of Object.keys(value)) {
+      if (steps.indexOf(k) < 0) return `${group}.${k}: шаги — ${steps.join(', ')}`;
+      if (!ok(value[k])) return `${group}.${k}: ${want}`;
+    }
+    return null;
+  }
+  if (steps.indexOf(parts[1]) < 0) return `${group}.${parts[1]}: шаги — ${steps.join(', ')}`;
+  if (n > 2) return `${group}.${parts[1]}: шаг пишут целиком`;
+  if (del) return null;
+  return ok(value) ? null : `${group}.${parts[1]}: ${want}`;
+}
+
+function tokenScaleProblem(parts, value, tokens) {
+  const [group] = parts;
+  const n = parts.length;
+  const del = value === undefined;
+  if (n === 1) {
+    if (del) return null;
+    if (!Array.isArray(value)) return `${group}: нужен массив чисел`;
+    return value.every(stepOk) ? null : `${group}: шаги — числа 0..${MAX_SIZE}`;
+  }
+  const cur = tokens && Array.isArray(tokens[group]) ? tokens[group] : [];
+  if (n > 2 || !/^(0|[1-9]\d*)$/.test(parts[1])) return `${group}: шаг адресуется номером`;
+  // снятие шага дало бы дыру в массиве (в JSON — null), запись за концом — тоже
+  if (del) return `${group}: шаг не снимают — шкалу пишут целиком`;
+  if (Number(parts[1]) > cur.length) return `${group}: шага ${parts[1]} нет — шкала длиной ${cur.length}`;
+  return stepOk(value) ? null : `${group}.${parts[1]}: число 0..${MAX_SIZE}`;
+}
+
+/**
+ * Круг 43: группы токенов со строгой формой — таблица и проверки, и отпечатка
+ * формата. Прочие группы — простые данные.
+ */
+const TOKEN_RULES = Object.freeze({
+  colors: tokenColorsProblem, type: tokenTypeProblem,
+  motion: tokenStepsProblem, shadow: tokenStepsProblem,
+  spacing: tokenScaleProblem, radii: tokenScaleProblem
+});
+
 function tokenWriteProblem(parts, value, tokens) {
   const [group] = parts;
   const n = parts.length;
   const del = value === undefined;
-  if (group === 'colors') {
-    if (n === 1) {
-      if (del) return null;   // структуру сторожит tokensShapeOk
-      if (!isObj(value)) return 'colors: нужен объект';
-      for (const k of Object.keys(value)) if (typeof value[k] !== 'string') return `colors.${k} должен быть строкой`;
-      return null;
-    }
-    if (n > 2) return `${parts.slice(0, 2).join('.')}: цвет — строка`;
-    return del || typeof value === 'string' ? null : `colors.${parts[1]} должен быть строкой`;
-  }
-  if (group === 'type') {
-    if (n === 1) {
-      if (del) return null;
-      if (!isObj(value)) return 'type: нужен объект';
-      for (const k of Object.keys(value)) {
-        const err = typeEntryProblem(value[k], 'type.' + k);
-        if (err) return err;
-      }
-      return null;
-    }
-    if (n === 2) return del ? null : typeEntryProblem(value, 'type.' + parts[1]);
-    if (n === 3 && del) return null;   // поля стиля необязательны
-    if (n > 3) {
-      const plain = del ? null : plainProblem(value, n - 1);
-      if (plain) return `${parts.join('.')}: ${plain}`;
-    }
-    /* Круг 33: проверяется ИТОГОВОЕ поле записи, а не только записываемое
-       значение. `type.body.fontSize.x = 16` раньше проходило (глубже трёх —
-       «простые данные») и превращало число fontSize в объект {x:16}: документ
-       после этого не импортировался. Знакомые поля (font, fontSize, …) — скаляры,
-       путь глубже них даёт объект и отклоняется typeEntryProblem; незнакомые
-       поля — простые данные любой формы. Соседние поля записи не смотрим. */
-    const group = tokens && isObj(tokens.type) ? tokens.type : {};
-    const entryNow = isObj(group[parts[1]]) ? group[parts[1]] : {};
-    const field = n === 3
-      ? value
-      : setPath(isObj(entryNow[parts[2]]) ? entryNow[parts[2]] : {}, parts.slice(3).join('.'), value);
-    return typeEntryProblem({ [parts[2]]: field }, 'type.' + parts[1]);
-  }
-  if (group === 'motion' || group === 'shadow') {
-    /* Круг 36 (SPEC §11.1): шкалы движения и теней — у них три именованных шага
-       (motion: fast/base/slow — мс; shadow: sm/md/lg — «dx dy blur цвет»). Пишут
-       шаг или группу целиком; снять можно и шаг (ссылка на него станет мёртвой —
-       dead-motion-ref, отрисовка возьмёт умолчание), и группу (документ вернётся
-       к умолчаниям ядра). */
-    const steps = group === 'motion' ? MOTION_STEPS : SHADOW_STEPS;
-    const ok = group === 'motion' ? motionStepOk : shadowStepOk;
-    const want = group === 'motion'
-      ? `мс ${STATE_LIMITS.duration[0]}..${STATE_LIMITS.duration[1]}`
-      : "описание тени «dx dy blur цвет» (px; цвет #hex или rgba()) или 'none'";
-    if (n === 1) {
-      if (del) return null;
-      if (!isObj(value)) return `${group}: нужен объект {${steps.join(', ')}}`;
-      for (const k of Object.keys(value)) {
-        if (steps.indexOf(k) < 0) return `${group}.${k}: шаги — ${steps.join(', ')}`;
-        if (!ok(value[k])) return `${group}.${k}: ${want}`;
-      }
-      return null;
-    }
-    if (steps.indexOf(parts[1]) < 0) return `${group}.${parts[1]}: шаги — ${steps.join(', ')}`;
-    if (n > 2) return `${group}.${parts[1]}: шаг пишут целиком`;
-    if (del) return null;
-    return ok(value) ? null : `${group}.${parts[1]}: ${want}`;
-  }
-  if (group === 'spacing' || group === 'radii') {
-    if (n === 1) {
-      if (del) return null;
-      if (!Array.isArray(value)) return `${group}: нужен массив чисел`;
-      return value.every(stepOk) ? null : `${group}: шаги — числа 0..${MAX_SIZE}`;
-    }
-    const cur = tokens && Array.isArray(tokens[group]) ? tokens[group] : [];
-    if (n > 2 || !/^(0|[1-9]\d*)$/.test(parts[1])) return `${group}: шаг адресуется номером`;
-    // снятие шага дало бы дыру в массиве (в JSON — null), запись за концом — тоже
-    if (del) return `${group}: шаг не снимают — шкалу пишут целиком`;
-    if (Number(parts[1]) > cur.length) return `${group}: шага ${parts[1]} нет — шкала длиной ${cur.length}`;
-    return stepOk(value) ? null : `${group}.${parts[1]}: число 0..${MAX_SIZE}`;
-  }
+  if (hasOwnProp.call(TOKEN_RULES, group)) return TOKEN_RULES[group](parts, value, tokens);
   if (del) return null;
   const plain = plainProblem(value, n);
   return plain ? `${parts.join('.')}: ${plain}` : null;
@@ -4011,12 +4090,18 @@ function setTokenInPlace(draft, st, parts, value, j) {
   else putProp(cur, parts[last], deepClone(value), j);
 }
 
+/** Круг 43: операции формата (SPEC §1): applyOne знает ровно эти. */
+const OP_NAMES = Object.freeze(['create', 'remove', 'set', 'move', 'setToken']);
+const OP_NAME_SET = new Set(OP_NAMES);
+
 /**
  * Внутреннее применение одной операции к изменяемой копии документа.
  * @returns {{code:string,message:string}|null}
  */
 function applyOne(draft, op, j) {
   if (!op || typeof op !== 'object') return opErr('bad-op', 'операция не объект');
+  // круг 43: перечень операций — таблица (она же в отпечатке формата)
+  if (!OP_NAME_SET.has(op.op)) return opErr('bad-op', `неизвестная операция «${shown(op.op)}»`);
   switch (op.op) {
     case 'create': {
       const node = deepClone(op.node);
@@ -4708,6 +4793,75 @@ function hashDoc(doc) {
   if (!doc || !doc.nodes) return '0';
   return fnv64(stableJSON({ root: doc.root, nodes: doc.nodes, tokens: doc.tokens }));
 }
+
+/* ------------------------------------------------------------------ *
+ * Отпечаток формата (круг 43)
+ *
+ * Правило SPEC §8.3: формат документа и операций меняется ТОЛЬКО вместе с
+ * ENGINE_VERSION — на нём стоит «запись, которую движок не принял, — наследная»
+ * (DSLTS) и 426 для клиента другой версии. formatSignature() собирает из ТЕХ ЖЕ
+ * таблиц, по которым идёт проверка (checkNode, fieldProblem, tokenWriteProblem,
+ * applyOne, parsePath, checkImportDoc), всё, что решает «принять или отказать»:
+ * типы узлов, поля и их ограничения по типам, вложенные ключи, перечисления,
+ * группы токенов, операции, команды путей, пределы схемы. Тест сверяет хэш с
+ * таблицей «версия движка → отпечаток»: формат изменился без подъёма версии —
+ * тест падает и называет изменившиеся разделы.
+ *
+ * Не входят (не влияют на то, примет ли старый движок запись нового): тексты
+ * сообщений, пороги замечаний validate (heavyCommands), пределы, которые журнал
+ * не проверяет (MAX_EXPANDED_NODES — applyBatches его не сверяет), умолчания токенов.
+ * ------------------------------------------------------------------ */
+
+const sortedList = (it) => [...it].map(String).sort();
+
+/**
+ * Отпечаток формата по разделам — простые данные (без функций), порядок
+ * перечислений не важен (отсортированы).
+ * @returns {Record<string, any>}
+ */
+function formatSignature() {
+  const rules = {};
+  for (const k of Object.keys(FIELD_RULES)) {
+    const r = FIELD_RULES[k];
+    rules[k] = { ...(r.only ? { only: sortedList(r.only) } : {}), ...(r.not ? { not: sortedList(r.not) } : {}) };
+  }
+  const enums = {};
+  for (const k of Object.keys(LAYOUT_ENUMS)) enums['layout.' + k] = sortedList(LAYOUT_ENUMS[k]);
+  const vector = { ...VECTOR_LIMITS };
+  delete vector.heavyCommands;
+  return {
+    nodes: { types: sortedList(NODE_TYPES), containers: sortedList(CONTAINER_TYPES), libraryRole: LIBRARY_ROLE },
+    fields: { struct: sortedList(STRUCT_FIELDS), string: sortedList(STRING_FIELDS), bool: sortedList(BOOL_FIELDS), rules },
+    enums: {
+      ...enums, sizeModes: sortedList(SIZE_MODES), textAligns: sortedList(TEXT_ALIGNS), propKinds: sortedList(PROP_KINDS),
+      fillRules: sortedList(FILL_RULES), lineCaps: sortedList(LINE_CAPS), lineJoins: sortedList(LINE_JOINS),
+      gradientKinds: sortedList(GRADIENT_KINDS), easings: sortedList(Object.keys(EASINGS)), motionFollow: sortedList(MOTION_FOLLOW),
+      states: sortedList(STATE_NAMES)
+    },
+    keys: {
+      textStyle: TEXT_STYLE_FIELDS, typeEntry: sortedList(TYPE_ENTRY_FIELDS), stroke: STROKE_FIELDS,
+      layout: sortedList(LAYOUT_KEYS), padding: sortedList(PAD_KEYS), size: sortedList(SIZE_AXES), pos: sortedList(POS_AXES),
+      viewBox: sortedList(VIEWBOX_KEYS), paint: sortedList(PAINT_WRAP_KEYS), gradient: sortedList(GRADIENT_KEYS),
+      stop: sortedList(STOP_KEYS), vpath: sortedList(VPATH_KEYS), statePatch: sortedList(STATE_KEYS), motion: sortedList(MOTION_KEYS)
+    },
+    refs: { scale: SCALE_REF_RE.source, motion: MOTION_REF_RE.source, shadow: SHADOW_REF_RE.source, shadowLen: SHADOW_LEN_RE.source, shadowColor: SHADOW_COLOR_RE.source },
+    tokens: { groups: sortedList(Object.keys(TOKEN_RULES)), scales: sortedList(Object.keys(SCALE_NAMES)), motionSteps: MOTION_STEPS.slice(), shadowSteps: SHADOW_STEPS.slice() },
+    ops: sortedList(OP_NAMES),
+    paths: { commands: { ...PATH_ARGS }, number: PATH_NUM_RE.source },
+    limits: { maxSize: MAX_SIZE, maxDepth: MAX_DEPTH, plainDepth: PLAIN_DEPTH, rotate: ROTATE_LIMIT, instanceDepth: MAX_INSTANCE_DEPTH, vector, state: STATE_LIMITS }
+  };
+}
+
+/**
+ * Хэш отпечатка: целиком и по разделам (по разделам — чтобы тест назвал, ЧТО
+ * изменилось). Считается при загрузке модуля.
+ */
+const FORMAT_SIGNATURE = (() => {
+  const sig = formatSignature();
+  const sections = {};
+  for (const k of Object.keys(sig).sort()) sections[k] = fnv64(stableJSON(sig[k]));
+  return Object.freeze({ hash: fnv64(stableJSON(sig)), sections: Object.freeze(sections) });
+})();
 
 /* Надгробия (круг 27, I1). Внутри core — словарь id удалённого узла → его
    последний родитель (Map или объект). В снимке — один из форматов:
@@ -11715,6 +11869,8 @@ export {
   ENGINE_VERSION, rebase, collectTombstones, hashDoc, uid,
   /* Круг 39 (N1): какие версии движка этот читает — */
   ENGINE_MIN_READ, engineReadable,
+  /* Круг 43: отпечаток формата — тест держит правило «формат — только с ENGINE_VERSION» — */
+  formatSignature, FORMAT_SIGNATURE,
   /* Круг 25: строки для документа и журнала — обрезка по кодовым точкам, санитайзер;
      годность id узла (непустая строка, не ключ Object.prototype) — */
   cutText, cleanText, isNodeId,

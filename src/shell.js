@@ -148,7 +148,8 @@ export function agentHealthNotice(prev, next, { hasProvider = false, editsWait =
   if (now === 'nodoc') {
     // K2: причина — база данных, а не сервис документа
     // круг 32: 'schema' — база догоняет схему после восстановления из копии (обычно секунды)
-    const why = schemaReason(next) ? 'сервер обновляет базу данных' : storageReason(next) ? 'база данных сервера недоступна' : 'сервер документа не отвечает';
+    const why = next.document_reason === 'engine' ? 'сервер документов ещё на прежней версии редактора'
+      : schemaReason(next) ? 'сервер обновляет базу данных' : storageReason(next) ? 'база данных сервера недоступна' : 'сервер документа не отвечает';
     return { text: `Сервер агента не видит документ — ${why}.${local}`, kind: 'plain' };
   }
   if (was === 'up') return { text: `Модель на сервере не отвечает — попробуйте позже.${local}`, kind: 'plain' };
@@ -482,6 +483,15 @@ export function agentErrorWords(err) {
   if (e.code === 'engine' && e.detail && e.detail.cause === 'client_old') {
     return { title: 'Вышла новая версия редактора — обновите страницу', note: 'Сервер агента работает с новой версией, эта вкладка — с прежней. Команда не выполнена, текст остался в строке', waitMs: 0, engine: 'client_old' };
   }
+  /* Круг 43: проект на сервере документов записан более новой версией, а сервер ещё не
+     обновился — повтор имеет смысл, когда его обновят (кнопка «Повторить» по сроку). */
+  if (e.code === 'engine' && e.detail && e.detail.cause === 'server_old' && e.detail.server === 'document') {
+    const waitMs = Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0 ? e.retryAfterMs : 0;
+    return { title: 'Сервер документов ещё не обновился — команда не выполнена', note: 'Проект записан более новой версией редактора, а сервер документов ещё на прежней. Текст команды остался в строке — повторите, когда сервер обновят', waitMs, engine: 'document_old' };
+  }
+  if (e.code === 'engine' && e.detail && e.detail.cause === 'agent_old') {
+    return { title: 'Сервер агента ещё не обновился — команда не выполнена', note: 'Он на прежней версии редактора, а сервер документов — уже на новой; повтор сейчас не поможет. Текст команды остался в строке — выполните её, когда сервер агента обновят', waitMs: 0, engine: 'agent_old' };
+  }
   if (e.code === 'engine' && e.detail && e.detail.cause === 'server_old') {
     return { title: 'Сервер агента ещё не обновился — команда не выполнена', note: 'Он на прежней версии редактора, повтор сейчас не поможет. Текст команды остался в строке — выполните её, когда сервер обновят', waitMs: 0, engine: 'server_old' };
   }
@@ -638,6 +648,43 @@ export function rescueFailWords(e) {
   if (st >= 500) return 'сервер не ответил как надо';
   if (x.retryable === false && x.message && !isJargon(x.message)) return cleanText(x.message).replace(/[.\s]+$/u, '');
   return 'сервер не ответил как надо';
+}
+
+/**
+ * Круг 43: спасение сохранилось новым проектом, а первая попытка — отдельным (409: её ключ занят
+ * проектом с прежним документом; или тело первой попытки не пережило перезагрузку). Удалять
+ * проект оболочке нечем (API удаления у сервиса нет) — говорим, что он есть и где его узнать.
+ * @param {{name?: string, certain?: boolean}} o
+ */
+export function rescueOrphanWords(o = {}) {
+  const name = cutText(cleanText(o.name || ''), 60, { ellipsis: true }) || 'Без названия';
+  return o.certain
+    ? `Первая попытка тоже сохранилась — отдельным проектом «${name}» без последних правок. В «Проектах» он помечен «первая попытка»; работа — в открытом сейчас.`
+    : `Если первая попытка всё же успела сохраниться, в «Проектах» будет ещё один «${name}» без последних правок — он помечен «первая попытка»; работа — в открытом сейчас.`;
+}
+
+/** Похоже ли, что проект списка — пустая первая попытка спасения (помета в «Проектах», круг 43). */
+export function isRescueOrphan(p, hints = []) {
+  if (!p || typeof p !== 'object') return false;
+  const at = Date.parse(p.created_at || '');
+  return (Array.isArray(hints) ? hints : []).some((h) => h && p.id !== h.keep && cleanText(p.name) === cleanText(h.name)
+    && Number(p.head_seq || 0) === 0 && Number.isFinite(at) && at >= (Number(h.since) || 0) - 60 * 1000 && at <= (Number(h.at) || Date.now()) + 1000);
+}
+
+/**
+ * Круг 43: строка «Истории» по применённому. Не легла часть операций — «Обернул 2 слоя ·
+ * не легло 1 из 3»; не легло ничего — «… — не применилась». Подпись записи задаётся до
+ * слияния, поэтому честность — по `ops_count`/`dropped_count` журнала (или своей записи).
+ * @param {string} text подпись (что сделано)
+ * @param {{ops?: number, dropped?: number}} n
+ */
+export function appliedLine(text, { ops = 0, dropped = 0 } = {}) {
+  const t = String(text || '').trim() || 'Правка';
+  const d = Math.max(0, Number(dropped) || 0);
+  const a = Math.max(0, Number(ops) || 0);
+  if (!a && d) return `${t} — не применилась`;
+  if (!d) return t;
+  return `${t} · не легло ${d} из ${a + d}`;
 }
 
 /** «52 008» — тысячи через неразрывный пробел. */
@@ -2603,9 +2650,26 @@ export function wrapSettledWords(doc, ops, id, asked) {
   const c = (Array.isArray(ops) ? ops : []).find((o) => o && o.op === 'create' && o.node && o.node.id === id);
   if (!c || !Array.isArray(c.node.children) || !Array.isArray(asked)) return null;
   const kids = c.node.children;
-  const lost = asked.filter((k) => !kids.includes(k)).length;
+  const lostIds = asked.filter((k) => !kids.includes(k));
+  const lost = lostIds.length;
   if (!lost || !kids.length) return null;
-  return { words: wrapWords(doc, kids, c.node.name), lost };
+  return { words: wrapWords(doc, kids, c.node.name), lost, lostIds };
+}
+
+/**
+ * Круг 43: «1 слой в рамку не вошёл: его удалил Борис» — кто удалил, если известно (один на
+ * всех пропавших); иначе «…уже удалили».
+ * @param {number} lost
+ * @param {{author?: string, author_kind?: string}|null} who
+ */
+export function wrapLostWords(lost, who = null) {
+  const head = `${lost} ${plural(lost, 'слой', 'слоя', 'слоёв')} в рамку не ${lost === 1 ? 'вошёл' : 'вошли'}`;
+  const it = lost === 1 ? 'его' : 'их';
+  if (!who || (!cleanText(who.author || '') && who.author_kind !== 'agent')) return `${head}: ${it} уже удалили.`;
+  // «Борис удалил» → «его удалил Борис»: глагол вперёд, согласование — у whoDid
+  const said = whoDid(who, 'удалил');
+  const k = said.lastIndexOf(' ');
+  return k > 0 ? `${head}: ${it} ${said.slice(k + 1)} ${said.slice(0, k)}.` : `${head}: ${it} ${said}.`;
 }
 
 /**

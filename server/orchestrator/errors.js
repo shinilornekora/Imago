@@ -64,6 +64,49 @@ export const documentBusy = (retryAfter = 5, detail) =>
 export const AGENT_READ_QUEUE_MESSAGE = 'Агент занят чтением других документов — команда не выполнена. Правки не потеряны; повторите через несколько секунд.';
 export const agentReadBusy = (retryAfter = 10, detail = {}) =>
   new OrchError(503, 'busy', AGENT_READ_QUEUE_MESSAGE, { retryable: true, retryAfter: Math.max(1, Math.min(60, Math.ceil(retryAfter || 10))), detail: { cause: 'agent', ...detail } });
+/**
+ * Круг 43: Document service отказал проекту по версии движка (503 `cause:'engine'`: проект
+ * записан движком новее этого экземпляра — «устарел») или сам работает с другой версией, чем
+ * агент (его /api/health). Это не «недоступен»: экземпляр жив, его нужно обновить.
+ * `detail.cause` — чья версия старее: `server_old` (сервер документов), `agent_old` (агент);
+ * `detail.server: 'document'` — о каком сервере речь (у 426 `server_old` от самого агента его нет).
+ * @param {{engine?: number, found?: number, retryAfter?: number}} [o] engine — версия сервера
+ *   документов, found — версия записи проекта (или агента)
+ */
+export const DOCUMENT_ENGINE_MESSAGE = 'Сервер документов ещё не обновился — команда не выполнена. Правки не потеряны; повторите, когда его обновят.';
+export const AGENT_ENGINE_MESSAGE = 'Сервер агента ещё не обновился до версии сервера документов — команда не выполнена. Правки не потеряны; повторите чуть позже.';
+export function documentEngine({ engine, found, retryAfter, agentOld = false } = {}) {
+  return new OrchError(503, 'engine', agentOld ? AGENT_ENGINE_MESSAGE : DOCUMENT_ENGINE_MESSAGE, {
+    retryable: true,
+    retryAfter: Math.max(1, Math.min(300, Math.ceil(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 30))),
+    detail: {
+      cause: agentOld ? 'agent_old' : 'server_old', server: 'document',
+      ...(Number.isInteger(engine) ? { engine } : {}), ...(Number.isInteger(found) ? { found } : {}),
+    },
+  });
+}
+
+/**
+ * Круг 43: что из `detail` ошибки можно отдать наружу — в событие `error` потока и в тело ответа
+ * (SPEC §10.13): только белый список полей и только безопасные значения — короткие коды
+ * (`[a-z_]`) и целые. Сырые причины сети («Document service ответил 503: …») сюда не попадают.
+ * @returns {object|undefined}
+ */
+const DETAIL_CODES = ['hint', 'cause', 'queue', 'limit', 'document_reason', 'server'];
+const DETAIL_INTS = ['engine', 'found', 'max'];
+export function safeDetail(detail) {
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return undefined;
+  const out = {};
+  for (const k of DETAIL_CODES) {
+    const v = detail[k];
+    if (typeof v === 'string' && /^[a-z][a-z_]{0,39}$/.test(v)) out[k] = v;
+  }
+  for (const k of DETAIL_INTS) {
+    const v = detail[k];
+    if (Number.isInteger(v) && v >= 0) out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 /** Круг 39 (N5а): занят главный поток самого агента (опаздывают его таймеры) — не сервис документов. */
 export const AGENT_BUSY_MESSAGE = 'Агент перегружен — команда не выполнена. Правки не потеряны; повторите через несколько секунд.';
 export const agentBusy = (retryAfter = 5) =>

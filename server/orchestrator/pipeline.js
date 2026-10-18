@@ -20,7 +20,7 @@
  */
 
 import * as core from '../../src/core.js';
-import { OrchError, toOrchError, INTERNAL_MESSAGE, notFound, badRequest, llmDown, llmUnconfigured, documentBusy, agentBusy, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
+import { OrchError, toOrchError, INTERNAL_MESSAGE, notFound, badRequest, llmDown, llmUnconfigured, documentBusy, agentBusy, documentEngine, safeDetail, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
 import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS, SHUTDOWN_GRACE_MS, SHUTDOWN_ABORT_WAIT_MS } from './limits.js';
 import {
   isInternalError, recognizeAction, recognizeVariants, recognizeUndoDoubt, recognizeComponentIntent,
@@ -303,6 +303,11 @@ export function createPipeline(deps) {
       }
       throw documentBusy(5, { document_reason: 'slow' });
     }
+    /* Круг 43: сервис документов работает с другой версией движка — не «недоступен», а «ещё не
+       обновился» (или агент старее его): код `engine`, повторяемо. */
+    if (doc.document !== 'up' && doc.reason === 'engine') {
+      throw documentEngine({ engine: doc.engine, found: ENGINE_VERSION, agentOld: Number.isInteger(doc.engine) && doc.engine > ENGINE_VERSION });
+    }
     if (doc.document !== 'up') {
       // круг 32: 'schema' — база сервиса догоняет схему после восстановления из копии (секунды)
       const text = doc.reason === 'schema'
@@ -500,8 +505,9 @@ export function createPipeline(deps) {
       // retry_after (с) — когда срок повтора известен: клиент считает его на кнопке «Повторить»
       sink.send('error', {
         code: err.code, message: llm.redact(err.message), retryable: err.retryable,
-        // круг 31: подсказка оболочке (какой совет дать) — единственное, что из detail идёт в поток
-        ...(err.detail && typeof err.detail.hint === 'string' ? { detail: { hint: err.detail.hint } } : {}),
+        /* Круг 31: подсказка оболочке (`hint`); круг 43 (§10.13): и прочие безопасные поля detail
+           (cause, queue, limit, engine/found…) — белым списком `safeDetail`, без сырых причин сети */
+        ...(safeDetail(err.detail) ? { detail: safeDetail(err.detail) } : {}),
         ...(Number.isFinite(err.retryAfter) && err.retryAfter > 0 ? { retry_after: err.retryAfter } : {}),
       });
       trace.status = err.code === 'cancelled' ? 'cancelled' : 'error';
@@ -768,8 +774,10 @@ export function createPipeline(deps) {
 
   /** Тело ошибки для события `error` потока (без служебного `error: true`). */
   function stripErr(body) {
-    const { error: _e, detail: _d, ...rest } = body;
-    return rest;
+    const { error: _e, detail, ...rest } = body;
+    // круг 43: безопасные поля detail — и здесь (белый список, как у события error выполняемой команды)
+    const safe = safeDetail(detail);
+    return safe ? { ...rest, detail: safe } : rest;
   }
 
   /**

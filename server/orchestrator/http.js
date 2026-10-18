@@ -205,14 +205,18 @@ function openSse(req, res) {
  * агента, — 426 `engine`, как у Document service: вкладка прежней версии не должна выполнять
  * команды агента над документом, который её движок не понимает (и наоборот — новая вкладка
  * у агента, который ещё не обновился). Нет ни поля, ни заголовка — как прежде (внешний вызов API).
+ * Круг 43: поле и заголовок вместе, но разные — 400.
  * Остановка (`/agent/stop`) версию не сверяет: остановить можно всегда.
  */
 export function checkClientEngine(req, body) {
-  let raw = body && body.engine !== undefined && body.engine !== null ? body.engine : undefined;
-  if (raw === undefined) {
-    const h = req.headers['x-engine'];
-    if (typeof h === 'string' && h.trim()) raw = /^\d{1,6}$/.test(h.trim()) ? Number(h.trim()) : h;
+  const fromBody = body && body.engine !== undefined && body.engine !== null ? body.engine : undefined;
+  const h = req.headers['x-engine'];
+  const fromHeader = typeof h === 'string' && h.trim() ? (/^\d{1,6}$/.test(h.trim()) ? Number(h.trim()) : h) : undefined;
+  // круг 43: поле тела и заголовок говорят разное — это ошибка клиента, а не «побеждает тело»
+  if (fromBody !== undefined && fromHeader !== undefined && fromBody !== fromHeader) {
+    throw badRequest('engine: поле тела и заголовок X-Engine расходятся — укажите версию движка один раз');
   }
+  const raw = fromBody !== undefined ? fromBody : fromHeader;
   if (raw === undefined) return;
   if (!Number.isInteger(raw) || raw < 1) throw badRequest('engine: целое ≥ 1 — версия движка клиента');
   if (raw === ENGINE_VERSION) return;

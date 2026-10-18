@@ -28,6 +28,7 @@ import {
   runCommand, makeProvider, readBodyCapped, parseBodyJson, completionText, modelDataProblem,
   failureReasons, failureHint, toErrorInfo, isInternalError, MODEL_DATA_MAX_DEPTH,
 } from '../../src/brain.js';
+import { ENGINE_VERSION } from '../../src/core.js';
 
 const PLAN_EDIT = { intent: 'edit', title: 'Правка', summary: 'Правлю.', steps: ['Найти', 'Поправить'], targets: ['Заголовок'] };
 const nest = (n) => '['.repeat(n) + ']'.repeat(n);
@@ -279,7 +280,7 @@ test('K2: /agent/health — document_reason storage (база сервиса) и
       return;
     }
     if (req.url === '/api/health') {
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, engine: 1, storage: 'up' }));
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, engine: ENGINE_VERSION, storage: 'up' }));
       return;
     }
     res.writeHead(404).end();

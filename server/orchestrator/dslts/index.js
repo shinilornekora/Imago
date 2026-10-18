@@ -114,6 +114,8 @@ export function createDsltsClient({
       try {
         r = await net.post(`/api/projects/${encodeURIComponent(projectId)}/tx`, tx);
       } catch (e) {
+        // круг 43: проект «устарел» на экземпляре сервиса документов — повтор записи не поможет
+        if (e && e.code === 'engine') throw e;
         last = e;
         const restarting = looksRestarting(e);
         if (restarting) restarts++; else { restarts = 0; counted++; }

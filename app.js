@@ -1159,6 +1159,7 @@ function onSyncStatus(s) {
   if (s.error === 'engine' && prev.error !== 'engine' && !(server.sync && server.sync.view)) renderLayers();
   if (prev.error === 'engine' && s.error !== 'engine') {
     if (dom.dockmsg && !dom.dockmsg.hidden && dom.dockmsg.dataset.role === 'engine') hideMsg();
+    serverAgent.quietBackUntil = Date.now() + 15000;   // «сервер документа снова на связи» — то же событие
     toast(s.pending ? 'Сервер обновился — ждавшие правки отправляю.' : 'Сервер обновился — работаем дальше.', 'plain', 6000);
     if (!(server.sync && server.sync.view)) renderLayers();
   }
@@ -1170,6 +1171,9 @@ function onSyncStatus(s) {
      строка состояния уже говорила «всё сохранено». */
   const h = serverAgent.health;
   if (!wasHealthy && syncHealthy() && h && h.ok === true && h.document !== 'up') probeAgent({ force: true });
+  // круг 43: документ слёг (по реплике) — спросить агента сразу и чаще, пока не встанет
+  if (wasHealthy && !syncHealthy() && docTrouble()) probeAgent({ force: true });
+  armDocProbe();
   syncDocCard();
   const opened = !!(server.sync && server.sync.view);
   /* Ни сервера, ни локальной копии: показать нечего, и говорим об этом честно. Реплика
@@ -1320,6 +1324,11 @@ async function saveAsNewProject() {
   const name = cutText(cleanText(server.project.name || docTitle()), 120) || 'Восстановленный проект';
   // прошлая попытка остановилась на середине — продолжаем её, а не создаём ещё один проект
   let job = server.rescue && server.rescue.failed && server.rescue.from === sync ? server.rescue : null;
+  /* Круг 43 (UX Д8): документ мог измениться после неудачной попытки (правки без перезагрузки).
+     Тело задания — прежнее: тот же create_id вернёт проект первой попытки (или создаст его), а
+     то, что изменилось потом, досылается заменой документа (rescueCatchUp). Ни второго проекта,
+     ни молча потерянных правок. */
+  if (job && !job.catchUp && rescueChanged(job, view, name)) job.catchUp = true;
   /* Круг 31 (UX Д8): попытка этой вкладки до перезагрузки — в sessionStorage. Проект, в
      который она досылала, уже есть: продолжаем его, а не заводим второй. */
   if (!job) job = await resumeRescue(sync, view, name);
@@ -1333,7 +1342,7 @@ async function saveAsNewProject() {
       });
       return;
     }
-    job = { from: sync, plan, project: null, createId: newCreateId(), bodySig: rescueBodySig(plan), seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
+    job = { from: sync, plan, project: null, createId: newCreateId(), bodySig: rescueBodySig(plan), seq: 0, done: 0, total: plan.batches.length, running: false, failed: false, startedAt: Date.now() };
     server.rescue = job;
   }
   job.running = true;
@@ -1358,10 +1367,11 @@ async function saveAsNewProject() {
       try {
         got = await apiJson('/api/projects', { method: 'POST', body: { ...job.plan.body, create_id: job.createId } });
       } catch (e) {
-        /* Круг 41 (арх. Н2): 409 — этот create_id уже занят проектом с другим телом (первая
-           попытка создала его, ответ потерялся, документ с тех пор изменился). Тот же ключ
-           повторять бесполезно: новый ключ, один раз; проект первой попытки остаётся пустым. */
+        /* Круг 41 (арх. Н2): 409 — этот create_id уже занят проектом с другим телом. Тот же ключ
+           повторять бесполезно: новый ключ, один раз. Проект первой попытки точно есть — о нём
+           скажем словами и пометим в «Проектах» (круг 43). */
         if (!(e && e.status === 409)) throw e;
+        job.orphan = { name: cleanText(job.plan.body && job.plan.body.name) || name, since: job.startedAt || Date.now() - 3600 * 1000, certain: true };
         job.createId = newCreateId();
         rememberRescue(job);
         got = await apiJson('/api/projects', { method: 'POST', body: { ...job.plan.body, create_id: job.createId } });
@@ -1379,13 +1389,23 @@ async function saveAsNewProject() {
       job.done += 1;
       rememberRescue(job);
     }
+    // круг 43 (UX Д8): правки после неудачной попытки — заменой документа, тем же проектом
+    if (job.catchUp) {
+      await rescueCatchUp(job, sync.view || view);
+      job.catchUp = false;
+    }
     job.running = false;
     server.rescue = null;
     forgetRescue();
     hideMsg();
     const got = job.project;
+    if (job.orphan) rememberOrphan({ ...job.orphan, keep: got.id });
     openProject(got);
-    toast(`Сохранил работу новым проектом «${clip(got.name || name, 60)}».`, 'plain', 8000);
+    const saved = `Сохранил работу новым проектом «${clip(got.name || name, 60)}».`;
+    if (job.orphan) {
+      const w = SHELL.rescueOrphanWords(job.orphan);
+      showMsg('plain', saved, { note: w, ms: 15000, actions: [{ label: 'Проекты', onClick: () => openProjects() }] });
+    } else toast(saved, 'plain', 8000);
   } catch (e) {
     job.running = false;
     job.failed = true;
@@ -1399,11 +1419,42 @@ async function saveAsNewProject() {
   renderSyncStatus();
 }
 
+/** Круг 43 (UX Д8): изменился ли документ вкладки с тех пор, как задание спасения составило план. */
+function rescueChanged(job, view, name) {
+  let now;
+  try { now = SHELL.rescuePlan(view, { name }); } catch { return false; }
+  return rescueBodySig(now) !== rescueBodySig(job.plan) || rescueSig(now) !== rescueSig(job.plan);
+}
+
+/**
+ * Круг 43 (UX Д8): проект спасения уже есть, а документ вкладки с тех пор менялся — документ
+ * проекта заменяется нынешним видом вкладки (как импорт: снять детей корня, создать узлы
+ * заново, токены группами), частями по пределу транзакции.
+ */
+async function rescueCatchUp(job, viewNow) {
+  const id = job.project.id;
+  const got = await apiJson(`/api/projects/${encodeURIComponent(id)}`);
+  if (!got || !got.snapshot || !got.snapshot.doc) throw new Error('сервер не вернул проект');
+  let doc = got.snapshot.doc;
+  for (const t of Array.isArray(got.tail) ? got.tail : []) {
+    const r = CORE.applyOps(doc, Array.isArray(t.ops) ? t.ops : []);
+    if (!r.error) doc = r.doc;
+  }
+  let seq = Number(got.head_seq) || job.seq;
+  const parts = SHELL.splitOpsForServer(SHELL.replaceDocOps(doc, viewNow));
+  for (let i = 0; i < parts.length; i++) {
+    const r = await sendRescueBatch(id, parts[i], seq, parts.length > 1 ? `Восстановил работу: правки после первой попытки, часть ${i + 1} из ${parts.length}` : 'Восстановил работу: правки после первой попытки');
+    seq = Number(r && r.seq) || seq + 1;
+  }
+  job.seq = seq;
+}
+
 /* Круг 31 (UX Д8): задание спасения переживает перезагрузку вкладки — sessionStorage:
-   {from: id пропавшего проекта, project: {id, name}, done, total, sig}. sig — отпечаток пачек:
-   документ поменялся — пачки другие, и досылка идёт с начала (повторы create сервер отбросит
-   как exists), но в тот же проект. */
+   {from: id пропавшего проекта, project: {id, name}, done, total, sig}. sig — отпечаток пачек.
+   Круг 43: и само тело создания, если оно невелико (body), — тогда после перезагрузки повтор
+   идёт тем же create_id с тем же телом, а изменившееся досылается заменой документа. */
 const RESCUE_KEY = 'imago.rescue.v1';
+const RESCUE_BODY_KEEP = 1_500_000;   // символов JSON: больше — sessionStorage может не принять
 
 /** Отпечаток тела создания (имя и документ): тот же create_id — только с тем же телом (§9.17). */
 function rescueBodySig(plan) {
@@ -1422,13 +1473,23 @@ function newCreateId() {
 
 function rememberRescue(job) {
   if (!job || (!job.project && !job.createId) || !server || !server.project) return;
+  let body = '';
   try {
-    sessionStorage.setItem(RESCUE_KEY, JSON.stringify({
-      from: server.project.id, project: job.project ? { id: job.project.id, name: job.project.name || '' } : null,
-      create_id: job.createId || '', body_sig: job.bodySig || '',
-      done: job.done, total: job.total, sig: rescueSig(job.plan), at: Date.now(),
-    }));
-  } catch { /* приватный режим — продолжим только в этой загрузке */ }
+    // тело — только у одной пачки и пока проекта нет: повтор тем же create_id после перезагрузки
+    if (!job.project && job.plan && job.plan.whole && job.plan.body) {
+      const text = JSON.stringify(job.plan.body);
+      if (text.length <= RESCUE_BODY_KEEP) body = text;
+    }
+  } catch { body = ''; }
+  const rec = {
+    from: server.project.id, project: job.project ? { id: job.project.id, name: job.project.name || '' } : null,
+    create_id: job.createId || '', body_sig: job.bodySig || '',
+    done: job.done, total: job.total, sig: rescueSig(job.plan), at: Date.now(), started_at: job.startedAt || Date.now(),
+    ...(job.orphan ? { orphan: job.orphan } : {}),
+  };
+  try { sessionStorage.setItem(RESCUE_KEY, JSON.stringify(body ? { ...rec, body } : rec)); } catch {
+    try { sessionStorage.setItem(RESCUE_KEY, JSON.stringify(rec)); } catch { /* приватный режим — продолжим только в этой загрузке */ }
+  }
 }
 
 function forgetRescue() {
@@ -1441,18 +1502,37 @@ async function resumeRescue(sync, view, name) {
   try { saved = JSON.parse(sessionStorage.getItem(RESCUE_KEY) || 'null'); } catch { saved = null; }
   if (!saved || !server || !server.project || saved.from !== server.project.id) return null;
   const createId = typeof saved.create_id === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(saved.create_id) ? saved.create_id : '';
+  const startedAt = Number(saved.started_at) || Number(saved.at) || Date.now();
+  let plan;
+  try { plan = SHELL.rescuePlan(view, { name }); } catch { return null; }
+  if (plan.oversize.length) { forgetRescue(); return null; }
+  const bodySig = rescueBodySig(plan);
   /* Круг 33 (L1): запрос создания ушёл, а ответа вкладка не дождалась (перезагрузили). Проект
      мог создаться — повтор с тем же create_id вернёт его, а не заведёт второй. */
   if ((!saved.project || typeof saved.project.id !== 'string') && createId) {
-    let plan;
-    try { plan = SHELL.rescuePlan(view, { name }); } catch { return null; }
-    if (plan.oversize.length) { forgetRescue(); return null; }
-    /* Круг 41 (арх. Н2): тот же create_id годится только с тем же телом. Документ с тех пор
-       изменился (правки после потерянного ответа) — сервер ответил бы 409 навсегда: новый ключ
-       (проект первой попытки, если создался, останется пустым — лучше, чем тупик). */
-    const bodySig = rescueBodySig(plan);
     const same = typeof saved.body_sig === 'string' && saved.body_sig && saved.body_sig === bodySig;
-    const job = { from: sync, plan, project: null, createId: same ? createId : newCreateId(), bodySig, seq: 0, done: 0, total: plan.batches.length, running: false, failed: false };
+    if (same) {
+      const job = { from: sync, plan, project: null, createId, bodySig, seq: 0, done: 0, total: plan.batches.length, running: false, failed: false, startedAt };
+      server.rescue = job;
+      return job;
+    }
+    /* Круг 43: документ с тех пор изменился. Тело первой попытки сохранено — повторяем ровно его
+       тем же ключом (сервер вернёт проект первой попытки или создаст его), остальное досылаем
+       заменой документа: проект один. */
+    let old = null;
+    try { old = typeof saved.body === 'string' ? JSON.parse(saved.body) : null; } catch { old = null; }
+    if (old && old.doc && saved.body_sig === hash36(JSON.stringify(old), 16)) {
+      const oldPlan = { whole: true, body: old, batches: [], nodes: Object.keys(old.doc.nodes || {}).length, oversize: [] };
+      const job = { from: sync, plan: oldPlan, project: null, createId, bodySig: saved.body_sig, seq: 0, done: 0, total: 0, running: false, failed: false, catchUp: true, startedAt };
+      server.rescue = job;
+      return job;
+    }
+    /* Тела нет (большой документ) — тот же ключ с другим телом дал бы 409: новый ключ. Проект
+       первой попытки мог создаться — скажем об этом и пометим его в «Проектах». */
+    const job = {
+      from: sync, plan, project: null, createId: newCreateId(), bodySig, seq: 0, done: 0, total: plan.batches.length, running: false, failed: false, startedAt,
+      orphan: { name, since: startedAt, certain: false },
+    };
     server.rescue = job;
     return job;
   }
@@ -1460,23 +1540,34 @@ async function resumeRescue(sync, view, name) {
   let head = null;
   try { head = await fetchProjectHead(saved.project.id); } catch { head = null; }
   if (!head) { forgetRescue(); return null; }   // того проекта нет — начнём заново
-  let plan;
-  try { plan = SHELL.rescuePlan(view, { name }); } catch { return null; }
-  if (plan.oversize.length) {
-    // неподъёмный слой — обычный путь скажет об этом сам
-    forgetRescue();
-    return null;
-  }
-  /* Документ уходил одним запросом, и проект с ним уже есть (перезагрузили между ответом и
-     открытием): досылать нечего — открываем его, а не создаём второй (круг 33). */
-  const same = rescueSig(plan) === saved.sig;
-  const done = same ? Math.max(0, Math.min(plan.batches.length, Number(saved.done) || 0)) : 0;
+  /* Проект уже есть. Документ тот же — продолжаем пачки с той, на которой остановились; другой —
+     пачки не досылаем, документ проекта заменяется нынешним видом (круг 43). */
+  const same = rescueSig(plan) === saved.sig && (!saved.body_sig || saved.body_sig === bodySig);
+  const done = same ? Math.max(0, Math.min(plan.batches.length, Number(saved.done) || 0)) : plan.batches.length;
   const job = {
     from: sync, plan, project: { id: saved.project.id, name: head.name || saved.project.name || name },
-    createId, seq: Number(head.head_seq) || 0, done, total: plan.batches.length, running: false, failed: false,
+    createId, bodySig, seq: Number(head.head_seq) || 0, done, total: plan.batches.length, running: false, failed: false,
+    catchUp: !same, startedAt, ...(saved.orphan ? { orphan: saved.orphan } : {}),
   };
   server.rescue = job;
   return job;
+}
+
+/* Круг 43: проект первой попытки спасения, оставшийся отдельным (409 или тело не пережило
+   перезагрузку), — помета в «Проектах»: имя, с какого времени и какой проект — спасённый. */
+const ORPHAN_KEY = 'imago.rescue.orphans.v1';
+function rememberOrphan(o) {
+  try {
+    const list = JSON.parse(localStorage.getItem(ORPHAN_KEY) || '[]');
+    const next = (Array.isArray(list) ? list : []).filter((x) => x && x.keep !== o.keep).concat([{ name: o.name, since: o.since, keep: o.keep, certain: !!o.certain, at: Date.now() }]).slice(-20);
+    localStorage.setItem(ORPHAN_KEY, JSON.stringify(next));
+  } catch { /* памяти нет — скажем только словами */ }
+}
+function orphanHints() {
+  try {
+    const list = JSON.parse(localStorage.getItem(ORPHAN_KEY) || '[]');
+    return Array.isArray(list) ? list.filter((x) => x && typeof x.name === 'string' && Date.now() - (Number(x.at) || 0) < 7 * 86400 * 1000) : [];
+  } catch { return []; }
 }
 
 /** Пачка досылки — HTTP-транзакцией; занято (503/429) — подождать и повторить. */
@@ -1645,7 +1736,10 @@ const journalHuman = new Map();       // tx_id → описание словам
 function noteJournal(tx, doc = state.doc) {
   if (!tx || !tx.tx_id || !doc) return;
   if (!journalHuman.has(tx.tx_id) && Array.isArray(tx.ops) && tx.ops.length) {
-    try { journalHuman.set(tx.tx_id, describeOps(tx.ops, doc)); } catch { /* опишем заголовком */ }
+    /* круг 43: «обернуть» соавтора, у которой слияние вычеркнуло часть слоёв, — подпись по тому,
+       что легло («Обернул «Список пунктов»…»), а не по записанному до слияния «Обернул 2 слоя» */
+    const group = /^Обернул /.test(cleanText(tx.title)) ? tx.ops.find((o) => o && o.op === 'create' && o.node && Array.isArray(o.node.children) && o.node.children.length) : null;
+    try { journalHuman.set(tx.tx_id, group ? SHELL.wrapWords(doc, group.node.children, group.node.name) : describeOps(tx.ops, doc)); } catch { /* опишем заголовком */ }
     while (journalHuman.size > JOURNAL_KEEP) journalHuman.delete(journalHuman.keys().next().value);
   }
   if (sessionJournal.some((t) => t.tx_id === tx.tx_id)) return;
@@ -1809,6 +1903,8 @@ function settleHistory(info) {
     entry.pending = false;
     entry.seq = c.seq;
     entry.ops = c.ops;
+    // круг 43: не легло часть операций — «История» скажет это (SHELL.appliedLine)
+    entry.dropped = Array.isArray(c.dropped) ? c.dropped.length : (Number(c.dropped) || 0);
     if (Array.isArray(info.inverse) && info.inverse.length) entry.inverse = info.inverse;
     return;
   }
@@ -1837,7 +1933,11 @@ function settleWrapWords(info) {
   entry.human = w.words;
   entry.wrapKids = null;
   refreshSheet();
-  const note = `${w.lost} ${plural(w.lost, 'слой', 'слоя', 'слоёв')} в рамку не ${w.lost === 1 ? 'вошёл' : 'вошли'}: ${w.lost === 1 ? 'его' : 'их'} уже удалили.`;
+  // круг 43: кто удалил — если один на всех пропавших и он известен (реплика или своя память)
+  const whos = w.lostIds.map((id) => dropperOf({ reason: 'removed', op: { op: 'remove', id } }));
+  const first = whos[0];
+  const one = first && whos.every((x) => x && x.author === first.author && x.author_kind === first.author_kind) ? first : null;
+  const note = SHELL.wrapLostWords(w.lost, one);
   if (msgUndoTx === entry.id) {
     showMsg('plain', w.words, {
       note, ms: 9000, transient: true,
@@ -2309,6 +2409,7 @@ function probeAgent({ force = false } = {}) {
     serverAgent.probing = null;
     agentModeChanged();
     onAgentHealthChanged(prev, serverAgent.health);
+    armDocProbe();
   });
   if (!serverAgent.timer && !serverAgent.absent) {
     serverAgent.timer = setInterval(() => { if (server && !state.busy) probeAgent(); }, AGENT_PROBE_MS);
@@ -2396,9 +2497,32 @@ function onAgentHealthChanged(prev, next) {
   /* Круг 39 (UX): «…снова на связи» — только после того, как о пропаже было сказано. Первые
      ответы health при открытии проекта (сервис документа ещё подключался) человек не видел —
      «снова» ему ни о чём. */
+  /* Круг 43: «не видит документ» — не сразу: сервис документа перезапускается (обновление)
+     секунду-другую, и тост о пропаже, за которым тут же «Сервер обновился», — шум. Сказанное
+     через HEALTH_SAY_MS, если пропажа ещё в силе; вернулось раньше — молчим и о возвращении. */
+  if (!words.back && next && next.ok === true && next.document !== 'up') {
+    if (serverAgent.sayLater) clearTimeout(serverAgent.sayLater);
+    serverAgent.sayLater = setTimeout(() => {
+      serverAgent.sayLater = null;
+      const h = serverAgent.health;
+      if (!h || h.ok !== true || h.document === 'up') return;
+      serverAgent.downSaid = true;
+      sayHealth(words);
+    }, HEALTH_SAY_MS);
+    return;
+  }
+  if (words.back && serverAgent.sayLater) { clearTimeout(serverAgent.sayLater); serverAgent.sayLater = null; return; }
   if (words.back && !serverAgent.downSaid) return;
   serverAgent.downSaid = !words.back;
+  /* Круг 43: о том же возвращении уже сказано (карточка «Сеть вернулась», тост «Сервер
+     обновился…») — второй голос о том же не нужен. */
+  if (words.back && Date.now() < (serverAgent.quietBackUntil || 0)) return;
   // о возвращении тостом не говорим, если и о пропаже не говорили бы: смена проекта, первый ответ
+  sayHealth(words);
+}
+
+const HEALTH_SAY_MS = 2500;
+function sayHealth(words) {
   dropHealthToast();
   const t = toast(words.text, words.kind, 6000);
   healthToast = t;
@@ -2716,6 +2840,8 @@ function onNetworkBack() {
   if (role !== 'offline') return;
   const again = serverAgent.lastFailed;
   serverAgent.lastFailed = null;
+  // круг 43: о возврате сети — один раз: тост «Сеть вернулась — агент снова на связи» после этой карточки не нужен
+  serverAgent.quietBackUntil = Date.now() + 15000;
   showMsg('plain', 'Сеть вернулась', {
     note: again ? `Команда «${clip(again.utterance, 60)}» не выполнялась — можно повторить.` : '',
     actions: again ? [{ label: 'Повторить', primary: true, onClick: () => retryFailed(again) }] : [],
@@ -2773,6 +2899,28 @@ function retryAfterProbe(utterance, { variants = false } = {}) {
  * Пока на экране «модель/агент не отвечает», спрашиваем /agent/health чаще обычного — раз
  * в 10 с: карточка должна уйти, как только связь вернулась (п.7), а не через полминуты.
  */
+/* Круг 43: пока документ «лежит» — по реплике (хранилище, связь при живой сети) или по ответу
+   health агента (document: down), — health агента спрашиваем раз в AGENT_DOWN_PROBE_MS, а не
+   плановой проверкой раз в 30 с: знак «Сервер агента не видит документ» приходит за секунды.
+   В норме лишних запросов нет. */
+const AGENT_DOWN_PROBE_MS = 4000;
+function docTrouble() {
+  if (!server || serverAgent.absent || engineHalted()) return false;
+  const s = server.status || {};
+  const h = serverAgent.health;
+  const syncDown = s.storage === 'down' || (!s.online && !s.connecting && !browserOffline() && !!(server.sync && server.sync.view));
+  const agentNoDoc = !!(h && h.ok === true && h.document !== 'up');
+  return syncDown || agentNoDoc;
+}
+function armDocProbe() {
+  if (serverAgent.docProbe || !docTrouble()) return;
+  serverAgent.docProbe = setTimeout(() => {
+    serverAgent.docProbe = null;
+    if (!docTrouble()) return;
+    probeAgent({ force: true }).finally(() => armDocProbe());
+  }, AGENT_DOWN_PROBE_MS);
+}
+
 function watchAgentHealth() {
   if (serverAgent.watch) return;
   /* Круг 33 (u10b): перезапуск сервера агента — секунды; проверяем раз в 1,5 с, чтобы знак
@@ -2822,11 +2970,14 @@ function showServerAgentError(e, utterance, { variants = false } = {}) {
   if (cause) {
     const w = agentErrorWords(e);
     restoreCommand(utterance);
-    showMsg(cause === 'client_old' ? 'error' : 'warn', w.title, {
-      note: w.note,
-      role: 'engine',
-      actions: cause === 'client_old' ? [{ label: 'Обновить страницу', primary: true, onClick: () => location.reload() }] : [],
-    });
+    /* Круг 43: сервер документов ещё не обновился («устаревший» проект) — повтор имеет смысл
+       позже: «Повторить» по сроку Retry-After. Остальное (вкладка или сервер агента старее) —
+       без повтора: сейчас он ничего не изменит. */
+    const actions = cause === 'client_old' ? [{ label: 'Обновить страницу', primary: true, onClick: () => location.reload() }]
+      : cause === 'document_old' ? [{ label: 'Повторить', primary: true, waitMs: w.waitMs, onClick: () => retryAfterProbe(utterance, { variants }) }]
+        : [];
+    if (cause === 'document_old') holdRetry(utterance, w.waitMs);
+    showMsg(cause === 'client_old' ? 'error' : 'warn', w.title, { note: w.note, role: 'engine', actions });
     return;
   }
   /* K2 (круг 31): документ не виден агенту из-за базы данных — это знает ошибка, health
@@ -3486,7 +3637,9 @@ function fillProjects(body, list, { loading } = {}) {
     const edits = twin && Number.isFinite(Number(p.head_seq))
       ? (Number(p.head_seq) ? `${p.head_seq} ${plural(Number(p.head_seq), 'правка', 'правки', 'правок')}` : 'без правок') : '';
     const whenLine = when ? `менялся ${when}${exact ? `, ${exact}` : ''}` : (exact ? `менялся ${exact}` : '');
-    meta.textContent = [p.id === current ? 'открыт' : '', p.kind === 'library' ? 'библиотека' : '', whenLine, edits].filter(Boolean).join(' · ');
+    // круг 43: пустой проект первой попытки спасения — помечен, чтобы его не путали со спасённым
+    const orphan = SHELL.isRescueOrphan(p, orphanHints()) ? 'первая попытка сохранения, без последних правок' : '';
+    meta.textContent = [p.id === current ? 'открыт' : '', p.kind === 'library' ? 'библиотека' : '', orphan, whenLine, edits].filter(Boolean).join(' · ');
     const rename = document.createElement('button');
     rename.type = 'button';
     rename.className = 'btn ghost small';
@@ -12610,9 +12763,11 @@ function otherEditItem(t) {
   // отмена и повтор — своей подписью («Отменил: …»): описание операций назвало бы их новой правкой
   const rewind = /^(?:Отменил|Вернул):/.test(title);
   // круг 30: все операции выпали при слиянии — сама правка не применилась (а не «без изменений»)
-  const text = emptyTx(t) ? (title ? `${human(title)} — не применилась` : 'Правка не применилась') : human((rewind ? title : described) || title || (t.ops_count
+  const base = emptyTx(t) ? (title ? human(title) : 'Правка') : human((rewind ? title : described) || title || (t.ops_count
     ? `${t.ops_count} ${plural(t.ops_count, 'изменение', 'изменения', 'изменений')}`
     : 'Правка без изменений'));
+  // круг 43: по метаданным журнала — не легло ничего («— не применилась») или часть («· не легло 1 из 3»)
+  const text = emptyTx(t) ? `${base} — не применилась` : SHELL.appliedLine(base, { ops: t.ops_count, dropped: t.dropped_count });
   what.textContent = text;
   what.title = title && title !== text ? `${text} · ${title}` : text;
   const who = document.createElement('span');
@@ -12663,8 +12818,8 @@ function otherEditItem(t) {
     foot.appendChild(tag);
     item.appendChild(foot);
   }
-  // круг 31: правка не легла целиком — это уже сказано в строке («— не применилась»), второй раз не нужно
-  if (dropped && !emptyTx(t)) {
+  // круг 43: сколько не легло — уже в строке (SHELL.appliedLine); метка — только у частей без счёта операций
+  if (dropped && !emptyTx(t) && !Number.isFinite(Number(t.ops_count))) {
     const foot = document.createElement('div');
     foot.className = 'hfoot';
     const tag = document.createElement('span');
@@ -12722,8 +12877,8 @@ function fillEdits(body) {
     const when = document.createElement('span');
     when.className = 'when';
     when.textContent = new Date(tx.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-    // строка истории — это описание правки, а не сырое имя намерения (п.4)
-    const text = human(tx.human || tx.label);
+    // строка истории — это описание правки, а не сырое имя намерения (п.4); круг 43 — по применённому
+    const text = SHELL.appliedLine(human(tx.human || tx.label), { ops: Array.isArray(tx.ops) ? tx.ops.length : 0, dropped: tx.dropped || 0 });
     const what = document.createElement('span');
     what.className = 'what'; what.textContent = text;
     what.title = tx.label && tx.label !== text ? `${text} · команда: ${human(tx.label)}` : text;

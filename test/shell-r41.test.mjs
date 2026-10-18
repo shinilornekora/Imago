@@ -112,9 +112,11 @@ test('r41 (арх. Н2): «Сохранить как новый» — тот ж�
   // отпечаток тела рядом с create_id в sessionStorage
   assert.match(app, /create_id: job\.createId \|\| '', body_sig: job\.bodySig \|\| ''/);
   // после перезагрузки: другое тело — новый ключ
-  assert.match(app, /createId: same \? createId : newCreateId\(\)/);
+  // (круг 43: тот же ключ — с тем же телом, иначе тело первой попытки из sessionStorage или новый ключ)
+  assert.match(app, /if \(same\) \{\s*const job = \{ from: sync, plan, project: null, createId, bodySig/);
+  assert.match(app, /createId: newCreateId\(\), bodySig, seq: 0[^\n]*\n\s*orphan: \{ name, since: startedAt, certain: false \}/);
   // 409 — новый ключ один раз, а не тот же повтор
-  assert.match(app, /if \(!\(e && e\.status === 409\)\) throw e;\s*job\.createId = newCreateId\(\);/);
+  assert.match(app, /if \(!\(e && e\.status === 409\)\) throw e;[\s\S]{0,250}job\.createId = newCreateId\(\);/);
   // в тостах спасения — слова оболочки
   const save = app.slice(app.indexOf('async function saveAsNewProject'), app.indexOf('const RESCUE_KEY'));
   assert.doesNotMatch(save, /afterColon\(humanError\(e\)\)/);
@@ -284,5 +286,6 @@ test('r41 (ORCH 426): команда и вариант несут версию �
   const fn = app.slice(app.indexOf('const cause = AGENT.engineCause(e);'), app.indexOf('const cause = AGENT.engineCause(e);') + 700);
   assert.match(fn, /restoreCommand\(utterance\)/);
   assert.match(fn, /cause === 'client_old' \? \[\{ label: 'Обновить страницу'/);
-  assert.doesNotMatch(fn, /Повторить/);
+  // «Повторить» — только когда старее сервер документов (круг 43, по сроку), не вкладка и не сервер агента
+  assert.match(fn, /cause === 'client_old' \? \[\{ label: 'Обновить страницу'[\s\S]{0,120}: cause === 'document_old' \? \[\{ label: 'Повторить'[\s\S]{0,160}: \[\];/);
 });

@@ -47,7 +47,8 @@ export function stageKey(key) {
 /** Сколько ждём `/agent/health`: дольше — считаем, что агента на сервере нет. */
 const HEALTH_TIMEOUT_MS = 3000;
 /** Причины «документ недоступен» в health (L3, круг 33): база, её схема, сам сервис. */
-export const DOCUMENT_REASONS = Object.freeze(['storage', 'schema', 'unreachable']);
+// круг 43: 'engine' — проект записан движком новее сервера документов (он ещё не обновился)
+export const DOCUMENT_REASONS = Object.freeze(['storage', 'schema', 'unreachable', 'engine']);
 /** Сколько ждём ответа на «стоп» и на выбор варианта, прежде чем сдаться. */
 const STOP_TIMEOUT_MS = 4000;
 const APPLY_TIMEOUT_MS = 60000;
@@ -169,7 +170,9 @@ export function createSSEParser(onEvent) {
 /** Тело ошибки → AgentError. Понимает единый формат §10.2, ответ nginx и голый текст. */
 /**
  * Круг 41: 426 `engine` от Orchestrator — чья версия старее: `client_old` (эта вкладка — нужна
- * перезагрузка) или `server_old` (сервер агента ещё не обновился). '' — не про версию клиента
+ * перезагрузка) или `server_old` (сервер агента ещё не обновился). Круг 43: `document_old` —
+ * сервер документов старее проекта (`server_old` + `server:'document'`, повтор по сроку);
+ * `agent_old` — сервер агента старее сервера документов. '' — не про версию клиента
  * (прежний смысл `engine`: разошлись сервер агента и сервис документов).
  * @param {{code?: string, status?: number, detail?: object}} e
  * @returns {'client_old'|'server_old'|''}
@@ -177,7 +180,9 @@ export function createSSEParser(onEvent) {
 export function engineCause(e) {
   const d = e && e.detail && typeof e.detail === 'object' ? e.detail : null;
   if (!e || e.code !== 'engine' || !d) return '';
-  if (d.cause === 'client_old' || d.cause === 'server_old') return d.cause;
+  // круг 43: server_old про сервер документов («устаревший» проект) — свой случай: повтор по сроку
+  if (d.cause === 'server_old' && d.server === 'document') return 'document_old';
+  if (d.cause === 'client_old' || d.cause === 'server_old' || d.cause === 'agent_old') return d.cause;
   return '';
 }
 

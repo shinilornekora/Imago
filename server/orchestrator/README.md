@@ -220,6 +220,14 @@ curl -N -X POST localhost:8090/agent/command -H 'content-type: application/json'
   `detail {engine, found, cause:'client_old'|'server_old'}` («Вышла новая версия редактора —
   обновите страницу» / «Сервер агента ещё не обновился…», повторяемо). Нет поля — как прежде.
   `/agent/stop` версию не сверяет.
+* **Круг 43.** Событие `error` в потоке несёт безопасные поля `detail` белым списком
+  (`safeDetail`: `hint`, `cause`, `queue`, `limit`, `document_reason`, `server` — короткие коды;
+  `engine`, `found`, `max` — целые), сырые причины сети — нет. `engine` тела и `X-Engine`
+  расходятся — `400`. Document service отказал проекту по версии движка (`503 cause:'engine'`,
+  проект «устарел» на экземпляре) или сам работает с другой версией (его `/api/health`) — код
+  `engine`: «Сервер документов ещё не обновился — команда не выполнена…», `retryable`,
+  `retry_after` (его или 30 с), `detail {cause:'server_old'|'agent_old', server:'document', engine,
+  found}`; запись не повторяется. `/agent/health` — `document:'down'`, `document_reason:'engine'`.
 * **Один экземпляр.** Очередь проекта, наборы вариантов и семафор чтений живут в памяти
   процесса: правило «команды агента одного проекта — по одной» (§8.3) держится только при одном
   Orchestrator. Несколько экземпляров — только с липкостью по проекту на балансировщике (и

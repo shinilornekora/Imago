@@ -10,7 +10,8 @@
  * Остальные статусы возвращаются вызывающему как есть: он знает, что значит 404 или 410.
  */
 
-import { documentDown } from './errors.js';
+import { documentDown, documentEngine } from './errors.js';
+import { ENGINE_VERSION } from '../../src/core.js';
 import { DOC_TIMEOUT_MS, DOC_HEALTH_TIMEOUT_MS, DOC_HEALTH_PATIENT_MS, LOOP_LAG_GRACE_MS, LOOP_LAG_EXTENSIONS, DOC_RECENT_OK_MS } from './limits.js';
 import { cutText } from '../../src/core.js';
 
@@ -107,11 +108,17 @@ export function createDocClient(o) {
         err.docDetail = json && json.detail && typeof json.detail === 'object' ? json.detail : null;
         err.docRetryAfter = after;
         if (after !== null && after > (err.retryAfter || 0)) err.retryAfter = Math.min(after, 60);
+        /* Круг 43: проект «устарел» на этом экземпляре (503 `cause:'engine'`) — не «недоступен»,
+           а «сервер документов ещё не обновился»: своим кодом `engine`, без повторов записи. */
+        if (err.docDetail && err.docDetail.cause === 'engine') {
+          const d = err.docDetail;
+          throw Object.assign(documentEngine({ engine: d.engine, found: d.found, retryAfter: after }), { docStatus: res.status });
+        }
         throw err;
       }
       return { status: res.status, body: json, headers: res.headers, chars: text.length };
     } catch (e) {
-      if (e && e.code === 'document_down') throw e;
+      if (e && (e.code === 'document_down' || e.code === 'engine')) throw e;
       // сетевой сбой или дедлайн; внешняя отмена — тоже «не дошли», вызывающий проверит signal
       const timedOut = ctl.signal.aborted && !(signal && signal.aborted);
       if (timedOut && lagged) stats.lagTimeouts++;
@@ -134,13 +141,23 @@ export function createDocClient(o) {
    * но его база недоступна (503 с `detail.storage: 'down'`); 'schema' (круг 32) — база отвечает,
    * но схема догоняется после восстановления из копии (503 с `detail.storage: 'schema'`, обычно
    * секунды); 'unreachable' — сервис не ответил, ответил не тем или ещё не готов.
-   * @returns {Promise<{document: 'up'|'down', reason?: 'storage'|'schema'|'unreachable'}>}
+   * Круг 43: 'engine' — экземпляр работает с другой версией движка, чем агент (`engine` — его версия).
+   * @returns {Promise<{document: 'up'|'down', reason?: 'storage'|'schema'|'unreachable'|'engine', engine?: number}>}
    */
+  /** Круг 43: ответ /api/health → здоровье; экземпляр другой версии движка — `reason:'engine'`. */
+  const healthOf = (r) => {
+    if (!(r.status === 200 && r.body && r.body.ok)) return { document: 'down', reason: 'unreachable' };
+    const eng = r.body.engine;
+    if (Number.isInteger(eng) && eng !== ENGINE_VERSION) return { document: 'down', reason: 'engine', engine: eng };
+    return { document: 'up' };
+  };
+
   async function healthOnce(patient) {
     try {
       const r = await call('GET', '/api/health', undefined, { timeout: DOC_HEALTH_TIMEOUT_MS });
-      return r.status === 200 && r.body && r.body.ok ? { document: 'up' } : { document: 'down', reason: 'unreachable' };
+      return healthOf(r);
     } catch (e) {
+      if (e && e.code === 'engine') return { document: 'down', reason: 'engine', ...(e.detail && Number.isInteger(e.detail.engine) ? { engine: e.detail.engine } : {}) };
       /* Круг 39 (N5а): не ответил в короткий срок — это ещё не «недоступен». Сервис только что
          ответил на другой запрос — он жив и занят (под нагрузкой его главный поток сериализует
          мегабайты). Иначе терпеливая проверка (перед командой) спрашивает ещё раз, подольше; не
@@ -151,7 +168,7 @@ export function createDocClient(o) {
         if (patient) {
           try {
             const r = await call('GET', '/api/health', undefined, { timeout: DOC_HEALTH_PATIENT_MS });
-            return r.status === 200 && r.body && r.body.ok ? { document: 'up' } : { document: 'down', reason: 'unreachable' };
+            return healthOf(r);
           } catch (e2) {
             if (e2 && e2.timedOut) return { document: 'down', reason: 'unreachable', slow: true, ...(e2.ownLag || e.ownLag ? { ownLag: true } : {}) };
             e = e2;
@@ -160,6 +177,7 @@ export function createDocClient(o) {
           return { document: 'down', reason: 'unreachable', slow: true, ...(e.ownLag ? { ownLag: true } : {}) };
         }
       }
+      if (e && e.code === 'engine') return { document: 'down', reason: 'engine', ...(e.detail && Number.isInteger(e.detail.engine) ? { engine: e.detail.engine } : {}) };
       const storage = e && e.docDetail ? e.docDetail.storage : undefined;
       return { document: 'down', reason: storage === 'down' ? 'storage' : storage === 'schema' ? 'schema' : 'unreachable' };
     }
