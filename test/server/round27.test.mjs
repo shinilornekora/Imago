@@ -153,7 +153,9 @@ describe('запись по HTTP: создание проекта под сем�
       active += 1;
       peak = Math.max(peak, active);
       try {
-        await sleep(20);
+        // круг 35: бюджет тел — по прочитанным байтам: тела держат его, пока запись идёт, — запись
+        // медленная, чтобы прочитанные тела копились сверх бюджета
+        await sleep(300);
         return await createProject(...a);
       } finally {
         active -= 1;

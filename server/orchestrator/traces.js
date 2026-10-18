@@ -46,6 +46,8 @@ export function createTraces({ doc: net, token = '', path = '/api/internal/trace
       ...(t.variants != null ? { variants: t.variants } : {}),
       ...(t.libraries != null ? { libraries: t.libraries } : {}),
       ...(t.library_components != null ? { library_components: t.library_components } : {}),
+      // круг 39: полное чтение ждало семафора агента (очередь чтений)
+      ...(t.read_queued ? { read_queued: true } : {}),
       engine: t.engine,
       ...(t.model ? { model: s(t.model, 120) } : {}),
       ...(t.llm_kind ? { llm_kind: t.llm_kind } : {}),

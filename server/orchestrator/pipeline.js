@@ -20,7 +20,7 @@
  */
 
 import * as core from '../../src/core.js';
-import { OrchError, toOrchError, INTERNAL_MESSAGE, notFound, badRequest, llmDown, llmUnconfigured, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
+import { OrchError, toOrchError, INTERNAL_MESSAGE, notFound, badRequest, llmDown, llmUnconfigured, documentBusy, agentBusy, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
 import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS, SHUTDOWN_GRACE_MS, SHUTDOWN_ABORT_WAIT_MS } from './limits.js';
 import {
   isInternalError, recognizeAction, recognizeVariants, recognizeUndoDoubt, recognizeComponentIntent,
@@ -29,6 +29,8 @@ import {
 import * as shell from '../../src/shell.js';
 
 const { ENGINE_VERSION, uid, cutText, cleanText } = core;
+/** Круг 39 (N5б): реплика длиннее (знаков) — не команда редактора; вид работы — по её началу. */
+export const RECOGNIZE_MAX = 2000;
 /** Длина `command_id` транзакции, которую хранит Document service (круг 25). */
 const TX_COMMAND_ID_MAX = 64;
 
@@ -98,18 +100,30 @@ export function isEditorCommand(text) {
  * @param {{hasSelection?: boolean, mode?: 'run'|'variants', n?: number}} [ctx]
  */
 export function intentOf(text, ctx = {}) {
-  if (recognizeAction(text)) return { kind: 'editor' };
-  const wantVariants = recognizeVariants(text);
-  if (wantVariants || (ctx.mode === 'variants' && !isEditorCommand(text))) {
+  const full = String(text == null ? '' : text).trim();
+  /* Круг 39 (N5б): стадия intent идёт на главном потоке до очереди — длинная реплика не должна
+     его держать. Команды редактора, отмена, просьба о вариантах и о компоненте — короткие фразы:
+     реплика длиннее RECOGNIZE_MAX ни одной из них не бывает (кроме слэш-формы — её видно по
+     первому знаку), а вид работы для промпта читается по её началу. */
+  if (full.length > RECOGNIZE_MAX) {
+    if (/^\/\p{L}/u.test(full)) return { kind: 'editor' };
+    if (ctx.mode === 'variants') return { kind: 'variants', n: ctx.n || 3, of: '' };
+    const head = full.slice(0, RECOGNIZE_MAX);
+    const guess = classifyUtterance(head, { hasSelection: !!ctx.hasSelection });
+    return { kind: 'model', needsModel: hasWords(head), intent: guess.intent };
+  }
+  if (recognizeAction(full)) return { kind: 'editor' };
+  const wantVariants = recognizeVariants(full);
+  if (wantVariants || (ctx.mode === 'variants' && !isEditorCommand(full))) {
     return {
       kind: 'variants',
-      n: ctx.n || variantsCount(text) || 3,
+      n: ctx.n || variantsCount(full) || 3,
       of: wantVariants ? wantVariants.variantsOf || '' : '',
     };
   }
-  if (isEditorCommand(text)) return { kind: 'editor' };
-  const local = !hasWords(text) || !!recognizeUndoDoubt(text) || !!recognizeComponentIntent(text);
-  const guess = classifyUtterance(text, { hasSelection: !!ctx.hasSelection });
+  if (isEditorCommand(full)) return { kind: 'editor' };
+  const local = !hasWords(full) || !!recognizeUndoDoubt(full) || !!recognizeComponentIntent(full);
+  const guess = classifyUtterance(full, { hasSelection: !!ctx.hasSelection });
   return { kind: 'model', needsModel: !local, intent: guess.intent };
 }
 
@@ -276,9 +290,19 @@ export function createPipeline(deps) {
   /** Document service и (если нужна) модель живы — иначе 503 до открытия потока. */
   async function preflight({ needsModel }) {
     const [doc, model] = await Promise.all([
-      docHealthDetail(),
+      // круг 39 (N5а): терпеливо — короткий срок не уложился, спрашиваем ещё раз подольше
+      docHealthDetail({ patient: true }),
       needsModel ? llm.health() : Promise.resolve(null),
     ]);
+    /* Круг 39 (N5а): сервис принял запрос, но не ответил и за долгий срок — он перегружен, а не
+       «недоступен»; опаздывал при этом наш собственный цикл событий — перегружен агент. */
+    if (doc.document !== 'up' && doc.slow) {
+      if (doc.ownLag) {
+        adminHint('lag', 'главный поток агента перегружен: проверка Document service не уложилась в срок из-за своей очереди — команде busy');
+        throw agentBusy(5);
+      }
+      throw documentBusy(5, { document_reason: 'slow' });
+    }
     if (doc.document !== 'up') {
       // круг 32: 'schema' — база сервиса догоняет схему после восстановления из копии (секунды)
       const text = doc.reason === 'schema'
@@ -358,13 +382,25 @@ export function createPipeline(deps) {
       sink.send('stage', { key, label: label || LABELS[key], at: Date.now(), ...(detail ? { detail: llm.redact(detail) } : {}) });
     };
     const guard = () => { if (signal.aborted) throw cancelledErr(); };
+    /** Круг 39: доля семафора полных чтений, которую держит документ этой команды. */
+    const lease = {};
+    const unlease = () => { const r = lease.release; lease.release = null; if (typeof r === 'function') r(); };
 
     try {
       guard();
       step('intent', LABELS.intent, verdict.kind === 'variants' ? 'варианты' : INTENT_RU[verdict.intent] || '');
       guard();
       step('read');
-      const st = await dslr.read(cmd.project, { signal });
+      /* Круг 39 (N5а): полное чтение ждёт семафора агента — событие `queued {scope:'read'}` с номером;
+         дождалось — снова «Читаю документ». Байты прочитанного целиком документа держатся в
+         семафоре, пока он нужен команде (до конца расчёта, `lease`). */
+      let readQueued = false;
+      const st = await dslr.read(cmd.project, {
+        signal, lease,
+        onQueued: (position) => { readQueued = true; sink.send('queued', { position, scope: 'read' }); },
+        onStart: () => { if (readQueued) step('read'); },
+      });
+      if (readQueued) trace.read_queued = true;
       guard();
       /* Круг 38: просьбу о вариантах, которую видно только по документу (предмет назван
          именем слоя), brain раньше отдавал оболочке действием `variants`. События `shell`
@@ -444,6 +480,8 @@ export function createPipeline(deps) {
           if (key) step(key, rec.label, rec.detail);
         },
       });
+      // круг 39: документ команде больше не нужен (расчёт кончился) — его байты другим чтениям
+      unlease();
       guard();
       trace.model_calls = usage.calls;
 
@@ -470,6 +508,7 @@ export function createPipeline(deps) {
       if (task.shutdown) trace.shutdown = true;
       trace.code = err.code;
     } finally {
+      unlease();
       if (curStep) steps.push({ key: curStep.key, ms: Date.now() - curStep.at });
       sink.send('done', {});
       sink.end();
@@ -606,7 +645,7 @@ export function createPipeline(deps) {
    */
   function historyTitle(res, text, variantLabel = null) {
     const done = res && typeof res.changeSummary === 'string' ? res.changeSummary.trim() : '';
-    const base = done || (res && res.plan && res.plan.title) || text || '';
+    const base = done || (res && res.plan && res.plan.title) || String(text || '').trim() || DONE_FALLBACK;
     return variantLabel ? `Вариант «${cutText(String(variantLabel), 60)}»: ${base}` : base;
   }
 
@@ -654,6 +693,9 @@ export function createPipeline(deps) {
     });
   }
 
+  /** Круг 39: подпись записи, если ни операции, ни план, ни команда её не дали. */
+  const DONE_FALLBACK = 'Правка агента';
+
   /** Committed → событие result. */
   function resultOf(committed, res, title = '') {
     const plan = (res && res.plan) || {};
@@ -667,14 +709,20 @@ export function createPipeline(deps) {
         select.push(op.id);
       }
     }
+    /* Круг 39 (N5д): `title` — что сделано (подпись записи в истории, tx.title: «Нарисовал
+       «Печенька»: 6 деталей»), есть всегда, когда правка записана; оболочка берёт из него
+       заголовок итога. `summary` — то же «что сделано» (прежние оболочки берут заголовок из
+       него), а пересказ ПЛАНА («Рисую печеньку…», написан до работы) — отдельным полем `plan`. */
+    const done = cleanText(cutText(String(committed.title || title || plan.title || ''), 200)).trim() || DONE_FALLBACK;
+    const planText = String(plan.summary || '').trim() || (res && typeof res.summary === 'string' ? res.summary.trim() : '');
     return {
       tx_id: committed.tx_id,
       seq: committed.seq,
       applied: (committed.ops || []).length,
       dropped: committed.dropped || [],
-      summary: llm.redact((res && res.summary) || plan.summary || plan.title || ''),
-      // круг 27: подпись записи в истории (то же, что tx.title) — что сделано, словами по операциям
-      ...(committed.title || title ? { title: llm.redact(cleanText(cutText(String(committed.title || title), 200))) } : {}),
+      title: llm.redact(done),
+      summary: llm.redact(done),
+      ...(planText && planText !== done ? { plan: llm.redact(cutText(planText, 500)) } : {}),
       warnings: ((res && res.warnings) || []).map((w) => llm.redact(w)),
       ...(res && res.cannot ? { cannot: res.cannot } : {}),
       // компоненты внешней библиотеки, перенесённые этой правкой в библиотеку документа (§10.6)

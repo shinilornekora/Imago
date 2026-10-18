@@ -96,6 +96,14 @@ function refRebase(doc, list, tomb) {
           if (Array.isArray(op.node.children)) {
             const chain = refAncestorIds(cur, parentId);
             const kids = op.node.children.filter((c) => cur.nodes[c] && !chain.has(c));
+            // круг 39: группа, у которой вычеркнуты все дети, — отброшена, если пачка дальше ничего в неё не кладёт
+            const filled = list.slice(i + 1).some((x) => x && ((x.op === 'create' && x.node && x.node.parent === node.id) || (x.op === 'move' && x.parent === node.id)));
+            if (!kids.length && op.node.children.length && !filled) {
+              const was = op.node.children;
+              const junk = was.some((c) => typeof c !== 'string' || !c || Object.prototype.hasOwnProperty.call(Object.prototype, c));
+              drop(junk ? 'invalid' : was.some((c) => cur.nodes[c]) ? 'cycle' : 'removed');
+              continue;
+            }
             if (kids.length !== op.node.children.length) op = { ...op, node: { ...op.node, children: kids } };
           }
           op = refWithIndex(op, cur.nodes[parentId], null);
@@ -512,9 +520,15 @@ test('id-ключи прототипа: create/remove/move/set с constructor, _
     const m = rebase(doc, list, { tombstones: new Map([[id, board]]) });
     assert.deepEqual(m.dropped.map((d) => [d.index, d.reason]).slice(0, 6),
       [[0, 'invalid'], [1, 'invalid'], [2, 'invalid'], [3, 'invalid'], [4, 'invalid'], [5, 'invalid']], id);
-    // create фрейма с ребёнком-ключом прототипа: ребёнок вычеркнут, фрейм создан
-    assert.equal(m.ops.length, 1, id);
-    assert.deepEqual(m.ops[0].node.children, [], id);
+    // create фрейма с ребёнком-ключом прототипа: ребёнок вычеркнут, а группировать больше
+    // нечего — фрейм отброшен (круг 39: пустая группа не создаётся), причина — мусор в списке
+    assert.deepEqual(m.dropped[6] && [m.dropped[6].index, m.dropped[6].reason], [6, 'invalid'], id);
+    assert.equal(m.ops.length, 0, id);
+    // с живым соседом по списку фрейм создаётся, ключ прототипа вычеркнут
+    const kid = artboards(doc)[0].children[0];
+    const m2 = rebase(doc, [{ op: 'create', node: frame(uid('f'), board, [id, kid]) }], { tombstones: new Map([[id, board]]) });
+    assert.equal(m2.dropped.length, 0, id);
+    assert.deepEqual(m2.ops[0].node.children, [kid], id);
     assert.deepEqual(collectTombstones(doc, [{ op: 'remove', id }]), [], 'надгробий нет: ' + id);
     // строгий applyOps — тоже не принимает
     for (const op of list.slice(0, 6)) assert.ok(applyOps(doc, [op]).error, id + ' ' + JSON.stringify(op));

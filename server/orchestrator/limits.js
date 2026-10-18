@@ -36,6 +36,45 @@ export const MAX_VARIANTS = 6;
 /** Сеть до Document service. */
 export const DOC_TIMEOUT_MS = 10000;
 export const DOC_HEALTH_TIMEOUT_MS = 1500;
+/**
+ * Круг 39 (N5а): проверка здоровья перед командой не уложилась в DOC_HEALTH_TIMEOUT_MS — ещё одна,
+ * подольше: под нагрузкой сервис отвечает медленно, но жив. Не ответил и тогда — 503 `busy`
+ * («перегружен»), а не `document_down`. /agent/health так не ждёт.
+ */
+export const DOC_HEALTH_PATIENT_MS = 5000;
+/** Круг 39: сервис ответил (не 5xx) не раньше этого — его молчание на /api/health не значит «недоступен». */
+export const DOC_RECENT_OK_MS = 5000;
+/**
+ * Круг 39 (N5а): таймер дедлайна опоздал больше этого — занят был наш цикл событий, а не
+ * сервис: срок продлевается (не больше LOOP_LAG_EXTENSIONS раз), ответ успевает прийти.
+ */
+export const LOOP_LAG_GRACE_MS = 100;
+export const LOOP_LAG_EXTENSIONS = 3;
+/**
+ * Круг 39 (N5а): полные чтения стейта у Document service (снимок + хвост: на 14 тыс. узлов —
+ * 3,6 МБ JSON, в памяти — в разы больше). Шторм из 30 команд в 30 больших проектов разом читал
+ * всё сразу: пик памяти агента ~0,9 ГБ, главный поток занят разбором, и проверки здоровья
+ * опаздывали — ложное «Сервис документов недоступен». Теперь полные чтения — под семафором:
+ *   • одновременно — не больше DSLR_FULL_CONCURRENCY;
+ *   • и по байтам: документы, прочитанные целиком и ещё нужные командам (до конца расчёта), —
+ *     не больше DSLR_FULL_BYTES (длина JSON); один документ больше предела читается, когда
+ *     других нет; размер ещё не читанного проекта — последний известный, иначе
+ *     DSLR_READ_ESTIMATE_BYTES;
+ *   • ждущих — не больше DSLR_FULL_QUEUE (сверх — сразу 503 busy), ждущим — событие
+ *     `queued {scope:'read', position}`;
+ *   • срок одного полного чтения — DOC_FULL_TIMEOUT_MS; всё чтение стейта (очередь, повторы по
+ *     таймауту, ожидания по Retry-After) — в бюджете DSLR_READ_BUDGET_MS, сверх — 503 `busy`.
+ */
+export const DSLR_FULL_CONCURRENCY = 4;
+export const DSLR_FULL_BYTES = 64 * 1024 * 1024;
+export const DSLR_READ_ESTIMATE_BYTES = 1024 * 1024;
+export const DSLR_FULL_QUEUE = 64;
+export const DOC_FULL_TIMEOUT_MS = 30000;
+export const DSLR_READ_BUDGET_MS = 60000;
+/** Круг 39: повторов чтения после таймаута (в пределах бюджета). */
+export const DSLR_TIMEOUT_RETRIES = 1;
+/** Круг 39: сколько проектов помнить по размеру (для оценки до чтения). */
+export const DSLR_SIZE_MEMO = 4096;
 export const WRITE_ATTEMPTS = 3;
 /**
  * 503 сервиса документов с `Retry-After` (семафор тяжёлых чтений, база недоступна): ждём

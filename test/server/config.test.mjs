@@ -30,7 +30,7 @@ test('умолчания — из limits.js', () => {
     recentTxs: L.RECENT_TXS, recentBytes: L.RECENT_BYTES,
     writesBodyBytes: L.WRITE_BODY_BYTES, writesBodyTimeoutMs: L.BODY_TIMEOUT_MS,
     headsBytes: L.HEADS_BYTES, importConcurrency: L.IMPORT_CONCURRENCY, importQueue: L.IMPORT_QUEUE,
-    snapshotCacheBytes: L.SNAPSHOT_CACHE_BYTES,
+    importTaskMs: L.IMPORT_TASK_MS, snapshotCacheBytes: L.SNAPSHOT_CACHE_BYTES,
   });
   assert.equal(warns.length, 0);
 });

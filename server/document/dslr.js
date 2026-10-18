@@ -13,9 +13,10 @@
  * нужен снимок, и не след ли это отката базы.
  */
 
-import { DocError, notFound, unavailable, viaStorage } from './errors.js';
+import { DocError, notFound, unavailable, viaStorage, noSnapshot } from './errors.js';
 import { headSummary } from './storage/committed.js';
 import { flatTombstones } from './dslts.js';
+import { CODE_ENGINE, engineUnreadable, engineError } from './engine.js';
 import { PAGE_TXS, MAX_LIMIT as LIMIT_MAX, PAGE_BYTES, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, SNAPSHOT_CACHE_BYTES } from './limits.js';
 
 /** Верхняя граница `limit` в `ops?since=` (совместимость: прежде экспортировалась отсюда). */
@@ -58,10 +59,22 @@ export function createSemaphore({ max = HEAVY_CONCURRENCY, queue = HEAVY_QUEUE, 
 }
 
 /**
- * @param {{storage: object, heavy?: ReturnType<typeof createSemaphore>, pageBytes?: number, snapshotCacheBytes?: number}} deps
- *   `snapshotCacheBytes` — кеш сериализованных снимков полного открытия (круг 33; 0 — без кеша)
+ * @param {{storage: object, heavy?: ReturnType<typeof createSemaphore>, pageBytes?: number, snapshotCacheBytes?: number, engine?: number}} deps
+ *   `snapshotCacheBytes` — кеш сериализованных снимков полного открытия (круг 33; 0 — без кеша);
+ *   `engine` — версия движка экземпляра (круг 39): снимок или запись журнала движка, которого
+ *   экземпляр не читает (новее), не отдаётся — 503 `cause:'engine'`: клиент этой версии
+ *   переиграл бы их без чужих слоёв
  */
-export function createReader({ storage, heavy = createSemaphore(), pageBytes = PAGE_BYTES, snapshotCacheBytes = SNAPSHOT_CACHE_BYTES }) {
+export function createReader({ storage, heavy = createSemaphore(), pageBytes = PAGE_BYTES, snapshotCacheBytes = SNAPSHOT_CACHE_BYTES, engine = CODE_ENGINE }) {
+  /** Записанное движком, которого экземпляр не читает, — 503 engine (круг 39). */
+  const guard = (found) => {
+    if (engineUnreadable(found, engine)) throw engineError(found, engine);
+  };
+  const guardTxs = (txs) => {
+    for (const t of txs) guard(t && t.engine);
+    return txs;
+  };
+
   async function project(projectId) {
     const p = await viaStorage(storage.getProject(projectId));
     if (!p) throw notFound();
@@ -70,14 +83,15 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
 
   /** Страница хвоста после `seq`: не больше `limit` записей и `pageBytes` байт. */
   async function page(projectId, seq, limit = PAGE_TXS) {
-    return viaStorage(storage.txsAfter(projectId, seq, limit, { maxBytes: pageBytes }));
+    return guardTxs(await viaStorage(storage.txsAfter(projectId, seq, limit, { maxBytes: pageBytes })));
   }
 
   /** Снимок под семафором тяжёлых чтений. */
   async function snapshotOf(projectId) {
     return heavy.run(async () => {
       const snapshot = await viaStorage(storage.latestSnapshot(projectId));
-      if (!snapshot) throw unavailable('у проекта нет снимка — журнал не с чего переигрывать');
+      if (!snapshot) throw noSnapshot(storage);
+      guard(snapshot.engine);
       return snapshot;
     });
   }
@@ -132,7 +146,8 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
       return { seq: r.seq, json: r.json };
     }
     const meta = await viaStorage(storage.latestSnapshotMeta(projectId));
-    if (!meta) throw unavailable('у проекта нет снимка — журнал не с чего переигрывать');
+    if (!meta) throw noSnapshot(storage);
+    guard(meta.engine);
     const key = snapKey(projectId, meta.seq, meta.chain, meta.epoch, isoAt(meta.created_at));
     const hit = snapCache.get(key);
     if (hit) {
@@ -166,8 +181,11 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
   async function snapshotMeta(projectId) {
     if (typeof storage.latestSnapshotMeta === 'function') {
       const m = await viaStorage(storage.latestSnapshotMeta(projectId));
-      if (m) return m;
-      throw unavailable('у проекта нет снимка');
+      if (m) {
+        guard(m.engine);
+        return m;
+      }
+      throw noSnapshot(storage, 'у проекта нет снимка');
     }
     return snapshotOf(projectId);
   }

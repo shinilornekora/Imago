@@ -32,9 +32,11 @@
  */
 
 import * as core from '../../src/core.js';
-import { applyOps, applyBatches, rebase, collectTombstones, ENGINE_VERSION } from '../../src/core.js';
-import { DocError, badRequest, notFound, tooLarge, unavailable, viaStorage } from './errors.js';
+import { applyOps, applyBatches, rebase, collectTombstones } from '../../src/core.js';
+import { DocError, badRequest, notFound, tooLarge, unavailable, viaStorage, noSnapshot } from './errors.js';
 import { chainNext, compactDropped, jsonBytes } from './storage/committed.js';
+import { CODE_ENGINE, OUTDATED_RECHECK_MS, engineUnreadable, engineError } from './engine.js';
+import { EXPAND_LIMIT, expandGrowthOver, mayGrowExpand } from './expand.js';
 import {
   MAX_OPS_PER_TX, MAX_DOC_BYTES, MAX_DOC_NODES, MERGE_BUDGET_MS,
   SNAPSHOT_EVERY, SNAPSHOT_KEEP, VERIFY_MS, PAGE_TXS,
@@ -56,6 +58,8 @@ export const IDLE_MS = 10 * 60 * 1000;
  * попыток на всплеске не хватает; после третьей ждём случайные миллисекунды,
  * чтобы два экземпляра не били в одну голову в такт.
  */
+/** Оценка памяти одного надгробия головы (две записи словарей: id → родитель, id → seq), байт. */
+const TOMB_ENTRY_BYTES = 160;
 const MAX_RETRIES = 12;
 const RETRY_BACKOFF_MS = 15;
 /** Страница чтения хвоста внутри сервиса (загрузка и догон головы): байтами шире, чем наружу. */
@@ -108,9 +112,10 @@ function opShapeError(op) {
  * Иначе запись в jsonb падала, ответ был 503 retryable, и очередь клиента стояла вечно.
  * @param {any} raw
  * @param {{author?: string}} [ctx] автор из заголовка X-Author, если в теле нет
+ * @param {number} [engine] версия движка экземпляра (круг 39: тестам смешанных версий — ниже версии кода)
  * @returns {object}
  */
-export function validateTx(raw, ctx = {}) {
+export function validateTx(raw, ctx = {}, engine = CODE_ENGINE) {
   const txId = raw && isStr(raw.tx_id, MAX_ID) ? { tx_id: cleanText(raw.tx_id) } : {};
   const bad = (msg) => badRequest(msg, { compat: txId });
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw bad('транзакция должна быть объектом');
@@ -136,10 +141,10 @@ export function validateTx(raw, ctx = {}) {
   if (!isMissing(raw.replay_of_epoch) && !isId(raw.replay_of_epoch, 64)) throw bad('replay_of_epoch: метка эпохи');
   if (!isMissing(raw.replay_at) && !(typeof raw.replay_at === 'string' && raw.replay_at.length <= 40 && Number.isFinite(Date.parse(raw.replay_at)))) throw bad('replay_at: дата ISO');
   // версия движка — после формы: у мусора нет версии, у старого клиента есть, и ему нужен именно 426
-  if (raw.engine !== ENGINE_VERSION) {
+  if (raw.engine !== engine) {
     // чужое значение — только через showValue: `{"engine":{"toString":1}}` в шаблоне строки — TypeError и 500
-    throw new DocError(426, 'engine', `версия движка ${raw.engine === undefined ? 'не указана' : showValue(raw.engine)}, сервер работает с ${ENGINE_VERSION} — обновите клиент`, {
-      retryable: false, detail: { engine: ENGINE_VERSION }, compat: { engine: ENGINE_VERSION, ...txId }
+    throw new DocError(426, 'engine', `версия движка ${raw.engine === undefined ? 'не указана' : showValue(raw.engine)}, сервер работает с ${engine} — обновите клиент`, {
+      retryable: false, detail: { engine }, compat: { engine, ...txId }
     });
   }
   let ops;
@@ -149,7 +154,7 @@ export function validateTx(raw, ctx = {}) {
     if (e && e.code === 'depth') throw bad(`ops: вложенность значений глубже ${MAX_VALUE_DEPTH}`);
     throw e;
   }
-  const tx = { tx_id: raw.tx_id, base_seq: raw.base_seq, ops, engine: ENGINE_VERSION };
+  const tx = { tx_id: raw.tx_id, base_seq: raw.base_seq, ops, engine };
   if (raw.undo_of) tx.undo_of = raw.undo_of;
   if (raw.redo_of) tx.redo_of = raw.redo_of;
   // круг 32: часть большой правки {i, n} — метаданные: хранится и рассылается, негодное — поля нет
@@ -195,6 +200,9 @@ function firstFailing(doc, list, apply = applyOps) {
   }
   return lo;
 }
+
+/** Движок сам держит предел раскрытия в applyOps и rebase (круг 39: экспорт EXPAND_LIMIT). */
+const ENGINE_GUARDS_EXPAND = typeof core.EXPAND_LIMIT === 'string';
 
 const nodeCount = (doc) => (doc && doc.nodes ? Object.keys(doc.nodes).length : 0);
 
@@ -254,8 +262,9 @@ const pathsMeet = (a, b) => a === b || a.startsWith(b + '.') || b.startsWith(a +
  * пределах бюджета времени — дальше подозрительный остаток отбрасывается целиком,
  * `limit:'merge_budget'`). Документ после транзакции больше предела (узлы, байты —
  * байты считаются точно, разницей по изменённым узлам) и больше, чем был, —
- * отбрасываются все операции, кроме `remove` (`limit:'doc_nodes'|'doc_bytes'`).
- * `lim.stale` — индексы операций, которые отброшены заранее с `reason:'stale'`
+ * отбрасываются все операции, кроме `remove` (`limit:'doc_nodes'|'doc_bytes'`). Круг 39 (N2): так же —
+ * раскрытие экземпляров после транзакции больше предела движка и больше, чем было
+ * (`limit:'expand_nodes'`, expand.js). `lim.stale` — индексы операций, которые отброшены заранее с `reason:'stale'`
  * (переигрывание после отката базы, их лист уже переписан позже). Надгробия
  * считаются по применённой форме ДО применения.
  * @param {{doc:object, tombstones:Map, docBytes?:number}} head
@@ -285,7 +294,11 @@ export function mergeIntoHead(head, tx, lim = {}) {
   // бюджет действует и внутри самого слияния (круг 26): rebase 5000 операций над
   // большим документом не должен съесть время под мьютексом проекта до проверки
   const rb = rebase(head.doc, input, { tombstones: head.tombstones, deadline: started + budget });
-  for (const d of rb.dropped) dropped.push({ ...d, index: map[d.index] });
+  // предел раскрытия, отброшенный самим движком (rebase), — тем же кодом, что у сервиса (круг 39)
+  for (const d of rb.dropped) {
+    const expand = d && typeof d.limit === 'string' && d.limit !== EXPAND_LIMIT && /^expand/.test(d.limit);
+    dropped.push({ ...d, index: map[d.index], ...(expand ? { limit: EXPAND_LIMIT } : {}) });
+  }
   notes = rb.notes.map((n) => ({ ...n, index: map[n.index] }));
   let kept = rb.ops.slice();
   // исходные индексы оставленных операций: rebase сохраняет порядок, минуя отброшенные
@@ -310,7 +323,8 @@ export function mergeIntoHead(head, tx, lim = {}) {
         keptIdx = keptIdx.slice(0, bad);
         continue;
       }
-      drop(bad);
+      // круг 39: движок отверг пачку за предел раскрытия — виноватая с тем же пределом
+      drop(bad, res.error.limit === EXPAND_LIMIT || (typeof res.error.limit === 'string' && /^expand/.test(res.error.limit)) ? { limit: EXPAND_LIMIT } : undefined);
       kept = kept.filter((_, i) => i !== bad);
       keptIdx = keptIdx.filter((_, i) => i !== bad);
     }
@@ -325,6 +339,10 @@ export function mergeIntoHead(head, tx, lim = {}) {
   let limit = null;
   if (afterNodes > maxNodes && afterNodes > beforeNodes) limit = 'doc_nodes';
   else if (afterBytes > maxBytes && afterBytes > beforeBytes) limit = 'doc_bytes';
+  // круг 39: раскрытие экземпляров — считается движком без раскрытия, и только если правка
+  // вообще может его увеличить (create, move, set of/props/component/role)
+  // (движок круга 39 сам сверяет предел в rebase/applyOps — тогда здесь не пересчитываем)
+  else if (!ENGINE_GUARDS_EXPAND && doc !== head.doc && mayGrowExpand(kept) && expandGrowthOver(head.doc, doc)) limit = EXPAND_LIMIT;
   if (limit) {
     const keepRemoves = [];
     const keepRemovesIdx = [];
@@ -474,8 +492,10 @@ function summaryOf(c, replayAt) {
  *   tombKeepSeq?: number, tombPruneEvery?: number, tombMax?: number,
  *   recentTxs?: number, recentBytes?: number,
  *   headsBytes?: number,
+ *   engine?: number,
  *   log?: {warn:Function, info:Function}
- * }} opts `headsBytes` — бюджет голов в памяти (байты документов, круг 33): сверх — выгрузка LRU
+ * }} opts `headsBytes` — бюджет голов в памяти (круг 33; с круга 35 — документ + выжимки + надгробия): сверх — выгрузка LRU;
+ *   `engine` — версия движка экземпляра (круг 39; по умолчанию — движка, тестам — ниже, engine.js)
  */
 export function createSequencer({
   storage, instanceId = 'i', snapshotEvery = SNAPSHOT_EVERY, snapshotKeep = SNAPSHOT_KEEP,
@@ -483,9 +503,16 @@ export function createSequencer({
   queueProjectBytes = QUEUE_PROJECT_BYTES, queueProjectTxs = QUEUE_PROJECT_TXS, queueTotalBytes = QUEUE_TOTAL_BYTES,
   replayScanTxs = REPLAY_SCAN_TXS,
   tombKeepSeq = TOMB_KEEP_SEQ, tombPruneEvery = TOMB_PRUNE_EVERY, tombMax = TOMB_MAX,
-  recentTxs = RECENT_TXS, recentBytes = RECENT_BYTES, headsBytes = HEADS_BYTES
+  recentTxs = RECENT_TXS, recentBytes = RECENT_BYTES, headsBytes = HEADS_BYTES,
+  engine = CODE_ENGINE
 }) {
   const lim = { mergeBudgetMs, maxDocNodes, maxDocBytes };
+  /**
+   * Проекты, записанные движком, которого этот экземпляр не читает (круг 39, N1): projectId →
+   * {found, at}. Такой проект здесь «устарел»: голова не держится, чтение и запись — 503
+   * `cause:'engine'`; до OUTDATED_RECHECK_MS — сразу, без чтения базы, потом — проверка заново.
+   */
+  const outdated = new Map();
   /** Очередь записи (§9.10): projectId → {bytes, txs} транзакций в мьютексе (ждут и пишутся); всего — байт. */
   const queued = new Map();
   let queuedBytes = 0;
@@ -625,8 +652,13 @@ export function createSequencer({
     for (let i = 0; i < page.length; i++) {
       const err = res.results[i] && res.results[i].error;
       // применённая форма обязана проходить строго; если нет — журнал и движок разошлись,
-      // молчать нельзя, но и вставать нельзя: голова идёт дальше по номерам
-      if (err) log.warn(`[document/dslts] ${projectId}: seq ${page[i].seq} не применяется: ${err.message}`);
+      // молчать нельзя, но и вставать нельзя: голова идёт дальше по номерам. Круг 39: такая
+      // голова «с пропуском» снимков не пишет никогда — снимок с неё потерял бы запись у всех
+      // (журнал её хранит, но после снимка её никто не переигрывает)
+      if (err) {
+        log.warn(`[document/dslts] ${projectId}: seq ${page[i].seq} не применяется: ${err.message}${head.holey ? '' : ' — голова с пропуском, снимков с неё не пишу'}`);
+        head.holey = true;
+      }
     }
     if (res.doc !== before) {
       head.docBytes += docBytesDelta(before, res.doc);
@@ -647,9 +679,22 @@ export function createSequencer({
   }
 
   /**
+   * Вес головы в бюджете (круг 35): байты JSON документа + выжимки последних транзакций
+   * (`recentBytes` — их оценка, до RECENT_BYTES на голову) + надгробия (оценка на запись двух
+   * словарей). Прежде считался только документ: 30 проектов по 5 тыс. узлов с правками по 5 тыс.
+   * операций держали в выжимках ~16 МБ на голову мимо бюджета — RSS рос до 1,9 ГБ.
+   */
+  function headWeight(h) {
+    const doc = Number.isFinite(h.docBytes) ? h.docBytes : 0;
+    const recent = Number.isFinite(h.recentBytes) ? h.recentBytes : 0;
+    const tombs = h.tombstones && h.tombstones.size ? h.tombstones.size * TOMB_ENTRY_BYTES : 0;
+    return doc + recent + tombs;
+  }
+
+  /**
    * Бюджет голов в памяти (круг 33): прежде головы выгружались только по бездействию (10 мин),
    * и 20 импортов по 20 тыс. узлов с правкой в каждый держали в памяти все 20 документов —
-   * память экземпляра росла без предела. Теперь сумма `docBytes` голов — не больше headsBytes:
+   * память экземпляра росла без предела. Теперь сумма весов голов (headWeight) — не больше headsBytes:
    * сверх — выгружаются самые давние по использованию (порядок Map — LRU: touch переставляет
    * голову в конец), кроме открытых сокетами (`watched`), с записью или сверкой в полёте
    * (мьютекс проекта занят) и той, что нужна сейчас (`keep`). Выгруженная голова
@@ -659,13 +704,13 @@ export function createSequencer({
   function trimHeads(keep) {
     if (!(headsBytes > 0)) return;
     let total = 0;
-    for (const h of heads.values()) total += Number.isFinite(h.docBytes) ? h.docBytes : 0;
+    for (const h of heads.values()) total += headWeight(h);
     if (total <= headsBytes) return;
     for (const [projectId, h] of [...heads]) {
       if (total <= headsBytes) break;
       if (projectId === keep || locks.has(projectId) || watched(projectId)) continue;
       dropHead(projectId);
-      total -= Number.isFinite(h.docBytes) ? h.docBytes : 0;
+      total -= headWeight(h);
       evicted += 1;
     }
   }
@@ -728,6 +773,8 @@ export function createSequencer({
   async function ensureHead(projectId) {
     let head = heads.get(projectId);
     if (!head) {
+      const mark = outdated.get(projectId);
+      if (mark && Date.now() - mark.at < OUTDATED_RECHECK_MS) throw engineError(mark.found, engine);
       const project = await viaStorage(storage.getProject(projectId));
       if (!project) {
         // сокеты проекта могли остаться от прежней головы (база восстановлена без проекта)
@@ -735,12 +782,12 @@ export function createSequencer({
         throw notFound();
       }
       const latest = await viaStorage(storage.latestSnapshot(projectId));
-      if (!latest) throw unavailable('у проекта нет снимка — журнал не с чего переигрывать');
+      if (!latest) throw noSnapshot(storage);
+      // круг 39: снимок движка, которого этот экземпляр не читает, — не «предупреждение», а отказ
+      // проекту (снимок прежней версии, которую движок читает, — как раньше: формат совместим)
+      if (engineUnreadable(latest.engine, engine)) throw goOutdated(projectId, latest.engine, `снимок seq ${latest.seq}`);
       const { snap, tomb, restored } = await startingPoint(projectId, latest);
-      if (snap.engine !== ENGINE_VERSION) {
-        // миграция формата — системная транзакция (§8.3), а не тихая правка; пока её нет — предупреждаем
-        log.warn(`[document/dslts] ${projectId}: снимок seq ${snap.seq} записан движком ${snap.engine}, сервер работает с ${ENGINE_VERSION}`);
-      }
+      if (engineUnreadable(snap.engine, engine)) throw goOutdated(projectId, snap.engine, `снимок seq ${snap.seq}`);
       head = {
         doc: snap.doc, head_seq: snap.seq, chain: snap.chain || '', epoch: project.epoch,
         // надгробия до снимка — из самого снимка (§9.10): без них та же офлайн-транзакция
@@ -754,7 +801,13 @@ export function createSequencer({
       for (;;) {
         const page = await viaStorage(storage.txsAfter(projectId, head.head_seq, PAGE_TXS, { maxBytes: INTERNAL_PAGE_BYTES, internal: true }));
         if (!page.length) break;
+        const ahead = page.find((t) => engineUnreadable(t.engine, engine));
+        if (ahead) throw goOutdated(projectId, ahead.engine, `запись seq ${ahead.seq}`);
         absorbPage(head, projectId, page);
+      }
+      if (mark) {
+        outdated.delete(projectId);
+        log.info(`[document/dslts] ${projectId}: проект снова читается движком ${engine}`);
       }
       heads.set(projectId, head);
       // круг 33: новая голова — сверх бюджета памяти выгружаются давние (не она сама)
@@ -762,7 +815,7 @@ export function createSequencer({
       if (restored) {
         log.warn(`[document/dslts] ${projectId}: надгробия снимка seq ${latest.seq} неизвестны (прежний экземпляр) — восстановлены журналом от снимка seq ${snap.seq}`);
         // свежий снимок с надгробиями: следующей загрузке переигрывать не придётся
-        if (head.head_seq > 0) scheduleSnapshot(projectId, head.head_seq, head.doc, head.chain, head.tombstones, head.tombSeq);
+        if (head.head_seq > 0 && !head.holey) scheduleSnapshot(projectId, head.head_seq, head.doc, head.chain, head.tombstones, head.tombSeq);
       }
     }
     touch(projectId, head);
@@ -833,6 +886,10 @@ export function createSequencer({
         if (typeof tx.chain === 'string') chain = tx.chain;
       }
       const good = ok === page.length ? page : page.slice(0, ok);
+      // круг 39: запись движка новее этого экземпляра (другой экземпляр уже обновлён) — не
+      // пропускать её молча: проект здесь «устарел», голова выбрасывается
+      const ahead = good.find((t) => engineUnreadable(t.engine, engine));
+      if (ahead) throw goOutdated(projectId, ahead.engine, `запись seq ${ahead.seq}`);
       absorbPage(head, projectId, good);
       for (const tx of good) emit({ kind: 'tx', projectId, committed: tx });
       if (ok < page.length) {
@@ -853,7 +910,28 @@ export function createSequencer({
       const r = await syncHead(projectId);
       // проект открыт сокетами — голова нужна им для живого потока: загрузить заново
       if ((r === 'epoch' || r === 'rollback') && watched(projectId)) await ensureHead(projectId);
-    }).catch((e) => log.warn(`[document/dslts] ${projectId}: сверка с базой не удалась: ${e && e.message}`)));
+    }).catch((e) => {
+      // «устарел» (круг 39) уже сказан одной строкой в goOutdated
+      if (e instanceof DocError && e.detail && e.detail.cause === 'engine') return;
+      log.warn(`[document/dslts] ${projectId}: сверка с базой не удалась: ${e && e.message}`);
+    }));
+  }
+
+  /**
+   * Проект записан движком, которого этот экземпляр не читает (круг 39, N1): голова
+   * выбрасывается (не держится и снимков не пишет), проект помечается «устаревшим», сокетам
+   * проекта — событие `engine` (Hub закрывает их 4503), в лог — одна строка на пометку.
+   * @returns {DocError} 503 `cause:'engine'` — бросить вызвавшему
+   */
+  function goOutdated(projectId, found, what) {
+    const was = outdated.get(projectId);
+    outdated.set(projectId, { found, at: Date.now() });
+    dropHead(projectId);
+    if (!was) {
+      log.warn(`[document/dslts] ${projectId}: ${what} — движок ${found}, а этот экземпляр работает с ${engine}: проект здесь не читается и не пишется (503 engine), снимков не пишу — обновите экземпляр`);
+      emit({ kind: 'engine', projectId, found, engine });
+    }
+    return engineError(found, engine);
   }
 
   function onEpochNotice(projectId, epoch) {
@@ -895,7 +973,7 @@ export function createSequencer({
     // после ответа: setImmediate отпускает текущий тик, запись идёт следующим
     track(new Promise((resolve) => setImmediate(resolve))
       .then(async () => {
-        const written = await storage.writeSnapshot(projectId, seq, doc, ENGINE_VERSION, chain, tomb);
+        const written = await storage.writeSnapshot(projectId, seq, doc, engine, chain, tomb);
         if (written && snapshotKeep > 0) await storage.pruneSnapshots(projectId, snapshotKeep);
       })
       .catch((e) => log.warn(`[document/dslts] ${projectId}: снимок seq ${seq} не записан: ${e && e.message}`)));
@@ -981,7 +1059,7 @@ export function createSequencer({
   async function commitQueued(projectId, raw, ctx) {
     let tx;
     try {
-      tx = validateTx(raw, ctx);
+      tx = validateTx(raw, ctx, engine);
     } catch (e) {
       // мусор в несуществующий проект — это 404, а не 400: проект проверяем только
       // на пути отказа, чтобы не платить запросом к базе за каждую годную транзакцию
@@ -1053,7 +1131,7 @@ export function createSequencer({
         // документ вырос — бюджет голов мог кончиться (выгружаются давние, не эта)
         if (heads.size > 1) trimHeads(projectId);
         emit({ kind: 'tx', projectId, committed: res.committed });
-        if (snapshotEvery > 0 && seq % snapshotEvery === 0) scheduleSnapshot(projectId, seq, head.doc, head.chain, head.tombstones, head.tombSeq);
+        if (snapshotEvery > 0 && seq % snapshotEvery === 0 && !head.holey) scheduleSnapshot(projectId, seq, head.doc, head.chain, head.tombstones, head.tombSeq);
         return { committed: res.committed, existing: false };
       }
       exhausted += 1;
@@ -1123,9 +1201,25 @@ export function createSequencer({
   }
 
   return {
+    /** Версия движка экземпляра (круг 39): hello сокета, health, новые проекты. */
+    engine,
+
+    /** Проект здесь «устарел» (записан движком, которого экземпляр не читает)? `{found, at}` или null. */
+    outdatedOf(projectId) {
+      const m = outdated.get(projectId);
+      return m ? { ...m } : null;
+    },
+
+    /** Голова «с пропуском» (запись не применилась — снимков не пишет)? null — не загружена. */
+    isHoley(projectId) {
+      const h = heads.get(projectId);
+      return h ? !!h.holey : null;
+    },
+
     /**
      * Подписка на события: `{kind:'tx', projectId, committed}` в порядке seq · `{kind:'epoch', projectId, epoch, token?}` ·
-     * `{kind:'missing', projectId}` — проекта нет в базе (I3) · `{kind:'project', projectId, project}` — сводка изменилась (I4).
+     * `{kind:'missing', projectId}` — проекта нет в базе (I3) · `{kind:'project', projectId, project}` — сводка изменилась (I4) ·
+     * `{kind:'engine', projectId, found, engine}` — проект записан движком новее экземпляра (круг 39).
      */
     subscribe(fn) {
       listeners.add(fn);
@@ -1298,8 +1392,12 @@ export function createSequencer({
     /** Гонки с другими экземплярами: сколько кругов заново, сколько раз попытки кончились (503). */
     stats() {
       let bytes = 0;
-      for (const h of heads.values()) bytes += Number.isFinite(h.docBytes) ? h.docBytes : 0;
-      return { staleRetries, exhausted, heads: heads.size, headsBytes: bytes, evicted };
+      let docs = 0;
+      for (const h of heads.values()) {
+        bytes += headWeight(h);
+        docs += Number.isFinite(h.docBytes) ? h.docBytes : 0;
+      }
+      return { staleRetries, exhausted, heads: heads.size, headsBytes: bytes, headsDocBytes: docs, evicted };
     },
 
     /** Загружена ли голова (после выгрузки по бездействию — нет). */

@@ -55,6 +55,26 @@ const PROP_KINDS = new Set(['text', 'enum', 'color', 'number', 'bool']);
  * конечным, даже если валидатор о цикле почему-то промолчал.
  */
 const MAX_INSTANCE_DEPTH = 8;
+/**
+ * Круг 39 (N2; работа круга 35, перенесена и проверена заново): предел числа
+ * РАСКРЫТЫХ узлов на документ — сумма по всем экземплярам, см. expandCost. Одна
+ * глубина 8 раскрытие не держит: цепочка из 9 мастеров по W экземпляров
+ * следующего даёт W⁸ узлов (документ в 37 КБ — 204 тыс. раскрытых узлов, solve
+ * 32 с и 1,4 ГБ; вкладка каждого участника проекта падала). Правка или импорт,
+ * после которых раскрытие вышло бы за предел, не проходят
+ * (`limit:'expand_nodes'`); документ, уже бывший сверх предела, открывается
+ * деградированным: часть экземпляров — заглушки, validate — `expand-limit`.
+ */
+const MAX_EXPANDED_NODES = 50000;
+/**
+ * Документ сверх MAX_EXPANDED_NODES: раскрываются только экземпляры не дороже
+ * этого (по порядку документа, пока сумма в пределе) — мелочь вроде кнопок
+ * видна, а ветки «бомбы» остаются заглушками, и решатель укладывается в доли
+ * секунды.
+ */
+const DEGRADED_INSTANCE_NODES = 2000;
+/** Имя нарушенного предела раскрытия — в ошибках applyOps, dropped rebase и отказе импорта. */
+const EXPAND_LIMIT = 'expand_nodes';
 /** Верхний уровень пути, который set никогда не меняет: на этом стоит дерево. */
 const PROTECTED_PATHS = new Set(['id', 'type', 'parent', 'children', '__proto__', 'prototype', 'constructor']);
 /** Ключи прототипа: запрещены на любом уровне пути — иначе у узла появляются свойства «из ниоткуда». */
@@ -82,9 +102,37 @@ const MAX_DEPTH = 256;
 
 /**
  * Версия формата движка (SPEC §8.3): в каждой транзакции и снимке. Меняется,
- * когда старый журнал перестаёт применяться без миграции.
+ * когда старый журнал перестаёт применяться без миграции — или когда движок
+ * прежней версии уже не может прочесть то, что пишет нынешний.
+ *
+ * Круг 39: 2. Круги 36–37 расширили формат: тип `vector` (контуры, viewBox),
+ * `layout.mode 'none'` с `pos` детей, градиенты в краске, `rotate`, `states` и
+ * `motion`. Движок 1 такие документы и операции отвергает (`bad-node`) или,
+ * хуже, применяет частично — поэтому запись движка 2 экземпляру с движком 1
+ * читать нельзя (сервер переводит проект в «устарел», см. SPEC §9).
+ * Обратно — можно: всё, что писал движок 1, движок 2 читает и применяет как
+ * раньше (формат только расширялся; миграции записей нет).
  */
-const ENGINE_VERSION = 1;
+const ENGINE_VERSION = 2;
+/**
+ * Круг 39: самая старая версия движка, записи и снимки которой этот движок
+ * читает без миграции. Документ, транзакция журнала или снимок с `engine` в
+ * [ENGINE_MIN_READ, ENGINE_VERSION] — читаются; больше ENGINE_VERSION — нет
+ * (записаны новым движком, формат может быть шире); меньше ENGINE_MIN_READ — нет
+ * (нужна миграция, которой у этого движка нет).
+ */
+const ENGINE_MIN_READ = 1;
+
+/**
+ * Круг 39: может ли этот движок прочесть запись журнала / снимок с такой
+ * версией. `undefined` (записи до введения поля) читается как 1.
+ * @param {any} engine
+ * @returns {boolean}
+ */
+function engineReadable(engine) {
+  const v = engine === undefined || engine === null ? 1 : engine;
+  return Number.isInteger(v) && v >= ENGINE_MIN_READ && v <= ENGINE_VERSION;
+}
 
 let uidCounter = 0;
 const UID_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
@@ -1161,9 +1209,22 @@ function paintProblem(v, what, noGradient) {
 /** Есть ли в значении градиент. */
 const isGradientPaint = (v) => isObj(v) && isObj(v.gradient);
 
-/** Кеш проверки путей: d → {err, at, count}. Путь проверяется на каждый set узла. */
+/**
+ * Кеш проверки путей: d → {err, at, count}. Путь проверяется на каждый set узла.
+ * Круг 39: предел не только по числу ключей, но и по их суммарной длине —
+ * 4096 ключей-строк до 20 000 символов держали до ~80 МБ на процесс (и в
+ * Document service). Длинные пути (больше PATH_CACHE_MAX_KEY) не кешируются
+ * вовсе: разбор линеен, а держать мегабайты ради редкого повтора незачем.
+ */
 const pathCheckCache = new Map();
 const PATH_CACHE_LIMIT = 4096;
+/** Суммарная длина ключей кеша (символов): ~1 МБ строк в худшем случае. */
+const PATH_CACHE_CHARS = 1 << 20;
+/** Путь длиннее — не кешируется. */
+const PATH_CACHE_MAX_KEY = 4096;
+let pathCacheChars = 0;
+/** Длинные пути: контур → {d, res}. */
+const pathCheckOwned = new WeakMap();
 
 /**
  * Разбор пути SVG. Строгий: первая команда M/m, числа конечные и не больше
@@ -1266,15 +1327,43 @@ function parsePath(d) {
   return { ok: true, cmds, count: cmds.length };
 }
 
-/** Проверка пути с кешем. @returns {{err:string|null, at:number, count:number}} */
-function pathCheck(d) {
+/** Круг 39: состояние кеша проверки путей — для тестов предела памяти. */
+function pathCacheStats() {
+  return { keys: pathCheckCache.size, chars: pathCacheChars };
+}
+
+/**
+ * Проверка пути с кешем. Длинный путь (больше PATH_CACHE_MAX_KEY) кешируется
+ * не по строке, а по объекту контура `owner` (WeakMap): узлы документа
+ * неизменяемы и делятся между версиями, так что повторная проверка того же
+ * контура (validate на каждом кадре) бесплатна, а память уходит вместе с
+ * документом.
+ * @param {any} d @param {object} [owner] контур, которому принадлежит путь
+ * @returns {{err:string|null, at:number, count:number}}
+ */
+function pathCheck(d, owner) {
   if (typeof d !== 'string') return { err: 'путь должен быть строкой', at: 0, count: 0 };
-  const hit = pathCheckCache.get(d);
-  if (hit) return hit;
+  const long = d.length > PATH_CACHE_MAX_KEY;
+  if (long) {
+    const own = owner && typeof owner === 'object' ? pathCheckOwned.get(owner) : undefined;
+    if (own && own.d === d) return own.res;
+  } else {
+    const hit = pathCheckCache.get(d);
+    if (hit) return hit;
+  }
   const r = parsePath(d);
   const res = r.ok ? { err: null, at: 0, count: r.count } : { err: r.error, at: r.at, count: 0 };
-  if (pathCheckCache.size >= PATH_CACHE_LIMIT) pathCheckCache.delete(pathCheckCache.keys().next().value);
+  if (long) {
+    if (owner && typeof owner === 'object') pathCheckOwned.set(owner, { d, res });
+    return res;
+  }
+  while (pathCheckCache.size && (pathCheckCache.size >= PATH_CACHE_LIMIT || pathCacheChars + d.length > PATH_CACHE_CHARS)) {
+    const old = pathCheckCache.keys().next().value;
+    pathCheckCache.delete(old);
+    pathCacheChars -= old.length;
+  }
   pathCheckCache.set(d, res);
+  pathCacheChars += d.length;
   return res;
 }
 
@@ -1283,7 +1372,7 @@ function vpathProblem(p, what) {
   if (!isObj(p)) return `${what}: контур — объект {d, fill?, stroke?, …}`;
   for (const k of Object.keys(p)) if (!VPATH_KEYS.has(k)) return `${what}.${k}: поля контура — ${[...VPATH_KEYS].join(', ')}`;
   if (typeof p.d !== 'string') return `${what}.d: нужен путь SVG строкой`;
-  const pc = pathCheck(p.d);
+  const pc = pathCheck(p.d, p);
   if (pc.err) return `${what}.d: ${pc.err} (символ ${pc.at})`;
   if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 200)) return `${what}.name: строка до 200 символов`;
   for (const k of ['fill', 'stroke']) {
@@ -1402,7 +1491,16 @@ function arcSamples(x1, y1, rxIn, ryIn, phiDeg, fa, fs, x2, y2, steps) {
   return out;
 }
 
-/** bbox разобранного пути (cmds из parsePath). @returns {{x1,y1,x2,y2}|null} */
+/**
+ * bbox разобранного пути (cmds из parsePath). @returns {{x1,y1,x2,y2}|null}
+ *
+ * Круг 39: M, за которым сразу идёт другой M, в рамку не входит — как в
+ * браузере (Skia: moveTo после moveTo заменяет точку, а не начинает пустой
+ * контур). Раньше `m11.62 -.5 M0 -175 t-.5 0` давал рамку шириной 12,12 вместо
+ * 0,5: viewBox детали шире нарисованного, рамка выделения «пустая». M перед
+ * Z, перед рисованием и последний в пути — входит (проверено по getBBox
+ * Chromium).
+ */
 function cmdsBox(cmds) {
   let x1 = Infinity; let y1 = Infinity; let x2 = -Infinity; let y2 = -Infinity;
   const add = (x, y) => {
@@ -1411,8 +1509,10 @@ function cmdsBox(cmds) {
   };
   let cx = 0; let cy = 0; let sx = 0; let sy = 0;
   let pc = null;   // прошлая контрольная точка (для S/T): {x, y, kind}
+  let moved = false;   // последняя команда — M: её точка ждёт, что будет дальше
   for (const { c, a } of cmds) {
-    if (c === 'M') { cx = a[0]; cy = a[1]; sx = cx; sy = cy; add(cx, cy); pc = null; continue; }
+    if (c === 'M') { cx = a[0]; cy = a[1]; sx = cx; sy = cy; moved = true; pc = null; continue; }
+    if (moved) { add(sx, sy); moved = false; }
     if (c === 'Z') { cx = sx; cy = sy; pc = null; continue; }
     if (c === 'L') { add(a[0], a[1]); cx = a[0]; cy = a[1]; pc = null; continue; }
     if (c === 'H') { add(a[0], cy); cx = a[0]; pc = null; continue; }
@@ -1462,6 +1562,7 @@ function cmdsBox(cmds) {
       cx = a[5]; cy = a[6]; pc = null; continue;
     }
   }
+  if (moved) add(sx, sy);
   if (x1 === Infinity) return null;
   return { x1, y1, x2, y2 };
 }
@@ -2092,8 +2193,12 @@ function depsFresh(doc, deps) {
  * @param {string[]} chain мастера, раскрытые выше — защита от самовключения
  * @param {object} out карта синтетических узлов
  * @param {Array} deps плоский список [id, узел, ...] для кеша
+ * @param {{left:number}} [budget] круг 39: сколько ещё НОВЫХ узлов можно положить в
+ *   `out`; кончился — бросается EXPAND_OVER (раскрытие этого экземпляра
+ *   отменяется целиком, вместо него заглушка). Страховка: expandDoc сверяется с
+ *   expandAnalysis заранее, и в норме счётчик не срабатывает.
  */
-function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps) {
+function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps, budget) {
   const lib = libraryNode(doc);
   deps.push(lib ? lib.id : '', lib || undefined);
   const master = ownNode(doc.nodes, inst.of);
@@ -2153,14 +2258,331 @@ function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps) {
     }
     const patch = patches.get(mid);
     if (patch) for (const one of patch) sn = setPath(sn, one.path, one.value);
+    if (budget && !hasOwnProp.call(out, sn.id) && --budget.left < 0) throw EXPAND_OVER;
     out[sn.id] = sn;
     if (sn.type === 'instance') nested.push(sn);
   }
   // вложенные экземпляры раскрываем после всего поддерева: запись под тем же id
   // заменяется раскрытым корнем их мастера
   for (const sn of nested) {
-    expandOne(doc, sn, sn.id, ownerId, depth + 1, chain.concat(master.id), out, deps);
+    expandOne(doc, sn, sn.id, ownerId, depth + 1, chain.concat(master.id), out, deps, budget);
   }
+}
+
+/** Круг 39: сигнал «счётчик раскрытия исчерпан» (не ошибка — заглушка вместо экземпляра). */
+const EXPAND_OVER = { expandOver: true };
+
+/* ---------------------- стоимость раскрытия (круг 39) ---------------------- */
+
+/** Голова пути пропса, от которой зависит раскрытие вложенного экземпляра: куда он ведёт и с чем. */
+const STRUCT_PROP_HEADS = new Set(['of', 'props']);
+const NO_CHAIN = Object.freeze([]);
+/** Запись «счёт оборван» — ключей анализа больше предела: стоимость считаем бесконечной. */
+const COST_OVER = Object.freeze({ cost: Infinity, kids: NO_CHAIN, d: 0, m: '' });
+
+/**
+ * Компоненты сильной связности графа «мастер → мастера его вложенных экземпляров»
+ * (итеративный Тарьян: мастеров бывают тысячи, рекурсия положила бы стек).
+ * @param {string[]} ids @param {Map<string,string[]>} edges
+ * @returns {Map<string,number>} мастер → номер компоненты
+ */
+function sccMap(ids, edges) {
+  const index = new Map();
+  const low = new Map();
+  const comp = new Map();
+  const onStack = new Set();
+  const stack = [];
+  let next = 0;
+  let compNo = 0;
+  for (const start of ids) {
+    if (index.has(start)) continue;
+    const work = [[start, 0]];
+    index.set(start, next); low.set(start, next); next++;
+    stack.push(start); onStack.add(start);
+    while (work.length) {
+      const top = work[work.length - 1];
+      const v = top[0];
+      const out = edges.get(v) || NO_CHAIN;
+      if (top[1] < out.length) {
+        const w = out[top[1]++];
+        if (!edges.has(w)) continue;
+        if (!index.has(w)) {
+          index.set(w, next); low.set(w, next); next++;
+          stack.push(w); onStack.add(w);
+          work.push([w, 0]);
+        } else if (onStack.has(w)) low.set(v, Math.min(low.get(v), index.get(w)));
+        continue;
+      }
+      work.pop();
+      if (work.length) {
+        const u = work[work.length - 1][0];
+        low.set(u, Math.min(low.get(u), low.get(v)));
+      }
+      if (low.get(v) === index.get(v)) {
+        for (;;) {
+          const w = stack.pop();
+          onStack.delete(w);
+          comp.set(w, compNo);
+          if (w === v) break;
+        }
+        compNo++;
+      }
+    }
+  }
+  return comp;
+}
+
+/**
+ * Круг 39: анализ раскрытия документа — сколько узлов даст expandOne каждому
+ * экземпляру, ЛИНЕЙНО и без самого раскрытия: мемоизация по мастеру (и глубине —
+ * от неё зависит обрыв на MAX_INSTANCE_DEPTH):
+ *   cost(m) = |поддерево m| + Σ по экземплярам внутри m (cost(их мастера) − 1)
+ * («−1»: раскрытый корень вложенного мастера ложится на место самого экземпляра).
+ * Цепочка цикла учитывается точно: от неё зависят только мастера той же
+ * компоненты сильной связности, и в ключ памяти входит пересечение цепочки с ней.
+ * Пропсы, переписывающие вложенному экземпляру `of`/`props`, тоже входят в ключ
+ * (для обычного словаря их нет, и ключ — мастер и глубина). Ссылку, уведённую
+ * пропсом назад по цепочке из другой компоненты, счёт не видит и считает дальше —
+ * оценка сверху, не снизу. Ключей больше MAX_EXPANDED_NODES (каждый ключ — хотя бы
+ * одно настоящее раскрытие) — счёт обрывается бесконечностью.
+ *
+ * `doc.nodes` читается вживую (стража правок держит анализ над черновиком), а
+ * сведения о мастерах кешируются — кто правит библиотеку, заводит анализ заново.
+ * @param {object} doc
+ * @returns {{instCost:(inst:object)=>number, entry:(inst:object)=>object|null, total:()=>number, heaviest:()=>string|null, multMap:()=>Map<string,number>|null}}
+ */
+function expandAnalysis(doc) {
+  const nodes = doc && doc.nodes && typeof doc.nodes === 'object' ? doc.nodes : {};
+  const lib = libraryNode(doc);
+  const libId = lib ? lib.id : null;
+  /** мастер → {size, nested: id экземпляров поддерева, known, struct: имена структурных пропсов|null} */
+  const info = new Map();
+  /** ключ → {cost, kids: записи раскрытых вложенных (с повторами), d, m} */
+  const memo = new Map();
+  let keys = 0;
+  let scc = null;
+  let totalCache = null;
+  let heavy = null;
+  let mult = null;
+  /** записи верхнего уровня (экземпляры документа) → сколько раз */
+  const top = new Map();
+
+  const masterFor = (inst) => {
+    const m = ownNode(nodes, inst.of);
+    return m && libId !== null && m.parent === libId && m.component ? m : null;
+  };
+  const infoOf = (m) => {
+    let mi = info.get(m.id);
+    if (mi) return mi;
+    const ids = subtreeIds(doc, m.id);
+    const nested = [];
+    for (const id of ids) {
+      const n = ownNode(nodes, id);
+      if (n && n.type === 'instance') nested.push(id);
+    }
+    const known = propMap(m);
+    let struct = null;
+    if (nested.length && known.size) {
+      const set = new Set(nested);
+      for (const p of known.values()) {
+        if (typeof p.path !== 'string' || !set.has(p.target)) continue;
+        if (!STRUCT_PROP_HEADS.has(p.path.split('.')[0])) continue;
+        if (!struct) struct = new Set();
+        struct.add(p.name);
+      }
+    }
+    mi = { size: ids.length, nested, known, struct };
+    info.set(m.id, mi);
+    return mi;
+  };
+  const sccOf = (id) => {
+    if (!scc) {
+      const ids = [];
+      const edges = new Map();
+      for (const mid of kidsOf(lib)) {
+        const m = ownNode(nodes, mid);
+        if (!m || !m.component || edges.has(mid)) continue;
+        ids.push(mid);
+        const to = [];
+        for (const nid of infoOf(m).nested) {
+          const of = nodes[nid] && nodes[nid].of;
+          if (typeof of === 'string') to.push(of);
+        }
+        edges.set(mid, to);
+      }
+      scc = sccMap(ids, edges);
+    }
+    return scc.get(id);
+  };
+
+  /** запись раскрытия экземпляра на глубине d под мастером pm (цепочка его компоненты — prel) или null */
+  const resolve = (inst, d, pm, prel) => {
+    if (!inst || d > MAX_INSTANCE_DEPTH) return null;
+    const m = masterFor(inst);
+    if (!m) return null;
+    let rel = NO_CHAIN;
+    if (pm) {
+      if (m.id === pm.id) return null;                 // самовключение: мастер уже в цепочке
+      const a = sccOf(m.id);
+      if (a !== undefined && a === sccOf(pm.id)) {
+        if (prel.indexOf(m.id) >= 0) return null;      // цикл длиннее: мастер уже в цепочке
+        rel = prel.concat(pm.id).sort();
+      }
+    }
+    const mi = infoOf(m);
+    let pkey = '';
+    let patches = null;
+    if (mi.struct) {
+      const given = inst.props && typeof inst.props === 'object' ? inst.props : {};
+      const parts = [];
+      for (const name of Object.keys(given)) {
+        if (!mi.struct.has(name)) continue;
+        const p = mi.known.get(name);
+        const v = propValue(p, given[name]);
+        if (v === undefined) continue;
+        parts.push(name, v);
+        if (!patches) patches = new Map();
+        let list = patches.get(p.target);
+        if (!list) { list = []; patches.set(p.target, list); }
+        list.push({ path: p.path, value: v });
+      }
+      if (parts.length) pkey = JSON.stringify(parts);
+    }
+    const key = d + '\u0001' + m.id + '\u0001' + rel.join('\u0002') + '\u0001' + pkey;
+    const hit = memo.get(key);
+    if (hit) return hit;
+    if (++keys > MAX_EXPANDED_NODES) return COST_OVER;
+    let cost = mi.size;
+    const kids = [];
+    for (const nid of mi.nested) {
+      let n = ownNode(nodes, nid);
+      if (!n) continue;
+      const pl = patches && patches.get(nid);
+      if (pl) for (const one of pl) n = setPath(n, one.path, one.value);
+      if (!n || n.type !== 'instance') continue;
+      const e = resolve(n, d + 1, m, rel);
+      if (!e) continue;
+      cost += e.cost - 1;
+      kids.push(e);
+    }
+    const entry = { cost, kids, d, m: m.id };
+    memo.set(key, entry);
+    return entry;
+  };
+
+  const instCost = (inst) => {
+    const e = resolve(inst, 1, null, NO_CHAIN);
+    return e ? e.cost : 0;
+  };
+  const total = () => {
+    if (totalCache !== null) return totalCache;
+    let sum = 0;
+    let best = -1;
+    for (const id of Object.keys(nodes)) {
+      const n = nodes[id];
+      if (!n || n.type !== 'instance') continue;
+      const e = resolve(n, 1, null, NO_CHAIN);
+      if (!e) continue;
+      sum += e.cost;
+      top.set(e, (top.get(e) || 0) + 1);
+      if (e.cost > best) { best = e.cost; heavy = id; }
+    }
+    totalCache = sum;
+    return sum;
+  };
+  /**
+   * Сколько раз раскрывается каждый мастер по всему документу (столько узлов
+   * даёт новый простой узел в нём). null — счёт оборван (ключей больше предела).
+   * @returns {Map<string,number>|null}
+   */
+  const multMap = () => {
+    if (!mult) {
+      total();
+      const count = new Map(top);
+      const byDepth = [];
+      for (const e of memo.values()) (byDepth[e.d] || (byDepth[e.d] = [])).push(e);
+      for (const layer of byDepth) {
+        if (!layer) continue;
+        for (const e of layer) {
+          const c = count.get(e) || 0;
+          if (!c) continue;
+          for (const k of e.kids) count.set(k, (count.get(k) || 0) + c);
+        }
+      }
+      mult = new Map();
+      for (const [e, c] of count) if (e.m) mult.set(e.m, (mult.get(e.m) || 0) + c);
+    }
+    return keys > MAX_EXPANDED_NODES ? null : mult;
+  };
+  /** Запись раскрытия экземпляра верхнего уровня (или null — не раскрывается). */
+  const entry = (inst) => resolve(inst, 1, null, NO_CHAIN);
+  return { instCost, entry, total, heaviest: () => { total(); return heavy; }, multMap };
+}
+
+/**
+ * Круг 39: вклад одной записи раскрытия в числа раскрытий мастеров —
+ * `mult[m] += sign · (сколько раз m раскрывается внутри e)`. Слоями по глубине:
+ * дети записи всегда на уровень глубже. Стоимость — число различных записей под e.
+ * @param {object|null} e @param {number} sign @param {(m:string, d:number)=>void} add
+ */
+function expandContrib(e, sign, add) {
+  if (!e || !e.m) return;
+  let level = new Map([[e, 1]]);
+  for (let guard = 0; level.size && guard <= MAX_INSTANCE_DEPTH + 1; guard++) {
+    const next = new Map();
+    for (const [x, c] of level) {
+      if (x.m) add(x.m, sign * c);
+      for (const k of x.kids) next.set(k, (next.get(k) || 0) + c);
+    }
+    level = next;
+  }
+}
+
+/**
+ * Круг 39 (N2): сколько узлов даст раскрытие всех экземпляров документа (expandDoc
+ * без предела) — линейно, по графу мастеров с мемоизацией, без самого раскрытия.
+ * Для документа без циклов компонентов, обойдённых пропсом-подменой `of`, число
+ * равно числу узлов expandDoc; иначе — оценка сверху. Infinity — счёт оборван
+ * (ключей больше предела). Не бросает.
+ * @param {object} doc
+ * @returns {number}
+ */
+function expandCost(doc) {
+  if (!doc || !doc.nodes) return 0;
+  try {
+    return expandAnalysis(doc).total();
+  } catch (e) {
+    logOnce('expandCost:throw', 'expandCost: счёт раскрытия не удался', e);
+    return Infinity;
+  }
+}
+
+const bigCount = (n) => (n === Infinity || n > 1e12 ? 'больше триллиона' : String(Math.round(n)));
+
+/**
+ * Круг 39 (N2): превышает ли документ предел раскрытия — для импорта, validate,
+ * DSLV и сервера. Не бросает.
+ * @param {object} doc
+ * @returns {null|{code:'expand-limit', limit:'expand_nodes', cost:number, max:number, nodeId:string|null, message:string}}
+ *   nodeId — самый дорогой экземпляр
+ */
+function expandProblem(doc) {
+  if (!doc || !doc.nodes) return null;
+  let cost;
+  let nodeId = null;
+  try {
+    const ana = expandAnalysis(doc);
+    cost = ana.total();
+    if (cost <= MAX_EXPANDED_NODES) return null;
+    nodeId = ana.heaviest();
+  } catch (e) {
+    logOnce('expandProblem:throw', 'expandProblem: счёт раскрытия не удался', e);
+    cost = Infinity;
+  }
+  return {
+    code: 'expand-limit', limit: EXPAND_LIMIT, cost, max: MAX_EXPANDED_NODES, nodeId,
+    message: `слишком много вложенных экземпляров: раскрытие дало бы ${bigCount(cost)} узлов — больше предела ${MAX_EXPANDED_NODES}`
+  };
 }
 
 /**
@@ -2179,45 +2601,153 @@ function mergeStates(base, over) {
   return out;
 }
 
+/** Подпись заглушки экземпляра, не раскрытого из-за предела (видна на холсте). */
+const EXPAND_STUB_TEXT = 'слишком много вложенных экземпляров';
+/**
+ * Заглушки по экземпляру: тот же объект, пока узел экземпляра — тот же
+ * (ссылки нужны точечной отрисовке, см. expandCache).
+ * @type {WeakMap<object,Record<string,object>>}
+ */
+const stubCache = new WeakMap();
+
+/**
+ * Круг 39 (N2): заглушка вместо экземпляра, не раскрытого из-за предела —
+ * рамка на месте экземпляра (его размер, место, видимость) с подписью
+ * «слишком много вложенных экземпляров». Два синтетических узла: решатель и
+ * сцена их размещают и рисуют как обычные, выделение уходит в экземпляр.
+ * @returns {Record<string,object>}
+ */
+function expandStub(doc, inst) {
+  const hit = stubCache.get(inst);
+  if (hit) return hit;
+  const master = ownNode(doc.nodes, inst.of);
+  const tid = inst.id + '/~expand-limit';
+  const frame = {
+    type: 'frame', id: inst.id, parent: inst.parent, synthetic: true, instance: inst.id, stub: 'expand-limit',
+    name: inst.name !== undefined ? inst.name : 'Экземпляр не раскрыт',
+    size: instanceSize(inst, master && master.type !== 'instance' ? master : null),
+    layout: { mode: 'column', padding: 8, align: 'center', justify: 'center' },
+    fill: '#F4F1EA', stroke: { color: '#B4AC9C', width: 1 }, clip: true,
+    children: [tid]
+  };
+  for (const k of ['pos', 'override', 'visible', 'opacity', 'rotate', 'locked']) {
+    if (inst[k] !== undefined) frame[k] = deepClone(inst[k]);
+  }
+  const text = {
+    type: 'text', id: tid, parent: inst.id, synthetic: true, instance: inst.id, stub: 'expand-limit',
+    characters: EXPAND_STUB_TEXT, color: '#6B6457', size: { w: { mode: 'fill' }, h: { mode: 'hug' } }, align: 'center'
+  };
+  const out = { [frame.id]: frame, [tid]: text };
+  stubCache.set(inst, out);
+  return out;
+}
+
 /**
  * Раскрытие всех экземпляров документа. Чистая функция от документа — на этом
  * стоит детерминированность решателя (SPEC §5.6).
+ *
+ * Круг 39 (N2): никогда не больше MAX_EXPANDED_NODES раскрытых узлов. Стоимость
+ * каждого экземпляра известна заранее (кеш или expandAnalysis); документ сверх
+ * предела (правкой и импортом такой уже не получить — только старым журналом)
+ * раскрывается деградированно: только экземпляры не дороже
+ * DEGRADED_INSTANCE_NODES, по порядку документа, пока сумма в пределе; прочие —
+ * заглушки «слишком много вложенных экземпляров» (`skipped`), validate говорит
+ * `expand-limit`. Счётчик в expandOne — страховка на случай ошибки в оценке.
+ * Заглушки (по два узла) в предел не входят: их не больше, чем экземпляров в
+ * самом документе.
  * @param {object} doc
- * @returns {{nodes:Record<string,object>, count:number}} count — сколько экземпляров в документе
+ * @returns {{nodes:Record<string,object>, count:number, skipped?:string[]}} count — сколько
+ *   экземпляров в документе; skipped — не раскрытые из-за предела (только если есть)
  */
 function expandDoc(doc) {
   const out = {};
   let count = 0;
   if (!doc || !doc.nodes) return { nodes: out, count };
+  const list = [];
+  let ana = null;
+  let total = 0;
   for (const id of Object.keys(doc.nodes)) {
     const inst = doc.nodes[id];
     if (!inst || inst.type !== 'instance') continue;
     count += 1;
     const hit = expandCache.get(inst);
-    if (hit && depsFresh(doc, hit.deps)) { Object.assign(out, hit.nodes); continue; }
+    const fresh = hit && depsFresh(doc, hit.deps) ? hit : null;
+    let need;
+    if (fresh) need = fresh.size;
+    else {
+      try {
+        if (!ana) ana = expandAnalysis(doc);
+        need = ana.instCost(inst);
+      } catch (e) {
+        logOnce('expand:cost:' + id, `стоимость раскрытия «${id}» не посчитать`, e);
+        need = Infinity;
+      }
+    }
+    total += need;
+    list.push(inst, fresh, need);
+  }
+  const degraded = total > MAX_EXPANDED_NODES;
+  let used = 0;
+  const skipped = [];
+  const skip = (inst) => {
+    skipped.push(inst.id);
+    Object.assign(out, expandStub(doc, inst));
+  };
+  for (let k = 0; k < list.length; k += 3) {
+    const inst = list[k];
+    const hit = list[k + 1];
+    const need = list[k + 2];
+    if (degraded && (need > DEGRADED_INSTANCE_NODES || used + need > MAX_EXPANDED_NODES)) { skip(inst); continue; }
+    if (hit) {
+      if (used + hit.size > MAX_EXPANDED_NODES) { skip(inst); continue; }
+      Object.assign(out, hit.nodes);
+      used += hit.size;
+      continue;
+    }
     const local = {};
     const deps = [];
+    const budget = { left: MAX_EXPANDED_NODES - used };
     try {
-      expandOne(doc, inst, inst.id, inst.id, 1, [], local, deps);
-      expandCache.set(inst, { deps, nodes: local });
+      expandOne(doc, inst, inst.id, inst.id, 1, [], local, deps, budget);
+      const size = MAX_EXPANDED_NODES - used - budget.left;
+      expandCache.set(inst, { deps, nodes: local, size });
     } catch (e) {
-      logOnce('expand:throw:' + id, `раскрытие экземпляра «${id}» не удалось`, e);
+      if (e === EXPAND_OVER) {
+        logOnce('expand:over:' + inst.id, `раскрытие «${inst.id}» упёрлось в предел ${MAX_EXPANDED_NODES} узлов — экземпляр не раскрыт`);
+        skip(inst);
+        continue;
+      }
+      logOnce('expand:throw:' + inst.id, `раскрытие экземпляра «${inst.id}» не удалось`, e);
     }
     Object.assign(out, local);
+    used = MAX_EXPANDED_NODES - budget.left;
+  }
+  if (skipped.length) {
+    logOnce('expand:limit', `раскрытие экземпляров дало бы ${bigCount(total)} узлов — больше предела ${MAX_EXPANDED_NODES}: `
+      + `${skipped.length} экземпляров не раскрыты`);
+    return { nodes: out, count, skipped };
   }
   return { nodes: out, count };
 }
 
 /**
  * Раскрытие одного экземпляра — для оболочки и мозга (превью компонента,
- * разбор «что внутри этого экземпляра»).
- * @returns {{nodes:Record<string,object>, root:object|null}|null}
+ * разбор «что внутри этого экземпляра»). Круг 39: дороже MAX_EXPANDED_NODES —
+ * не раскрывается (`root: null`, `limit: 'expand_nodes'`).
+ * @returns {{nodes:Record<string,object>, root:object|null, limit?:string}|null}
  */
 function expandInstance(doc, idOrNode) {
   const inst = typeof idOrNode === 'string' ? nodeById(doc, idOrNode) : idOrNode;
   if (!inst || inst.type !== 'instance') return null;
   const nodes = {};
-  expandOne(doc, inst, inst.id, inst.id, 1, [], nodes, []);
+  try {
+    if (expandAnalysis(doc).instCost(inst) > MAX_EXPANDED_NODES) throw EXPAND_OVER;
+    expandOne(doc, inst, inst.id, inst.id, 1, [], nodes, [], { left: MAX_EXPANDED_NODES });
+  } catch (e) {
+    if (e !== EXPAND_OVER) throw e;
+    logOnce('expandInstance:over:' + inst.id, `раскрытие «${inst.id}» больше предела ${MAX_EXPANDED_NODES} узлов — не раскрыт`);
+    return { nodes: {}, root: null, limit: EXPAND_LIMIT };
+  }
   return { nodes, root: nodes[inst.id] || null };
 }
 
@@ -2545,6 +3075,122 @@ function cloneSubtree(doc, id) {
   return { rootId: map.get(id), nodes };
 }
 
+/** Шаг сдвига копии по умолчанию (px): там, где место задаёт pos, копия не ложится на оригинал. */
+const DUPLICATE_OFFSET = 16;
+
+/**
+ * Круг 39 (N3): ДУБЛИРОВАТЬ — единственная реализация (таблица команд оболочки,
+ * ⌘/Ctrl+D на холсте, Stage._duplicate). Копия каждого корня выделения встаёт
+ * сразу после оригинала у того же родителя:
+ *   • выделение «родитель + его ребёнок» копирует только родителя (ребёнок едет
+ *     в его копии); страницы, корень холста и библиотека не копируются;
+ *   • внутренние ссылки переписаны по карте старый id → новый: `parent`,
+ *     `children`, `of` (если мастер внутри копии) и `component.props[].target`
+ *     (раньше копия мастера отказывала: «target … вне мастера»); пропс, чья цель
+ *     и в оригинале вне мастера, в копию не переносится;
+ *   • копия мастера — новый компонент с новым именем «… копия» (свободным: «…
+ *     копия 2» и т.д.); `component` ставится отдельным set ПОСЛЕ детей — цели
+ *     пропсов должны уже лежать в мастере;
+ *   • там, где место задаёт pos (на холсте, в свободной рамке layout.mode 'none'),
+ *     копия сдвинута на `offset` (по умолчанию 16) по обеим осям; в потоке —
+ *     просто следующий сосед (а отвязанная от потока override — тоже со сдвигом).
+ * Документ не меняет; операции ложатся одной транзакцией applyOps.
+ * @param {object} doc
+ * @param {string[]|string} ids выделение
+ * @param {{offset?:number}} [opts]
+ * @returns {{ops:object[], ids:string[], roots:string[], error?:string}} ids — корни
+ *   копий (их выделить), roots — что скопировано; error — словами, без id
+ */
+function duplicateOps(doc, ids, opts) {
+  const res = { ops: [], ids: [], roots: [] };
+  if (!doc || !doc.nodes) return { ...res, error: 'Документа нет' };
+  const off = opts && isNum(opts.offset) ? clamp(opts.offset, -1000, 1000) : DUPLICATE_OFFSET;
+  const raw = Array.isArray(ids) ? ids : typeof ids === 'string' ? [ids] : [];
+  const lib = libraryNode(doc);
+  const picked = [];
+  const seen = new Set();
+  for (const id of raw) {
+    if (!isNodeId(id) || seen.has(id)) continue;
+    seen.add(id);
+    const n = ownNode(doc.nodes, id);
+    if (!n || n.type === 'page' || id === doc.root || (lib && id === lib.id)) continue;
+    if (!ownNode(doc.nodes, n.parent)) continue;
+    picked.push(id);
+  }
+  const set = new Set(picked);
+  const roots = picked.filter((id) => !ancestors(doc, id).some((a) => set.has(a.id)));
+  if (!roots.length) {
+    return { ...res, error: raw.length ? 'Копировать нечего: страницу и библиотеку не дублируют' : 'Копировать нечего: ничего не выделено' };
+  }
+  // имена компонентов — чтобы копия мастера получила свободное
+  const names = new Set();
+  if (lib) for (const mid of kidsOf(lib)) { const m = ownNode(doc.nodes, mid); if (m && m.component) names.add(componentName(m)); }
+  const freeName = (base) => {
+    let name = `${base} копия`;
+    for (let k = 2; names.has(name); k++) name = `${base} копия ${k}`;
+    names.add(name);
+    return name;
+  };
+  // порядок детей по родителям — с учётом уже вставленных копий: две копии у
+  // одного родителя встают каждая после СВОЕГО оригинала
+  const orders = new Map();
+  const orderOf = (pid) => {
+    let o = orders.get(pid);
+    if (!o) { o = kidsOf(ownNode(doc.nodes, pid)).slice(); orders.set(pid, o); }
+    return o;
+  };
+  for (const id of roots) {
+    const node = doc.nodes[id];
+    const parent = doc.nodes[node.parent];
+    const sub = subtreeIds(doc, id);
+    const map = new Map(sub.map((old) => [old, uid(ownNode(doc.nodes, old).type === 'frame' ? 'f' : 'n')]));
+    const inside = (v) => typeof v === 'string' && map.has(v);
+    let component = null;
+    const list = [];
+    for (const old of sub) {
+      const n = deepClone(doc.nodes[old]);
+      n.id = map.get(old);
+      if (old !== id) n.parent = map.get(n.parent) || n.parent;
+      if (Array.isArray(n.children)) n.children = [];
+      if (n.type === 'instance' && inside(n.of)) n.of = map.get(n.of);
+      if (isObj(n.component)) {
+        const c = n.component;
+        const props = (Array.isArray(c.props) ? c.props : [])
+          .filter((p) => isObj(p) && inside(p.target))
+          .map((p) => ({ ...p, target: map.get(p.target) }));
+        const next = { ...c, ...(Array.isArray(c.props) ? { props } : {}) };
+        if (old === id && lib && parent.id === lib.id) next.name = freeName(componentName(doc.nodes[old]));
+        delete n.component;
+        // компонент — после детей: цели пропсов должны уже лежать в поддереве
+        if (old === id) component = next;
+        else list.push(null, n.id, next);
+      }
+      if (old === id) {
+        n.name = `${typeof node.name === 'string' && node.name.trim() ? node.name : displayName(doc, node)} копия`;
+        const L = resolveLayout(doc, parent.layout);
+        if (parent.id === doc.root || L.mode === 'none') {
+          const pos = isObj(n.pos) ? n.pos : { x: 0, y: 0 };
+          n.pos = { x: r2((isNum(pos.x) ? pos.x : 0) + off), y: r2((isNum(pos.y) ? pos.y : 0) + off) };
+        } else if (isObj(n.override) && isNum(n.override.x) && isNum(n.override.y)) {
+          n.override = { ...n.override, x: r2(n.override.x + off), y: r2(n.override.y + off) };
+        }
+        const order = orderOf(parent.id);
+        const at = order.indexOf(id) + 1;
+        order.splice(at, 0, n.id);
+        res.ops.push(ops.create(n, at));
+      } else {
+        res.ops.push(ops.create(n));
+      }
+    }
+    // компоненты вложенных узлов (в норме их нет: мастер — только ребёнок библиотеки)
+    for (let k = 0; k < list.length; k += 3) res.ops.push(ops.set(list[k + 1], 'component', list[k + 2]));
+    if (component) res.ops.push(ops.set(map.get(id), 'component', component));
+    res.ids.push(map.get(id));
+    res.roots.push(id);
+  }
+  return res;
+}
+
 const ROLE_PATTERNS = [
   ['button', /кнопк|button|cta|действие/i],
   ['title', /заголов|title|heading|назван/i],
@@ -2870,6 +3516,241 @@ function applyStep(draft, op, j) {
     err = opErr('bad-op', 'правку не удалось применить: в операции негодное значение');
   }
   if (err) rollbackDraft(draft, j, 0);
+  j.length = 0;
+  return err;
+}
+
+/* Круг 39 (N2): стража раскрытия для applyOps и rebase. Операция, после которой
+   раскрытие экземпляров превысило бы MAX_EXPANDED_NODES, не проходит
+   (`bad-op`, `limit:'expand_nodes'`). Документ, уже бывший сверх предела
+   (старым журналом), правке не запирается: предел для него — его же нынешняя
+   стоимость (удалять и править можно, раздувать дальше — нет), как doc_nodes у
+   DSLTS.
+
+   Полный пересчёт (expandAnalysis().total()) линеен по документу, и на каждую
+   операцию пачки в 5000 он был бы квадратом, поэтому стража ведёт стоимость
+   (`total`) и числа раскрытий мастеров (`mult`) по приращениям:
+   • экземпляр вне мастеров (создан, сменил of/props) — total ± стоимость его
+     записи раскрытия, mult ± вклад записи (expandContrib); записи — из анализа,
+     заведённого после последней правки мастеров (он ленив и дёшев: считает
+     только то, о чём спросили, без обхода документа);
+   • простой узел внутри мастера — total + mult(мастер) (каждое раскрытие
+     копирует новый узел ровно один раз), mult не меняется, анализ — заново;
+   • remove — стоимость только падает: total и mult остаются оценкой сверху
+     (exact = false), анализ — заново;
+   • setToken и правки полей, кроме of/props/component/role, на раскрытие не влияют;
+   • прочее (библиотека, мастера, экземпляры внутри мастеров, move в мастер и из
+     него, страницы) — «грязно»: следующий вопрос пересчитывает целиком.
+   Решение «за пределом» — только по точной стоимости: оценка сверх предела
+   сначала уточняется полным пересчётом. Тест сверяет решения с наивным полным
+   пересчётом после каждой операции. */
+const EG_DIRTY = { kind: 'dirty' };
+const EG_SHRINK = { kind: 'shrink' };
+
+/**
+ * @param {object} base документ ДО пачки (не меняется)
+ * @param {object} draft черновик, в который пишет applyOne
+ */
+function expandGuard(base, draft) {
+  let lib;                 // id библиотеки черновика (undefined — не искали)
+  let ana = null;          // анализ черновика (память записей раскрытия мастеров)
+  let anaOk = false;       // анализ заведён после последней правки мастеров
+  let total = null;        // стоимость черновика (точно или сверху; null — неизвестна)
+  let exact = false;       // total точна
+  let mult = null;         // мастер → сколько раз раскрывается (точно или сверху); null — неизвестно
+  let log = [];            // правки mult после последней точки сохранения: [мастер, приращение]
+  let limit = null;        // max(MAX_EXPANDED_NODES, стоимость base)
+
+  const libId = () => {
+    if (lib === undefined) {
+      const l = libraryNode(draft);
+      lib = l ? l.id : null;
+    }
+    return lib;
+  };
+  /** предок-или-сам, лежащий прямо в библиотеке (мастер или его заготовка), иначе null */
+  const masterAbove = (id) => {
+    const L = libId();
+    if (L === null || !isNodeId(id)) return null;
+    let cur = ownNode(draft.nodes, id);
+    for (let guard = 0; cur && guard < 100000; guard++) {
+      if (cur.parent === L) return cur;
+      if (cur.id === L || !isNodeId(cur.parent)) return null;
+      cur = ownNode(draft.nodes, cur.parent);
+    }
+    return null;
+  };
+  const full = () => {
+    ana = expandAnalysis(draft);
+    anaOk = true;
+    total = ana.total();
+    exact = true;
+    const m = ana.multMap();
+    mult = m ? new Map(m) : null;    // null — счёт оборван: total = Infinity
+    log = [];
+  };
+  const known = () => {
+    if (total === null || (mult === null && Number.isFinite(total))) full();
+  };
+  const freshAna = () => {
+    if (!anaOk) { ana = expandAnalysis(draft); anaOk = true; }
+  };
+  const addMult = (m, d) => {
+    if (!mult) return;
+    mult.set(m, (mult.get(m) || 0) + d);
+    log.push(m, d);
+  };
+  const settle = () => {
+    if (!Number.isFinite(total)) { total = Infinity; exact = false; }
+  };
+
+  return {
+    /** До применения: как операция влияет на раскрытие. @returns {object|null} */
+    pre(op) {
+      if (!op || typeof op !== 'object') return null;
+      switch (op.op) {
+        case 'create': {
+          const n = op.node;
+          if (!n || typeof n !== 'object') return null;
+          if (n.type === 'page' || n.component !== undefined || (Array.isArray(n.children) && n.children.length)) return EG_DIRTY;
+          if (libId() === null) return null;           // без библиотеки мастеров нет — раскрывать нечего
+          const m = masterAbove(n.parent);
+          if (n.type === 'instance') {
+            if (m) return EG_DIRTY;
+            known(); freshAna();
+            return { kind: 'inst', oldE: null };
+          }
+          if (!m || !m.component) return null;
+          known();
+          return { kind: 'plain', delta: mult ? (mult.get(m.id) || 0) : Infinity };
+        }
+        case 'set': {
+          const n = ownNode(draft.nodes, op.id);
+          if (!n) return null;
+          const path = typeof op.path === 'string' ? op.path : isNum(op.path) ? String(op.path) : '';
+          const head = path.split('.')[0];
+          if (head === 'role') return n.type === 'page' ? EG_DIRTY : null;
+          if (head !== 'component' && head !== 'of' && head !== 'props') return null;
+          const L = libId();
+          if (L === null) return null;
+          if (head === 'component') return n.parent === L ? EG_DIRTY : null;
+          if (n.type !== 'instance') return null;
+          if (masterAbove(n.id)) return EG_DIRTY;
+          known(); freshAna();
+          return { kind: 'inst', oldE: ana.entry(n) };
+        }
+        case 'remove': {
+          const n = ownNode(draft.nodes, op.id);
+          if (!n) return null;
+          return n.type === 'page' ? EG_DIRTY : EG_SHRINK;
+        }
+        case 'move': {
+          const n = ownNode(draft.nodes, op.id);
+          if (!n) return null;
+          if (n.type === 'page') return EG_DIRTY;
+          const L = libId();
+          if (L === null) return null;
+          if (n.parent === L || op.parent === L || masterAbove(n.id) || masterAbove(op.parent)) return EG_DIRTY;
+          return null;
+        }
+        default:
+          return null;                                  // setToken: раскрытие от токенов не зависит
+      }
+    },
+    /** После применения. @returns {boolean} могла ли стоимость вырасти */
+    post(plan, op) {
+      if (plan === EG_SHRINK) {
+        exact = false;
+        anaOk = false;
+        return false;
+      }
+      if (plan === EG_DIRTY || total === null) {
+        ana = null; anaOk = false; total = null; mult = null; lib = undefined; log = [];
+        return true;
+      }
+      if (plan.kind === 'plain') {
+        total += plan.delta;
+        anaOk = false;
+        settle();
+        return true;
+      }
+      // 'inst': новый вид экземпляра (create — новый узел, set — он же после правки);
+      // мастера не менялись — записи того же анализа годны
+      const id = op.op === 'create' ? op.node && op.node.id : op.id;
+      const now = ownNode(draft.nodes, id);
+      const newE = now && now.type === 'instance' ? ana.entry(now) : null;
+      total += (newE ? newE.cost : 0) - (plan.oldE ? plan.oldE.cost : 0);
+      expandContrib(plan.oldE, -1, addMult);
+      expandContrib(newE, 1, addMult);
+      settle();
+      return true;
+    },
+    /** Нарушен ли предел сейчас. @returns {null|{cost:number, max:number}} */
+    over() {
+      if (total === null) full();
+      if (total <= MAX_EXPANDED_NODES) return null;
+      if (!exact) {
+        full();
+        if (total <= MAX_EXPANDED_NODES) return null;
+      }
+      if (limit === null) limit = Math.max(MAX_EXPANDED_NODES, expandCost(base));
+      return total > limit ? { cost: total, max: MAX_EXPANDED_NODES } : null;
+    },
+    /** Точка сохранения перед операцией (rebase откатывает не легшую). */
+    save() {
+      return [lib, ana, anaOk, total, exact, mult, log, log.length];
+    },
+    restore(s) {
+      let n;
+      [lib, ana, anaOk, total, exact, mult, log, n] = s;
+      while (log.length > n) {
+        const d = log.pop();
+        const m = log.pop();
+        if (mult) mult.set(m, mult.get(m) - d);
+      }
+    },
+    /** Операция легла — журнал правок mult больше не нужен. */
+    commit() {
+      log = [];
+    },
+    reset() {
+      ana = null; anaOk = false; total = null; mult = null; lib = undefined; log = [];
+    }
+  };
+}
+
+/** Ошибка операции «раскрытие за пределом». */
+function expandErr(what, over) {
+  return opErr('bad-op', `${what}: слишком много вложенных экземпляров — раскрытие дало бы ${bigCount(over.cost)} узлов, предел ${over.max}`,
+    { limit: EXPAND_LIMIT });
+}
+
+/**
+ * applyStep со стражей раскрытия (rebase): операция, после которой раскрытие
+ * вышло бы за предел, откатывается, как не легшая.
+ */
+function applyStepGuarded(draft, op, j, guard) {
+  j.length = 0;
+  let err;
+  let snap = null;
+  try {
+    const plan = guard.pre(op);
+    if (plan) snap = guard.save();
+    err = applyOne(draft, op, j);
+    if (!err && plan && guard.post(plan, op)) {
+      const over = guard.over();
+      if (over) err = expandErr(shown(op.op), over);
+    }
+  } catch (e) {
+    logOnce('apply:throw', 'исключение при применении операций', e);
+    err = opErr('bad-op', 'правку не удалось применить: в операции негодное значение');
+    snap = null;
+    guard.reset();
+  }
+  if (err) {
+    rollbackDraft(draft, j, 0);
+    if (snap) guard.restore(snap);
+  } else if (snap) guard.commit();
   j.length = 0;
   return err;
 }
@@ -3394,22 +4275,39 @@ function stampIds(list) {
  * Иммутабельно применяет операции. Никогда не бросает.
  * @param {object} doc
  * @param {object[]} opList
- * @returns {{doc: object, error?: {code:string, message:string}}} при ошибке возвращается исходный doc.
- *   Коды: not-found · protected-path · bad-node · bad-parent · cycle · bad-op
+ * @param {{checkExpand?:boolean}} [opts] круг 39: `checkExpand` (по умолчанию true) —
+ *   сверять итог пачки с пределом раскрытия экземпляров (MAX_EXPANDED_NODES);
+ *   false — только для переигрывания уже принятого (журнал — источник истины)
+ * @returns {{doc: object, error?: {code:string, message:string, limit?:string}}} при ошибке возвращается исходный doc.
+ *   Коды: not-found · protected-path · bad-node · bad-parent · cycle · bad-op;
+ *   `error.limit` — нарушенный предел: 'depth' (вложенность), 'expand_nodes'
+ *   (круг 39: раскрытие экземпляров больше MAX_EXPANDED_NODES узлов, см. expandCost)
  */
-function applyOps(doc, opList) {
+function applyOps(doc, opList, opts) {
   if (!doc || !doc.nodes) return { doc, error: opErr('not-found', 'нет документа') };
   const list = Array.isArray(opList) ? opList : opList ? [opList] : [];
   if (!list.length) return { doc };
   stampIds(list);   // id создаваемых узлов фиксируем до применения — их увидит invertOps
   const draft = openDraft(doc);
+  // круг 39: пачка атомарна — предел раскрытия сверяется с её итогом; виноватой
+  // называется последняя операция, которая могла раскрытие увеличить
+  const guard = opts && opts.checkExpand === false ? null : expandGuard(doc, draft);
+  let grewAt = -1;
   try {
     for (let i = 0; i < list.length; i++) {
+      const plan = guard ? guard.pre(list[i]) : null;
       const err = applyOne(draft, list[i]);
       if (err) {
         logOnce('apply:' + err.message, `операция ${i} отклонена: ${err.message}`);
         return { doc, error: opErr(err.code, `операция ${i} (${shown(list[i] && list[i].op)}): ${err.message}`, err) };
       }
+      if (plan && guard.post(plan, list[i])) grewAt = i;
+    }
+    const over = grewAt >= 0 ? guard.over() : null;
+    if (over) {
+      const err = expandErr(`операция ${grewAt} (${shown(list[grewAt] && list[grewAt].op)})`, over);
+      logOnce('apply:expand', err.message);
+      return { doc, error: err };
     }
   } catch (e) {
     // круг 16, п.8: наружу — человеческая строка. Сырой текст исключения из движка
@@ -4037,6 +4935,21 @@ const okIndex = (v) => v === undefined || v === null || typeof v === 'number';
 /** Сколько операций сливать между взглядами на часы (Date.now не бесплатен). */
 const BUDGET_CHECK_EVERY = 32;
 
+/* Круг 39: кто в пачке становится родителем (create node.parent, move parent) → индекс
+   последней такой операции — для правила «пустая группа отбрасывается» в rebase.
+   Линейно; rebase зовёт один раз на пачку и лениво — только когда такая группа встретилась. */
+function lastParentIndex(list) {
+  const last = new Map();
+  for (let k = 0; k < list.length; k++) {
+    const op = list[k];
+    if (!op || typeof op !== 'object') continue;
+    const p = op.op === 'create' ? (op.node && typeof op.node === 'object' ? op.node.parent : undefined)
+      : op.op === 'move' ? op.parent : undefined;
+    if (isNodeId(p)) last.set(p, k);
+  }
+  return last;
+}
+
 /**
  * Слияние (SPEC §9.6): операции относительно старой базы → применимые к голове.
  *
@@ -4051,6 +4964,11 @@ const BUDGET_CHECK_EVERY = 32;
  * Исчерпан — остаток операций в `dropped` с `reason:'invalid'`, `limit:'merge_budget'`
  * (DSLTS: транзакция всё равно получает seq, автор видит, что не легло). Без
  * них — без предела и полностью детерминирован.
+ *
+ * Круг 39: `create` с перечисленными детьми («сгруппировать»), у которого после
+ * вычёркивания не осталось ни одного ребёнка, — `dropped` (`removed`; `cycle`, если
+ * живого ребёнка вычеркнул цикл; `invalid`, если в списке не id), если только пачка не
+ * кладёт в этот узел что-то ещё.
  * @param {object} doc голова
  * @param {object[]} opList
  * @param {{tombstones?: Map<string,string|null>|Record<string,string|null>, deadline?: number, budgetMs?: number}} [opts]
@@ -4076,7 +4994,16 @@ function rebase(doc, opList, opts) {
   if (isNum(o.budgetMs)) deadline = Math.min(deadline, Date.now() + Math.max(0, o.budgetMs));
   const cur = openDraft(doc);
   const j = [];
+  // круг 39 (N2): операция, после которой раскрытие экземпляров вышло бы за
+  // предел, — в dropped с limit 'expand_nodes' (как depth и merge_budget)
+  const guard = expandGuard(doc, cur);
   const alive = (id) => ownNode(cur.nodes, id);
+  let lastParent = null;
+  /** пачка после операции i кладёт что-то в узел id */
+  const filledLater = (id, i) => {
+    if (!lastParent) lastParent = lastParentIndex(list);
+    return lastParent.has(id) && lastParent.get(id) > i;
+  };
   /** ближайший живой предок по цепочке надгробий */
   const liveAncestor = (id) => {
     let p = id;
@@ -4140,6 +5067,18 @@ function rebase(doc, opList, opts) {
             // то же, что без удалённого, а не потеря всей правки
             const chain = ancestorIds(cur, parentId);
             const kids = op.node.children.filter((c) => alive(c) && !chain.has(c));
+            /* Круг 39: «сгруппировать» (create с перечисленными детьми, оболочка — wrapOps),
+               у которого вычеркнуты ВСЕ дети, отбрасывается: пустая рамка — не то, о чём
+               просили, а второй транзакцией её убирать — лишняя запись и мигание у всех.
+               Причина — 'removed' (детей удалили), 'cycle' — если кто-то из них вычеркнут
+               как предок родителя, 'invalid' — в списке не id узла (мусор). Исключение: та же пачка кладёт в этот узел что-то ещё
+               (create/move с parent = он) — тогда он не пустой и остаётся (слияние не
+               отказывает остальным операциям пачки). */
+            if (!kids.length && op.node.children.length && !filledLater(node.id, i)) {
+              const was = op.node.children;
+              drop(!was.every(isNodeId) ? 'invalid' : was.some((c) => alive(c)) ? 'cycle' : 'removed');
+              continue;
+            }
             if (kids.length !== op.node.children.length) op = { ...op, node: { ...op.node, children: kids } };
           }
           op = withIndex(cur, op, alive(parentId), null);
@@ -4172,9 +5111,10 @@ function rebase(doc, opList, opts) {
         drop('invalid');
         continue;
     }
-    const err = applyStep(cur, op, j);
+    const err = applyStepGuarded(cur, op, j, guard);
     if (err) {
       // круг 27: нарушенный предел (глубина) — в dropped с limit, как merge_budget
+      // (круг 39: и раскрытие экземпляров — limit 'expand_nodes')
       if (err.limit) out.dropped.push({ index: i, op: raw, reason: 'invalid', limit: err.limit });
       else drop('invalid');
       continue;
@@ -5162,7 +6102,7 @@ function vectorSummary(doc, node) {
   for (const p of node.paths) {
     if (!isObj(p)) continue;
     out.paths++;
-    out.commands += pathCheck(p.d).count;
+    out.commands += pathCheck(p.d, p).count;
     take(p.fill === undefined ? node.fill : p.fill);
     take(p.stroke === undefined ? (isObj(node.stroke) ? node.stroke.color : node.stroke) : p.stroke);
   }
@@ -5369,7 +6309,7 @@ function contrastRatio(hexA, hexB) {
 /* Круг 20 (SPEC §6.1): dead-scale-ref — ссылка на шаг, которого в шкале нет;
    блокирующая: решатель считает такой шаг нулём, и макет уже не тот, что задуман.
    off-scale для чисел остаётся как был — мягкое замечание. */
-const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'dead-scale-ref': 'error', 'bad-children': 'warn', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'off-scale': 'info', 'empty-frame': 'info',
+const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance': 'error', 'unknown-prop': 'error', 'component-cycle': 'error', 'dead-scale-ref': 'error', 'bad-children': 'warn', 'padding-eaten': 'warn', 'no-geometry': 'warn', 'zero-size': 'warn', overlap: 'warn', 'low-contrast': 'warn', 'instance-too-deep': 'warn', 'expand-limit': 'error', 'off-scale': 'info', 'empty-frame': 'info',
   /* Круг 36 (SPEC §11.2): состояния и движение */
   'state-on-page': 'error', 'motion-slow': 'warn', 'dead-motion-ref': 'warn', 'state-no-effect': 'info', 'press-without-hover': 'info',
   /* Круг 37 (SPEC §12.1): векторы и краски */
@@ -5478,6 +6418,16 @@ function validateComponents(doc, add) {
     if (d > MAX_INSTANCE_DEPTH) {
       add('instance-too-deep', n.id, `вложенность экземпляров ${Math.min(d, TOO)} глубже предела ${MAX_INSTANCE_DEPTH}`
         + ` — глубже этого «${componentName(master)}» не раскрывается`);
+    }
+  }
+  /* Круг 39 (N2): раскрытие сверх предела (документ из старого журнала — правкой
+     и импортом такой не получить). Одна строка на документ — на самом дорогом
+     экземпляре: решатель раскрыл не всё, и человек должен прочесть, почему. */
+  if (instances.length) {
+    const over = expandProblem(doc);
+    if (over) {
+      add('expand-limit', over.nodeId || doc.root, `${over.message}: часть экземпляров показана заглушкой`
+        + ` (раскрываются только не дороже ${DEGRADED_INSTANCE_NODES} узлов) — уберите лишние экземпляры или вложенность`);
     }
   }
 }
@@ -5607,7 +6557,7 @@ function validatePaint(doc, node, add) {
       paths.forEach((p, i) => {
         const err = vpathProblem(p, 'paths.' + i);
         if (err) { add('bad-path', node.id, `«${name()}»: ${err}`); return; }
-        commands += pathCheck(p.d).count;
+        commands += pathCheck(p.d, p).count;
         paintRefs(p.fill, `paths.${i}.fill`, refs);
         paintRefs(p.stroke, `paths.${i}.stroke`, refs);
         const fill = resolvePaint(doc, p.fill !== undefined ? p.fill : node.fill);
@@ -6374,7 +7324,7 @@ function repairVector(n, mark) {
   let total = 0;
   for (let i = 0; i < src.length && kept.length < VECTOR_LIMITS.maxPaths; i++) {
     const p = src[i];
-    if (!isObj(p) || typeof p.d !== 'string' || pathCheck(p.d).err || total + p.d.length > VECTOR_LIMITS.maxTotalD) {
+    if (!isObj(p) || typeof p.d !== 'string' || pathCheck(p.d, p).err || total + p.d.length > VECTOR_LIMITS.maxTotalD) {
       mark('paths.' + i);
       continue;
     }
@@ -6543,7 +7493,8 @@ const MAX_IMPORT_NODES = 20000;
  * Не бросает. Документ не меняет.
  * @param {any} doc документ как пришёл (разобранный JSON)
  * @param {{maxNodes?:number}} [opts]
- * @returns {null|{code:'bad-doc', message:string, id?:string, limit?:'depth'|'nodes', max?:number}}
+ * Круг 39: и раскрытие экземпляров не больше MAX_EXPANDED_NODES (`limit:'expand_nodes'`).
+ * @returns {null|{code:'bad-doc', message:string, id?:string, limit?:'depth'|'nodes'|'expand_nodes', max?:number}}
  *   null — годен; иначе первая причина (сервер отвечает 400, оболочка — словами)
  */
 function checkImportDoc(doc, opts) {
@@ -6625,6 +7576,15 @@ function checkImportDoc(doc, opts) {
       for (const c of kids) {
         if (up.has(c)) return bad(`цикл: «${id}» называет ребёнком «${c}» — себя или своего предка`, { id });
       }
+    }
+    /* Круг 39 (N2): раскрытие экземпляров — линейный счёт по мастерам (expandCost).
+       Счёт по сырому документу — оценка сверху для того, что откроет createDoc:
+       тот только выбрасывает рёбра и узлы, а не добавляет. Файл в 37 КБ с
+       цепочкой 9 мастеров по 4 экземпляра раскрывался в 204 тыс. узлов во
+       вкладке каждого участника. */
+    const over = expandProblem(doc);
+    if (over) {
+      return bad(over.message, { ...(over.nodeId ? { id: over.nodeId } : {}), limit: EXPAND_LIMIT, max: MAX_EXPANDED_NODES });
     }
     return null;
   } catch (e) {
@@ -8218,7 +9178,7 @@ class Stage {
     });
     if (!s) return g;
     for (const p of Array.isArray(node.paths) ? node.paths : []) {
-      if (!isObj(p) || typeof p.d !== 'string' || pathCheck(p.d).err) continue;
+      if (!isObj(p) || typeof p.d !== 'string' || pathCheck(p.d, p).err) continue;
       const pf = p.fill !== undefined ? (paint(p.fill) || 'none') : undefined;
       const ps = p.stroke !== undefined ? (paint(p.stroke) || 'none') : undefined;
       const hasStroke = ps !== undefined ? ps !== 'none' : !!stroke;
@@ -10683,42 +11643,22 @@ class Stage {
     })];
   }
 
+  /**
+   * ⌘/Ctrl+D на холсте. Круг 39 (N3): та же единственная реализация, что у
+   * команды таблицы оболочки, — duplicateOps (ссылки пропсов, копия мастера,
+   * «родитель + ребёнок», сдвиг в свободной рамке). Оболочка может перехватить
+   * клавишу сама (opts.onDuplicate) — тогда подпись и слова итога её.
+   */
   _duplicate(sel) {
     if (!sel.length) return;
-    const doc = this.doc;
-    const list = [];
-    const newIds = [];
-    // потомок выделенного узла копируется вместе с ним — отдельно его дублировать
-    // значит получить подпись дважды. Тот же отбор, что у удаления.
-    const roots = sel.filter((id) => !ancestors(doc, id).some((a) => sel.includes(a.id)));
-    for (const id of roots) {
-      const node = doc.nodes[id];
-      if (!node || !node.parent) continue;
-      const clone = cloneSubtree(doc, id);
-      if (!clone.rootId) continue;
-      const parent = ownNode(doc.nodes, node.parent);
-      const index = (parent.children || []).indexOf(id) + 1;
-      clone.nodes.forEach((n, i) => {
-        const flat = { ...n };
-        if (flat.children) flat.children = [];
-        if (i === 0) {
-          flat.name = (flat.name || 'Узел') + ' копия';
-          const L = parent ? resolveLayout(doc, parent.layout) : DEFAULT_LAYOUT;
-          if (parent.id === doc.root || L.mode === 'none') {
-            const pos = flat.pos || { x: 0, y: 0 };
-            flat.pos = { x: r2(pos.x + 16), y: r2(pos.y + 16) };
-          } else if (flat.override) {
-            flat.override = { ...flat.override, x: r2(flat.override.x + 16), y: r2(flat.override.y + 16) };
-          }
-          list.push(ops.create(flat, index));
-          newIds.push(flat.id);
-        } else {
-          list.push(ops.create(flat));
-        }
-      });
+    if (typeof this.opts.onDuplicate === 'function') {
+      try { this.opts.onDuplicate(sel.slice()); } catch (err) { this._fail('duplicate', err); }
+      return;
     }
-    this._commit(list, 'Дублировать');
-    if (newIds.length) this._emitSelect(newIds);
+    const r = duplicateOps(this.doc, sel);
+    if (r.error || !r.ops.length) return;
+    this._commit(r.ops, r.roots.length > 1 ? 'Дублировать слои' : 'Дублировать слой');
+    if (r.ids.length) this._emitSelect(r.ids);
   }
 }
 
@@ -10728,6 +11668,8 @@ export {
   splitOps, SPLIT_MAX_OPS, SPLIT_MAX_BYTES,
   /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */
   ENGINE_VERSION, rebase, collectTombstones, hashDoc, uid,
+  /* Круг 39 (N1): какие версии движка этот читает — */
+  ENGINE_MIN_READ, engineReadable,
   /* Круг 25: строки для документа и журнала — обрезка по кодовым точкам, санитайзер;
      годность id узла (непустая строка, не ключ Object.prototype) — */
   cutText, cleanText, isNodeId,
@@ -10743,6 +11685,8 @@ export {
   hashGeometry, nodeById, ancestors, isArtboard, artboards, subtreeIds, cloneSubtree,
   resolveTarget, resolveColor, resolveTextStyle, contrastRatio, sizeSpec, normalizeLayout,
   placeholderName, displayName,
+  /* Круг 39 (N3): дублирование — одна реализация на оболочку и холст — */
+  duplicateOps, DUPLICATE_OFFSET,
   NODE_TYPES, DEFAULT_TOKENS,
   /* Круг 19 (SPEC §5): компоненты. Библиотека и миграция — */
   isLibrary, libraryId, libraryNode, ensureLibrary, ensureLibraryOps,
@@ -10752,6 +11696,8 @@ export {
   canMakeComponent, makeComponentOps, instanceOps, detachInstanceOps,
   /* раскрытие и пределы — */
   expandInstance, expandDoc, MAX_INSTANCE_DEPTH, PROP_KINDS, LIBRARY_ROLE,
+  /* Круг 39 (N2): стоимость раскрытия (линейно, без раскрытия) и её предел на документ — */
+  expandCost, expandProblem, MAX_EXPANDED_NODES, DEGRADED_INSTANCE_NODES, EXPAND_LIMIT,
   /* Круг 20 (SPEC §6): шкалы как ссылки. Разрешение — ЕДИНСТВЕННЫЙ способ
      прочитать отступ или скругление числом (мозгу, оболочке, экспорту) — */
   resolveScale, resolveLayout, resolveRadius,
@@ -10768,5 +11714,7 @@ export {
   /* Круг 37 (SPEC §12): векторные иллюстрации — разбор и геометрия путей, краски
      с градиентами, сводка вектора, свободная рамка, пример иллюстрации — */
   parsePath, formatPath, pathBounds, fitVector, translatePath, resolvePaint, paintCss, paintProblem,
-  vectorSummary, isFreeFrame, sampleIllustration, VECTOR_LIMITS, GRADIENT_KINDS
+  vectorSummary, isFreeFrame, sampleIllustration, VECTOR_LIMITS, GRADIENT_KINDS,
+  /* Круг 39: кеш проверки путей с пределом по памяти — */
+  pathCacheStats, PATH_CACHE_CHARS
 };

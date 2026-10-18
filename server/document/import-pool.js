@@ -8,23 +8,26 @@
  * готовится сразу в главном потоке (миллисекунды — передача в поток дороже). Поток упал (нет
  * памяти, сбой) — его задача получает 503, на его место заводится новый. Поток завести не
  * удалось вовсе (среда без worker_threads) — подготовка в главном потоке, по одной (тот же
- * семафор), как предупреждение в лог.
+ * семафор), как предупреждение в лог. Круг 35: у задачи — срок `taskMs` (IMPORT_TASK_MS, очередь и
+ * подготовка вместе): не уложилась — 503 `cause:'import_timeout'`, поток с ней останавливается и
+ * заменяется (зависший поток не держит запрос и место в пуле вечно).
  */
 
 import { Worker } from 'node:worker_threads';
 import { DocError, badRequest, busy, unavailable } from './errors.js';
 import { prepareProject } from './importer.js';
-import { IMPORT_CONCURRENCY, IMPORT_QUEUE, IMPORT_INLINE_BYTES, BUSY_RETRY_S } from './limits.js';
+import { IMPORT_CONCURRENCY, IMPORT_QUEUE, IMPORT_INLINE_BYTES, IMPORT_TASK_MS, BUSY_RETRY_S } from './limits.js';
 
 const WORKER_URL = new URL('./import-worker.js', import.meta.url);
 /** Куча потока: документ в 4 МБ JSON (20 тыс. узлов) — сотни МБ объектов на пике; с запасом. */
 const WORKER_HEAP_MB = 1024;
 
 /**
- * @param {{size?: number, queue?: number, inlineBytes?: number, opts?: object, log?: {warn: Function}}} [o]
- *   `opts` — пределы prepareProject (maxNodes, maxDocBytes)
+ * @param {{size?: number, queue?: number, inlineBytes?: number, taskMs?: number, workerUrl?: URL, opts?: object, log?: {warn: Function}}} [o]
+ *   `opts` — пределы prepareProject (maxNodes, maxDocBytes); `taskMs` — срок задачи (очередь +
+ *   подготовка, круг 35; 0 — без срока); `workerUrl` — модуль потока (тестам: падающий, зависающий)
  */
-export function createImportPool({ size = IMPORT_CONCURRENCY, queue = IMPORT_QUEUE, inlineBytes = IMPORT_INLINE_BYTES, opts = {}, log = console } = {}) {
+export function createImportPool({ size = IMPORT_CONCURRENCY, queue = IMPORT_QUEUE, inlineBytes = IMPORT_INLINE_BYTES, taskMs = IMPORT_TASK_MS, workerUrl = WORKER_URL, opts = {}, log = console } = {}) {
   const max = Math.max(1, Math.floor(size));
   /** @type {{w: Worker, task: object|null}[]} */
   const workers = [];
@@ -33,7 +36,7 @@ export function createImportPool({ size = IMPORT_CONCURRENCY, queue = IMPORT_QUE
   let closed = false;
   let noWorkers = false;
   let inlineActive = 0;
-  const stats = { inline: 0, worker: 0, refused: 0, crashed: 0, peakWaiting: 0 };
+  const stats = { inline: 0, worker: 0, refused: 0, crashed: 0, timedOut: 0, peakWaiting: 0 };
 
   const toError = (err) => new DocError(err.status || 500, err.code || 'internal', err.message || 'импорт не подготовлен', {
     retryable: err.retryable, detail: err.detail
@@ -41,30 +44,36 @@ export function createImportPool({ size = IMPORT_CONCURRENCY, queue = IMPORT_QUE
 
   function spawn() {
     const slot = { w: null, task: null };
-    const w = new Worker(WORKER_URL, { workerData: { opts }, resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
+    const w = new Worker(workerUrl, { workerData: { opts }, resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
     w.unref();
     slot.w = w;
     w.on('message', (m) => {
       const t = slot.task;
       if (!t || !m || m.id !== t.id) return;
       slot.task = null;
+      t.slot = null;
       for (const warn of m.warns || []) log.warn(warn);
       if (m.ok) t.resolve(m.out);
       else t.reject(toError(m.error || {}));
       next();
     });
+    let gone = false;
     const dead = (why) => {
+      if (gone) return;
+      gone = true;
       const i = workers.indexOf(slot);
       if (i >= 0) workers.splice(i, 1);
       const t = slot.task;
       slot.task = null;
       if (t) {
+        t.slot = null;
         stats.crashed += 1;
         log.warn(`[document/import] поток подготовки импорта упал (${why}) — запрос получает 503`);
         t.reject(unavailable('импорт не подготовлен: поток подготовки упал — повторите позже', { detail: { cause: 'import_worker' } }));
       }
       next();
     };
+    slot.dead = dead;
     w.on('error', (e) => dead((e && (e.code || e.message)) || 'ошибка'));
     w.on('exit', (code) => { if (!closed) dead(`выход ${code}`); });
     workers.push(slot);
@@ -103,6 +112,7 @@ export function createImportPool({ size = IMPORT_CONCURRENCY, queue = IMPORT_QUE
       if (!slot) return;
       const t = waiting.shift();
       slot.task = t;
+      t.slot = slot;
       stats.worker += 1;
       // байты тела — передачей (без копии); Buffer из пула node копируется в свой ArrayBuffer
       const ab = t.buf.byteOffset === 0 && t.buf.byteLength === t.buf.buffer.byteLength ? t.buf.buffer : t.buf.buffer.slice(t.buf.byteOffset, t.buf.byteOffset + t.buf.byteLength);
@@ -145,7 +155,34 @@ export function createImportPool({ size = IMPORT_CONCURRENCY, queue = IMPORT_QUE
         return Promise.reject(busy('сервер готовит много импортов сразу — повторите чуть позже', { retryAfter: BUSY_RETRY_S, detail: { limit: 'import_queue' } }));
       }
       return new Promise((resolve, reject) => {
-        waiting.push({ id: ++seq, buf, resolve, reject });
+        let timer = null;
+        const settle = (fn) => (v) => {
+          if (task.settled) return;
+          task.settled = true;
+          if (timer) clearTimeout(timer);
+          fn(v);
+        };
+        const task = { id: ++seq, buf, resolve: settle(resolve), reject: settle(reject), slot: null, settled: false };
+        // круг 35: у задачи есть срок — запрос не висит вечно, что бы ни случилось с потоком
+        if (taskMs > 0) {
+          timer = setTimeout(() => {
+            if (task.settled) return;
+            stats.timedOut += 1;
+            const i = waiting.indexOf(task);
+            if (i >= 0) waiting.splice(i, 1);
+            const slot = task.slot;
+            log.warn(`[document/import] подготовка импорта не уложилась в ${taskMs} мс — запрос получает 503${slot ? ', поток заменяется' : ''}`);
+            task.reject(unavailable(`импорт не подготовлен за ${Math.round(taskMs / 1000)} с — повторите позже`, { detail: { cause: 'import_timeout' } }));
+            if (slot) {
+              // поток занят чужой (уже отвеченной) задачей — останавливаем, на его место — новый
+              slot.task = null;
+              slot.dead('срок задачи');
+              slot.w.terminate().catch(() => {});
+            }
+          }, taskMs);
+          // таймер не unref: задача в полёте — работа, её ответ должен дождаться процесс
+        }
+        waiting.push(task);
         if (waiting.length > stats.peakWaiting) stats.peakWaiting = waiting.length;
         next();
       });

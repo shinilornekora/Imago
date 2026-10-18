@@ -69,6 +69,7 @@ services:
       SNAPSHOT_CACHE_BYTES: ${SNAPSHOT_CACHE_BYTES:-134217728}
       IMPORT_CONCURRENCY: ${IMPORT_CONCURRENCY:-2}
       IMPORT_QUEUE: ${IMPORT_QUEUE:-8}
+      IMPORT_TASK_MS: ${IMPORT_TASK_MS:-30000}
       # общий с orchestrator секрет для /api/internal/traces; заглушку change-me сервис
       # не принимает — тогда трассы просто не пишутся (см. deploy/env.example)
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-change-me}
@@ -112,6 +113,8 @@ services:
       POOL_QUEUE_MAX: ${POOL_QUEUE_MAX:-32}
       POOL_QUEUE_WAIT_MS: ${POOL_QUEUE_WAIT_MS:-30000}
       QUEUE_MAX: ${QUEUE_MAX:-4}
+      DSLR_FULL_CONCURRENCY: ${DSLR_FULL_CONCURRENCY:-4}
+      DSLR_FULL_BYTES: ${DSLR_FULL_BYTES:-67108864}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

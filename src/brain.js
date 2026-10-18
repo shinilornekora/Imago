@@ -2446,7 +2446,7 @@ const RE_UNDO_DOUBT = /^(убери|убрать|сотри|стереть|уд�
  */
 export function recognizeUndoDoubt(utterance) {
   if (recognizeAction(utterance)) return null;
-  for (const core of actionCores(utterance)) {
+  for (const core of actionCores(utterance, 40)) {
     if (core && core.length <= 40 && RE_UNDO_DOUBT.test(core)) {
       return 'Не понял: отменить последнюю правку или удалить последний элемент?'
         + ' Скажите «отмени» — откачу правку, или назовите, что именно удалить.';
@@ -2460,25 +2460,43 @@ export function recognizeUndoDoubt(utterance) {
  * Обе формы важны: «отмени, пожалуйста» надо очистить, а «не так» очисткой ломается
  * («так» — слово-затычка), поэтому сверяем и исходную форму тоже.
  */
-function actionCores(utterance) {
+/** Круг 39: ядра длиннее не нужны никому из вызывающих (отмена — до 40, компоненты — до 90). */
+const ACTION_CORE_MAX = 300;
+
+function actionCores(utterance, maxLen = ACTION_CORE_MAX) {
   const flat = String(utterance == null ? '' : utterance)
     .toLowerCase().replace(/ё/g, 'е')
     .replace(/[.,!?;:…"«»()\[\]\-–—]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   const words = flat.split(' ').filter(Boolean);
-  if (!words.length) return [];
+  const n = words.length;
+  if (!n) return [];
   // сколько затычек можно снять с каждого края: «всё не так» → снимать «всё» надо, «так» нельзя,
   // поэтому проверяем ВСЕ комбинации обрезки, а не одну
   let lead = 0;
-  while (lead < words.length - 1 && ACTION_EDGE_NOISE.has(words[lead])) lead++;
+  while (lead < n - 1 && ACTION_EDGE_NOISE.has(words[lead])) lead++;
   let trail = 0;
-  while (trail < words.length - 1 - lead && ACTION_EDGE_NOISE.has(words[words.length - 1 - trail])) trail++;
+  while (trail < n - 1 - lead && ACTION_EDGE_NOISE.has(words[n - 1 - trail])) trail++;
+  /* Круг 39 (N5б): ядро длиннее maxLen вызывающему не нужно (он сверяет только короткие), а
+     перебор всех обрезок «а а а … а» (5000 знаков) склеивал n строк по n слов — 0,1–0,3 с
+     главного потока на реплику. Теперь длина ядра — по префиксным суммам, без склейки, и
+     перебираются только обрезки, оставляющие не больше maxWords слов: пар — не больше
+     maxWords², склеек — только годных по длине. */
+  const at = new Array(n + 1);
+  at[0] = 0;
+  for (let k = 0; k < n; k++) at[k + 1] = at[k] + words[k].length + 1;
+  const spanLen = (i, end) => at[end] - at[i] - 1;   // «слово слово» от i до end (не включая)
+  const maxWords = Math.floor((maxLen + 1) / 2);      // слово ≥ 1 знака и пробел
   const out = [];
+  const seen = new Set();
   for (let i = 0; i <= lead; i++) {
-    for (let j = 0; j <= trail; j++) {
-      const core = words.slice(i, words.length - j).join(' ');
-      if (core && !out.includes(core)) out.push(core);
+    // слов в ядре: n − i − j ≤ maxWords  ⇒  j ≥ n − i − maxWords
+    for (let j = Math.max(0, n - i - maxWords); j <= trail; j++) {
+      const end = n - j;
+      if (end <= i || spanLen(i, end) > maxLen) continue;
+      const core = words.slice(i, end).join(' ');
+      if (!seen.has(core)) { seen.add(core); out.push(core); }
     }
   }
   return out;
@@ -2495,7 +2513,7 @@ function actionCores(utterance) {
  * @returns {'undo'|'redo'|null}
  */
 export function recognizeAction(utterance) {
-  for (const core of actionCores(utterance)) {
+  for (const core of actionCores(utterance, 40)) {
     if (!core || core.length > 40) continue;
     if (REDO_PHRASES.has(core)) return 'redo';
     if (UNDO_PHRASES.has(core) || RE_UNDO_CMD.test(core) || RE_UNDO_ERASE.test(core)) return 'undo';
@@ -2811,7 +2829,7 @@ function originalCase(utterance, lowered) {
  * @returns {{kind:'make'|'detach', what:string|null, name:string, soft:boolean}|null}
  */
 export function recognizeComponentIntent(utterance) {
-  for (const core of actionCores(utterance)) {
+  for (const core of actionCores(utterance, 90)) {
     if (!core || core.length > 90) continue;
     if (RE_LAYOUT_WORD.test(core)) continue;
     const mk = (what, name, soft = false) => ({
@@ -5332,6 +5350,46 @@ function artSeriesStem(name) {
   return m ? m[1].trim() : '';
 }
 
+/**
+ * Круг 39 (N5г): одно имя — один слой. Группа модели распадается на несколько слоёв (повёрнутая
+ * деталь — своим слоем, предел контуров/длины пути, детали группы вперемешку с чужими), и в
+ * списке слоёв стояли два соседних «Крошки» — непонятно, какой из них что. Теперь: слой из одной
+ * детали, чьё имя совпало с чужим, зовётся именем самой детали («Крошка 1»); остальные совпадения
+ * — с номером части («Крошки 2»). Имена сверяются без регистра; первый слой имени сохраняет его.
+ * @param {Array<{name: string, parts: Array<{name: string}>}>} layers
+ */
+function uniqueArtLayerNames(layers) {
+  const keyOf = (n) => String(n || '').trim().toLowerCase();
+  const count = new Map();
+  for (const l of layers) count.set(keyOf(l.name), (count.get(keyOf(l.name)) || 0) + 1);
+  if (![...count.values()].some((n) => n > 1)) return;
+  // одиночная деталь под чужим (групповым) именем — своим именем, если оно ещё свободно
+  const taken = new Set(layers.map((l) => keyOf(l.name)));
+  for (const l of layers) {
+    if (count.get(keyOf(l.name)) < 2 || l.parts.length !== 1) continue;
+    const own = String(l.parts[0].name || '').trim();
+    if (!own || taken.has(keyOf(own))) continue;
+    count.set(keyOf(l.name), count.get(keyOf(l.name)) - 1);
+    l.name = own;
+    taken.add(keyOf(own));
+    count.set(keyOf(own), 1);
+  }
+  // оставшиеся совпадения — с номером части; первый слой имени — без номера
+  const seen = new Map();
+  for (const l of layers) {
+    const k = keyOf(l.name);
+    if (count.get(k) < 2) continue;
+    const n = (seen.get(k) || 0) + 1;
+    seen.set(k, n);
+    if (n === 1) continue;
+    let m = n;
+    let name = `${l.name} ${m}`;
+    while (taken.has(keyOf(name))) name = `${l.name} ${++m}`;
+    l.name = name;
+    taken.add(keyOf(name));
+  }
+}
+
 /** Узел-вектор по набору контуров: viewBox, pos и size — по их bbox в координатах холста. */
 function fitArtVector(vpaths, tools) {
   const b = tools.box(vpaths);
@@ -5441,6 +5499,8 @@ export function compileIllustration(raw, { doc = null, engine = null, warn = nul
     layers.splice(best, 0, { key: a.key, parts: a.parts.concat(b.parts), rotate: 0, name: a.name });
   }
 
+  uniqueArtLayerNames(layers);
+
   // рамка: холст 1:1 или вписан в заданный размер
   const W = box && Number(box.w) > 0 ? Number(box.w) : cw;
   const H = box && Number(box.h) > 0 ? Number(box.h) : ch;
@@ -5466,9 +5526,9 @@ export function compileIllustration(raw, { doc = null, engine = null, warn = nul
   }
   const spec = {
     type: 'frame', name: title,
-    layout: { mode: 'none', gap: 0, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false },
+    layout: artFrameLayout(doc, engine),
     size: { w: { mode: 'fixed', value: r2(W) }, h: { mode: 'fixed', value: r2(H) } },
-    radius: 0, clip: true, role: 'illustration', children,
+    radius: onScale(doc, 0, 'radii', engine), clip: true, role: 'illustration', children,
   };
   const bg = data.background != null ? artPaint(data.background, ctx) : undefined;
   if (bg) spec.fill = bg;
@@ -5580,6 +5640,19 @@ const ART_PATCH_RULES = `ПРАВКА ИЛЛЮСТРАЦИЙ (рамки «free�
 
 /* — иллюстрация и деталь в дереве (tree и create патча) — */
 
+/**
+ * Круг 39 (N5в, SPEC §6): раскладка рамки-иллюстрации — нули ссылками на шаг шкалы
+ * (`spacing.0`), а не числами: иначе свежий рисунок при следующем открытии выглядел
+ * «документом прежней версии» и получал системную миграцию формата. Шкалы без нуля нет —
+ * число как есть (мимо шкалы и так).
+ */
+function artFrameLayout(doc, engine) {
+  return {
+    mode: 'none', gap: onScale(doc, 0, 'spacing', engine), padding: paddingOnScale(doc, { t: 0, r: 0, b: 0, l: 0 }, engine),
+    align: 'start', justify: 'start', wrap: false,
+  };
+}
+
 /** Слова модели для узла-картинки. */
 const ART_NODE_TYPES = new Set(['illustration', 'art', 'artwork', 'drawing', 'иллюстрация', 'рисунок', 'mascot', 'маскот']);
 /** Размер картинки, если модель его не задала или задала «по содержимому». */
@@ -5618,9 +5691,9 @@ function treeIllustration(raw, { doc, engine, note, bud }) {
   } else {
     spec = {
       type: 'frame', name,
-      layout: { mode: 'none', gap: 0, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false },
+      layout: artFrameLayout(doc, engine),
       size: { w: { mode: 'fixed', value: w }, h: { mode: 'fixed', value: h } },
-      radius: 0, clip: true, role: 'illustration', children: [],
+      radius: onScale(doc, 0, 'radii', engine), clip: true, role: 'illustration', children: [],
       $art: { parts: 0, paths: 0, blocking: [], human: [], pending: true },
     };
     note(`Картинка «${name}» не нарисована — на её месте пустая рамка ${w}×${h}. Скажите «нарисуй ${name.toLowerCase()}», чтобы дорисовать`);
@@ -6502,10 +6575,23 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     runs.sort((a, b) => (deepFirst ? b.depth - a.depth : a.depth - b.depth) || (b.saves - a.saves));
     return runs;
   };
+  /* Круг 39: заметка о свёрнутом диапазоне — за O(1). collapseTail зовёт её на КАЖДОМ шаге
+     сдвига границы, и прежние `slice` + `map` имён + `reduce` стоимостей давали O(n²) на ряд из
+     n однотипных узлов: выжимка документа в 14 тыс. узлов строилась 14 с (из 18 с всей команды). */
+  const nameAt = (parent, i) => { const e = parent.children[i]; return nodeOf(doc, e.id).name || e.id; };
+  const costBetween = (parent, from, to) => {
+    if (!parent.pre) {
+      parent.pre = new Array(parent.children.length + 1);
+      parent.pre[0] = 0;
+      parent.children.forEach((e, i) => { parent.pre[i + 1] = parent.pre[i] + e.cost; });
+    }
+    return parent.pre[to] - parent.pre[from];
+  };
   const runNote = (parent, from, to, why) => {
-    const hidden = parent.children.slice(from, to);
-    const names = hidden.map((e) => nodeOf(doc, e.id).name || e.id);
-    const inner = hidden.reduce((sum, e) => sum + e.cost, 0);
+    const count = to - from;
+    const first = nameAt(parent, from);
+    const last = nameAt(parent, to - 1);
+    const inner = costBetween(parent, from, to);
     const pad = '  '.repeat(parent.depth + 1);
     /**
      * Круг 15, п.8: обещания «спроси подробности» тут больше нет — операции «разверни поддерево»
@@ -6516,8 +6602,8 @@ export function describeDoc(doc, scopeIds, opts = {}) {
      * ИМЕНИ во всём документе, а не только по строкам выжимки, так что свёрнутый узел вполне
      * адресуем — его надо назвать.
      */
-    return `${pad}… ещё ${hidden.length} узл(ов) свёрнуто ${why}, около ${inner} знаков `
-      + `(«${names[0]}» … «${names[names.length - 1]}»). Их можно назвать по имени: цель ищется `
+    return `${pad}… ещё ${count} узл(ов) свёрнуто ${why}, около ${inner} знаков `
+      + `(«${first}» … «${last}»). Их можно назвать по имени: цель ищется `
       + 'по всему документу, а не только по этим строкам.';
   };
   const applyRuns = (eligible, keeps, deepFirst, why) => {
@@ -6559,10 +6645,8 @@ export function describeDoc(doc, scopeIds, opts = {}) {
   for (const t of tops) scan(t);
   candidates.sort((a, b) => (Number(b.far) - Number(a.far)) || (b.depth - a.depth) || (b.saves - a.saves));
   const collapsedNote = (parent, from, to) => {
-    const hidden = parent.children.slice(from, to);
-    const names = hidden.map((e) => nodeOf(doc, e.id).name || e.id);
     const pad = '  '.repeat(parent.depth + 1);
-    return `${pad}… ещё ${hidden.length} таких же узлов свёрнуто («${names[0]}» … «${names[names.length - 1]}»)`;
+    return `${pad}… ещё ${to - from} таких же узлов свёрнуто («${nameAt(parent, from)}» … «${nameAt(parent, to - 1)}»)`;
   };
   for (const c of candidates) {
     if (total <= budget) break;
@@ -12961,6 +13045,50 @@ function repairPalette(doc, engine, touched = new Set()) {
   return { ops, fixed, stuck: [...new Set([...[...stuck].map((r) => `цвет «${ruToken('colors', r)}»`), ...left])] };
 }
 
+/**
+ * Круг 39 (N2): нарушение предела раскрытия экземпляров после правки — или null.
+ * Движок без `expandProblem` (прежнее ядро, заглушка в тестах) — null: проверять нечем.
+ * Документ, УЖЕ бывший сверх предела (прежней версии), правке не запирается: нельзя только
+ * раздувать его дальше (стоимость выросла) — как `doc_nodes` у секвенсора.
+ * @returns {null|{message: string, cost: number, max: number, limit?: string, nodeId?: string|null}}
+ */
+export function expandOverflow(engine, before, after) {
+  if (!engine || typeof engine.expandProblem !== 'function' || !after) return null;
+  let p = null;
+  try { p = engine.expandProblem(after); } catch { return null; }
+  if (!p) return null;
+  const max = Number.isFinite(p.max) ? p.max : Number(engine.MAX_EXPANDED_NODES) || 0;
+  if (before && typeof engine.expandCost === 'function') {
+    try {
+      const was = engine.expandCost(before);
+      const now = Number.isFinite(p.cost) || p.cost === Infinity ? p.cost : engine.expandCost(after);
+      if (max && was > max && now <= was) return null;
+    } catch { /* считаем нарушением */ }
+  }
+  return {
+    message: String(p.message || `раскрытие экземпляров больше предела ${max}`),
+    cost: p.cost, max, limit: p.limit, nodeId: p.nodeId || null,
+  };
+}
+
+/**
+ * Круг 39 (N2): попытка, отвергнутая за предел раскрытия: человеку — что не так и что делать,
+ * модели (круг починки) — нарушение `expand-limit` с объяснением; не починилось — `not_applied`.
+ */
+function expandRefused(out, over) {
+  const why = String(over.message || 'слишком много вложенных экземпляров').replace(/[.\s]+$/u, '');
+  const human = `${cap(why)}. Правка не записана: вложите меньше экземпляров друг в друга или`
+    + ' соберите повторяющееся без лишней вложенности компонентов';
+  out.fatal = ERR('model', human, { code: 'not_applied', limit: over.limit || 'expand_nodes' });
+  out.problems.push(human);
+  out.blocking.push(`Нарушение expand-limit: ${why}${over.max ? ` (предел ${over.max} раскрытых узлов)` : ''}.`
+    + ' Экземпляры компонентов раскрываются в узлы, вложенные экземпляры перемножаются. Не вкладывай экземпляры'
+    + ' мастеров друг в друга цепочкой и не множь их: верни правку с меньшим числом экземпляров'
+    + ' (или обычными узлами без компонентов).');
+  out.expandLimit = { ...(Number.isFinite(over.cost) ? { cost: over.cost } : {}), ...(over.max ? { max: over.max } : {}) };
+  return out;
+}
+
 function materialize({ engine, doc, data, intent, scope, placement, persona, baseline, geo: baseGeo = null, group = false, said = '' }) {
   const warnings = [];
   const warn = (m) => { if (m && !warnings.includes(m)) warnings.push(m); };
@@ -13030,6 +13158,12 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
   if (!applied || applied.error || !applied.doc) {
     // core после правок отдаёт error объектом {code, message}, раньше была строка — принимаем обе формы
     const err = applied && applied.error;
+    /* Круг 39 (N2): ядро само отказало пачке за пределом раскрытия (`limit: 'expand_nodes'`) —
+       то же нарушение, что ниже: для круга починки и человеку словами, а не «операции не легли». */
+    if (err && typeof err === 'object' && err.limit === ((engine && engine.EXPAND_LIMIT) || 'expand_nodes')) {
+      const message = String(err.message || '').replace(/^операция \d+ \([^)]*\):\s*/u, '') || 'слишком много вложенных экземпляров';
+      return expandRefused(out, { message, max: Number(engine && engine.MAX_EXPANDED_NODES) || null, limit: err.limit });
+    }
     const msg = !err ? 'операции не применились'
       : typeof err === 'string' ? err
         : [err.message, err.code ? `(${err.code})` : ''].filter(Boolean).join(' ') || JSON.stringify(err);
@@ -13039,9 +13173,23 @@ function materialize({ engine, doc, data, intent, scope, placement, persona, bas
     return out;
   }
 
+  /* Круг 39 (N2): DSLV не принимает патч, после которого раскрытие экземпляров выходит за предел
+   * ядра (MAX_EXPANDED_NODES): такую транзакцию Document service всё равно отбросит
+   * (`dropped … limit:'expand_nodes'`), а решатель и отрисовка у каждого участника её не раскроют.
+   * Это нарушение для круга починки (модели — что не так и как поправить); не починилось —
+   * правка не записывается. Раскладку такого документа не считаем вовсе: она и есть бомба. */
+  const over = expandOverflow(engine, doc, applied.doc);
+  if (over) return expandRefused(out, over);
+
   let geo = safeSolve(engine, applied.doc);
   const base = baseline || new Set();
-  let fresh = safeValidate(engine, applied.doc, geo).filter((v) => !base.has(violationKey(v)));
+  /* Круг 39 (стыковка N2): expandOverflow пропустил правку, а validate всё равно говорит
+     `expand-limit` — значит, документ был сверх предела ДО команды (прежний журнал) и правка его
+     не раздула. Это не нарушение агента: ключ замечания меняется вместе со стоимостью и самым
+     дорогим экземпляром, и сверка с baseline его не узнаёт — иначе удаление в таком документе
+     шло бы в круг починки («уберите лишние экземпляры») и в «Проверку макета» как вина правки. */
+  let fresh = safeValidate(engine, applied.doc, geo)
+    .filter((v) => !base.has(violationKey(v)) && !(v && v.code === 'expand-limit'));
 
   /**
    * Круг 16, п.3: палитра, в которой текст не читается, — негодный ответ модели, а не

@@ -104,6 +104,24 @@ const MIGRATION_LOCK = 728208;
 /** Имя файла миграции: номер, имя, .sql или .mjs. */
 const MIGRATION_RE = /^\d{3,}_[\w.-]+\.(sql|mjs)$/;
 const CHANNEL_RE = /^[a-z_][a-z0-9_]{0,53}$/;
+/** application_name сеансов сервиса по умолчанию (круг 35: свои сеансы отличаются от чужих). */
+export const APP_NAME = 'imago-document';
+/** Код ошибки «база пуста или в неё идёт восстановление — запросы не идут» (круг 35; viaStorage → 503 schema). */
+export const SCHEMA_WAIT = 'IMAGO_SCHEMA_WAIT';
+/** Метка дозаполнения, которое ведёт другой экземпляр (health `detail.backfill.by`). */
+export const FILL_BY_OTHER = 'другой экземпляр';
+/** Таблицы схемы: у каждой есть первичный ключ; нет — схема неполна (восстановление посреди, круг 35). */
+const KEYED_TABLES = ['schema_migrations', 'projects', 'operations', 'snapshots', 'project_epochs', 'traces'];
+/**
+ * Триггеры схемы по миграциям, которые их ставят (круг 39): миграция учтена, а триггера нет —
+ * схема неполна (pg_dump ставит триггеры последними, после ключей), `restore`.
+ */
+const MIGRATION_TRIGGERS = [
+  ['002_chain_epoch.sql', 'operations', 'operations_chain'],
+  ['002_chain_epoch.sql', 'snapshots', 'snapshots_chain'],
+  ['009_ops_size.mjs', 'operations', 'operations_size'],
+  ['014_snapshot_engine.sql', 'snapshots', 'snapshots_engine']
+];
 /** Полезная нагрузка NOTIFY по умолчанию в Postgres — меньше 8000 байт. */
 export const NOTIFY_MAX_BYTES = 7999;
 /** Эфемерных сообщений в очереди соединения слушателя — больше не копим (база не успевает). */
@@ -341,7 +359,8 @@ export function createPgStorage(opts = {}) {
     keepAlive: true,
     keepAliveInitialDelayMillis: KEEPALIVE_MS,
     ...(opts.options ? { options: opts.options } : {}),
-    ...(opts.applicationName ? { application_name: String(opts.applicationName).slice(0, 56) } : {}),
+    // круг 35: свои сеансы видно по имени — сверка схемы во время восстановления отличает их от чужих
+    application_name: String(opts.applicationName || APP_NAME).slice(0, 56),
     // сервер без базы должен отвечать 503, а не висеть: ждём подключения не дольше 5 с
     connectionTimeoutMillis: opts.connectionTimeoutMillis || 5000
   };
@@ -349,7 +368,9 @@ export function createPgStorage(opts = {}) {
   const pool = opts.pool || new pg.Pool({
     ...base,
     max: poolMax,
-    ...(dbTimeoutMs > 0 ? { statement_timeout: dbTimeoutMs, query_timeout: dbTimeoutMs + 1000 } : {})
+    ...(dbTimeoutMs > 0 ? { statement_timeout: dbTimeoutMs, query_timeout: dbTimeoutMs + 1000 } : {}),
+    // круг 35: новое соединение — в ту же базу? (пересоздали — сверка до первого запроса)
+    onConnect: (client) => onPoolConnect(client)
   });
   // ошибка простаивающего соединения (база перезапустилась) без обработчика роняет процесс
   pool.on('error', (err) => log.warn('[document/pg] соединение потеряно:', err.message));
@@ -407,7 +428,7 @@ export function createPgStorage(opts = {}) {
 
   async function connectListener(isRetry) {
     if (closing) return;
-    const client = new pg.Client(opts.applicationName ? { ...base, application_name: base.application_name + ':listen' } : base);
+    const client = new pg.Client({ ...base, application_name: base.application_name.slice(0, 49) + ':listen' });
     // у соединения одна судьба: error, end и сбой подключения приходят вперемешку, а
     // переподключение должно назначиться один раз — иначе поздний end старого клиента
     // заводил бы второго слушателя (две копии каждого уведомления и утечка соединения)
@@ -579,6 +600,16 @@ export function createPgStorage(opts = {}) {
       for (let attempt = 0; ; attempt++) {
         if ((await client.query('SELECT pg_try_advisory_lock($1) AS ok', [MIGRATION_LOCK])).rows[0].ok) break;
         if (closing) throw new Error('хранилище закрывается');
+        // круг 35: замок держит другой экземпляр, а ждут только отложенные дозаполнения, чей DDL
+        // уже на месте (он их и заполняет) — схема годна: не ждём замка всё дозаполнение
+        if (deferFill && attempt % 4 === 0) {
+          const other = await othersFilling(client);
+          if (other) {
+            const byOther = other.filter((f) => !ownFill.has(f));
+            if (onDdl) await onDdl({ deferred: other, byOther: byOther.length > 0 });
+            return { byOther: other };
+          }
+        }
         await sleep(Math.min(500, 50 + 25 * attempt));
       }
       locked = true;
@@ -640,7 +671,8 @@ export function createPgStorage(opts = {}) {
         }
         log.info(`[document/pg] миграция ${file} применена за ${Date.now() - started} мс`);
       }
-      if (onDdl) await onDdl({ deferred: deferred.map((d) => d.file) });
+      for (const d of deferred) ownFill.add(d.file);
+      if (onDdl) await onDdl({ deferred: deferred.map((d) => d.file), byOther: false });
       for (const d of deferred) {
         if (closing) throw new Error('хранилище закрывается');
         const started = Date.now();
@@ -652,6 +684,7 @@ export function createPgStorage(opts = {}) {
           throw e;
         }
         await client.query('INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING', [d.file]);
+        ownFill.delete(d.file);
         log.info(`[document/pg] миграция ${d.file}: дозаполнение за ${Date.now() - started} мс — применена`);
       }
     } catch (e) {
@@ -660,12 +693,42 @@ export function createPgStorage(opts = {}) {
       if (file) e.message += ` — сделанное сохранено, повторный старт продолжит с ${file}`;
       throw e;
     } finally {
+      for (const d of deferred) ownFill.delete(d.file);
       migrationState = null;
       if (migrationClient === client) migrationClient = null;
       if (locked) await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK]).catch(() => {});
       await client.end().catch(() => {});
     }
   }
+
+  /**
+   * Круг 35: ждут ли миграции только отложенного дозаполнения, чей DDL уже на месте (его ведёт
+   * держатель замка). Ждущие файлы — `.mjs` с `ddlUp`, `fillUp` и `ddlApplied(client)`, и
+   * `ddlApplied` у каждого — true. Тогда — их список (пусто — ждать нечего: всё учтено); иначе null.
+   * @param {import('pg').Client} client
+   * @returns {Promise<string[]|null>}
+   */
+  async function othersFilling(client) {
+    try {
+      if (!(await client.query("SELECT to_regclass('schema_migrations') IS NOT NULL AS ok")).rows[0].ok) return null;
+      const applied = new Set((await client.query('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
+      const files = (await readdir(migrationsDir)).filter((f) => MIGRATION_RE.test(f)).sort();
+      // первая миграция не учтена — база не та (пуста/чужая): тут решают замок и сверка
+      if (files.length && !applied.has(files[0])) return null;
+      const pending = files.filter((f) => !applied.has(f));
+      for (const file of pending) {
+        if (!file.endsWith('.mjs')) return null;
+        const mod = await import(pathToFileURL(path.join(migrationsDir, file)).href);
+        if (typeof mod.ddlUp !== 'function' || typeof mod.fillUp !== 'function' || typeof mod.ddlApplied !== 'function') return null;
+        if (!(await mod.ddlApplied(client))) return null;
+      }
+      return pending;
+    } catch (_) {
+      return null;
+    }
+  }
+  /** Отложенные дозаполнения, которые ведёт этот экземпляр (не «другой»). */
+  const ownFill = new Set();
 
   /**
    * Соединение из пула на время транзакции. Пока соединение выдано, пул его ошибок не
@@ -759,6 +822,8 @@ export function createPgStorage(opts = {}) {
   let hasUndoPart = true;
   /** Колонка 012 (`projects.create_id`, круг 33) есть: без неё create_id не учитывается. */
   let hasCreateId = true;
+  /** Колонка 013 (`projects.create_hash`, круг 35) есть: без неё отпечаток тела не пишется. */
+  let hasCreateHash = true;
   async function columnExists(table, column) {
     const r = await pool.query(
       'SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2 AND NOT attisdropped',
@@ -772,6 +837,7 @@ export function createPgStorage(opts = {}) {
     hasCommandAuthor = await columnExists('operations', 'command_author');
     hasUndoPart = await columnExists('operations', 'undo_part');
     hasCreateId = await columnExists('projects', 'create_id');
+    hasCreateHash = await columnExists('projects', 'create_hash');
   }
 
   /* -------------------- сверка схемы под работающим экземпляром -------------------- */
@@ -812,23 +878,62 @@ export function createPgStorage(opts = {}) {
    * application_name). Иначе — `phase: 'empty'` или `'restore'` (health 503 `storage:'schema'`)
    * и проверка заново через EMPTY_RECHECK_MS. На старте процесса (init) — как раньше: пустую
    * базу создают миграции.
+   *
+   * Круг 35: в фазе empty/restore не идут и ЗАПРОСЫ (кроме /api/health) — запись в базу посреди
+   * pg_restore (трасса, новый проект, транзакция) ложилась в таблицы до их первичных ключей, и
+   * pg_restore падал на дублях (`traces_pkey`). И признаки восстановления шире:
+   *   - у таблицы схемы (KEYED_TABLES) нет первичного ключа — схема неполна: ключи pg_dump
+   *     ставит после данных, так ловится и `psql < dump.sql`, и переподключение посреди восстановления;
+   *   - после ожидания (`settle`) — к базе подключён чужой сеанс (не сервиса: application_name не
+   *     наш), дольше 0,5 с выполняющий запрос или стоящий в транзакции, — psql ещё льёт копию
+   *     (короткие запросы экземпляра прежней версии, у которого имени нет, ожидание не держат).
+   * @param {boolean} settle только что ждали — схема должна устояться
+   * @param {{query: Function}} [q] на чём спрашивать (пул или соединение — onConnect)
    * @returns {Promise<null|{phase: 'empty'|'restore', detail: string}>}
    */
-  async function restoreGuard(settle) {
+  async function restoreGuard(settle, q = pool) {
     if (!migrationFiles) migrationFiles = (await readdir(migrationsDir)).filter((f) => MIGRATION_RE.test(f)).sort();
     const first = migrationFiles[0];
-    const r = (await pool.query(
+    const r = (await q.query(
       `SELECT to_regclass('schema_migrations') IS NOT NULL AS has_table,
               (SELECT count(*)::int FROM pg_stat_activity
                 WHERE datname = current_database() AND application_name = 'pg_restore' AND pid <> pg_backend_pid()) AS restoring,
+              (SELECT count(*)::int FROM pg_stat_activity
+                WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'
+                  AND coalesce(state, '') NOT IN ('idle', '')
+                  AND now() - coalesce(state_change, now()) > interval '500 milliseconds'
+                  AND NOT (application_name = ANY($2::text[]) OR application_name LIKE '${APP_NAME}%')) AS foreign_busy,
+              (SELECT count(*)::int FROM pg_stat_activity
+                WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'
+                  AND state = 'active' AND query ~* '^\\s*copy\\s.*\\sfrom\\s+stdin'
+                  AND NOT (application_name = ANY($2::text[]) OR application_name LIKE '${APP_NAME}%')) AS foreign_copy,
+              (SELECT count(*)::int FROM unnest($1::text[]) t(name)
+                WHERE to_regclass(t.name) IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass(t.name) AND c.contype = 'p')) AS unkeyed,
               (SELECT count(*)::int FROM pg_class WHERE relnamespace = current_schema()::regnamespace) AS rels,
               (SELECT count(*)::int FROM pg_constraint WHERE connamespace = current_schema()::regnamespace) AS cons,
-              (SELECT count(*)::int FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = current_schema()::regnamespace) AS trg`
+              (SELECT count(*)::int FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = current_schema()::regnamespace) AS trg`,
+      [KEYED_TABLES, ownApps]
     )).rows[0];
     if (r.restoring > 0) return { phase: 'restore', detail: 'к базе подключён pg_restore' };
     if (!r.has_table) return { phase: 'empty', detail: 'нет таблицы schema_migrations' };
-    const names = (await pool.query('SELECT name FROM schema_migrations ORDER BY name')).rows.map((x) => x.name);
+    const names = (await q.query('SELECT name FROM schema_migrations ORDER BY name')).rows.map((x) => x.name);
     if (first && !names.includes(first)) return { phase: 'empty', detail: `в schema_migrations нет ${first}` };
+    if (r.unkeyed > 0) return { phase: 'restore', detail: 'схема неполна: у таблиц нет первичного ключа (идёт восстановление?)' };
+    // круг 39: чужой сеанс льёт COPY … FROM stdin в эту базу — восстановление идёт, сколько бы он ни
+    // длился (COPY … TO stdout — это pg_dump, резервная копия: она запросам не мешает)
+    if (r.foreign_copy > 0) return { phase: 'restore', detail: 'чужой сеанс выполняет COPY в эту базу (идёт восстановление?)' };
+    // круг 39: учтённые миграции поставили триггеры — их нет, значит схема ещё не долита
+    const want = MIGRATION_TRIGGERS.filter(([m]) => names.includes(m));
+    if (want.length) {
+      const missing = (await q.query(
+        `SELECT t.tg FROM unnest($1::text[], $2::text[]) AS t(tbl, tg)
+          WHERE NOT EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid = to_regclass(t.tbl) AND g.tgname = t.tg AND NOT g.tgisinternal)`,
+        [want.map((w) => w[1]), want.map((w) => w[2])]
+      )).rows.map((x) => x.tg);
+      if (missing.length) return { phase: 'restore', detail: `схема неполна: нет триггеров ${missing.join(', ')} (идёт восстановление?)` };
+    }
+    if (settle && r.foreign_busy > 0) return { phase: 'restore', detail: 'к базе подключён чужой сеанс и выполняет запросы (идёт восстановление?)' };
     // только что ждали (база была пуста или шло восстановление) — схема должна устояться: тот же
     // учёт и то же число объектов (таблицы, индексы, ограничения, триггеры) две проверки подряд —
     // восстановление не через pg_restore (psql < dump.sql) так не застаётся посреди DDL
@@ -840,26 +945,113 @@ export function createPgStorage(opts = {}) {
     lastSig = sig;
     return null;
   }
+  /** Свои сеансы (пул, слушатель, миграции) — по application_name. */
+  const ownApps = [base.application_name, base.application_name.slice(0, 49) + ':listen'];
   let lastSig = '';
   let lastGuardAt = 0;
   const EMPTY_RECHECK_MS = 1000;
   let emptyTimer = null;
-  /** Дозаполнение под работающим экземпляром (круг 33): `{migration, since, progress}` или null. */
+  /** Дозаполнение под работающим экземпляром (круг 33): `{migration, since, progress?, by?}` или null. */
   let backfillState = null;
   let fillRetryAt = 0;
+  /** Дозаполнение ведёт другой экземпляр (круг 35): проверяем, кончилось ли (или он умер), не чаще. */
+  const OTHER_FILL_CHECK_MS = 2000;
+  let otherFillCheckAt = 0;
+  /** Сверка, попросившая начаться, пока этот экземпляр сам дозаполнял (её начнёт конец дозаполнения). */
+  let pendingReschema = null;
+  /** oid базы (pg_database): пересоздали базу (`dropdb; createdb`) — oid другой (круг 35). */
+  let dbOid = null;
+  const OID_SQL = 'SELECT oid::text AS oid FROM pg_database WHERE datname = current_database()';
+  const readOid = async (q = pool) => (await q.query(OID_SQL)).rows[0].oid;
 
-  function reschema(reason) {
-    if (reschemaFlight) return reschemaFlight;
-    // ждали восстановления (empty/restore) — время начала то же, и в лог второй раз не пишем
-    const waiting = !!(schemaState && (schemaState.phase === 'empty' || schemaState.phase === 'restore'));
-    // пока ждём, каждый упавший запрос не перепроверяет базу: проверка — не чаще EMPTY_RECHECK_MS
-    if (waiting && Date.now() - lastGuardAt < EMPTY_RECHECK_MS) {
-      const now = Promise.resolve();
-      return { flags: now, ddl: now, done: now };
+  /** База пуста или в неё идёт восстановление — запросы не идут (круг 35). */
+  const waitingNow = () => !!(schemaState && (schemaState.phase === 'empty' || schemaState.phase === 'restore'));
+
+  /** Отказ запросу, пока база пуста или восстанавливается: viaStorage → 503 `cause:'schema'`. */
+  function schemaWaitError() {
+    const st = schemaState || {};
+    const e = new Error(`${st.phase === 'empty' ? 'база пуста' : 'в базу идёт восстановление'}${st.wait ? ' (' + st.wait + ')' : ''} — запросы к хранилищу ждут его конца`);
+    e.code = SCHEMA_WAIT;
+    e.phase = st.phase || 'restore';
+    return e;
+  }
+
+  /** Перейти в ожидание восстановления (или остаться в нём) и назначить проверку. */
+  function enterWaiting(reason, since, guard) {
+    const first = !waitingNow();
+    schemaState = { reason, since, phase: guard.phase, wait: guard.detail };
+    reschemaFailedAt = Date.now();
+    if (first) log.warn(`[document/pg] сверка схемы (${reason}): ${guard.detail} — базу восстанавливают? Миграции не запускаю, запросы к хранилищу — 503 schema; проверяю раз в ${EMPTY_RECHECK_MS} мс`);
+    if (!emptyTimer && !closing) {
+      emptyTimer = setTimeout(() => {
+        emptyTimer = null;
+        if (!closing && waitingNow()) reschema(schemaState.reason);
+      }, EMPTY_RECHECK_MS);
+      if (emptyTimer.unref) emptyTimer.unref();
     }
+  }
+
+  /**
+   * Круг 35: новое соединение пула — в ту же базу? Пересоздали (`dropdb; createdb`, oid
+   * другой) — до первого запроса на нём проверить, не пуста ли она и не идёт ли восстановление:
+   * иначе запрос, пришедший до переподключения слушателя, писал бы в таблицы посреди pg_restore.
+   * Пуста/восстанавливается — отказ (503 schema) и ожидание; годна — сверка схемы.
+   * @param {import('pg').Client} client
+   */
+  async function onPoolConnect(client) {
+    if (closing || dbOid === null) return;
+    const oid = await readOid(client);
+    if (oid === dbOid) return;
+    const guard = await restoreGuard(false, client);
+    if (!guard) {
+      if (dbOid === oid) return;   // соседнее соединение уже сверило ту же новую базу
+      dbOid = oid;
+      log.warn('[document/pg] база пересоздана (другой oid) — сверяю схему');
+      checkSchema('база пересоздана').catch(() => {});
+      return;
+    }
+    // уже ждём — фаза и причина обновляются (пустая база → идёт восстановление), время начала то же
+    if (!waitingNow()) enterWaiting('база пересоздана', new Date().toISOString(), guard);
+    else enterWaiting(schemaState.reason, schemaState.since, guard);
+    throw schemaWaitError();
+  }
+
+  /** Пустой полёт сверки (ничего не делаем сейчас). */
+  const noFlight = () => {
+    const now = Promise.resolve();
+    return { flags: now, ddl: now, done: now, ddlSettled: true };
+  };
+
+  /** Этот экземпляр дозаполнял и закончил — отложенная сверка, если просили. */
+  function afterOwnFill() {
+    if (!pendingReschema || ownFill.size || closing) return;
+    const r = pendingReschema;
+    pendingReschema = null;
+    setImmediate(() => { if (!closing) reschema(r); });
+  }
+
+  /**
+   * Сверка схемы. `quiet` (круг 35) — схема уже годна, нужно только дозаполнение (повтор
+   * оборвавшегося или проверка дозаполнения другого экземпляра): health остаётся 200, фаза check/migrate
+   * не выставляется.
+   * @param {string} reason
+   * @param {{quiet?: boolean}} [o]
+   */
+  function reschema(reason, { quiet = false } = {}) {
+    if (reschemaFlight) return reschemaFlight;
+    // свой фоновый дозаполнитель держит замок — сверка после него (иначе приняла бы его за «другого»)
+    if (ownFill.size) {
+      pendingReschema = pendingReschema || reason;
+      return noFlight();
+    }
+    // ждали восстановления (empty/restore) — время начала то же, и в лог второй раз не пишем
+    const waiting = waitingNow();
+    // пока ждём, каждый упавший запрос не перепроверяет базу: проверка — не чаще EMPTY_RECHECK_MS
+    if (waiting && Date.now() - lastGuardAt < EMPTY_RECHECK_MS) return noFlight();
+    if (waiting) quiet = false;
     const since = waiting && schemaState.since ? schemaState.since : new Date().toISOString();
     // перепроверка во время ожидания восстановления — фаза та же (empty/restore), а не «check»
-    schemaState = waiting ? { ...schemaState } : { reason, since, phase: 'check' };
+    if (!quiet) schemaState = waiting ? { ...schemaState } : { reason, since, phase: 'check' };
     let flagsDone;
     const flags = new Promise((r) => { flagsDone = r; });
     let ddlDone;
@@ -868,53 +1060,59 @@ export function createPgStorage(opts = {}) {
     const done = (async () => {
       try {
         // сразу — флаги по факту: запросы снова идут (без новых колонок), пока мигрируем
-        await refreshFlags().catch(() => {});
+        if (!quiet) await refreshFlags().catch(() => {});
         flagsDone();
         if (closing) throw new Error('хранилище закрывается');
         // круг 33: пустая база или идёт pg_restore — DDL не трогаем, ждём и проверяем заново
         lastGuardAt = Date.now();
         const guard = await restoreGuard(waiting);
         if (guard) {
-          const first = !waiting;
-          schemaState = { reason, since, phase: guard.phase, wait: guard.detail };
-          reschemaFailedAt = Date.now();
-          if (first) log.warn(`[document/pg] сверка схемы (${reason}): ${guard.detail} — базу восстанавливают? Миграции не запускаю, проверяю раз в ${EMPTY_RECHECK_MS} мс`);
-          if (!emptyTimer && !closing) {
-            emptyTimer = setTimeout(() => {
-              emptyTimer = null;
-              if (!closing && schemaState && (schemaState.phase === 'empty' || schemaState.phase === 'restore')) reschema(schemaState.reason);
-            }, EMPTY_RECHECK_MS);
-            if (emptyTimer.unref) emptyTimer.unref();
-          }
+          enterWaiting(reason, since, guard);
           ddlDone();
           return;
         }
-        schemaState = { reason, since, phase: 'migrate' };
+        dbOid = await readOid().catch(() => dbOid);
+        if (!quiet) schemaState = { reason, since, phase: 'migrate' };
         // круг 33: DDL всех ждущих миграций — сначала, долгое дозаполнение (009) — потом: флаги
         // пересчитаны сразу после DDL, сервис здоров (health 200 с detail.backfill)
         await migrate({
           deferFill: true,
-          onDdl: async ({ deferred }) => {
+          onDdl: async ({ deferred, byOther }) => {
             await refreshFlags();
             ddlReady = true;
             schemaState = null;
             reschemaFailedAt = 0;
-            if (deferred.length) backfillState = { migration: deferred[0], since: new Date().toISOString() };
-            log.warn(`[document/pg] схема базы сверена (${reason}): миграции догнаны${deferred.length ? ` (дозаполнение ${deferred.join(', ')} — фоном)` : ''}, колонки журнала — ops_bytes ${hasOpsSize ? 'есть' : 'нет'}, command_author ${hasCommandAuthor ? 'есть' : 'нет'}, undo_part ${hasUndoPart ? 'есть' : 'нет'}`);
+            const was = backfillState;
+            backfillState = deferred.length
+              ? { migration: deferred[0], since: was && was.migration === deferred[0] ? was.since : new Date().toISOString(), ...(byOther ? { by: FILL_BY_OTHER } : {}) }
+              : null;
+            const changed = !was !== !backfillState || (was && backfillState && (was.by !== backfillState.by || was.migration !== backfillState.migration));
+            if (!quiet) {
+              log.warn(`[document/pg] схема базы сверена (${reason}): миграции догнаны${deferred.length ? ` (дозаполнение ${deferred.join(', ')} — фоном${byOther ? ', ведёт другой экземпляр' : ''})` : ''}, колонки журнала — ops_bytes ${hasOpsSize ? 'есть' : 'нет'}, command_author ${hasCommandAuthor ? 'есть' : 'нет'}, undo_part ${hasUndoPart ? 'есть' : 'нет'}`);
+            } else if (changed) {
+              log.info(`[document/pg] дозаполнение: ${backfillState ? `${backfillState.migration} — ${backfillState.by ? 'ведёт другой экземпляр' : 'веду сам'}` : 'завершено (другим экземпляром)'}`);
+            }
             ddlDone();
           }
         });
-        if (backfillState) log.info(`[document/pg] дозаполнение ${backfillState.migration} завершено`);
-        backfillState = null;
+        if (backfillState && !backfillState.by) {
+          log.info(`[document/pg] дозаполнение ${backfillState.migration} завершено`);
+          backfillState = null;
+        }
         fillRetryAt = 0;
       } catch (e) {
         flagsDone();
         ddlDone();
-        backfillState = null;
-        if (ddlReady) {
+        if (backfillState && !backfillState.by) backfillState = null;
+        if (ddlReady || (quiet && !schemaState)) {
           // схема уже годна, не дошло только дозаполнение — сервис здоров; повторит /api/health
+          backfillState = null;
           fillRetryAt = Date.now() + RESCHEMA_RETRY_MS;
           if (!closing) log.warn(`[document/pg] дозаполнение после сверки схемы не завершено (${reason}): ${e && e.message} — повторю`);
+        } else if (e && e.code === SCHEMA_WAIT && !closing) {
+          // круг 39: соединение пула отвергнуто сверкой (база пересоздана и пуста/восстанавливается) —
+          // это не «сверка не удалась», а то же ожидание восстановления: фаза остаётся empty/restore
+          enterWaiting(reason, since, { phase: e.phase === 'empty' ? 'empty' : 'restore', detail: (schemaState && schemaState.wait) || 'идёт восстановление' });
         } else {
           reschemaFailedAt = Date.now();
           schemaState = { reason, since, phase: 'failed', error: String((e && e.message) || e).slice(0, 200) };
@@ -923,6 +1121,7 @@ export function createPgStorage(opts = {}) {
         throw e;
       } finally {
         reschemaFlight = null;
+        afterOwnFill();
       }
     })();
     done.catch(() => {});
@@ -934,16 +1133,24 @@ export function createPgStorage(opts = {}) {
 
   /**
    * Схема на месте? Дёшево (учёт миграций против каталога): после переподключения слушателя —
-   * базу могли подменить. Не хватает миграций или таблицы учёта — сверка; иначе только флаги.
+   * базу могли подменить. Круг 35: сначала — не пуста ли база и не идёт ли в неё восстановление
+   * (restoreGuard всегда: учёт миграций мог уже лечь, а ключи таблиц — ещё нет). Не хватает
+   * миграций или таблицы учёта — сверка; иначе только флаги.
    */
   let migrationFiles = null;
   async function checkSchema(reason) {
     if (closing || reschemaFlight) return;
     try {
       if (!migrationFiles) migrationFiles = (await readdir(migrationsDir)).filter((f) => MIGRATION_RE.test(f)).sort();
+      if (await restoreGuard(false)) {
+        reschema(reason);
+        return;
+      }
+      dbOid = await readOid();
       const r = await pool.query('SELECT name FROM schema_migrations');
       const applied = new Set(r.rows.map((x) => x.name));
-      const missing = migrationFiles.filter((f) => !applied.has(f));
+      // своё фоновое дозаполнение — не «недостающая» миграция
+      const missing = migrationFiles.filter((f) => !applied.has(f) && !ownFill.has(f));
       if (missing.length) {
         log.warn(`[document/pg] ${reason}: в базе не учтены миграции ${missing.join(', ')} — базу восстановили из старой копии? Догоняю`);
         reschema(`${reason}: нет ${missing.join(', ')}`);
@@ -959,6 +1166,7 @@ export function createPgStorage(opts = {}) {
   /**
    * Запрос с одной попыткой после сверки схемы: ошибка схемы → сверка (флаги, миграции,
    * флаги) — ждём её не дольше schemaWaitMs и повторяем по флагам, какие есть.
+   * Круг 35: база пуста или в неё идёт восстановление — запрос не идёт вовсе (SCHEMA_WAIT → 503 schema).
    * @template T
    * @param {() => Promise<T>} fn
    * @returns {Promise<T>}
@@ -975,10 +1183,16 @@ export function createPgStorage(opts = {}) {
       })]);
       clearTimeout(t);
     }
+    if (waitingNow()) throw schemaWaitError();
     try {
       return await fn();
     } catch (e) {
-      if (!isSchemaError(e) || closing) throw e;
+      if (closing || !e || e.code === SCHEMA_WAIT) throw e;
+      if (!isSchemaError(e)) {
+        // база пуста или восстанавливается, а мы ещё не знали (запрос начался раньше) — та же причина
+        if (waitingNow()) throw schemaWaitError();
+        throw e;
+      }
       log.warn(`[document/pg] схема базы не та, что ждёт код (${e.code}: ${e.message}) — сверяю миграции и повторяю запрос`);
       const flight = reschema(e.code);
       await flight.flags;
@@ -989,6 +1203,7 @@ export function createPgStorage(opts = {}) {
         if (timer.unref) timer.unref();
       })]);
       clearTimeout(timer);
+      if (waitingNow()) throw schemaWaitError();
       return await fn();
     }
   }
@@ -1005,7 +1220,12 @@ export function createPgStorage(opts = {}) {
     const l = listener;
     const saturated = pool.idleCount === 0 && pool.totalCount >= max;
     if (saturated && l && l.serial && l.serial.busyFor() === 0) return l.serial.query('SELECT 1');
-    return pool.query('SELECT 1');
+    // круг 35: база пересоздана и пуста/восстанавливается — соединение отвергнуто сверкой, но база
+    // отвечает: она жива (health скажет 503 schema по schemaState, а не «down»)
+    return pool.query('SELECT 1').catch((e) => {
+      if (e && e.code === SCHEMA_WAIT) return null;
+      throw e;
+    });
   }
 
   /**
@@ -1022,7 +1242,12 @@ export function createPgStorage(opts = {}) {
     // дозаполнение после сверки оборвалось (схема годна) — повторить
     else if (!schemaState && fillRetryAt && !reschemaFlight && Date.now() > fillRetryAt) {
       fillRetryAt = 0;
-      reschema('дозаполнение не завершено');
+      reschema('дозаполнение не завершено', { quiet: true });
+    }
+    // круг 35: дозаполнение ведёт другой экземпляр — кончилось ли (или он умер — тогда ведём сами)
+    else if (!schemaState && backfillState && backfillState.by && !reschemaFlight && Date.now() - otherFillCheckAt > OTHER_FILL_CHECK_MS) {
+      otherFillCheckAt = Date.now();
+      reschema('дозаполнение ведёт другой экземпляр', { quiet: true });
     }
     if (pingCache && Date.now() - pingCache.at < PING_CACHE_MS) return Promise.resolve(pingCache.value);
     if (pingFlight) return pingFlight;
@@ -1043,6 +1268,58 @@ export function createPgStorage(opts = {}) {
       return value;
     })().finally(() => { pingFlight = null; });
     return pingFlight;
+  }
+
+  /**
+   * Миграции на старте процесса (круг 35): DDL — сразу (до него сервис отвечает 503 migrating), долгое
+   * дозаполнение отложенных миграций (`ddlUp` + `fillUp`, это 009) — фоном: сервис готов, /api/health
+   * 200 с `detail.backfill`. Дозаполнение ведёт другой экземпляр (держит замок, DDL на месте) — замка не
+   * ждём (`by: 'другой экземпляр'`). Промис — до конца DDL; дозаполнение оборвалось — повтор из /api/health.
+   */
+  const FILL_GRACE_MS = 500;
+  function startMigrations() {
+    return new Promise((resolve, reject) => {
+      let ddl = false;
+      const run = migrate({
+        deferFill: true,
+        onDdl: async ({ deferred, byOther }) => {
+          await refreshFlags();
+          ddl = true;
+          backfillState = deferred.length ? { migration: deferred[0], since: new Date().toISOString(), ...(byOther ? { by: FILL_BY_OTHER } : {}) } : null;
+          if (!deferred.length || byOther) {
+            if (deferred.length) log.info(`[document/pg] миграции: схема готова, дозаполнение ${deferred.join(', ')} ведёт другой экземпляр`);
+            resolve();
+            return;
+          }
+          // малый журнал (новая база) дозаполняется за миллисекунды — тогда старт ждёт его целиком;
+          // большой — сервис готов через FILL_GRACE_MS, дозаполнение идёт фоном
+          const t = setTimeout(() => {
+            if (backfillState) log.info(`[document/pg] миграции: схема готова, дозаполнение ${deferred.join(', ')} — фоном`);
+            resolve();
+          }, FILL_GRACE_MS);
+          if (t.unref) t.unref();
+        }
+      });
+      run.then(() => {
+        if (backfillState && !backfillState.by) {
+          log.info(`[document/pg] дозаполнение ${backfillState.migration} завершено`);
+          backfillState = null;
+        }
+        resolve();
+        afterOwnFill();
+      }, (e) => {
+        if (!ddl) {
+          reject(e);
+          return;
+        }
+        if (backfillState && !backfillState.by) backfillState = null;
+        if (!closing) {
+          fillRetryAt = Date.now() + RESCHEMA_RETRY_MS;
+          log.warn(`[document/pg] дозаполнение на старте не завершено: ${e && e.message} — повторю`);
+        }
+        afterOwnFill();
+      });
+    });
   }
 
   const self = {
@@ -1083,17 +1360,20 @@ export function createPgStorage(opts = {}) {
       }
       return out;
     },
+    /** Круг 35: попутная проверка «не идёт ли восстановление» (у проекта нет снимка и т. п.); не ждёт. */
+    checkRestore(reason = 'по запросу') { checkSchema(reason).catch(() => {}); },
     /** Сверить схему сейчас (тестам и отладке): промис сверки. */
     recheckSchema(reason = 'по запросу') { return reschema(reason).done; },
     /** Колонки журнала, которые адаптер сейчас пишет и читает (тестам). */
-    get schemaFlags() { return { opsSize: hasOpsSize, commandAuthor: hasCommandAuthor, undoPart: hasUndoPart, createId: hasCreateId }; },
+    get schemaFlags() { return { opsSize: hasOpsSize, commandAuthor: hasCommandAuthor, undoPart: hasUndoPart, createId: hasCreateId, createHash: hasCreateHash }; },
 
     /** Миграции и слушатель уведомлений; повторный вызов (второй экземпляр на том же адаптере) — тот же промис. */
     init() {
       if (!initing) {
         initing = (async () => {
-          await migrate();
+          await startMigrations();
           await refreshFlags();
+          dbOid = await readOid();
           if (canListen) await connectListener(false);
         })();
         initing.catch(() => { initing = null; });
@@ -1133,9 +1413,11 @@ export function createPgStorage(opts = {}) {
      * создаётся (гонка двух одинаковых запросов — уникальный индекс, ON CONFLICT). Колонки нет
      * (схема до 012) — create_id не учитывается.
      */
-    async createProject({ name = '', kind = 'design', doc, docJson, engine, createId }) {
+    async createProject({ name = '', kind = 'design', doc, docJson, engine, createId, createHash }) {
       const epoch = newEpoch();
       const cid = typeof createId === 'string' && createId && hasCreateId ? createId : null;
+      // круг 35: отпечаток тела (013) — повтор с другим телом отличим (409 create_id_conflict)
+      const hash = cid && hasCreateHash && typeof createHash === 'string' && createHash ? createHash : null;
       if (cid) {
         const found = await self.projectByCreateId(cid);
         if (found) return { ...found, existing: true };
@@ -1143,9 +1425,9 @@ export function createPgStorage(opts = {}) {
       const made = await inTx(async (client) => {
         const ins = await client.query(
           cid
-            ? 'INSERT INTO projects (name, kind, engine, epoch, epoch_cause, create_id) VALUES ($1, $2, $3, $4, \'init\', $5) ON CONFLICT (create_id) WHERE create_id IS NOT NULL DO NOTHING RETURNING *'
+            ? `INSERT INTO projects (name, kind, engine, epoch, epoch_cause, create_id${hash ? ', create_hash' : ''}) VALUES ($1, $2, $3, $4, 'init', $5${hash ? ', $6' : ''}) ON CONFLICT (create_id) WHERE create_id IS NOT NULL DO NOTHING RETURNING *`
             : 'INSERT INTO projects (name, kind, engine, epoch, epoch_cause) VALUES ($1, $2, $3, $4, \'init\') RETURNING *',
-          cid ? [name, kind, engine, epoch, cid] : [name, kind, engine, epoch]
+          cid ? [name, kind, engine, epoch, cid, ...(hash ? [hash] : [])] : [name, kind, engine, epoch]
         );
         // тот же create_id записал одновременный запрос — ничего не создаём
         if (!ins.rows.length) return rollback(null);
@@ -1164,11 +1446,15 @@ export function createPgStorage(opts = {}) {
       return { ...found, existing: true };
     },
 
-    /** Проект по create_id (круг 33, L1) или null; колонки нет (схема до 012) — null. */
+    /**
+     * Проект по create_id (круг 33, L1) или null; колонки нет (схема до 012) — null. `create_hash` —
+     * отпечаток тела создания (круг 35, 013) или null (неизвестен).
+     */
     async projectByCreateId(createId) {
       if (!hasCreateId || typeof createId !== 'string' || !createId) return null;
       const res = await pool.query('SELECT * FROM projects WHERE create_id = $1', [createId]);
-      return projectOf(res.rows[0]);
+      const p = projectOf(res.rows[0]);
+      return p ? { ...p, create_hash: res.rows[0].create_hash || null } : null;
     },
 
     async listProjects() {

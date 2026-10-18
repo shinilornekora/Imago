@@ -45,7 +45,10 @@ test('команда для модели: транзакция агента в �
   assert.equal(result.seq, 1);
   assert.ok(result.applied >= 3, 'артборд и два текста');
   assert.deepEqual(result.dropped, []);
-  assert.equal(result.summary, PLAN_CREATE.summary);
+  // круг 39 (N5д): заголовок итога — что сделано (то же, что подпись записи), план — отдельно
+  assert.equal(result.title, 'Добавил «Экран тарифов» новой доской');
+  assert.equal(result.summary, result.title);
+  assert.equal(result.plan, PLAN_CREATE.summary);
   assert.ok(Array.isArray(result.select) && result.select.length === 1, 'выделить новый артборд');
 
   const j = await journal(document, p.id);

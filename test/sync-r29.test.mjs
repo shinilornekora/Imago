@@ -370,7 +370,7 @@ test('sync r29 (J4): statusLine — «сервер не может сохран�
   assert.equal(STORAGE_DOWN_LABEL, 'сервер не может сохранить — правки ждут');
   assert.equal(statusLine({ online: true, pending: 0, syncing: false, storage: 'down' }), 'сервер не может сохранить');
   assert.equal(statusLine({ online: true, pending: 0, syncing: false, storage: 'up' }), 'в сети · всё сохранено');
-  assert.equal(statusLine({ online: true, pending: 1, storage: 'down', error: 'engine' }), 'версия движка устарела — обновите страницу');
+  assert.equal(statusLine({ online: true, pending: 1, storage: 'down', error: 'engine' }), 'вышла новая версия редактора — обновите страницу');
 });
 
 test('sync r29 (J4): две вкладки при лежащем хранилище говорят одно и то же; правка не снимается; health вернулось — уходит сразу', { timeout: 20000 }, async () => {

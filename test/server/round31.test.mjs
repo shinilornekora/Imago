@@ -85,7 +85,7 @@ describe('круг 31: база из копии до миграций 009/010 п
         assert.equal(await cols(), '', `${name}: схема откачена`);
         await step();
         await waitFor(async () => (await cols()) === ALL_COLS && s.schemaState === null && s.backfillState === null, `${name}: колонки вернулись`, 10000);
-        assert.deepEqual(s.schemaFlags, { opsSize: true, commandAuthor: true, undoPart: true, createId: true });
+        assert.deepEqual(s.schemaFlags, { opsSize: true, commandAuthor: true, undoPart: true, createId: true, createHash: true });
         const applied = (await admin.query(`SELECT name FROM schema_migrations WHERE name IN ('009_ops_size.mjs', '010_command_author.sql', '011_undo_part.sql') ORDER BY name`)).rows.map((r) => r.name);
         assert.deepEqual(applied, ['009_ops_size.mjs', '010_command_author.sql', '011_undo_part.sql'], `${name}: учёт миграций догнан`);
       }
@@ -148,7 +148,7 @@ describe('круг 31: база из копии до миграций 009/010 п
       const pid = s.listenerPid;
       await admin.query('SELECT pg_terminate_backend($1)', [pid]);
       await waitFor(async () => (await cols()) === ALL_COLS && s.schemaState === null && s.listenerPid && s.listenerPid !== pid, 'слушатель вернулся и миграции догнаны', 10000);
-      assert.deepEqual(s.schemaFlags, { opsSize: true, commandAuthor: true, undoPart: true, createId: true });
+      assert.deepEqual(s.schemaFlags, { opsSize: true, commandAuthor: true, undoPart: true, createId: true, createHash: true });
     } finally {
       await s.close();
     }

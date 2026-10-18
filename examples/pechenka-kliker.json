@@ -1,25 +1,25 @@
 {
-  "id": "doc_xx99xqgqh9ex2",
+  "id": "doc_vn2tp6vi6eje2",
   "version": 5,
-  "root": "page_zkfs12647hn11",
+  "root": "page_ytnaj12e6lfd1",
   "nodes": {
-    "page_zkfs12647hn11": {
+    "page_ytnaj12e6lfd1": {
       "type": "page",
-      "id": "page_zkfs12647hn11",
+      "id": "page_ytnaj12e6lfd1",
       "name": "Пустая страница",
       "parent": null,
       "children": [
-        "lib_ymx0lhrv6hbu3",
-        "f_6nwaqk89g91s4",
-        "f_whyglsn03vzk22"
+        "lib_i668hg5eirem3",
+        "f_k9wt0rc9rd7i4",
+        "f_zmz5dwuer28y22"
       ]
     },
-    "lib_ymx0lhrv6hbu3": {
+    "lib_i668hg5eirem3": {
       "type": "page",
-      "id": "lib_ymx0lhrv6hbu3",
+      "id": "lib_i668hg5eirem3",
       "name": "Библиотека",
       "role": "library",
-      "parent": "page_zkfs12647hn11",
+      "parent": "page_ytnaj12e6lfd1",
       "children": [],
       "pos": {
         "x": 0,
@@ -39,18 +39,18 @@
         "wrap": false
       }
     },
-    "f_6nwaqk89g91s4": {
+    "f_k9wt0rc9rd7i4": {
       "type": "frame",
-      "id": "f_6nwaqk89g91s4",
+      "id": "f_k9wt0rc9rd7i4",
       "name": "Кликер · телефон",
-      "parent": "page_zkfs12647hn11",
+      "parent": "page_ytnaj12e6lfd1",
       "children": [
-        "f_bwqyljva1bpk5",
-        "f_fvi5bbdbrwagb",
-        "f_qg5z35rvadpeg",
-        "f_1g3hwejf1g96r",
-        "f_lmkzypm3cmdyx",
-        "f_9h31bi7av7iv1x"
+        "f_3qpsgglrmrjb5",
+        "f_wk5ogkkrhk4sb",
+        "f_1sc4au8t4s6ng",
+        "f_96tsog9csahlr",
+        "f_mrx26d8wqlmqx",
+        "f_j99lxyqw4lwv1x"
       ],
       "layout": {
         "mode": "column",
@@ -81,14 +81,14 @@
         "y": 0
       }
     },
-    "f_bwqyljva1bpk5": {
+    "f_3qpsgglrmrjb5": {
       "type": "frame",
-      "id": "f_bwqyljva1bpk5",
+      "id": "f_3qpsgglrmrjb5",
       "name": "Шапка",
-      "parent": "f_6nwaqk89g91s4",
+      "parent": "f_k9wt0rc9rd7i4",
       "children": [
-        "f_tbvz9s1n71n36",
-        "f_y65cexin6qx19"
+        "f_j20ykruu7rso6",
+        "f_uch00u5xkuah9"
       ],
       "layout": {
         "mode": "row",
@@ -113,14 +113,14 @@
       },
       "radius": "radii.0"
     },
-    "f_tbvz9s1n71n36": {
+    "f_j20ykruu7rso6": {
       "type": "frame",
-      "id": "f_tbvz9s1n71n36",
+      "id": "f_j20ykruu7rso6",
       "name": "Шапка · текст",
-      "parent": "f_bwqyljva1bpk5",
+      "parent": "f_3qpsgglrmrjb5",
       "children": [
-        "t_gv2yghz7j7tq7",
-        "t_ca3o0q3pzyvc8"
+        "t_e720orzfid3x7",
+        "t_kk3k2a1n21at8"
       ],
       "layout": {
         "mode": "column",
@@ -145,11 +145,11 @@
       },
       "radius": "radii.0"
     },
-    "t_gv2yghz7j7tq7": {
+    "t_e720orzfid3x7": {
       "type": "text",
-      "id": "t_gv2yghz7j7tq7",
+      "id": "t_e720orzfid3x7",
       "name": "Название",
-      "parent": "f_tbvz9s1n71n36",
+      "parent": "f_j20ykruu7rso6",
       "characters": "Печенька-кликер",
       "style": "title",
       "align": "left",
@@ -162,11 +162,11 @@
         }
       }
     },
-    "t_ca3o0q3pzyvc8": {
+    "t_kk3k2a1n21at8": {
       "type": "text",
-      "id": "t_ca3o0q3pzyvc8",
+      "id": "t_kk3k2a1n21at8",
       "name": "Подзаголовок",
-      "parent": "f_tbvz9s1n71n36",
+      "parent": "f_j20ykruu7rso6",
       "characters": "Пекарня Ани · уровень 7",
       "style": "caption",
       "align": "left",
@@ -180,13 +180,13 @@
       },
       "color": "muted"
     },
-    "f_y65cexin6qx19": {
+    "f_uch00u5xkuah9": {
       "type": "frame",
-      "id": "f_y65cexin6qx19",
+      "id": "f_uch00u5xkuah9",
       "name": "Буст",
-      "parent": "f_bwqyljva1bpk5",
+      "parent": "f_3qpsgglrmrjb5",
       "children": [
-        "t_zfri3mg0orufa"
+        "t_c9zi39qzhbw5a"
       ],
       "layout": {
         "mode": "row",
@@ -226,11 +226,11 @@
         "easing": "spring"
       }
     },
-    "t_zfri3mg0orufa": {
+    "t_c9zi39qzhbw5a": {
       "type": "text",
-      "id": "t_zfri3mg0orufa",
+      "id": "t_c9zi39qzhbw5a",
       "name": "Буст · текст",
-      "parent": "f_y65cexin6qx19",
+      "parent": "f_uch00u5xkuah9",
       "characters": "🔥 ×2",
       "style": "caption",
       "align": "left",
@@ -244,15 +244,15 @@
       },
       "color": "accentInk"
     },
-    "f_fvi5bbdbrwagb": {
+    "f_wk5ogkkrhk4sb": {
       "type": "frame",
-      "id": "f_fvi5bbdbrwagb",
+      "id": "f_wk5ogkkrhk4sb",
       "name": "Счётчик",
-      "parent": "f_6nwaqk89g91s4",
+      "parent": "f_k9wt0rc9rd7i4",
       "children": [
-        "t_18lqv5mh0frlc",
-        "t_gxnbj34uf53ld",
-        "f_952rbgyuwi9qe"
+        "t_pn5e71i0g123c",
+        "t_0tx6o4n7biy4d",
+        "f_b18u2n1gy4ppe"
       ],
       "layout": {
         "mode": "column",
@@ -279,11 +279,11 @@
       "fill": "surface",
       "shadow": "shadow.sm"
     },
-    "t_18lqv5mh0frlc": {
+    "t_pn5e71i0g123c": {
       "type": "text",
-      "id": "t_18lqv5mh0frlc",
+      "id": "t_pn5e71i0g123c",
       "name": "Печенек",
-      "parent": "f_fvi5bbdbrwagb",
+      "parent": "f_wk5ogkkrhk4sb",
       "characters": "1 284",
       "style": "display",
       "align": "center",
@@ -296,11 +296,11 @@
         }
       }
     },
-    "t_gxnbj34uf53ld": {
+    "t_0tx6o4n7biy4d": {
       "type": "text",
-      "id": "t_gxnbj34uf53ld",
+      "id": "t_0tx6o4n7biy4d",
       "name": "Подпись счётчика",
-      "parent": "f_fvi5bbdbrwagb",
+      "parent": "f_wk5ogkkrhk4sb",
       "characters": "печенек в банке",
       "style": "body",
       "align": "center",
@@ -314,13 +314,13 @@
       },
       "color": "muted"
     },
-    "f_952rbgyuwi9qe": {
+    "f_b18u2n1gy4ppe": {
       "type": "frame",
-      "id": "f_952rbgyuwi9qe",
+      "id": "f_b18u2n1gy4ppe",
       "name": "Скорость",
-      "parent": "f_fvi5bbdbrwagb",
+      "parent": "f_wk5ogkkrhk4sb",
       "children": [
-        "t_04y1wzo9rdo4f"
+        "t_w8vt5b7t15c2f"
       ],
       "layout": {
         "mode": "row",
@@ -346,11 +346,11 @@
       "radius": "radii.7",
       "fill": "surfaceAlt"
     },
-    "t_04y1wzo9rdo4f": {
+    "t_w8vt5b7t15c2f": {
       "type": "text",
-      "id": "t_04y1wzo9rdo4f",
+      "id": "t_w8vt5b7t15c2f",
       "name": "Скорость · текст",
-      "parent": "f_952rbgyuwi9qe",
+      "parent": "f_b18u2n1gy4ppe",
       "characters": "▲ +12,4 в секунду",
       "style": "caption",
       "align": "left",
@@ -364,14 +364,14 @@
       },
       "color": "good"
     },
-    "f_qg5z35rvadpeg": {
+    "f_1sc4au8t4s6ng": {
       "type": "frame",
-      "id": "f_qg5z35rvadpeg",
+      "id": "f_1sc4au8t4s6ng",
       "name": "Сцена печеньки",
-      "parent": "f_6nwaqk89g91s4",
+      "parent": "f_k9wt0rc9rd7i4",
       "children": [
-        "f_kkk7iejnnh09h",
-        "t_ngponv9s7sv6q"
+        "f_0l9v2mzlhin3h",
+        "t_yoxpqv5ei843q"
       ],
       "layout": {
         "mode": "column",
@@ -396,29 +396,29 @@
       },
       "radius": "radii.0"
     },
-    "f_kkk7iejnnh09h": {
+    "f_0l9v2mzlhin3h": {
       "type": "frame",
-      "id": "f_kkk7iejnnh09h",
+      "id": "f_0l9v2mzlhin3h",
       "name": "Печенька",
-      "parent": "f_qg5z35rvadpeg",
+      "parent": "f_1sc4au8t4s6ng",
       "children": [
-        "n_5jje3a35izgqi",
-        "n_4umeix91i5e3j",
-        "n_xzszm0d1v1ybk",
-        "n_zqvhjada3cvpl",
-        "n_lld2iqpxvmmam",
-        "n_poin9x14xf0en",
-        "n_lmi6t4xyqmeao",
-        "n_8hcx1oc21ypvp"
+        "n_akjdvv5l6qqri",
+        "n_cyh5hl6vbfmqj",
+        "n_k4e679ac768gk",
+        "n_qwoxwxfrzodjl",
+        "n_6u6iyaharv3xm",
+        "n_8idqqjtiumi2n",
+        "n_3m522ktrqm4vo",
+        "n_jsyvnpf3md5dp"
       ],
       "layout": {
         "mode": "none",
-        "gap": 0,
+        "gap": "spacing.0",
         "padding": {
-          "t": 0,
-          "r": 0,
-          "b": 0,
-          "l": 0
+          "t": "spacing.0",
+          "r": "spacing.0",
+          "b": "spacing.0",
+          "l": "spacing.0"
         },
         "align": "start",
         "justify": "start",
@@ -434,7 +434,7 @@
           "value": 250
         }
       },
-      "radius": 0,
+      "radius": "radii.0",
       "clip": true,
       "role": "illustration",
       "states": {
@@ -451,11 +451,11 @@
         "easing": "spring"
       }
     },
-    "n_5jje3a35izgqi": {
+    "n_akjdvv5l6qqri": {
       "type": "vector",
-      "id": "n_5jje3a35izgqi",
+      "id": "n_akjdvv5l6qqri",
       "name": "Тень",
-      "parent": "f_kkk7iejnnh09h",
+      "parent": "f_0l9v2mzlhin3h",
       "viewBox": {
         "x": 84,
         "y": 330,
@@ -486,11 +486,11 @@
         "y": 206.25
       }
     },
-    "n_4umeix91i5e3j": {
+    "n_cyh5hl6vbfmqj": {
       "type": "vector",
-      "id": "n_4umeix91i5e3j",
+      "id": "n_cyh5hl6vbfmqj",
       "name": "Тесто",
-      "parent": "f_kkk7iejnnh09h",
+      "parent": "f_0l9v2mzlhin3h",
       "viewBox": {
         "x": 48.1,
         "y": 48.9,
@@ -543,11 +543,11 @@
         "y": 30.56
       }
     },
-    "n_xzszm0d1v1ybk": {
+    "n_k4e679ac768gk": {
       "type": "vector",
-      "id": "n_xzszm0d1v1ybk",
+      "id": "n_k4e679ac768gk",
       "name": "Подрумяненный край",
-      "parent": "f_kkk7iejnnh09h",
+      "parent": "f_0l9v2mzlhin3h",
       "viewBox": {
         "x": 74,
         "y": 228,
@@ -578,11 +578,11 @@
         "y": 142.5
       }
     },
-    "n_zqvhjada3cvpl": {
+    "n_qwoxwxfrzodjl": {
       "type": "vector",
-      "id": "n_zqvhjada3cvpl",
+      "id": "n_qwoxwxfrzodjl",
       "name": "Трещинки",
-      "parent": "f_kkk7iejnnh09h",
+      "parent": "f_0l9v2mzlhin3h",
       "viewBox": {
         "x": 102,
         "y": 102,
@@ -613,11 +613,11 @@
         "y": 63.75
       }
     },
-    "n_lld2iqpxvmmam": {
+    "n_6u6iyaharv3xm": {
       "type": "vector",
-      "id": "n_lld2iqpxvmmam",
+      "id": "n_6u6iyaharv3xm",
       "name": "Шоколадная крошка",
-      "parent": "f_kkk7iejnnh09h",
+      "parent": "f_0l9v2mzlhin3h",
       "viewBox": {
         "x": 109,
         "y": 95,
@@ -711,11 +711,11 @@
         "y": 59.38
       }
     },
-    "n_poin9x14xf0en": {
+    "n_8idqqjtiumi2n": {
       "type": "vector",
-      "id": "n_poin9x14xf0en",
+      "id": "n_8idqqjtiumi2n",
       "name": "Блики шоколада",
-      "parent": "f_kkk7iejnnh09h",
+      "parent": "f_0l9v2mzlhin3h",
       "viewBox": {
         "x": 124.9,
         "y": 96.8,
@@ -781,11 +781,11 @@
         "y": 60.5
       }
     },
-    "n_lmi6t4xyqmeao": {
+    "n_3m522ktrqm4vo": {
       "type": "vector",
-      "id": "n_lmi6t4xyqmeao",
+      "id": "n_3m522ktrqm4vo",
       "name": "Крошки",
-      "parent": "f_kkk7iejnnh09h",
+      "parent": "f_0l9v2mzlhin3h",
       "viewBox": {
         "x": 66,
         "y": 277,
@@ -844,11 +844,11 @@
         "y": 173.13
       }
     },
-    "n_8hcx1oc21ypvp": {
+    "n_jsyvnpf3md5dp": {
       "type": "vector",
-      "id": "n_8hcx1oc21ypvp",
+      "id": "n_jsyvnpf3md5dp",
       "name": "Блик",
-      "parent": "f_kkk7iejnnh09h",
+      "parent": "f_0l9v2mzlhin3h",
       "viewBox": {
         "x": 119.6,
         "y": 76.4,
@@ -879,11 +879,11 @@
         "y": 47.75
       }
     },
-    "t_ngponv9s7sv6q": {
+    "t_yoxpqv5ei843q": {
       "type": "text",
-      "id": "t_ngponv9s7sv6q",
+      "id": "t_yoxpqv5ei843q",
       "name": "Подсказка клика",
-      "parent": "f_qg5z35rvadpeg",
+      "parent": "f_1sc4au8t4s6ng",
       "characters": "Нажми на печеньку · +2 за клик",
       "style": "caption",
       "align": "center",
@@ -897,14 +897,14 @@
       },
       "color": "muted"
     },
-    "f_1g3hwejf1g96r": {
+    "f_96tsog9csahlr": {
       "type": "frame",
-      "id": "f_1g3hwejf1g96r",
+      "id": "f_96tsog9csahlr",
       "name": "Прогресс уровня",
-      "parent": "f_6nwaqk89g91s4",
+      "parent": "f_k9wt0rc9rd7i4",
       "children": [
-        "f_vogapzd4mpk5s",
-        "f_bsg0z4rz8jeav"
+        "f_sud1786mrcgys",
+        "f_mqjhbmckiv5qv"
       ],
       "layout": {
         "mode": "column",
@@ -929,14 +929,14 @@
       },
       "radius": "radii.0"
     },
-    "f_vogapzd4mpk5s": {
+    "f_sud1786mrcgys": {
       "type": "frame",
-      "id": "f_vogapzd4mpk5s",
+      "id": "f_sud1786mrcgys",
       "name": "Прогресс · строка",
-      "parent": "f_1g3hwejf1g96r",
+      "parent": "f_96tsog9csahlr",
       "children": [
-        "t_8hkiwa8scfr6t",
-        "t_ho91tdyngtztu"
+        "t_7ydpg5td3jalt",
+        "t_mo3r7wocaoiru"
       ],
       "layout": {
         "mode": "row",
@@ -961,11 +961,11 @@
       },
       "radius": "radii.0"
     },
-    "t_8hkiwa8scfr6t": {
+    "t_7ydpg5td3jalt": {
       "type": "text",
-      "id": "t_8hkiwa8scfr6t",
+      "id": "t_7ydpg5td3jalt",
       "name": "Прогресс · подпись",
-      "parent": "f_vogapzd4mpk5s",
+      "parent": "f_sud1786mrcgys",
       "characters": "До уровня 8",
       "style": "caption",
       "align": "left",
@@ -979,11 +979,11 @@
       },
       "color": "muted"
     },
-    "t_ho91tdyngtztu": {
+    "t_mo3r7wocaoiru": {
       "type": "text",
-      "id": "t_ho91tdyngtztu",
+      "id": "t_mo3r7wocaoiru",
       "name": "Прогресс · число",
-      "parent": "f_vogapzd4mpk5s",
+      "parent": "f_sud1786mrcgys",
       "characters": "1 284 / 2 000",
       "style": "caption",
       "align": "left",
@@ -996,13 +996,13 @@
         }
       }
     },
-    "f_bsg0z4rz8jeav": {
+    "f_mqjhbmckiv5qv": {
       "type": "frame",
-      "id": "f_bsg0z4rz8jeav",
+      "id": "f_mqjhbmckiv5qv",
       "name": "Полоса",
-      "parent": "f_1g3hwejf1g96r",
+      "parent": "f_96tsog9csahlr",
       "children": [
-        "r_qhw614khrn1aw"
+        "r_f08kywan302tw"
       ],
       "layout": {
         "mode": "row",
@@ -1029,11 +1029,11 @@
       "radius": "radii.7",
       "fill": "surfaceAlt"
     },
-    "r_qhw614khrn1aw": {
+    "r_f08kywan302tw": {
       "type": "rect",
-      "id": "r_qhw614khrn1aw",
+      "id": "r_f08kywan302tw",
       "name": "Заполнение",
-      "parent": "f_bsg0z4rz8jeav",
+      "parent": "f_mqjhbmckiv5qv",
       "size": {
         "w": {
           "mode": "fixed",
@@ -1047,17 +1047,17 @@
       "radius": "radii.7",
       "fill": "accent"
     },
-    "f_lmkzypm3cmdyx": {
+    "f_mrx26d8wqlmqx": {
       "type": "frame",
-      "id": "f_lmkzypm3cmdyx",
+      "id": "f_mrx26d8wqlmqx",
       "name": "Магазин улучшений",
-      "parent": "f_6nwaqk89g91s4",
+      "parent": "f_k9wt0rc9rd7i4",
       "children": [
-        "f_luscpr3cty1zy",
-        "f_yezw6iezmbzh11",
-        "f_kcw7e8w2wcee19",
-        "f_vk6aieddffda1h",
-        "f_7y0t470jn2ie1p"
+        "f_seqpzc8esxxiy",
+        "f_l6dumgf9600m11",
+        "f_rkrcq6c02bio19",
+        "f_xi36f092n9od1h",
+        "f_d9gqzkzod38r1p"
       ],
       "layout": {
         "mode": "column",
@@ -1082,14 +1082,14 @@
       },
       "radius": "radii.0"
     },
-    "f_luscpr3cty1zy": {
+    "f_seqpzc8esxxiy": {
       "type": "frame",
-      "id": "f_luscpr3cty1zy",
+      "id": "f_seqpzc8esxxiy",
       "name": "Улучшения · шапка",
-      "parent": "f_lmkzypm3cmdyx",
+      "parent": "f_mrx26d8wqlmqx",
       "children": [
-        "t_iv32gyt4xzc4z",
-        "t_g2v5uulo2wds10"
+        "t_16fivoo3xnjcz",
+        "t_9j9foq04hxkh10"
       ],
       "layout": {
         "mode": "row",
@@ -1114,11 +1114,11 @@
       },
       "radius": "radii.0"
     },
-    "t_iv32gyt4xzc4z": {
+    "t_16fivoo3xnjcz": {
       "type": "text",
-      "id": "t_iv32gyt4xzc4z",
+      "id": "t_16fivoo3xnjcz",
       "name": "Улучшения · заголовок",
-      "parent": "f_luscpr3cty1zy",
+      "parent": "f_seqpzc8esxxiy",
       "characters": "Улучшения",
       "style": "heading",
       "align": "left",
@@ -1131,11 +1131,11 @@
         }
       }
     },
-    "t_g2v5uulo2wds10": {
+    "t_9j9foq04hxkh10": {
       "type": "text",
-      "id": "t_g2v5uulo2wds10",
+      "id": "t_9j9foq04hxkh10",
       "name": "Улучшения · счёт",
-      "parent": "f_luscpr3cty1zy",
+      "parent": "f_seqpzc8esxxiy",
       "characters": "куплено 16",
       "style": "caption",
       "align": "left",
@@ -1149,15 +1149,15 @@
       },
       "color": "muted"
     },
-    "f_yezw6iezmbzh11": {
+    "f_l6dumgf9600m11": {
       "type": "frame",
-      "id": "f_yezw6iezmbzh11",
+      "id": "f_l6dumgf9600m11",
       "name": "Улучшение · Курсор",
-      "parent": "f_lmkzypm3cmdyx",
+      "parent": "f_mrx26d8wqlmqx",
       "children": [
-        "f_3a41h2izklpk12",
-        "f_tw7tlz3cbe6y14",
-        "f_uuljslq7b4a917"
+        "f_sjqhvfjz6u1w12",
+        "f_g3u4fmjpz91314",
+        "f_12byluf636bu17"
       ],
       "layout": {
         "mode": "row",
@@ -1198,13 +1198,13 @@
         "easing": "spring"
       }
     },
-    "f_3a41h2izklpk12": {
+    "f_sjqhvfjz6u1w12": {
       "type": "frame",
-      "id": "f_3a41h2izklpk12",
+      "id": "f_sjqhvfjz6u1w12",
       "name": "Курсор · значок",
-      "parent": "f_yezw6iezmbzh11",
+      "parent": "f_l6dumgf9600m11",
       "children": [
-        "t_947ubhjcik1k13"
+        "t_oqr09ooxgq0y13"
       ],
       "layout": {
         "mode": "row",
@@ -1232,11 +1232,11 @@
       "radius": "radii.3",
       "fill": "accentSoft"
     },
-    "t_947ubhjcik1k13": {
+    "t_oqr09ooxgq0y13": {
       "type": "text",
-      "id": "t_947ubhjcik1k13",
+      "id": "t_oqr09ooxgq0y13",
       "name": "Курсор · эмодзи",
-      "parent": "f_3a41h2izklpk12",
+      "parent": "f_sjqhvfjz6u1w12",
       "characters": "👆",
       "style": "heading",
       "align": "left",
@@ -1249,14 +1249,14 @@
         }
       }
     },
-    "f_tw7tlz3cbe6y14": {
+    "f_g3u4fmjpz91314": {
       "type": "frame",
-      "id": "f_tw7tlz3cbe6y14",
+      "id": "f_g3u4fmjpz91314",
       "name": "Курсор · текст",
-      "parent": "f_yezw6iezmbzh11",
+      "parent": "f_l6dumgf9600m11",
       "children": [
-        "t_63mt4y05fjei15",
-        "t_j2tanr57yxnc16"
+        "t_ghd1dq3u9ely15",
+        "t_a7qbjgmrpuo016"
       ],
       "layout": {
         "mode": "column",
@@ -1281,11 +1281,11 @@
       },
       "radius": "radii.0"
     },
-    "t_63mt4y05fjei15": {
+    "t_ghd1dq3u9ely15": {
       "type": "text",
-      "id": "t_63mt4y05fjei15",
+      "id": "t_ghd1dq3u9ely15",
       "name": "Курсор · имя",
-      "parent": "f_tw7tlz3cbe6y14",
+      "parent": "f_g3u4fmjpz91314",
       "characters": "Курсор",
       "style": "body",
       "align": "left",
@@ -1298,11 +1298,11 @@
         }
       }
     },
-    "t_j2tanr57yxnc16": {
+    "t_a7qbjgmrpuo016": {
       "type": "text",
-      "id": "t_j2tanr57yxnc16",
+      "id": "t_a7qbjgmrpuo016",
       "name": "Курсор · уровень",
-      "parent": "f_tw7tlz3cbe6y14",
+      "parent": "f_g3u4fmjpz91314",
       "characters": "×12 · +1,2 в секунду",
       "style": "caption",
       "align": "left",
@@ -1316,13 +1316,13 @@
       },
       "color": "muted"
     },
-    "f_uuljslq7b4a917": {
+    "f_12byluf636bu17": {
       "type": "frame",
-      "id": "f_uuljslq7b4a917",
+      "id": "f_12byluf636bu17",
       "name": "Курсор · купить",
-      "parent": "f_yezw6iezmbzh11",
+      "parent": "f_l6dumgf9600m11",
       "children": [
-        "t_x2ovsomm4dgm18"
+        "t_181fw3wwulc618"
       ],
       "layout": {
         "mode": "row",
@@ -1361,11 +1361,11 @@
         "easing": "spring"
       }
     },
-    "t_x2ovsomm4dgm18": {
+    "t_181fw3wwulc618": {
       "type": "text",
-      "id": "t_x2ovsomm4dgm18",
+      "id": "t_181fw3wwulc618",
       "name": "Курсор · цена",
-      "parent": "f_uuljslq7b4a917",
+      "parent": "f_12byluf636bu17",
       "characters": "15 🍪",
       "style": "caption",
       "align": "left",
@@ -1379,15 +1379,15 @@
       },
       "color": "onAccent"
     },
-    "f_kcw7e8w2wcee19": {
+    "f_rkrcq6c02bio19": {
       "type": "frame",
-      "id": "f_kcw7e8w2wcee19",
+      "id": "f_rkrcq6c02bio19",
       "name": "Улучшение · Бабушка",
-      "parent": "f_lmkzypm3cmdyx",
+      "parent": "f_mrx26d8wqlmqx",
       "children": [
-        "f_o91gf595c5mn1a",
-        "f_1248uj17i4nm1c",
-        "f_m9oqac5yr3a91f"
+        "f_1c8dsbqqc0251a",
+        "f_9q6yqajcoyjq1c",
+        "f_vzhczt506kwd1f"
       ],
       "layout": {
         "mode": "row",
@@ -1428,13 +1428,13 @@
         "easing": "spring"
       }
     },
-    "f_o91gf595c5mn1a": {
+    "f_1c8dsbqqc0251a": {
       "type": "frame",
-      "id": "f_o91gf595c5mn1a",
+      "id": "f_1c8dsbqqc0251a",
       "name": "Бабушка · значок",
-      "parent": "f_kcw7e8w2wcee19",
+      "parent": "f_rkrcq6c02bio19",
       "children": [
-        "t_6ehcdgz9si9d1b"
+        "t_3n9wx5aespki1b"
       ],
       "layout": {
         "mode": "row",
@@ -1462,11 +1462,11 @@
       "radius": "radii.3",
       "fill": "accentSoft"
     },
-    "t_6ehcdgz9si9d1b": {
+    "t_3n9wx5aespki1b": {
       "type": "text",
-      "id": "t_6ehcdgz9si9d1b",
+      "id": "t_3n9wx5aespki1b",
       "name": "Бабушка · эмодзи",
-      "parent": "f_o91gf595c5mn1a",
+      "parent": "f_1c8dsbqqc0251a",
       "characters": "👵",
       "style": "heading",
       "align": "left",
@@ -1479,14 +1479,14 @@
         }
       }
     },
-    "f_1248uj17i4nm1c": {
+    "f_9q6yqajcoyjq1c": {
       "type": "frame",
-      "id": "f_1248uj17i4nm1c",
+      "id": "f_9q6yqajcoyjq1c",
       "name": "Бабушка · текст",
-      "parent": "f_kcw7e8w2wcee19",
+      "parent": "f_rkrcq6c02bio19",
       "children": [
-        "t_tzk7ygach5vj1d",
-        "t_5oscry5fy7f51e"
+        "t_7o0jbwxykt551d",
+        "t_j3liqcc9jhzq1e"
       ],
       "layout": {
         "mode": "column",
@@ -1511,11 +1511,11 @@
       },
       "radius": "radii.0"
     },
-    "t_tzk7ygach5vj1d": {
+    "t_7o0jbwxykt551d": {
       "type": "text",
-      "id": "t_tzk7ygach5vj1d",
+      "id": "t_7o0jbwxykt551d",
       "name": "Бабушка · имя",
-      "parent": "f_1248uj17i4nm1c",
+      "parent": "f_9q6yqajcoyjq1c",
       "characters": "Бабушка",
       "style": "body",
       "align": "left",
@@ -1528,11 +1528,11 @@
         }
       }
     },
-    "t_5oscry5fy7f51e": {
+    "t_j3liqcc9jhzq1e": {
       "type": "text",
-      "id": "t_5oscry5fy7f51e",
+      "id": "t_j3liqcc9jhzq1e",
       "name": "Бабушка · уровень",
-      "parent": "f_1248uj17i4nm1c",
+      "parent": "f_9q6yqajcoyjq1c",
       "characters": "×3 · +3 в секунду",
       "style": "caption",
       "align": "left",
@@ -1546,13 +1546,13 @@
       },
       "color": "muted"
     },
-    "f_m9oqac5yr3a91f": {
+    "f_vzhczt506kwd1f": {
       "type": "frame",
-      "id": "f_m9oqac5yr3a91f",
+      "id": "f_vzhczt506kwd1f",
       "name": "Бабушка · купить",
-      "parent": "f_kcw7e8w2wcee19",
+      "parent": "f_rkrcq6c02bio19",
       "children": [
-        "t_da9zntxplsn91g"
+        "t_dw7t1iusxc1w1g"
       ],
       "layout": {
         "mode": "row",
@@ -1591,11 +1591,11 @@
         "easing": "spring"
       }
     },
-    "t_da9zntxplsn91g": {
+    "t_dw7t1iusxc1w1g": {
       "type": "text",
-      "id": "t_da9zntxplsn91g",
+      "id": "t_dw7t1iusxc1w1g",
       "name": "Бабушка · цена",
-      "parent": "f_m9oqac5yr3a91f",
+      "parent": "f_vzhczt506kwd1f",
       "characters": "100 🍪",
       "style": "caption",
       "align": "left",
@@ -1609,15 +1609,15 @@
       },
       "color": "onAccent"
     },
-    "f_vk6aieddffda1h": {
+    "f_xi36f092n9od1h": {
       "type": "frame",
-      "id": "f_vk6aieddffda1h",
+      "id": "f_xi36f092n9od1h",
       "name": "Улучшение · Ферма",
-      "parent": "f_lmkzypm3cmdyx",
+      "parent": "f_mrx26d8wqlmqx",
       "children": [
-        "f_hw4vb50e0do91i",
-        "f_fhgdo8evpdam1k",
-        "f_ubf4opwr8v671n"
+        "f_2fw6seu1nbuu1i",
+        "f_cqfsb9irdxa31k",
+        "f_tni30gl1p8jv1n"
       ],
       "layout": {
         "mode": "row",
@@ -1645,13 +1645,13 @@
       "stroke": "line",
       "opacity": 0.7
     },
-    "f_hw4vb50e0do91i": {
+    "f_2fw6seu1nbuu1i": {
       "type": "frame",
-      "id": "f_hw4vb50e0do91i",
+      "id": "f_2fw6seu1nbuu1i",
       "name": "Ферма · значок",
-      "parent": "f_vk6aieddffda1h",
+      "parent": "f_xi36f092n9od1h",
       "children": [
-        "t_dsimyh7dcqov1j"
+        "t_iyvdjevp225q1j"
       ],
       "layout": {
         "mode": "row",
@@ -1679,11 +1679,11 @@
       "radius": "radii.3",
       "fill": "surfaceAlt"
     },
-    "t_dsimyh7dcqov1j": {
+    "t_iyvdjevp225q1j": {
       "type": "text",
-      "id": "t_dsimyh7dcqov1j",
+      "id": "t_iyvdjevp225q1j",
       "name": "Ферма · эмодзи",
-      "parent": "f_hw4vb50e0do91i",
+      "parent": "f_2fw6seu1nbuu1i",
       "characters": "🌾",
       "style": "heading",
       "align": "left",
@@ -1696,14 +1696,14 @@
         }
       }
     },
-    "f_fhgdo8evpdam1k": {
+    "f_cqfsb9irdxa31k": {
       "type": "frame",
-      "id": "f_fhgdo8evpdam1k",
+      "id": "f_cqfsb9irdxa31k",
       "name": "Ферма · текст",
-      "parent": "f_vk6aieddffda1h",
+      "parent": "f_xi36f092n9od1h",
       "children": [
-        "t_8sruza3n9czk1l",
-        "t_nbrmm9ld69i61m"
+        "t_2a2efcpx65dv1l",
+        "t_rzw9yk9cdun81m"
       ],
       "layout": {
         "mode": "column",
@@ -1728,11 +1728,11 @@
       },
       "radius": "radii.0"
     },
-    "t_8sruza3n9czk1l": {
+    "t_2a2efcpx65dv1l": {
       "type": "text",
-      "id": "t_8sruza3n9czk1l",
+      "id": "t_2a2efcpx65dv1l",
       "name": "Ферма · имя",
-      "parent": "f_fhgdo8evpdam1k",
+      "parent": "f_cqfsb9irdxa31k",
       "characters": "Ферма",
       "style": "body",
       "align": "left",
@@ -1745,11 +1745,11 @@
         }
       }
     },
-    "t_nbrmm9ld69i61m": {
+    "t_rzw9yk9cdun81m": {
       "type": "text",
-      "id": "t_nbrmm9ld69i61m",
+      "id": "t_rzw9yk9cdun81m",
       "name": "Ферма · уровень",
-      "parent": "f_fhgdo8evpdam1k",
+      "parent": "f_cqfsb9irdxa31k",
       "characters": "×1 · +8 в секунду",
       "style": "caption",
       "align": "left",
@@ -1763,13 +1763,13 @@
       },
       "color": "muted"
     },
-    "f_ubf4opwr8v671n": {
+    "f_tni30gl1p8jv1n": {
       "type": "frame",
-      "id": "f_ubf4opwr8v671n",
+      "id": "f_tni30gl1p8jv1n",
       "name": "Ферма · купить",
-      "parent": "f_vk6aieddffda1h",
+      "parent": "f_xi36f092n9od1h",
       "children": [
-        "t_3cqajw59wli01o"
+        "t_mfg18dwrcuce1o"
       ],
       "layout": {
         "mode": "row",
@@ -1795,11 +1795,11 @@
       "radius": "radii.7",
       "fill": "surfaceAlt"
     },
-    "t_3cqajw59wli01o": {
+    "t_mfg18dwrcuce1o": {
       "type": "text",
-      "id": "t_3cqajw59wli01o",
+      "id": "t_mfg18dwrcuce1o",
       "name": "Ферма · цена",
-      "parent": "f_ubf4opwr8v671n",
+      "parent": "f_tni30gl1p8jv1n",
       "characters": "1 100 🍪",
       "style": "caption",
       "align": "left",
@@ -1813,15 +1813,15 @@
       },
       "color": "muted"
     },
-    "f_7y0t470jn2ie1p": {
+    "f_d9gqzkzod38r1p": {
       "type": "frame",
-      "id": "f_7y0t470jn2ie1p",
+      "id": "f_d9gqzkzod38r1p",
       "name": "Улучшение · Фабрика",
-      "parent": "f_lmkzypm3cmdyx",
+      "parent": "f_mrx26d8wqlmqx",
       "children": [
-        "f_1o3j0rd5l2381q",
-        "f_oegz26ombtbr1s",
-        "f_4uye7ye9qy2l1v"
+        "f_422b6agzc8bj1q",
+        "f_e0i5o5nzf3pm1s",
+        "f_sstrrlhgusf21v"
       ],
       "layout": {
         "mode": "row",
@@ -1849,13 +1849,13 @@
       "stroke": "line",
       "opacity": 0.7
     },
-    "f_1o3j0rd5l2381q": {
+    "f_422b6agzc8bj1q": {
       "type": "frame",
-      "id": "f_1o3j0rd5l2381q",
+      "id": "f_422b6agzc8bj1q",
       "name": "Фабрика · значок",
-      "parent": "f_7y0t470jn2ie1p",
+      "parent": "f_d9gqzkzod38r1p",
       "children": [
-        "t_zckhp5dzg9471r"
+        "t_oeja0bi2nmfj1r"
       ],
       "layout": {
         "mode": "row",
@@ -1883,11 +1883,11 @@
       "radius": "radii.3",
       "fill": "surfaceAlt"
     },
-    "t_zckhp5dzg9471r": {
+    "t_oeja0bi2nmfj1r": {
       "type": "text",
-      "id": "t_zckhp5dzg9471r",
+      "id": "t_oeja0bi2nmfj1r",
       "name": "Фабрика · эмодзи",
-      "parent": "f_1o3j0rd5l2381q",
+      "parent": "f_422b6agzc8bj1q",
       "characters": "🏭",
       "style": "heading",
       "align": "left",
@@ -1900,14 +1900,14 @@
         }
       }
     },
-    "f_oegz26ombtbr1s": {
+    "f_e0i5o5nzf3pm1s": {
       "type": "frame",
-      "id": "f_oegz26ombtbr1s",
+      "id": "f_e0i5o5nzf3pm1s",
       "name": "Фабрика · текст",
-      "parent": "f_7y0t470jn2ie1p",
+      "parent": "f_d9gqzkzod38r1p",
       "children": [
-        "t_5yhltqdbwkcf1t",
-        "t_m6h50f0gojxg1u"
+        "t_k1c6gnugtim31t",
+        "t_ul56a3su9ioc1u"
       ],
       "layout": {
         "mode": "column",
@@ -1932,11 +1932,11 @@
       },
       "radius": "radii.0"
     },
-    "t_5yhltqdbwkcf1t": {
+    "t_k1c6gnugtim31t": {
       "type": "text",
-      "id": "t_5yhltqdbwkcf1t",
+      "id": "t_k1c6gnugtim31t",
       "name": "Фабрика · имя",
-      "parent": "f_oegz26ombtbr1s",
+      "parent": "f_e0i5o5nzf3pm1s",
       "characters": "Фабрика",
       "style": "body",
       "align": "left",
@@ -1949,11 +1949,11 @@
         }
       }
     },
-    "t_m6h50f0gojxg1u": {
+    "t_ul56a3su9ioc1u": {
       "type": "text",
-      "id": "t_m6h50f0gojxg1u",
+      "id": "t_ul56a3su9ioc1u",
       "name": "Фабрика · уровень",
-      "parent": "f_oegz26ombtbr1s",
+      "parent": "f_e0i5o5nzf3pm1s",
       "characters": "откроется на уровне 10",
       "style": "caption",
       "align": "left",
@@ -1967,13 +1967,13 @@
       },
       "color": "muted"
     },
-    "f_4uye7ye9qy2l1v": {
+    "f_sstrrlhgusf21v": {
       "type": "frame",
-      "id": "f_4uye7ye9qy2l1v",
+      "id": "f_sstrrlhgusf21v",
       "name": "Фабрика · купить",
-      "parent": "f_7y0t470jn2ie1p",
+      "parent": "f_d9gqzkzod38r1p",
       "children": [
-        "t_0mau9x0yuhb51w"
+        "t_v39mtov5ks041w"
       ],
       "layout": {
         "mode": "row",
@@ -1999,11 +1999,11 @@
       "radius": "radii.7",
       "fill": "surfaceAlt"
     },
-    "t_0mau9x0yuhb51w": {
+    "t_v39mtov5ks041w": {
       "type": "text",
-      "id": "t_0mau9x0yuhb51w",
+      "id": "t_v39mtov5ks041w",
       "name": "Фабрика · цена",
-      "parent": "f_4uye7ye9qy2l1v",
+      "parent": "f_sstrrlhgusf21v",
       "characters": "12 000 🍪",
       "style": "caption",
       "align": "left",
@@ -2017,14 +2017,14 @@
       },
       "color": "muted"
     },
-    "f_9h31bi7av7iv1x": {
+    "f_j99lxyqw4lwv1x": {
       "type": "frame",
-      "id": "f_9h31bi7av7iv1x",
+      "id": "f_j99lxyqw4lwv1x",
       "name": "Достижение",
-      "parent": "f_6nwaqk89g91s4",
+      "parent": "f_k9wt0rc9rd7i4",
       "children": [
-        "t_6y87d00dz07e1y",
-        "f_bkq5nxv9xpn61z"
+        "t_n3u3xtx69ei31y",
+        "f_m6i1u6h071o21z"
       ],
       "layout": {
         "mode": "row",
@@ -2050,11 +2050,11 @@
       "radius": "radii.4",
       "fill": "accentSoft"
     },
-    "t_6y87d00dz07e1y": {
+    "t_n3u3xtx69ei31y": {
       "type": "text",
-      "id": "t_6y87d00dz07e1y",
+      "id": "t_n3u3xtx69ei31y",
       "name": "Кубок",
-      "parent": "f_9h31bi7av7iv1x",
+      "parent": "f_j99lxyqw4lwv1x",
       "characters": "🏆",
       "style": "heading",
       "align": "left",
@@ -2067,14 +2067,14 @@
         }
       }
     },
-    "f_bkq5nxv9xpn61z": {
+    "f_m6i1u6h071o21z": {
       "type": "frame",
-      "id": "f_bkq5nxv9xpn61z",
+      "id": "f_m6i1u6h071o21z",
       "name": "Достижение · текст",
-      "parent": "f_9h31bi7av7iv1x",
+      "parent": "f_j99lxyqw4lwv1x",
       "children": [
-        "t_nlc4g8wirkum20",
-        "t_y8jbffptobbc21"
+        "t_uihbkvi42zf220",
+        "t_ydgu2i5diw2321"
       ],
       "layout": {
         "mode": "column",
@@ -2099,11 +2099,11 @@
       },
       "radius": "radii.0"
     },
-    "t_nlc4g8wirkum20": {
+    "t_uihbkvi42zf220": {
       "type": "text",
-      "id": "t_nlc4g8wirkum20",
+      "id": "t_uihbkvi42zf220",
       "name": "Достижение · имя",
-      "parent": "f_bkq5nxv9xpn61z",
+      "parent": "f_m6i1u6h071o21z",
       "characters": "Тысяча крошек",
       "style": "body",
       "align": "left",
@@ -2117,11 +2117,11 @@
       },
       "color": "accentInk"
     },
-    "t_y8jbffptobbc21": {
+    "t_ydgu2i5diw2321": {
       "type": "text",
-      "id": "t_y8jbffptobbc21",
+      "id": "t_ydgu2i5diw2321",
       "name": "Достижение · описание",
-      "parent": "f_bkq5nxv9xpn61z",
+      "parent": "f_m6i1u6h071o21z",
       "characters": "испекли первые 1 000 печенек",
       "style": "caption",
       "align": "left",
@@ -2135,14 +2135,14 @@
       },
       "color": "accentInk"
     },
-    "f_whyglsn03vzk22": {
+    "f_zmz5dwuer28y22": {
       "type": "frame",
-      "id": "f_whyglsn03vzk22",
+      "id": "f_zmz5dwuer28y22",
       "name": "Кликер · компьютер",
-      "parent": "page_zkfs12647hn11",
+      "parent": "page_ytnaj12e6lfd1",
       "children": [
-        "f_tbwocfvab9yp23",
-        "f_zgwy5d6dg78r2w"
+        "f_pcpscb95ubfw23",
+        "f_237bsgn6ie4m2w"
       ],
       "layout": {
         "mode": "row",
@@ -2173,16 +2173,16 @@
         "y": 0
       }
     },
-    "f_tbwocfvab9yp23": {
+    "f_pcpscb95ubfw23": {
       "type": "frame",
-      "id": "f_tbwocfvab9yp23",
+      "id": "f_pcpscb95ubfw23",
       "name": "Левая колонка",
-      "parent": "f_whyglsn03vzk22",
+      "parent": "f_zmz5dwuer28y22",
       "children": [
-        "f_n4s1chk3ik4i24",
-        "f_0qs2a5ptnr782a",
-        "f_1r695mpn4xrb2f",
-        "f_8gum73cr39s12q"
+        "f_i6jqz37u3jcx24",
+        "f_zg1vwa1bwmg52a",
+        "f_lmc7tm9phyl72f",
+        "f_eo4fqm59e0b62q"
       ],
       "layout": {
         "mode": "column",
@@ -2207,14 +2207,14 @@
       },
       "radius": "radii.0"
     },
-    "f_n4s1chk3ik4i24": {
+    "f_i6jqz37u3jcx24": {
       "type": "frame",
-      "id": "f_n4s1chk3ik4i24",
+      "id": "f_i6jqz37u3jcx24",
       "name": "Шапка",
-      "parent": "f_tbwocfvab9yp23",
+      "parent": "f_pcpscb95ubfw23",
       "children": [
-        "f_tv7ht45ux11225",
-        "f_pc3pmc7a7qo828"
+        "f_xhq9wgi5e9cs25",
+        "f_4v5cf5q3rzq128"
       ],
       "layout": {
         "mode": "row",
@@ -2239,14 +2239,14 @@
       },
       "radius": "radii.0"
     },
-    "f_tv7ht45ux11225": {
+    "f_xhq9wgi5e9cs25": {
       "type": "frame",
-      "id": "f_tv7ht45ux11225",
+      "id": "f_xhq9wgi5e9cs25",
       "name": "Шапка · текст",
-      "parent": "f_n4s1chk3ik4i24",
+      "parent": "f_i6jqz37u3jcx24",
       "children": [
-        "t_s3yrm3hhu55j26",
-        "t_fdopd2wbt09627"
+        "t_60jqnuc6qaut26",
+        "t_7sflxoy5ks0727"
       ],
       "layout": {
         "mode": "column",
@@ -2271,11 +2271,11 @@
       },
       "radius": "radii.0"
     },
-    "t_s3yrm3hhu55j26": {
+    "t_60jqnuc6qaut26": {
       "type": "text",
-      "id": "t_s3yrm3hhu55j26",
+      "id": "t_60jqnuc6qaut26",
       "name": "Название",
-      "parent": "f_tv7ht45ux11225",
+      "parent": "f_xhq9wgi5e9cs25",
       "characters": "Печенька-кликер",
       "style": "title",
       "align": "left",
@@ -2288,11 +2288,11 @@
         }
       }
     },
-    "t_fdopd2wbt09627": {
+    "t_7sflxoy5ks0727": {
       "type": "text",
-      "id": "t_fdopd2wbt09627",
+      "id": "t_7sflxoy5ks0727",
       "name": "Подзаголовок",
-      "parent": "f_tv7ht45ux11225",
+      "parent": "f_xhq9wgi5e9cs25",
       "characters": "Пекарня Ани · уровень 7 · 3 ч 12 мин в игре",
       "style": "caption",
       "align": "left",
@@ -2306,13 +2306,13 @@
       },
       "color": "muted"
     },
-    "f_pc3pmc7a7qo828": {
+    "f_4v5cf5q3rzq128": {
       "type": "frame",
-      "id": "f_pc3pmc7a7qo828",
+      "id": "f_4v5cf5q3rzq128",
       "name": "Буст",
-      "parent": "f_n4s1chk3ik4i24",
+      "parent": "f_i6jqz37u3jcx24",
       "children": [
-        "t_bk4istks7y9129"
+        "t_kula2fkzj5fa29"
       ],
       "layout": {
         "mode": "row",
@@ -2352,11 +2352,11 @@
         "easing": "spring"
       }
     },
-    "t_bk4istks7y9129": {
+    "t_kula2fkzj5fa29": {
       "type": "text",
-      "id": "t_bk4istks7y9129",
+      "id": "t_kula2fkzj5fa29",
       "name": "Буст · текст",
-      "parent": "f_pc3pmc7a7qo828",
+      "parent": "f_4v5cf5q3rzq128",
       "characters": "🔥 буст ×2 · 0:42",
       "style": "caption",
       "align": "left",
@@ -2370,15 +2370,15 @@
       },
       "color": "accentInk"
     },
-    "f_0qs2a5ptnr782a": {
+    "f_zg1vwa1bwmg52a": {
       "type": "frame",
-      "id": "f_0qs2a5ptnr782a",
+      "id": "f_zg1vwa1bwmg52a",
       "name": "Счётчик",
-      "parent": "f_tbwocfvab9yp23",
+      "parent": "f_pcpscb95ubfw23",
       "children": [
-        "t_msliuxjx2sz82b",
-        "t_jj4ul4neyct52c",
-        "f_3bx064kaf1tt2d"
+        "t_vxvfze2346o52b",
+        "t_0ls7lumydstd2c",
+        "f_6bwdqz11htip2d"
       ],
       "layout": {
         "mode": "column",
@@ -2405,11 +2405,11 @@
       "fill": "surface",
       "shadow": "shadow.sm"
     },
-    "t_msliuxjx2sz82b": {
+    "t_vxvfze2346o52b": {
       "type": "text",
-      "id": "t_msliuxjx2sz82b",
+      "id": "t_vxvfze2346o52b",
       "name": "Печенек",
-      "parent": "f_0qs2a5ptnr782a",
+      "parent": "f_zg1vwa1bwmg52a",
       "characters": "1 284",
       "style": "display",
       "align": "center",
@@ -2422,11 +2422,11 @@
         }
       }
     },
-    "t_jj4ul4neyct52c": {
+    "t_0ls7lumydstd2c": {
       "type": "text",
-      "id": "t_jj4ul4neyct52c",
+      "id": "t_0ls7lumydstd2c",
       "name": "Подпись счётчика",
-      "parent": "f_0qs2a5ptnr782a",
+      "parent": "f_zg1vwa1bwmg52a",
       "characters": "печенек в банке",
       "style": "body",
       "align": "center",
@@ -2440,13 +2440,13 @@
       },
       "color": "muted"
     },
-    "f_3bx064kaf1tt2d": {
+    "f_6bwdqz11htip2d": {
       "type": "frame",
-      "id": "f_3bx064kaf1tt2d",
+      "id": "f_6bwdqz11htip2d",
       "name": "Скорость",
-      "parent": "f_0qs2a5ptnr782a",
+      "parent": "f_zg1vwa1bwmg52a",
       "children": [
-        "t_e14iltc6qh3o2e"
+        "t_v0mhab4n5ec12e"
       ],
       "layout": {
         "mode": "row",
@@ -2472,11 +2472,11 @@
       "radius": "radii.7",
       "fill": "surfaceAlt"
     },
-    "t_e14iltc6qh3o2e": {
+    "t_v0mhab4n5ec12e": {
       "type": "text",
-      "id": "t_e14iltc6qh3o2e",
+      "id": "t_v0mhab4n5ec12e",
       "name": "Скорость · текст",
-      "parent": "f_3bx064kaf1tt2d",
+      "parent": "f_6bwdqz11htip2d",
       "characters": "▲ +12,4 в секунду",
       "style": "caption",
       "align": "left",
@@ -2490,14 +2490,14 @@
       },
       "color": "good"
     },
-    "f_1r695mpn4xrb2f": {
+    "f_lmc7tm9phyl72f": {
       "type": "frame",
-      "id": "f_1r695mpn4xrb2f",
+      "id": "f_lmc7tm9phyl72f",
       "name": "Сцена печеньки",
-      "parent": "f_tbwocfvab9yp23",
+      "parent": "f_pcpscb95ubfw23",
       "children": [
-        "f_hjywjhduf7vi2g",
-        "t_vx08msst429t2p"
+        "f_30wlgqc627h22g",
+        "t_no3ntazsza0u2p"
       ],
       "layout": {
         "mode": "column",
@@ -2522,29 +2522,29 @@
       },
       "radius": "radii.0"
     },
-    "f_hjywjhduf7vi2g": {
+    "f_30wlgqc627h22g": {
       "type": "frame",
-      "id": "f_hjywjhduf7vi2g",
+      "id": "f_30wlgqc627h22g",
       "name": "Печенька",
-      "parent": "f_1r695mpn4xrb2f",
+      "parent": "f_lmc7tm9phyl72f",
       "children": [
-        "n_604vn629tnxt2h",
-        "n_kzafttyb7x1i2i",
-        "n_vizgkmygrjmr2j",
-        "n_ghy2ny19rx902k",
-        "n_p0ylx0ueh5kb2l",
-        "n_250jev8dno2b2m",
-        "n_mxo88jagr0ps2n",
-        "n_fb1xtgyx7s192o"
+        "n_ixt64pcf3scz2h",
+        "n_cewf229dzth52i",
+        "n_ee7eo36sp1um2j",
+        "n_eofmthufp6bd2k",
+        "n_4wicg2al9ls32l",
+        "n_9lhilvf75ook2m",
+        "n_5rcc1siexbh02n",
+        "n_q8hfeovevs832o"
       ],
       "layout": {
         "mode": "none",
-        "gap": 0,
+        "gap": "spacing.0",
         "padding": {
-          "t": 0,
-          "r": 0,
-          "b": 0,
-          "l": 0
+          "t": "spacing.0",
+          "r": "spacing.0",
+          "b": "spacing.0",
+          "l": "spacing.0"
         },
         "align": "start",
         "justify": "start",
@@ -2560,7 +2560,7 @@
           "value": 380
         }
       },
-      "radius": 0,
+      "radius": "radii.0",
       "clip": true,
       "role": "illustration",
       "states": {
@@ -2577,11 +2577,11 @@
         "easing": "spring"
       }
     },
-    "n_604vn629tnxt2h": {
+    "n_ixt64pcf3scz2h": {
       "type": "vector",
-      "id": "n_604vn629tnxt2h",
+      "id": "n_ixt64pcf3scz2h",
       "name": "Тень",
-      "parent": "f_hjywjhduf7vi2g",
+      "parent": "f_30wlgqc627h22g",
       "viewBox": {
         "x": 84,
         "y": 330,
@@ -2612,11 +2612,11 @@
         "y": 313.5
       }
     },
-    "n_kzafttyb7x1i2i": {
+    "n_cewf229dzth52i": {
       "type": "vector",
-      "id": "n_kzafttyb7x1i2i",
+      "id": "n_cewf229dzth52i",
       "name": "Тесто",
-      "parent": "f_hjywjhduf7vi2g",
+      "parent": "f_30wlgqc627h22g",
       "viewBox": {
         "x": 48.1,
         "y": 48.9,
@@ -2669,11 +2669,11 @@
         "y": 46.46
       }
     },
-    "n_vizgkmygrjmr2j": {
+    "n_ee7eo36sp1um2j": {
       "type": "vector",
-      "id": "n_vizgkmygrjmr2j",
+      "id": "n_ee7eo36sp1um2j",
       "name": "Подрумяненный край",
-      "parent": "f_hjywjhduf7vi2g",
+      "parent": "f_30wlgqc627h22g",
       "viewBox": {
         "x": 74,
         "y": 228,
@@ -2704,11 +2704,11 @@
         "y": 216.6
       }
     },
-    "n_ghy2ny19rx902k": {
+    "n_eofmthufp6bd2k": {
       "type": "vector",
-      "id": "n_ghy2ny19rx902k",
+      "id": "n_eofmthufp6bd2k",
       "name": "Трещинки",
-      "parent": "f_hjywjhduf7vi2g",
+      "parent": "f_30wlgqc627h22g",
       "viewBox": {
         "x": 102,
         "y": 102,
@@ -2739,11 +2739,11 @@
         "y": 96.9
       }
     },
-    "n_p0ylx0ueh5kb2l": {
+    "n_4wicg2al9ls32l": {
       "type": "vector",
-      "id": "n_p0ylx0ueh5kb2l",
+      "id": "n_4wicg2al9ls32l",
       "name": "Шоколадная крошка",
-      "parent": "f_hjywjhduf7vi2g",
+      "parent": "f_30wlgqc627h22g",
       "viewBox": {
         "x": 109,
         "y": 95,
@@ -2837,11 +2837,11 @@
         "y": 90.25
       }
     },
-    "n_250jev8dno2b2m": {
+    "n_9lhilvf75ook2m": {
       "type": "vector",
-      "id": "n_250jev8dno2b2m",
+      "id": "n_9lhilvf75ook2m",
       "name": "Блики шоколада",
-      "parent": "f_hjywjhduf7vi2g",
+      "parent": "f_30wlgqc627h22g",
       "viewBox": {
         "x": 124.9,
         "y": 96.8,
@@ -2907,11 +2907,11 @@
         "y": 91.96
       }
     },
-    "n_mxo88jagr0ps2n": {
+    "n_5rcc1siexbh02n": {
       "type": "vector",
-      "id": "n_mxo88jagr0ps2n",
+      "id": "n_5rcc1siexbh02n",
       "name": "Крошки",
-      "parent": "f_hjywjhduf7vi2g",
+      "parent": "f_30wlgqc627h22g",
       "viewBox": {
         "x": 66,
         "y": 277,
@@ -2970,11 +2970,11 @@
         "y": 263.15
       }
     },
-    "n_fb1xtgyx7s192o": {
+    "n_q8hfeovevs832o": {
       "type": "vector",
-      "id": "n_fb1xtgyx7s192o",
+      "id": "n_q8hfeovevs832o",
       "name": "Блик",
-      "parent": "f_hjywjhduf7vi2g",
+      "parent": "f_30wlgqc627h22g",
       "viewBox": {
         "x": 119.6,
         "y": 76.4,
@@ -3005,11 +3005,11 @@
         "y": 72.58
       }
     },
-    "t_vx08msst429t2p": {
+    "t_no3ntazsza0u2p": {
       "type": "text",
-      "id": "t_vx08msst429t2p",
+      "id": "t_no3ntazsza0u2p",
       "name": "Подсказка клика",
-      "parent": "f_1r695mpn4xrb2f",
+      "parent": "f_lmc7tm9phyl72f",
       "characters": "Нажми на печеньку · +2 за клик",
       "style": "caption",
       "align": "center",
@@ -3023,14 +3023,14 @@
       },
       "color": "muted"
     },
-    "f_8gum73cr39s12q": {
+    "f_eo4fqm59e0b62q": {
       "type": "frame",
-      "id": "f_8gum73cr39s12q",
+      "id": "f_eo4fqm59e0b62q",
       "name": "Прогресс уровня",
-      "parent": "f_tbwocfvab9yp23",
+      "parent": "f_pcpscb95ubfw23",
       "children": [
-        "f_ea709hs56k2d2r",
-        "f_5n0ioei3la5i2u"
+        "f_tt3vjtgih1uc2r",
+        "f_urq45bihu1pa2u"
       ],
       "layout": {
         "mode": "column",
@@ -3055,14 +3055,14 @@
       },
       "radius": "radii.0"
     },
-    "f_ea709hs56k2d2r": {
+    "f_tt3vjtgih1uc2r": {
       "type": "frame",
-      "id": "f_ea709hs56k2d2r",
+      "id": "f_tt3vjtgih1uc2r",
       "name": "Прогресс · строка",
-      "parent": "f_8gum73cr39s12q",
+      "parent": "f_eo4fqm59e0b62q",
       "children": [
-        "t_ukrut8njxiu72s",
-        "t_wg519efkrvlr2t"
+        "t_n4ow06l8m10w2s",
+        "t_4a9pxf2unlj02t"
       ],
       "layout": {
         "mode": "row",
@@ -3087,11 +3087,11 @@
       },
       "radius": "radii.0"
     },
-    "t_ukrut8njxiu72s": {
+    "t_n4ow06l8m10w2s": {
       "type": "text",
-      "id": "t_ukrut8njxiu72s",
+      "id": "t_n4ow06l8m10w2s",
       "name": "Прогресс · подпись",
-      "parent": "f_ea709hs56k2d2r",
+      "parent": "f_tt3vjtgih1uc2r",
       "characters": "До уровня 8",
       "style": "caption",
       "align": "left",
@@ -3105,11 +3105,11 @@
       },
       "color": "muted"
     },
-    "t_wg519efkrvlr2t": {
+    "t_4a9pxf2unlj02t": {
       "type": "text",
-      "id": "t_wg519efkrvlr2t",
+      "id": "t_4a9pxf2unlj02t",
       "name": "Прогресс · число",
-      "parent": "f_ea709hs56k2d2r",
+      "parent": "f_tt3vjtgih1uc2r",
       "characters": "1 284 / 2 000",
       "style": "caption",
       "align": "left",
@@ -3122,13 +3122,13 @@
         }
       }
     },
-    "f_5n0ioei3la5i2u": {
+    "f_urq45bihu1pa2u": {
       "type": "frame",
-      "id": "f_5n0ioei3la5i2u",
+      "id": "f_urq45bihu1pa2u",
       "name": "Полоса",
-      "parent": "f_8gum73cr39s12q",
+      "parent": "f_eo4fqm59e0b62q",
       "children": [
-        "r_6oxgrb11ugoz2v"
+        "r_3l63dzacsam62v"
       ],
       "layout": {
         "mode": "row",
@@ -3155,11 +3155,11 @@
       "radius": "radii.7",
       "fill": "surfaceAlt"
     },
-    "r_6oxgrb11ugoz2v": {
+    "r_3l63dzacsam62v": {
       "type": "rect",
-      "id": "r_6oxgrb11ugoz2v",
+      "id": "r_3l63dzacsam62v",
       "name": "Заполнение",
-      "parent": "f_5n0ioei3la5i2u",
+      "parent": "f_urq45bihu1pa2u",
       "size": {
         "w": {
           "mode": "fixed",
@@ -3173,14 +3173,14 @@
       "radius": "radii.7",
       "fill": "accent"
     },
-    "f_zgwy5d6dg78r2w": {
+    "f_237bsgn6ie4m2w": {
       "type": "frame",
-      "id": "f_zgwy5d6dg78r2w",
+      "id": "f_237bsgn6ie4m2w",
       "name": "Правая колонка",
-      "parent": "f_whyglsn03vzk22",
+      "parent": "f_zmz5dwuer28y22",
       "children": [
-        "f_vwgu6g4sgh132x",
-        "f_xtz2j3fsn4rl3x"
+        "f_85k233oxdibx2x",
+        "f_plri0pxrn5za3x"
       ],
       "layout": {
         "mode": "column",
@@ -3206,17 +3206,17 @@
       },
       "radius": "radii.0"
     },
-    "f_vwgu6g4sgh132x": {
+    "f_85k233oxdibx2x": {
       "type": "frame",
-      "id": "f_vwgu6g4sgh132x",
+      "id": "f_85k233oxdibx2x",
       "name": "Магазин улучшений",
-      "parent": "f_zgwy5d6dg78r2w",
+      "parent": "f_237bsgn6ie4m2w",
       "children": [
-        "f_jg1c0uw6z7s22y",
-        "f_aizqn25g3c8031",
-        "f_q6u8uckqer5t39",
-        "f_sda1ybcsyf213h",
-        "f_aipqul2ktl8z3p"
+        "f_dhlzq05v2mps2y",
+        "f_53ys6n3y1vqe31",
+        "f_z37e0ycjznyo39",
+        "f_sz4oekgkw5kc3h",
+        "f_h0l9dpe7ojgt3p"
       ],
       "layout": {
         "mode": "column",
@@ -3241,14 +3241,14 @@
       },
       "radius": "radii.0"
     },
-    "f_jg1c0uw6z7s22y": {
+    "f_dhlzq05v2mps2y": {
       "type": "frame",
-      "id": "f_jg1c0uw6z7s22y",
+      "id": "f_dhlzq05v2mps2y",
       "name": "Улучшения · шапка",
-      "parent": "f_vwgu6g4sgh132x",
+      "parent": "f_85k233oxdibx2x",
       "children": [
-        "t_jfuw8c6hh0go2z",
-        "t_t4j6yqydd6va30"
+        "t_u1xkbyu0rmkq2z",
+        "t_dfcv9e7jpmeg30"
       ],
       "layout": {
         "mode": "row",
@@ -3273,11 +3273,11 @@
       },
       "radius": "radii.0"
     },
-    "t_jfuw8c6hh0go2z": {
+    "t_u1xkbyu0rmkq2z": {
       "type": "text",
-      "id": "t_jfuw8c6hh0go2z",
+      "id": "t_u1xkbyu0rmkq2z",
       "name": "Улучшения · заголовок",
-      "parent": "f_jg1c0uw6z7s22y",
+      "parent": "f_dhlzq05v2mps2y",
       "characters": "Улучшения",
       "style": "heading",
       "align": "left",
@@ -3290,11 +3290,11 @@
         }
       }
     },
-    "t_t4j6yqydd6va30": {
+    "t_dfcv9e7jpmeg30": {
       "type": "text",
-      "id": "t_t4j6yqydd6va30",
+      "id": "t_dfcv9e7jpmeg30",
       "name": "Улучшения · счёт",
-      "parent": "f_jg1c0uw6z7s22y",
+      "parent": "f_dhlzq05v2mps2y",
       "characters": "куплено 16",
       "style": "caption",
       "align": "left",
@@ -3308,15 +3308,15 @@
       },
       "color": "muted"
     },
-    "f_aizqn25g3c8031": {
+    "f_53ys6n3y1vqe31": {
       "type": "frame",
-      "id": "f_aizqn25g3c8031",
+      "id": "f_53ys6n3y1vqe31",
       "name": "Улучшение · Курсор",
-      "parent": "f_vwgu6g4sgh132x",
+      "parent": "f_85k233oxdibx2x",
       "children": [
-        "f_vr10yqassvb132",
-        "f_2pb3vm7r3vlt34",
-        "f_ks0sqr9m000537"
+        "f_q1h1igzpf8xy32",
+        "f_39il53zzgezg34",
+        "f_8ocbgr2yleun37"
       ],
       "layout": {
         "mode": "row",
@@ -3357,13 +3357,13 @@
         "easing": "spring"
       }
     },
-    "f_vr10yqassvb132": {
+    "f_q1h1igzpf8xy32": {
       "type": "frame",
-      "id": "f_vr10yqassvb132",
+      "id": "f_q1h1igzpf8xy32",
       "name": "Курсор · значок",
-      "parent": "f_aizqn25g3c8031",
+      "parent": "f_53ys6n3y1vqe31",
       "children": [
-        "t_dwpdy6qb791l33"
+        "t_p9okt80g021w33"
       ],
       "layout": {
         "mode": "row",
@@ -3391,11 +3391,11 @@
       "radius": "radii.3",
       "fill": "accentSoft"
     },
-    "t_dwpdy6qb791l33": {
+    "t_p9okt80g021w33": {
       "type": "text",
-      "id": "t_dwpdy6qb791l33",
+      "id": "t_p9okt80g021w33",
       "name": "Курсор · эмодзи",
-      "parent": "f_vr10yqassvb132",
+      "parent": "f_q1h1igzpf8xy32",
       "characters": "👆",
       "style": "heading",
       "align": "left",
@@ -3408,14 +3408,14 @@
         }
       }
     },
-    "f_2pb3vm7r3vlt34": {
+    "f_39il53zzgezg34": {
       "type": "frame",
-      "id": "f_2pb3vm7r3vlt34",
+      "id": "f_39il53zzgezg34",
       "name": "Курсор · текст",
-      "parent": "f_aizqn25g3c8031",
+      "parent": "f_53ys6n3y1vqe31",
       "children": [
-        "t_imbxcsx50bxq35",
-        "t_1x4m2fg4fz0j36"
+        "t_8wxt18yvlqnt35",
+        "t_bnf87k1p81na36"
       ],
       "layout": {
         "mode": "column",
@@ -3440,11 +3440,11 @@
       },
       "radius": "radii.0"
     },
-    "t_imbxcsx50bxq35": {
+    "t_8wxt18yvlqnt35": {
       "type": "text",
-      "id": "t_imbxcsx50bxq35",
+      "id": "t_8wxt18yvlqnt35",
       "name": "Курсор · имя",
-      "parent": "f_2pb3vm7r3vlt34",
+      "parent": "f_39il53zzgezg34",
       "characters": "Курсор",
       "style": "body",
       "align": "left",
@@ -3457,11 +3457,11 @@
         }
       }
     },
-    "t_1x4m2fg4fz0j36": {
+    "t_bnf87k1p81na36": {
       "type": "text",
-      "id": "t_1x4m2fg4fz0j36",
+      "id": "t_bnf87k1p81na36",
       "name": "Курсор · уровень",
-      "parent": "f_2pb3vm7r3vlt34",
+      "parent": "f_39il53zzgezg34",
       "characters": "×12 · +1,2 в секунду",
       "style": "caption",
       "align": "left",
@@ -3475,13 +3475,13 @@
       },
       "color": "muted"
     },
-    "f_ks0sqr9m000537": {
+    "f_8ocbgr2yleun37": {
       "type": "frame",
-      "id": "f_ks0sqr9m000537",
+      "id": "f_8ocbgr2yleun37",
       "name": "Курсор · купить",
-      "parent": "f_aizqn25g3c8031",
+      "parent": "f_53ys6n3y1vqe31",
       "children": [
-        "t_qtbid150180438"
+        "t_188q1klaaobe38"
       ],
       "layout": {
         "mode": "row",
@@ -3520,11 +3520,11 @@
         "easing": "spring"
       }
     },
-    "t_qtbid150180438": {
+    "t_188q1klaaobe38": {
       "type": "text",
-      "id": "t_qtbid150180438",
+      "id": "t_188q1klaaobe38",
       "name": "Курсор · цена",
-      "parent": "f_ks0sqr9m000537",
+      "parent": "f_8ocbgr2yleun37",
       "characters": "15 🍪",
       "style": "caption",
       "align": "left",
@@ -3538,15 +3538,15 @@
       },
       "color": "onAccent"
     },
-    "f_q6u8uckqer5t39": {
+    "f_z37e0ycjznyo39": {
       "type": "frame",
-      "id": "f_q6u8uckqer5t39",
+      "id": "f_z37e0ycjznyo39",
       "name": "Улучшение · Бабушка",
-      "parent": "f_vwgu6g4sgh132x",
+      "parent": "f_85k233oxdibx2x",
       "children": [
-        "f_wypmhuohm1073a",
-        "f_3v5vyxaisf0a3c",
-        "f_xvtb7bjm64dv3f"
+        "f_7ga1odrc3g5c3a",
+        "f_bk1w0w3b3k3m3c",
+        "f_k1xtu1xckqtm3f"
       ],
       "layout": {
         "mode": "row",
@@ -3587,13 +3587,13 @@
         "easing": "spring"
       }
     },
-    "f_wypmhuohm1073a": {
+    "f_7ga1odrc3g5c3a": {
       "type": "frame",
-      "id": "f_wypmhuohm1073a",
+      "id": "f_7ga1odrc3g5c3a",
       "name": "Бабушка · значок",
-      "parent": "f_q6u8uckqer5t39",
+      "parent": "f_z37e0ycjznyo39",
       "children": [
-        "t_fa2lrk2zvxbg3b"
+        "t_11pb0se9of0y3b"
       ],
       "layout": {
         "mode": "row",
@@ -3621,11 +3621,11 @@
       "radius": "radii.3",
       "fill": "accentSoft"
     },
-    "t_fa2lrk2zvxbg3b": {
+    "t_11pb0se9of0y3b": {
       "type": "text",
-      "id": "t_fa2lrk2zvxbg3b",
+      "id": "t_11pb0se9of0y3b",
       "name": "Бабушка · эмодзи",
-      "parent": "f_wypmhuohm1073a",
+      "parent": "f_7ga1odrc3g5c3a",
       "characters": "👵",
       "style": "heading",
       "align": "left",
@@ -3638,14 +3638,14 @@
         }
       }
     },
-    "f_3v5vyxaisf0a3c": {
+    "f_bk1w0w3b3k3m3c": {
       "type": "frame",
-      "id": "f_3v5vyxaisf0a3c",
+      "id": "f_bk1w0w3b3k3m3c",
       "name": "Бабушка · текст",
-      "parent": "f_q6u8uckqer5t39",
+      "parent": "f_z37e0ycjznyo39",
       "children": [
-        "t_53ujm7ah1vg33d",
-        "t_uftr80lb79jo3e"
+        "t_g1vdbke59og33d",
+        "t_5hr8e0w3qz8a3e"
       ],
       "layout": {
         "mode": "column",
@@ -3670,11 +3670,11 @@
       },
       "radius": "radii.0"
     },
-    "t_53ujm7ah1vg33d": {
+    "t_g1vdbke59og33d": {
       "type": "text",
-      "id": "t_53ujm7ah1vg33d",
+      "id": "t_g1vdbke59og33d",
       "name": "Бабушка · имя",
-      "parent": "f_3v5vyxaisf0a3c",
+      "parent": "f_bk1w0w3b3k3m3c",
       "characters": "Бабушка",
       "style": "body",
       "align": "left",
@@ -3687,11 +3687,11 @@
         }
       }
     },
-    "t_uftr80lb79jo3e": {
+    "t_5hr8e0w3qz8a3e": {
       "type": "text",
-      "id": "t_uftr80lb79jo3e",
+      "id": "t_5hr8e0w3qz8a3e",
       "name": "Бабушка · уровень",
-      "parent": "f_3v5vyxaisf0a3c",
+      "parent": "f_bk1w0w3b3k3m3c",
       "characters": "×3 · +3 в секунду",
       "style": "caption",
       "align": "left",
@@ -3705,13 +3705,13 @@
       },
       "color": "muted"
     },
-    "f_xvtb7bjm64dv3f": {
+    "f_k1xtu1xckqtm3f": {
       "type": "frame",
-      "id": "f_xvtb7bjm64dv3f",
+      "id": "f_k1xtu1xckqtm3f",
       "name": "Бабушка · купить",
-      "parent": "f_q6u8uckqer5t39",
+      "parent": "f_z37e0ycjznyo39",
       "children": [
-        "t_lmgxuu2rbbn33g"
+        "t_n4b6a8evg4zr3g"
       ],
       "layout": {
         "mode": "row",
@@ -3750,11 +3750,11 @@
         "easing": "spring"
       }
     },
-    "t_lmgxuu2rbbn33g": {
+    "t_n4b6a8evg4zr3g": {
       "type": "text",
-      "id": "t_lmgxuu2rbbn33g",
+      "id": "t_n4b6a8evg4zr3g",
       "name": "Бабушка · цена",
-      "parent": "f_xvtb7bjm64dv3f",
+      "parent": "f_k1xtu1xckqtm3f",
       "characters": "100 🍪",
       "style": "caption",
       "align": "left",
@@ -3768,15 +3768,15 @@
       },
       "color": "onAccent"
     },
-    "f_sda1ybcsyf213h": {
+    "f_sz4oekgkw5kc3h": {
       "type": "frame",
-      "id": "f_sda1ybcsyf213h",
+      "id": "f_sz4oekgkw5kc3h",
       "name": "Улучшение · Ферма",
-      "parent": "f_vwgu6g4sgh132x",
+      "parent": "f_85k233oxdibx2x",
       "children": [
-        "f_aq1xgnt8bwgo3i",
-        "f_m5j2sah0ev5z3k",
-        "f_gtbybzvhk9xh3n"
+        "f_p8v3qhigj83q3i",
+        "f_ptm86yku11md3k",
+        "f_f1dazw9sgqvo3n"
       ],
       "layout": {
         "mode": "row",
@@ -3804,13 +3804,13 @@
       "stroke": "line",
       "opacity": 0.7
     },
-    "f_aq1xgnt8bwgo3i": {
+    "f_p8v3qhigj83q3i": {
       "type": "frame",
-      "id": "f_aq1xgnt8bwgo3i",
+      "id": "f_p8v3qhigj83q3i",
       "name": "Ферма · значок",
-      "parent": "f_sda1ybcsyf213h",
+      "parent": "f_sz4oekgkw5kc3h",
       "children": [
-        "t_sn272t30orb43j"
+        "t_ditbz3uw9i3q3j"
       ],
       "layout": {
         "mode": "row",
@@ -3838,11 +3838,11 @@
       "radius": "radii.3",
       "fill": "surfaceAlt"
     },
-    "t_sn272t30orb43j": {
+    "t_ditbz3uw9i3q3j": {
       "type": "text",
-      "id": "t_sn272t30orb43j",
+      "id": "t_ditbz3uw9i3q3j",
       "name": "Ферма · эмодзи",
-      "parent": "f_aq1xgnt8bwgo3i",
+      "parent": "f_p8v3qhigj83q3i",
       "characters": "🌾",
       "style": "heading",
       "align": "left",
@@ -3855,14 +3855,14 @@
         }
       }
     },
-    "f_m5j2sah0ev5z3k": {
+    "f_ptm86yku11md3k": {
       "type": "frame",
-      "id": "f_m5j2sah0ev5z3k",
+      "id": "f_ptm86yku11md3k",
       "name": "Ферма · текст",
-      "parent": "f_sda1ybcsyf213h",
+      "parent": "f_sz4oekgkw5kc3h",
       "children": [
-        "t_uehf50f9f6uj3l",
-        "t_i5ewkfifg2193m"
+        "t_hn3e4qem1kwu3l",
+        "t_i54vjh6mxfu03m"
       ],
       "layout": {
         "mode": "column",
@@ -3887,11 +3887,11 @@
       },
       "radius": "radii.0"
     },
-    "t_uehf50f9f6uj3l": {
+    "t_hn3e4qem1kwu3l": {
       "type": "text",
-      "id": "t_uehf50f9f6uj3l",
+      "id": "t_hn3e4qem1kwu3l",
       "name": "Ферма · имя",
-      "parent": "f_m5j2sah0ev5z3k",
+      "parent": "f_ptm86yku11md3k",
       "characters": "Ферма",
       "style": "body",
       "align": "left",
@@ -3904,11 +3904,11 @@
         }
       }
     },
-    "t_i5ewkfifg2193m": {
+    "t_i54vjh6mxfu03m": {
       "type": "text",
-      "id": "t_i5ewkfifg2193m",
+      "id": "t_i54vjh6mxfu03m",
       "name": "Ферма · уровень",
-      "parent": "f_m5j2sah0ev5z3k",
+      "parent": "f_ptm86yku11md3k",
       "characters": "×1 · +8 в секунду",
       "style": "caption",
       "align": "left",
@@ -3922,13 +3922,13 @@
       },
       "color": "muted"
     },
-    "f_gtbybzvhk9xh3n": {
+    "f_f1dazw9sgqvo3n": {
       "type": "frame",
-      "id": "f_gtbybzvhk9xh3n",
+      "id": "f_f1dazw9sgqvo3n",
       "name": "Ферма · купить",
-      "parent": "f_sda1ybcsyf213h",
+      "parent": "f_sz4oekgkw5kc3h",
       "children": [
-        "t_e1x402ea5wjr3o"
+        "t_ah6bqnvl22d93o"
       ],
       "layout": {
         "mode": "row",
@@ -3954,11 +3954,11 @@
       "radius": "radii.7",
       "fill": "surfaceAlt"
     },
-    "t_e1x402ea5wjr3o": {
+    "t_ah6bqnvl22d93o": {
       "type": "text",
-      "id": "t_e1x402ea5wjr3o",
+      "id": "t_ah6bqnvl22d93o",
       "name": "Ферма · цена",
-      "parent": "f_gtbybzvhk9xh3n",
+      "parent": "f_f1dazw9sgqvo3n",
       "characters": "1 100 🍪",
       "style": "caption",
       "align": "left",
@@ -3972,15 +3972,15 @@
       },
       "color": "muted"
     },
-    "f_aipqul2ktl8z3p": {
+    "f_h0l9dpe7ojgt3p": {
       "type": "frame",
-      "id": "f_aipqul2ktl8z3p",
+      "id": "f_h0l9dpe7ojgt3p",
       "name": "Улучшение · Фабрика",
-      "parent": "f_vwgu6g4sgh132x",
+      "parent": "f_85k233oxdibx2x",
       "children": [
-        "f_np68b00tyx9c3q",
-        "f_mkgglxfh0rid3s",
-        "f_6axxkud4v4ya3v"
+        "f_86y6wi49rurs3q",
+        "f_i2i14ra4o2re3s",
+        "f_40a79t24qykw3v"
       ],
       "layout": {
         "mode": "row",
@@ -4008,13 +4008,13 @@
       "stroke": "line",
       "opacity": 0.7
     },
-    "f_np68b00tyx9c3q": {
+    "f_86y6wi49rurs3q": {
       "type": "frame",
-      "id": "f_np68b00tyx9c3q",
+      "id": "f_86y6wi49rurs3q",
       "name": "Фабрика · значок",
-      "parent": "f_aipqul2ktl8z3p",
+      "parent": "f_h0l9dpe7ojgt3p",
       "children": [
-        "t_kxzmnt4jjv4o3r"
+        "t_bbyujtzswk6a3r"
       ],
       "layout": {
         "mode": "row",
@@ -4042,11 +4042,11 @@
       "radius": "radii.3",
       "fill": "surfaceAlt"
     },
-    "t_kxzmnt4jjv4o3r": {
+    "t_bbyujtzswk6a3r": {
       "type": "text",
-      "id": "t_kxzmnt4jjv4o3r",
+      "id": "t_bbyujtzswk6a3r",
       "name": "Фабрика · эмодзи",
-      "parent": "f_np68b00tyx9c3q",
+      "parent": "f_86y6wi49rurs3q",
       "characters": "🏭",
       "style": "heading",
       "align": "left",
@@ -4059,14 +4059,14 @@
         }
       }
     },
-    "f_mkgglxfh0rid3s": {
+    "f_i2i14ra4o2re3s": {
       "type": "frame",
-      "id": "f_mkgglxfh0rid3s",
+      "id": "f_i2i14ra4o2re3s",
       "name": "Фабрика · текст",
-      "parent": "f_aipqul2ktl8z3p",
+      "parent": "f_h0l9dpe7ojgt3p",
       "children": [
-        "t_9di1o804yct73t",
-        "t_e85iqmgr064c3u"
+        "t_uy8cm66mxxjl3t",
+        "t_jlwznmm9q6rd3u"
       ],
       "layout": {
         "mode": "column",
@@ -4091,11 +4091,11 @@
       },
       "radius": "radii.0"
     },
-    "t_9di1o804yct73t": {
+    "t_uy8cm66mxxjl3t": {
       "type": "text",
-      "id": "t_9di1o804yct73t",
+      "id": "t_uy8cm66mxxjl3t",
       "name": "Фабрика · имя",
-      "parent": "f_mkgglxfh0rid3s",
+      "parent": "f_i2i14ra4o2re3s",
       "characters": "Фабрика",
       "style": "body",
       "align": "left",
@@ -4108,11 +4108,11 @@
         }
       }
     },
-    "t_e85iqmgr064c3u": {
+    "t_jlwznmm9q6rd3u": {
       "type": "text",
-      "id": "t_e85iqmgr064c3u",
+      "id": "t_jlwznmm9q6rd3u",
       "name": "Фабрика · уровень",
-      "parent": "f_mkgglxfh0rid3s",
+      "parent": "f_i2i14ra4o2re3s",
       "characters": "откроется на уровне 10",
       "style": "caption",
       "align": "left",
@@ -4126,13 +4126,13 @@
       },
       "color": "muted"
     },
-    "f_6axxkud4v4ya3v": {
+    "f_40a79t24qykw3v": {
       "type": "frame",
-      "id": "f_6axxkud4v4ya3v",
+      "id": "f_40a79t24qykw3v",
       "name": "Фабрика · купить",
-      "parent": "f_aipqul2ktl8z3p",
+      "parent": "f_h0l9dpe7ojgt3p",
       "children": [
-        "t_ma4guqkmwb613w"
+        "t_8gsan8wb2ii73w"
       ],
       "layout": {
         "mode": "row",
@@ -4158,11 +4158,11 @@
       "radius": "radii.7",
       "fill": "surfaceAlt"
     },
-    "t_ma4guqkmwb613w": {
+    "t_8gsan8wb2ii73w": {
       "type": "text",
-      "id": "t_ma4guqkmwb613w",
+      "id": "t_8gsan8wb2ii73w",
       "name": "Фабрика · цена",
-      "parent": "f_6axxkud4v4ya3v",
+      "parent": "f_40a79t24qykw3v",
       "characters": "12 000 🍪",
       "style": "caption",
       "align": "left",
@@ -4176,14 +4176,14 @@
       },
       "color": "muted"
     },
-    "f_xtz2j3fsn4rl3x": {
+    "f_plri0pxrn5za3x": {
       "type": "frame",
-      "id": "f_xtz2j3fsn4rl3x",
+      "id": "f_plri0pxrn5za3x",
       "name": "Достижение",
-      "parent": "f_zgwy5d6dg78r2w",
+      "parent": "f_237bsgn6ie4m2w",
       "children": [
-        "t_11b54111o1n73y",
-        "f_yju70qvhg9cc3z"
+        "t_1ipxcz123wbq3y",
+        "f_kb02bmwtga1b3z"
       ],
       "layout": {
         "mode": "row",
@@ -4209,11 +4209,11 @@
       "radius": "radii.4",
       "fill": "accentSoft"
     },
-    "t_11b54111o1n73y": {
+    "t_1ipxcz123wbq3y": {
       "type": "text",
-      "id": "t_11b54111o1n73y",
+      "id": "t_1ipxcz123wbq3y",
       "name": "Кубок",
-      "parent": "f_xtz2j3fsn4rl3x",
+      "parent": "f_plri0pxrn5za3x",
       "characters": "🏆",
       "style": "heading",
       "align": "left",
@@ -4226,14 +4226,14 @@
         }
       }
     },
-    "f_yju70qvhg9cc3z": {
+    "f_kb02bmwtga1b3z": {
       "type": "frame",
-      "id": "f_yju70qvhg9cc3z",
+      "id": "f_kb02bmwtga1b3z",
       "name": "Достижение · текст",
-      "parent": "f_xtz2j3fsn4rl3x",
+      "parent": "f_plri0pxrn5za3x",
       "children": [
-        "t_0n662692jhwc40",
-        "t_501o2thckz1f41"
+        "t_prz325o0od2740",
+        "t_kdoayyvdj7lw41"
       ],
       "layout": {
         "mode": "column",
@@ -4258,11 +4258,11 @@
       },
       "radius": "radii.0"
     },
-    "t_0n662692jhwc40": {
+    "t_prz325o0od2740": {
       "type": "text",
-      "id": "t_0n662692jhwc40",
+      "id": "t_prz325o0od2740",
       "name": "Достижение · имя",
-      "parent": "f_yju70qvhg9cc3z",
+      "parent": "f_kb02bmwtga1b3z",
       "characters": "Тысяча крошек",
       "style": "body",
       "align": "left",
@@ -4276,11 +4276,11 @@
       },
       "color": "accentInk"
     },
-    "t_501o2thckz1f41": {
+    "t_kdoayyvdj7lw41": {
       "type": "text",
-      "id": "t_501o2thckz1f41",
+      "id": "t_kdoayyvdj7lw41",
       "name": "Достижение · описание",
-      "parent": "f_yju70qvhg9cc3z",
+      "parent": "f_kb02bmwtga1b3z",
       "characters": "испекли первые 1 000 печенек",
       "style": "caption",
       "align": "left",
@@ -4395,6 +4395,6 @@
   },
   "meta": {
     "name": "Печенька-кликер",
-    "createdAt": "2026-10-17T17:37:47.152Z"
+    "createdAt": "2026-10-18T02:55:49.325Z"
   }
 }

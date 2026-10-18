@@ -353,7 +353,7 @@ test('r38: оболочка — палитра и справка в размет
     assert.ok(!app.includes(`'${t}'`) && !app.includes(`«${t}»`), `app.js держит название команды «${t}» сам`);
   }
   // правки — обычной транзакцией (commit), без выделения — подсказка
-  assert.match(app, /function commitTableEdit[\s\S]{0,400}commit\(r\.ops, label, 'human', \{ human: r\.words/);
+  assert.match(app, /function commitTableEdit[\s\S]{0,700}commit\(r\.ops, label, 'human', \{\s*human: r\.words/);
   assert.match(app, /Сначала выделите слой/);
   const css = read('styles.css');
   for (const k of ['.palette {', '.pal-row[aria-selected="true"]', '.cmd-help {']) assert.ok(css.includes(k), k);

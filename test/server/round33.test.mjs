@@ -342,8 +342,10 @@ describe('круг 33: восстановление под работающим 
       const p = (await h.post('/api/projects', { name: 'до' })).body;
       const root = (await h.get(`/api/projects/${p.id}`)).body.snapshot.doc.root;
       await admin.query(DRIFT);
+      // круг 35: пока идёт pg_restore, запросы к хранилищу не идут — 503 schema (не пишем посреди восстановления)
       const r = await h.post(`/api/projects/${p.id}/tx`, tx(0, [{ op: 'set', id: root, path: 'name', value: 'x' }]));
-      assert.equal(r.status, 201, r.text);
+      assert.equal(r.status, 503, r.text);
+      assert.equal(r.body.detail.cause, 'schema');
       await sleep(1500);
       const health = await h.get('/api/health');
       assert.equal(health.status, 503, health.text);
@@ -366,7 +368,8 @@ describe('круг 33: восстановление под работающим 
       const p = (await h.post('/api/projects', { name: 'пусто' })).body;
       await admin.query(DRIFT + `; DELETE FROM schema_migrations WHERE name = '001_init.sql'`);
       const r = await h.get(`/api/projects/${p.id}/ops?since=0`);
-      assert.equal(r.status, 200, r.text);
+      assert.equal(r.status, 503, r.text);
+      assert.equal(r.body.detail.cause, 'schema');
       await sleep(1500);
       const health = await h.get('/api/health');
       assert.equal(health.status, 503, health.text);
@@ -518,7 +521,8 @@ describe('круг 33 (L1): create_id — идемпотентное созда�
         // голова проекта ушла вперёд — повтор отдаёт нынешнюю
         const root = (await h.get(`/api/projects/${r1.body.id}`)).body.snapshot.doc.root;
         const w = await h.post(`/api/projects/${r1.body.id}/tx`, tx(0, [{ op: 'set', id: root, path: 'name', value: 'z' }]));
-        const r3 = await h.post('/api/projects', { name: 'другое имя', create_id: cid });
+        // круг 35: повтор — тем же телом; другое тело с тем же create_id — 409 (ниже)
+        const r3 = await h.post('/api/projects', { name: 'спасение', doc, create_id: cid });
         assert.equal(r3.status, 200);
         assert.equal(r3.body.head_seq, 1);
         assert.equal(r3.body.tip, w.body.chain || '');

@@ -11,6 +11,7 @@ import { createDslrClient, estimateBytes } from '../../server/orchestrator/dslr/
 import { createDuil } from '../../server/orchestrator/duil/index.js';
 import { createDocClient } from '../../server/orchestrator/docclient.js';
 import * as limits from '../../server/orchestrator/limits.js';
+import { ENGINE_VERSION } from '../../src/core.js';
 import {
   startDocument, startFakeLlm, startOrch, command, commandStream, createProject, call, cid, quiet, PLAN_CREATE, TREE_OK,
   spawnOrchestrator,
@@ -62,7 +63,7 @@ test('DSLR: дочитывание хвоста — одним черновик�
   const texts = Object.keys(st0.doc.nodes).filter((id) => st0.doc.nodes[id].type === 'text').slice(0, 20);
   for (let i = 0; i < 30; i++) {
     const r = await call(base, 'POST', `/api/projects/${p.id}/tx`, {
-      tx_id: cid(), base_seq: i, engine: 1, ops: [{ op: 'set', id: texts[i % texts.length], path: 'name', value: 'имя ' + i }],
+      tx_id: cid(), base_seq: i, engine: ENGINE_VERSION, ops: [{ op: 'set', id: texts[i % texts.length], path: 'name', value: 'имя ' + i }],
     });
     assert.equal(r.status, 201, r.text);
   }

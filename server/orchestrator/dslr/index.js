@@ -17,12 +17,151 @@
  *
  * Чтения одного проекта идут по одному (цепочка промисов): параллельные DUIL и команда не
  * затирают кеш более старым стейтом.
+ *
+ * Круг 39 (N5а) — шторм команд в большие проекты (30 × 14 тыс. узлов разом): полные чтения шли
+ * все сразу, пик памяти агента ~0,9 ГБ, а таймауты занятого главного потока становились
+ * «Сервис документов недоступен». Теперь:
+ *   • полные чтения — под семафором (`createReadGate`): одновременно не больше `fullConcurrency`,
+ *     и документы, прочитанные целиком и ещё нужные командам, — не больше `fullBytes` (длина JSON;
+ *     команда держит свою долю до конца расчёта — `lease`); ждущим — `onQueued(position)`
+ *     (событие `queued {scope:'read'}`); ждущих больше `fullQueue` — сразу 503 `busy`;
+ *   • всё чтение — в бюджете `readBudgetMs` (очередь, повтор после таймаута, Retry-After);
+ *     503 busy сервиса ждётся по его Retry-After; сервис так и не ответил в срок — 503 `busy`
+ *     («перегружен, повторите»). `document_down` остаётся для «нет связи» и 5xx без признаков
+ *     перегрузки.
  */
 
 import { createHash } from 'node:crypto';
 import { applyBatches } from '../../../src/core.js';
-import { notFound, OrchError } from '../errors.js';
-import { DSLR_CACHE_PROJECTS, DSLR_CACHE_BYTES, DOC_PAGE_LIMIT, DSLR_MAX_PAGES, DSLR_FULL_ATTEMPTS, DOC_RETRY_AFTER_MAX_S } from '../limits.js';
+import { notFound, OrchError, documentBusy, cancelled } from '../errors.js';
+import {
+  DSLR_CACHE_PROJECTS, DSLR_CACHE_BYTES, DOC_PAGE_LIMIT, DSLR_MAX_PAGES, DSLR_FULL_ATTEMPTS, DOC_RETRY_AFTER_MAX_S,
+  DOC_TIMEOUT_MS, DOC_FULL_TIMEOUT_MS, DSLR_FULL_CONCURRENCY, DSLR_FULL_BYTES, DSLR_FULL_QUEUE, DSLR_READ_BUDGET_MS,
+  DSLR_TIMEOUT_RETRIES, DSLR_READ_ESTIMATE_BYTES, DSLR_SIZE_MEMO,
+} from '../limits.js';
+
+/**
+ * Круг 39 (N5а): семафор полных чтений — по числу одновременных и по байтам.
+ *
+ * Очередь по порядку (большой документ не обгоняется мелкими и не голодает): чтение с байтами
+ * проходит, когда занято меньше `max` чтений и его оценка помещается в `bytes` — или когда
+ * байтов не держит никто (документ больше всего предела читается один). Пропуск (`grant`)
+ * отпускает место чтения (`done()`) и байты (`free()`) порознь: байты команда держит, пока ей
+ * нужен документ. `resize(n)` — фактический размер вместо оценки.
+ * Чтение без байтов (`need` 0: библиотеки DUIL — документ уходит в кеш, команда его не
+ * держит) ждёт только места и обходит чтения, которые ждут байтов: иначе команда, держащая
+ * байты своего документа, ждала бы чтения своей же библиотеки за чужой спиной.
+ * @param {{max?: number, bytes?: number, queue?: number}} [o]
+ */
+export function createReadGate({ max = DSLR_FULL_CONCURRENCY, bytes = DSLR_FULL_BYTES, queue = DSLR_FULL_QUEUE } = {}) {
+  let active = 0;
+  let held = 0;
+  const waiting = [];
+  const stats = { peak: 0, peakBytes: 0, waited: 0, refused: 0, expired: 0 };
+
+  const fits = (need) => active < max && (need === 0 || held === 0 || held + need <= bytes);
+
+  function grant(need) {
+    active++;
+    held += need;
+    if (active > stats.peak) stats.peak = active;
+    if (held > stats.peakBytes) stats.peakBytes = held;
+    let reading = true;
+    let size = need;
+    return {
+      /** Чтение кончилось: место — следующему (байты остаются за документом). */
+      done() {
+        if (!reading) return;
+        reading = false;
+        active--;
+        pump();
+      },
+      /** Фактический размер вместо оценки. */
+      resize(n) {
+        if (size === null || !Number.isFinite(n) || n < 0) return;
+        held += n - size;
+        size = n;
+        if (held > stats.peakBytes) stats.peakBytes = held;
+        pump();
+      },
+      /** Документ больше не нужен: байты — следующим. */
+      free() {
+        this.done();
+        if (size === null) return;
+        held -= size;
+        size = null;
+        pump();
+      },
+    };
+  }
+
+  function pump() {
+    let byteHead = true;   // среди ждущих байтов — только первый (строгий порядок)
+    for (let i = 0; i < waiting.length && active < max;) {
+      const w = waiting[i];
+      if ((w.need === 0 || byteHead) && fits(w.need)) {
+        waiting.splice(i, 1);
+        w.take();
+        continue;
+      }
+      // первый ждущий байтов не прошёл — следующие за ним ждут (порядок), без байтов — нет
+      if (w.need > 0) byteHead = false;
+      i++;
+    }
+    waiting.forEach((w, i) => w.at(i + 1));
+  }
+
+  /**
+   * @param {number} need оценка размера (байтов JSON)
+   * @param {{signal?: AbortSignal, deadline?: number, onQueued?: (position: number) => void}} [o]
+   * @returns {Promise<{done: Function, resize: Function, free: Function}>}
+   */
+  function acquire(need, { signal, deadline, onQueued } = {}) {
+    const n = Math.max(0, Number(need) || 0);
+    if (signal && signal.aborted) return Promise.reject(cancelled());
+    if ((n === 0 ? !waiting.some((w) => w.need === 0) : !waiting.some((w) => w.need > 0)) && fits(n)) return Promise.resolve(grant(n));
+    if (waiting.length >= queue) {
+      stats.refused++;
+      return Promise.reject(documentBusy(5, { cause: 'очередь полных чтений агента полна' }));
+    }
+    stats.waited++;
+    return new Promise((resolve, reject) => {
+      let told = 0;
+      const w = { need: n };
+      const off = () => {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        const i = waiting.indexOf(w);
+        if (i >= 0) { waiting.splice(i, 1); waiting.forEach((x, k) => x.at(k + 1)); }
+      };
+      const onAbort = () => { off(); reject(cancelled()); };
+      const timer = setTimeout(() => {
+        off();
+        stats.expired++;
+        reject(documentBusy(5, { cause: 'полное чтение не дождалось очереди' }));
+      }, Math.max(1, (deadline || Date.now() + DSLR_READ_BUDGET_MS) - Date.now()));
+      w.take = () => { off(); resolve(grant(n)); };
+      w.at = (pos) => {
+        if (pos === told || !onQueued) return;
+        told = pos;
+        try { onQueued(pos); } catch { /* интерфейс не роняет чтение */ }
+      };
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      waiting.push(w);
+      w.at(waiting.length);
+    });
+  }
+
+  return {
+    acquire, stats,
+    get active() { return active; },
+    get held() { return held; },
+    get waiting() { return waiting.length; },
+  };
+}
+
+/** Круг 39: пауза перед единственным повтором чтения после обрыва соединения. */
+const NET_RETRY_PAUSE_MS = 150;
 
 /** Якорь записи журнала (SPEC §9.8): sha256(prev_chain + tx_id + seq), hex. */
 export function chainNext(prev, txId, seq) {
@@ -62,13 +201,28 @@ export function estimateBytes(value) {
 /**
  * @param {{doc: ReturnType<import('../docclient.js').createDocClient>, log?: object, cacheSize?: number, cacheBytes?: number, pageLimit?: number}} o
  */
-export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CACHE_PROJECTS, cacheBytes = DSLR_CACHE_BYTES, pageLimit = DOC_PAGE_LIMIT }) {
+export function createDslrClient({
+  doc: net, log = console, cacheSize = DSLR_CACHE_PROJECTS, cacheBytes = DSLR_CACHE_BYTES, pageLimit = DOC_PAGE_LIMIT,
+  fullConcurrency = DSLR_FULL_CONCURRENCY, fullBytes = DSLR_FULL_BYTES, fullQueue = DSLR_FULL_QUEUE,
+  fullTimeoutMs = DOC_FULL_TIMEOUT_MS, pageTimeoutMs = DOC_TIMEOUT_MS, readBudgetMs = DSLR_READ_BUDGET_MS,
+  timeoutRetries = DSLR_TIMEOUT_RETRIES, retryAfterMaxS = DOC_RETRY_AFTER_MAX_S, estimateBytes: estimateDefault = DSLR_READ_ESTIMATE_BYTES,
+}) {
+  /** Круг 39: семафор полных чтений (число и байты). */
+  const gate = createReadGate({ max: fullConcurrency, bytes: fullBytes, queue: fullQueue });
+  /** Круг 39: проект → последний известный размер JSON (оценка до чтения); порядок — давность. */
+  const sizes = new Map();
+  const noteSize = (id, n) => {
+    if (!Number.isFinite(n) || n <= 0) return;
+    sizes.delete(id);
+    sizes.set(id, n);
+    while (sizes.size > DSLR_SIZE_MEMO) sizes.delete(sizes.keys().next().value);
+  };
   /** id → {seq, doc, chain, epoch, project, bytes}; порядок вставки = давность использования. */
   const cache = new Map();
   let cachedBytes = 0;
   /** id → хвост цепочки чтений этого проекта. */
   const lanes = new Map();
-  const stats = { full: 0, incremental: 0, hits: 0, resets: 0, pages: 0, evicted: 0 };
+  const stats = { full: 0, incremental: 0, hits: 0, resets: 0, pages: 0, evicted: 0, busyWaits: 0, timeoutRetries: 0, overloaded: 0, netRetries: 0 };
 
   const drop = (id) => {
     const e = cache.get(id);
@@ -149,17 +303,75 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
   /** Ответ, который не 200 и не 404/410, — сбой чтения. */
   const failed = (what, r) => new OrchError(502, 'document_failed', `Document service ответил на ${what} ${r.status}`);
 
-  /** GET с ограниченным ожиданием по Retry-After при 503 (семафор тяжёлых чтений, §9.8). */
-  async function get(url, opts) {
-    for (let i = 0; ; i++) {
+  /**
+   * GET с ожиданием по Retry-After при 503 (семафор тяжёлых чтений сервиса, §9.8) и, круг 39,
+   * в бюджете всего чтения (`opts.deadline`):
+   *   • 503 busy — ждём его Retry-After (не дольше `retryAfterMaxS` за раз), пока бюджет есть;
+   *     не дождались — 503 `busy` агента;
+   *   • 503 с Retry-After по другой причине (база сервиса недоступна) — как прежде, два ожидания,
+   *     потом его ошибка (`document_down`);
+   *   • нет ответа в срок (`timedOut`) — повтор (`timeoutRetries` раз), пока бюджет есть; потом
+   *     `busy`: сервис принял запрос и молчит под очередью — это перегрузка, а не «недоступен»;
+   *   • нет связи и прочие 5xx — `document_down`, как прежде.
+   * @param {string} url
+   * @param {{signal?: AbortSignal, deadline?: number}} opts
+   * @param {number} [timeout] срок одного запроса, мс
+   */
+  async function get(url, opts, timeout = pageTimeoutMs) {
+    const deadline = opts.deadline || Date.now() + readBudgetMs;
+    let unavailableWaits = 0;
+    let timeouts = 0;
+    let resets = 0;
+    let lastBusy = null;
+    for (;;) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw overloaded(lastBusy, url);
       try {
-        return await net.get(url, opts);
+        return await net.get(url, { signal: opts.signal, timeout: Math.max(1, Math.min(timeout, left)) });
       } catch (e) {
-        const wait = e && e.docStatus === 503 && e.docRetryAfter ? Math.min(e.docRetryAfter, DOC_RETRY_AFTER_MAX_S) : 0;
-        if (!wait || i >= 2 || (opts.signal && opts.signal.aborted)) throw e;
-        await sleep(wait * 1000, opts.signal);
+        if (opts.signal && opts.signal.aborted) throw e;
+        if (!e || e.code !== 'document_down') throw e;
+        if (e.docStatus === 503 && (e.docCode === 'busy' || e.docRetryAfter)) {
+          const busy = e.docCode === 'busy';
+          const wait = Math.max(1, Math.min(e.docRetryAfter || 1, retryAfterMaxS)) * 1000;
+          if (busy) {
+            lastBusy = e;
+            if (Date.now() + wait >= deadline) throw overloaded(e, url);
+          } else if (unavailableWaits++ >= 2 || Date.now() + wait >= deadline) {
+            throw e;
+          }
+          stats.busyWaits++;
+          await sleep(wait, opts.signal);
+          continue;
+        }
+        if (e.timedOut) {
+          lastBusy = e;
+          if (timeouts++ >= timeoutRetries || deadline - Date.now() < 1000) throw overloaded(e, url);
+          stats.timeoutRetries++;
+          log.warn(`[orchestrator/dslr] ${url}: ${e.detail && e.detail.cause ? e.detail.cause : 'нет ответа'} — повторяю`);
+          continue;
+        }
+        /* Круг 39: соединение оборвалось (под нагрузкой — сокет keep-alive, который сервис как раз
+           закрыл) — чтение безопасно повторить: один раз, после короткой паузы. Не помогло —
+           сервис и правда недоступен. */
+        if (e.network && !resets && deadline - Date.now() > NET_RETRY_PAUSE_MS) {
+          resets++;
+          stats.netRetries++;
+          await sleep(NET_RETRY_PAUSE_MS, opts.signal);
+          continue;
+        }
+        log.warn(`[orchestrator/dslr] ${url}: ${e.detail && e.detail.cause ? e.detail.cause : e.message} — сервис документов недоступен`);
+        throw e;
       }
     }
+  }
+
+  /** Круг 39: сервис жив, но перегружен (busy/таймаут сверх бюджета) — 503 `busy` агента. */
+  function overloaded(e, url) {
+    stats.overloaded++;
+    const cause = e && e.detail && e.detail.cause ? e.detail.cause : 'бюджет чтения исчерпан';
+    log.warn(`[orchestrator/dslr] ${url}: сервис документов перегружен (${cause}) — команде busy`);
+    return documentBusy(e && e.docRetryAfter ? e.docRetryAfter : 5, { cause: e && e.ownLag ? 'agent' : 'document' });
   }
 
   /**
@@ -199,15 +411,21 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
   }
 
   /** Полное чтение: снимок + хвост (+ дочитывание по `more`). */
-  async function full(id, opts) {
-    const r = await get(path(id), opts);
+  async function full(id, opts, ticket) {
+    const r = await get(path(id), opts, fullTimeoutMs);
     if (r.status === 404) throw notFound('Проект не найден');
     if (r.status !== 200 || !r.body || !r.body.snapshot || !r.body.snapshot.doc) throw failed('чтение проекта', r);
+    // круг 39: фактический размер — в семафор (вместо оценки) и в память на следующий раз
+    if (Number.isFinite(r.chars) && r.chars > 0) {
+      noteSize(id, r.chars);
+      if (ticket) ticket.resize(r.chars);
+    }
     const { snapshot, tail = [], more, ...project } = r.body;
     const base = {
       seq: snapshot.seq,
       doc: snapshot.doc,
-      bytes: estimateBytes(snapshot.doc),
+      // круг 39: размер — длиной пришедшего JSON (он и есть оценка), без обхода документа
+      bytes: Number.isFinite(r.chars) && r.chars > 0 ? r.chars : estimateBytes(snapshot.doc),
       chain: typeof snapshot.chain === 'string' ? snapshot.chain : null,
       epoch: typeof project.epoch === 'string' && project.epoch ? project.epoch : null,
     };
@@ -218,21 +436,40 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
     return { ...st, meta: project };
   }
 
-  /** Прочитать заново целиком (ограниченно: журнал может переписываться прямо сейчас). */
+  /**
+   * Прочитать заново целиком (ограниченно: журнал может переписываться прямо сейчас).
+   * Круг 39: под семафором полных чтений. Место чтения отпускается, как только документ собран;
+   * байты — когда документ больше не нужен: `opts.lease` (команда держит их до конца расчёта и
+   * отпускает `lease.release()`), без него — сразу.
+   */
   async function fresh(id, opts) {
-    let last = null;
-    for (let i = 0; i < DSLR_FULL_ATTEMPTS; i++) {
-      try {
-        const st = await full(id, opts);
-        return { ...st, project: summary(st.meta, st.seq) };
-      } catch (e) {
-        if (!(e instanceof Reset)) throw e;
-        last = e;
-        stats.resets++;
-        log.warn(`[orchestrator/dslr] ${id}: ${e.message} — читаю заново`);
+    const leased = !!(opts.lease && typeof opts.lease === 'object');
+    const need = leased ? sizes.get(id) || estimateDefault : 0;
+    const ticket = await gate.acquire(need, { signal: opts.signal, deadline: opts.deadline, onQueued: opts.onQueued });
+    let kept = false;
+    try {
+      if (opts.onStart) { try { opts.onStart(); } catch { /* ignore */ } }
+      let last = null;
+      for (let i = 0; i < DSLR_FULL_ATTEMPTS; i++) {
+        try {
+          const st = await full(id, opts, leased ? ticket : null);
+          if (leased) {
+            opts.lease.release = () => ticket.free();
+            kept = true;
+          }
+          return { ...st, project: summary(st.meta, st.seq) };
+        } catch (e) {
+          if (!(e instanceof Reset)) throw e;
+          last = e;
+          stats.resets++;
+          log.warn(`[orchestrator/dslr] ${id}: ${e.message} — читаю заново`);
+        }
       }
+      throw new OrchError(502, 'document_failed', `Стейт проекта не собрался: ${last ? last.message : 'журнал меняется под чтением'}`);
+    } finally {
+      if (kept) ticket.done();
+      else ticket.free();
     }
-    throw new OrchError(502, 'document_failed', `Стейт проекта не собрался: ${last ? last.message : 'журнал меняется под чтением'}`);
   }
 
   async function readNow(id, opts) {
@@ -263,12 +500,18 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
   /**
    * Стейт проекта на голове журнала.
    * @param {string} id
-   * @param {{signal?: AbortSignal}} [opts]
+   * @param {{signal?: AbortSignal, onQueued?: (position: number) => void, onStart?: () => void,
+   *   lease?: {release?: Function}}} [opts] круг 39: onQueued — полное чтение ждёт семафора (номер
+   *   в очереди); onStart — дождалось; lease — документ прочитан целиком: его байты в семафоре
+   *   держатся до `lease.release()` (иначе отпускаются сразу); кеш или дочитывание хвоста —
+   *   `lease.release` не задаётся
    * @returns {Promise<{seq: number, doc: object, chain: string|null, epoch: string|null, project: {id, name, kind, head_seq}}>}
    */
   function read(id, opts = {}) {
     const prev = lanes.get(id) || Promise.resolve();
-    const run = prev.catch(() => {}).then(() => readNow(id, opts)).catch((e) => {
+    // круг 39: бюджет всего чтения считается с его начала (с очередью проекта и семафором)
+    const o = { ...opts, deadline: opts.deadline || Date.now() + readBudgetMs };
+    const run = prev.catch(() => {}).then(() => readNow(id, o)).catch((e) => {
       if (e && e.code === 'not_found') drop(id);
       throw e;
     });
@@ -288,6 +531,8 @@ export function createDslrClient({ doc: net, log = console, cacheSize = DSLR_CAC
 
   return {
     read, list, stats,
+    /** Круг 39: семафор полных чтений (тестам и отладке). */
+    gate,
     forget: (id) => drop(id),
     /** Сколько байтов (оценка) и проектов в кеше. */
     usage: () => ({ projects: cache.size, bytes: cachedBytes }),

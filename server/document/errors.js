@@ -6,7 +6,9 @@
  * транспорт отвечает 500 `internal` и пишет в лог.
  *
  * Коды: bad_request 400 · forbidden 403 · not_found 404 · method_not_allowed 405 ·
- * gone 410 · too_large 413 · engine 426 · internal 500 · unavailable 503 · busy 503 ·
+ * conflict 409 (круг 39: create_id с другим телом, `detail.cause:'create_id'`) ·
+ * gone 410 · too_large 413 · engine 426 · internal 500 · unavailable 503 (`detail.cause`:
+ * storage · timeout · schema · engine — круг 39: проект записан движком новее экземпляра) · busy 503 ·
  * migrating 503 (идут миграции базы, SPEC §9.11).
  *
  * `compat` — поля, которые прежние клиенты читали с верхнего уровня тела
@@ -120,6 +122,13 @@ export async function viaStorage(p) {
       logOnce(`[document] хранилище отвергло данные → 400 (${code}): ${oneLine(msg)}`);
       throw badRequest('данные не принимаются: ' + (DATA_ERRORS[code] || 'значение не подходит базе'), { detail: { cause: 'data', sqlstate: code } });
     }
+    // круг 35: база пуста или в неё идёт восстановление — хранилище запросов не пускает (pg.js SCHEMA_WAIT)
+    if (code === 'IMAGO_SCHEMA_WAIT') {
+      logOnce(`[document] хранилище → 503 (schema, ${e.phase || 'restore'}): ${oneLine(msg)}`);
+      throw unavailable('хранилище недоступно: база пуста или в неё идёт восстановление — сервис ждёт его конца', {
+        retryAfter: 5, detail: { cause: 'schema', phase: e.phase === 'empty' ? 'empty' : 'restore' }
+      });
+    }
     const timeout = code === '57014' || /timeout/i.test(msg);
     // круг 31: схема базы не та, что ждёт код (восстановили из копии до миграций) — хранилище
     // уже сверяет миграции; повтор запроса не помог — 503 с причиной `schema`
@@ -128,6 +137,26 @@ export async function viaStorage(p) {
     logOnce(`[document] хранилище → 503 (${cause}${code ? ' ' + code : ''}): ${oneLine(msg)}`);
     throw unavailable('хранилище недоступно' + (timeout ? ': запрос не уложился в дедлайн' : schema ? ': схема базы не согласована с кодом, идёт сверка миграций' : ''), { detail: { cause } });
   }
+}
+
+/**
+ * У проекта нет снимка (круг 35): обычно — сбой данных; но если схема базы не согласована (идёт
+ * восстановление, данные ещё не легли) — та же причина, что у прочих запросов: `cause:'schema'`.
+ * Хранилище, умеющее сверку (`checkRestore`), заодно проверяет, не идёт ли восстановление.
+ * @param {object} storage
+ * @param {string} [message]
+ */
+export function noSnapshot(storage, message = 'у проекта нет снимка — журнал не с чего переигрывать') {
+  const schema = storage && storage.schemaState;
+  if (schema) {
+    return unavailable('хранилище недоступно: схема базы не согласована с кодом (идёт восстановление или сверка миграций)', {
+      retryAfter: 5, detail: { cause: 'schema', ...(schema.phase ? { phase: schema.phase } : {}) }
+    });
+  }
+  if (storage && typeof storage.checkRestore === 'function') {
+    try { storage.checkRestore('у проекта нет снимка'); } catch (_) { /* проверка — попутно */ }
+  }
+  return unavailable(message);
 }
 
 /**

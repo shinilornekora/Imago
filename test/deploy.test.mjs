@@ -281,6 +281,8 @@ test('compose: все пределы сервисов — из окружени�
     LLM_TIMEOUT_MS: 120000, WORKERS: '',
     // круг 31: потолок тела ответа модели — то же умолчание, что у brain
     LLM_MAX_BODY_BYTES: (await import('../src/brain.js')).MODEL_BODY_MAX_BYTES,
+    // круг 39 (N5а): семафор и бюджет байт полных чтений DSLR
+    DSLR_FULL_CONCURRENCY: ol.DSLR_FULL_CONCURRENCY, DSLR_FULL_BYTES: ol.DSLR_FULL_BYTES,
   };
   // Orchestrator читает из окружения ровно эти (index.js) — compose передаёт каждый
   const orchSrc = read('server/orchestrator/index.js');

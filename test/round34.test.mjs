@@ -111,7 +111,10 @@ test('круг 34: слова brain для человека — «слой», а
   lines.forEach((line, i) => {
     if (!/\b(?:note|warn|ERR|cannot)\(/.test(line)) return;
     // сам вызов и продолжение строки (`+ '…'`) до закрывающей скобки — до 4 строк
-    const chunk = [line, ...lines.slice(i + 1, i + 4).filter((l) => /^\s*[+:?]/.test(l))].join(' ');
+    // круг 39: только подряд идущие продолжения — чужой вызов ниже (промпт модели) не в счёт
+    const tail = [];
+    for (const l of lines.slice(i + 1, i + 4)) { if (!/^\s*[+:?]/.test(l)) break; tail.push(l); }
+    const chunk = [line, ...tail].join(' ');
     if (/(?<![А-Яа-яЁё])[Уу]з(?:ел|л[аеуыо]\p{L}*)(?![А-Яа-яЁё])/u.test(chunk.replace(/\/\/.*$/gm, ''))) bad.push(`${i + 1}: ${line.trim()}`);
   });
   assert.deepEqual(bad, [], bad.join('\n'));

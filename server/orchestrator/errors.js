@@ -4,7 +4,7 @@
  *
  * Коды: bad_request 400 · not_found 404 · method_not_allowed 405 · timeout 408 (тело запроса не пришло,
  * круг 33) · too_large 413 ·
- * busy 429 · not_applied 422 (правка модели к документу не приложилась, круг 29) · llm_failed 502 ·
+ * busy 429 (503 — перегрузка: сервис документов или сам агент, круг 39) · not_applied 422 (правка модели к документу не приложилась, круг 29) · llm_failed 502 ·
  * llm_bad_response 502 (ответ модели слишком большой, глубокий или не JSON — круг 31) · document_failed 502 ·
  * llm_down 503 · document_down 503 · shutting_down 503 · worker_failed 500 ·
  * internal 500 (исключение кода агента, не модели; повтор не поможет — круг 31) · timeout 504 · engine 426 ·
@@ -48,6 +48,18 @@ export const badRequest = (message, detail) => new OrchError(400, 'bad_request',
 export const notFound = (message) => new OrchError(404, 'not_found', message, { retryable: false });
 export const documentDown = (message = 'Сервис документов недоступен — команда не выполнена. Правки не потеряны; попробуйте через несколько секунд.') =>
   new OrchError(503, 'document_down', message, { retryAfter: 5 });
+/**
+ * Круг 39 (N5а): Document service жив, но перегружен (его очередь тяжёлых чтений полна — 503 busy, —
+ * или он не ответил в срок под очередью), либо очередь полных чтений самого агента полна. Это не
+ * «недоступен»: повторяемо, срок — Retry-After.
+ */
+export const DOCUMENT_BUSY_MESSAGE = 'Сервис документов перегружен — команда не выполнена. Правки не потеряны; повторите через несколько секунд.';
+export const documentBusy = (retryAfter = 5, detail) =>
+  new OrchError(503, 'busy', DOCUMENT_BUSY_MESSAGE, { retryable: true, retryAfter: Math.max(1, Math.min(60, Math.ceil(retryAfter || 5))), ...(detail ? { detail } : {}) });
+/** Круг 39 (N5а): занят главный поток самого агента (опаздывают его таймеры) — не сервис документов. */
+export const AGENT_BUSY_MESSAGE = 'Агент перегружен — команда не выполнена. Правки не потеряны; повторите через несколько секунд.';
+export const agentBusy = (retryAfter = 5) =>
+  new OrchError(503, 'busy', AGENT_BUSY_MESSAGE, { retryable: true, retryAfter, detail: { cause: 'agent' } });
 /* Круг 26: текст `llm_down` — для человека в браузере, без советов администратору
    («проверьте, что сервер модели запущен», имя переменной окружения): их пишет в лог
    pipeline (`adminHint`). */

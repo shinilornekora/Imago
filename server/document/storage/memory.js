@@ -38,6 +38,8 @@ export function createMemoryStorage() {
   /** @type {Map<string, object[]>} projectId → трассы */
   let traces = new Map();
   let traceId = 0;
+  /** @type {Map<string, string>} id проекта → отпечаток тела создания (круг 35) */
+  const createHashes = new Map();
   /** @type {Map<string, string>} create_id → id проекта (круг 33, L1) */
   let byCreateId = new Map();
   const listeners = new Set();
@@ -123,9 +125,9 @@ export function createMemoryStorage() {
      * Как у pg: `docJson` — документ строкой (импорт, круг 33); `createId` — проект с таким
      * create_id уже есть → он же с `existing: true` (L1).
      */
-    async createProject({ name = '', kind = 'design', doc, docJson, engine, createId }) {
+    async createProject({ name = '', kind = 'design', doc, docJson, engine, createId, createHash }) {
       const cid = typeof createId === 'string' && createId ? createId : null;
-      if (cid && byCreateId.has(cid) && projects.has(byCreateId.get(cid))) return { ...clone(projects.get(byCreateId.get(cid))), existing: true };
+      if (cid && byCreateId.has(cid) && projects.has(byCreateId.get(cid))) return { ...(await self.projectByCreateId(cid)), existing: true };
       // документ строкой (импорт, круг 33) уже вычищен подготовкой (cleanDeep): его не разбираем
       // и не обходим здесь — только строку имени и вида; разбор — при чтении снимка
       const bad = pgRejects({ json: typeof docJson === 'string' ? [] : [doc], text: [name, kind] });
@@ -134,7 +136,11 @@ export function createMemoryStorage() {
       const epoch = newEpoch();
       const project = { id: randomUUID(), name, kind, head_seq: 0, head_chain: '', epoch, epoch_cause: 'init', engine, created_at: now, updated_at: now };
       projects.set(project.id, project);
-      if (cid) byCreateId.set(cid, project.id);
+      if (cid) {
+        byCreateId.set(cid, project.id);
+        // круг 35: отпечаток тела создания — как колонка create_hash в pg (013)
+        if (typeof createHash === 'string' && createHash) createHashes.set(project.id, createHash);
+      }
       snapshots.set(project.id, [{ seq: 0, ...(typeof docJson === 'string' ? { docJson } : { doc: clone(doc) }), engine, chain: '', parents: {}, meta: null, metaChain: null, created_at: now }]);
       epochs.set(project.id, [{ epoch, seq: 0, cause: 'init', created_at: now }]);
       journalOf(project.id);
@@ -144,7 +150,7 @@ export function createMemoryStorage() {
     /** Проект по create_id (круг 33, L1) или null. */
     async projectByCreateId(createId) {
       const id = typeof createId === 'string' ? byCreateId.get(createId) : undefined;
-      return id && projects.has(id) ? clone(projects.get(id)) : null;
+      return id && projects.has(id) ? { ...clone(projects.get(id)), create_hash: createHashes.get(id) || null } : null;
     },
 
     async listProjects() {

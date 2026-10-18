@@ -66,6 +66,7 @@ const PRESENCE_GAP = 100;         // присутствие — не чаще 10
 const PRESENCE_TTL = 90 * 1000;   // чужое присутствие без вестей столько — считаем ушедшим
 const ACK_TIMEOUT = 8 * 1000;     // подтверждение не пришло — дослать (идемпотентно), потом переподключиться
 const OPS_PAGE = 500;             // сколько транзакций просить за один GET …/ops
+const FIRST_CONNECT_MS = 6 * 1000;   // круг 39: первое подключение дольше — уже не «подключаюсь», а честное «недоступен»
 const HELLO_TIMEOUT = 8 * 1000;   // сокет открыт, а hello нет — это не сервер (или зомби): закрыть и подключиться заново
 const MINE_KEEP = 200;            // своих подтверждённых транзакций помним столько — переиграть после отката базы
 const MINE_BYTES = 4 * 1024 * 1024; // …и не больше стольких байт JSON (старые вытесняются первыми)
@@ -138,7 +139,36 @@ export const DROP_WORDS = Object.freeze({
   ops_per_tx: 'слишком много операций в одной правке',
   tx_bytes: 'правка слишком большая',
   stale: 'правка устарела — её уже переписали после восстановления базы',
+  // круг 39 (N2): раскрытие экземпляров вышло бы за предел ядра
+  expand_nodes: 'слишком много вложенных экземпляров',
 });
+
+/**
+ * Круг 39 (N1): версия движка у сервера другая. Сервер новее — вышла новая версия редактора,
+ * её даёт перезагрузка; сервер старее (обновляется позже клиента) — перезагрузка не поможет
+ * сразу, правки ждут в очереди вкладки. Версия сервера неизвестна (426 без неё) — считаем,
+ * что новее: так отвечает обновлённый сервер старому клиенту.
+ * @param {number|null|undefined} serverEngine
+ * @param {number} ownEngine
+ * @returns {{status: string, title: string, note: string, newer: boolean}}
+ */
+export function engineWords(serverEngine, ownEngine) {
+  const older = isNum(serverEngine) && isNum(ownEngine) && serverEngine < ownEngine;
+  if (older) {
+    return {
+      newer: false,
+      status: 'сервер ещё на прежней версии — правки ждут',
+      title: 'Сервер ещё не обновился',
+      note: 'Редактор новее сервера документов — правки ждут в этой вкладке. Обновите страницу чуть позже, когда сервер обновится.',
+    };
+  }
+  return {
+    newer: true,
+    status: 'вышла новая версия редактора — обновите страницу',
+    title: 'Вышла новая версия редактора — обновите страницу',
+    note: 'Сервер принимает правки только от новой версии. Правки этой вкладки ждут в очереди и уйдут после обновления.',
+  };
+}
 
 /* ------------------------------ строки (SPEC §9.10) ------------------------------ */
 
@@ -222,12 +252,15 @@ export const STORAGE_DOWN_LABEL = 'сервер не может сохранит
  */
 export function statusLine(s) {
   if (!s) return '';
-  if (s.error === 'engine') return 'версия движка устарела — обновите страницу';
+  if (s.error === 'engine') return engineWords(s.engine, s.ownEngine).status;
   if (s.error === 'not_found') return 'проект не найден на сервере';
   if (s.storage === 'down') return s.pending ? STORAGE_DOWN_LABEL : 'сервер не может сохранить';
   if (!s.online) {
     const n = s.pending || 0;
-    return n ? `не в сети · ${n} ${plural(n, 'правка ждёт', 'правки ждут', 'правок ждут')}` : 'не в сети';
+    const wait = n ? ` · ${n} ${plural(n, 'правка ждёт', 'правки ждут', 'правок ждут')}` : '';
+    // круг 39 (N6а): первое подключение ещё идёт — это не «не в сети»
+    if (s.connecting) return `подключаюсь к проекту…${wait}`;
+    return `не в сети${wait}`;
   }
   if (s.syncing) return 'синхронизация…';
   return 'в сети · всё сохранено';
@@ -532,6 +565,8 @@ export function memoryStorage() {
  * @param {number} [o.epochReopenMs] переоткрытие после 4410 (смена эпохи) — через столько мс с разбросом вниз до половины (250)
  * @param {number} [o.idleHealthMs] пока проект открыт и правок нет — /api/health раз в столько мс с разбросом
  *                                  (12000; 0 — не спрашивать): база могла лечь в простое, а статус — «всё сохранено»
+ * @param {number} [o.firstConnectMs] первое подключение сокета: пока оно идёт (до hello, первой неудачи или
+ *                                  этого срока, 6000 мс), статус несёт `connecting: true` — «подключаюсь к проекту…»
  */
 export function createSync(o) {
   const core = o.core;
@@ -549,6 +584,7 @@ export function createSync(o) {
   const reconnectMax = isNum(o.reconnectMax) ? o.reconnectMax : 30000;
   const epochReopenMs = isNum(o.epochReopenMs) ? o.epochReopenMs : EPOCH_REOPEN_MS;
   const idleHealthMs = isNum(o.idleHealthMs) ? o.idleHealthMs : IDLE_HEALTH_MS;
+  const firstConnectMs = isNum(o.firstConnectMs) && o.firstConnectMs > 0 ? o.firstConnectMs : FIRST_CONNECT_MS;
   const heartbeatMs = isNum(o.presenceHeartbeatMs) ? o.presenceHeartbeatMs : LIMITS.presenceHeartbeatMs;
   const presenceTtl = isNum(o.presenceTtl) ? o.presenceTtl : PRESENCE_TTL;
   // прореживание надгробий (круг 29): числа сервера; опции — для тестов и для сервиса с другими
@@ -582,6 +618,14 @@ export function createSync(o) {
   let openHead = -1;
   let firstHello = true;
   let ready = false;           // hello получен: сервер до него ничего не принимает (Hub), и «в сети» — только с него
+  /* Круг 39 (N6а): до первого hello и до первой неудачной попытки сокета — «подключаюсь к
+     проекту…», а не «не в сети»/«сервер недоступен»: открытие проекта не краснеет. Попытка
+     провалилась (сокет закрылся без hello, сеть пропала) или первое подключение дольше
+     FIRST_CONNECT_MS — дальше обычные слова. */
+  let everReady = false;
+  let connectFailed = false;
+  let connectGrace = null;
+  let serverEngine = null;     // версия движка сервера из hello (для слов об отказе по версии)
   let helloTimer = null;
   let openRetry = null;        // ожидание повтора в open() без сервера — reconnect() будит его раньше срока
   let inflight = null;         // tx_id отправленной и ещё не подтверждённой транзакции
@@ -675,6 +719,8 @@ export function createSync(o) {
       online,
       pending: pending.length,
       syncing: online && !halted && (catchingUp || pending.length > 0 || confirmed.seq < helloHead),
+      ...(!online && !closed && !halted && !error && !notFound && !storageDown && !everReady && !connectFailed ? { connecting: true } : {}),
+      ...(error === 'engine' ? { engine: serverEngine, ownEngine: core.ENGINE_VERSION } : {}),
       error,
       head: confirmed.seq,
       storage: storageDown ? 'down' : 'up',
@@ -1654,9 +1700,12 @@ export function createSync(o) {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (socket && (socket.readyState === 0 || socket.readyState === 1)) return;
     let ws;
-    try { ws = new WS(wsUrl()); } catch (e) { report('connect', e); scheduleReconnect(); return; }
+    try { ws = new WS(wsUrl()); } catch (e) { report('connect', e); connectFailed = true; emitStatus(); scheduleReconnect(); return; }
     socket = ws;
     ready = false;
+    if (!everReady && !connectFailed && !connectGrace) {
+      connectGrace = setT(() => { connectGrace = null; if (!everReady) { connectFailed = true; emitStatus(); } }, firstConnectMs);
+    }
     ws.onopen = () => {
       if (ws !== socket) return;
       helloHead = -1;
@@ -1680,6 +1729,7 @@ export function createSync(o) {
     ws.onclose = (ev) => {
       if (ws !== socket) return;
       socket = null;
+      if (!ready) connectFailed = true;
       const code = ev && isNum(ev.code) ? ev.code : 0;
       const lost = inflight;
       dropSocketState();
@@ -1842,6 +1892,8 @@ export function createSync(o) {
       case 'hello': {
         attempt = 0;
         ready = true;
+        everReady = true;
+        if (connectGrace) { clearTimeout(connectGrace); connectGrace = null; }
         online = true;
         notFound = false;   // проект снова есть (его вернули): обычная работа
         if (helloTimer) { clearTimeout(helloTimer); helloTimer = null; }
@@ -1864,7 +1916,8 @@ export function createSync(o) {
         if (isNum(msg.engine) && msg.engine !== core.ENGINE_VERSION) {
           halted = true;
           error = 'engine';
-          call(o.onError, { code: 'engine', message: 'версия движка на сервере другая — обновите страницу', engine: msg.engine });
+          serverEngine = msg.engine;
+          call(o.onError, { code: 'engine', message: engineWords(msg.engine, core.ENGINE_VERSION).status, engine: msg.engine });
         }
         // журнал впереди сервера (базу пересоздали): своя копия ничего не стоит — берём снимок.
         // Сервер круга 23 (с эпохой) сам пришлёт gone — второй снимок по HTTP не нужен
@@ -1920,7 +1973,12 @@ export function createSync(o) {
         if (code === 'not_found' || code === 'not-found') { markNotFound(); break; }
         const i = msg.tx_id ? pending.findIndex((p) => p.tx_id === msg.tx_id) : -1;
         const tx = i >= 0 ? pending[i] : null;
-        if (/engine|426/i.test(code)) { halted = true; error = 'engine'; }
+        if (/engine|426/i.test(code)) {
+          halted = true;
+          error = 'engine';
+          const se = isNum(msg.engine) ? msg.engine : msg.detail && isNum(msg.detail.engine) ? msg.detail.engine : null;
+          if (se !== null) serverEngine = se;
+        }
         // прежний сервер не говорил retryable — тогда судим по коду
         const retryable = typeof msg.retryable === 'boolean' ? msg.retryable : /unavailable|busy|internal|timeout/i.test(code);
         const wait = isNum(msg.retry_after) ? Math.min(msg.retry_after, RETRY_AFTER_MAX) * 1000 : 0;
@@ -1960,7 +2018,7 @@ export function createSync(o) {
           scheduleWrite();
           call(o.onChange, view, { reason: 'error', tx });
         }
-        call(o.onError, { code, message: String(msg.message || ''), tx });
+        call(o.onError, { code, message: String(msg.message || ''), tx, ...(error === 'engine' ? { engine: serverEngine } : {}) });
         emitStatus();
         sendNext();
         break;
@@ -2233,6 +2291,7 @@ export function createSync(o) {
     if (closed) return;
     const ws = socket;
     if (!ws) return;
+    connectFailed = true;
     try { ws.close(); } catch { /* уже закрыт */ }
     // некоторые реализации не зовут onclose при закрытии без сети — переводим сами
     if (socket === ws) {
@@ -2244,6 +2303,7 @@ export function createSync(o) {
 
   function close() {
     closed = true;
+    if (connectGrace) { clearTimeout(connectGrace); connectGrace = null; }
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
     if (idleHealthTimer) { clearTimeout(idleHealthTimer); idleHealthTimer = null; }

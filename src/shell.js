@@ -16,7 +16,7 @@
 
 import {
   artboards, isArtboard, subtreeIds, placeholderName,
-  ops as OPS, ancestors, cloneSubtree, resolveLayout, normalizeLayout, uid,
+  ops as OPS, ancestors, normalizeLayout, uid,
   scaleSteps, scaleRef, parseScaleRef, resolveScale,
 } from './core.js';
 // круг 25: cutText/cleanText появляются в core параллельно — берём оттуда, если уже есть
@@ -198,13 +198,17 @@ export function serverStageRec(data = {}) {
  * у них `busy`/`queued`, §9.9), если оболочка их знает. `scope` (круг 27, §10.8):
  * `'project'` — очередь проекта (по одной команде на проект), `'workers'` — команда
  * принята и ждёт свободного исполнителя (воркера) агента: очередь проекта ни при чём,
- * впереди — команды любых проектов, их имён оболочка не знает.
+ * впереди — команды любых проектов, их имён оболочка не знает. Круг 39: `'read'` — полное
+ * чтение документа ждёт семафора чтений агента (впереди — чтения любых проектов, тоже без
+ * имён); прочие (будущие) очереди агента — общими словами, тоже без имён.
  * @param {number} position
  * @param {string[]} [ahead]
- * @param {'project'|'workers'} [scope]
+ * @param {'project'|'workers'|'read'|string} [scope]
  */
 export function queuedLabel(position, ahead = [], scope = 'project') {
   if (scope === 'workers') return 'Ждёт свободного исполнителя агента…';
+  if (scope === 'read') return 'Ждёт очереди на чтение документа…';
+  if (scope !== 'project') return 'Ждёт очереди агента…';
   const n = Number(position);
   const names = (Array.isArray(ahead) ? ahead : []).map((a) => cutText(cleanText(a), 40, { ellipsis: true })).filter(Boolean);
   const whose = names.length
@@ -212,6 +216,31 @@ export function queuedLabel(position, ahead = [], scope = 'project') {
     : '';
   if (!Number.isFinite(n) || n <= 0) return names.length ? `В очереди проекта: впереди команда${whose}` : 'В очереди проекта';
   return `В очереди проекта: впереди ${n} ${plural(n, 'команда', 'команды', 'команд')}${whose}`;
+}
+
+/** Очередь события `queued` (§10.3): нет поля (прежний Orchestrator) — очередь проекта. */
+export function queuedScope(data) {
+  const s = data && typeof data === 'object' ? data.scope : undefined;
+  if (s === undefined || s === null || s === '' || s === 'project') return 'project';
+  return typeof s === 'string' ? s : 'project';
+}
+
+/**
+ * Событие `queued` → стадия ленты. «Чьи команды впереди» (по присутствию: у кого агент сейчас
+ * работает) — только для очереди ПРОЕКТА: в очереди исполнителей (`workers`) и чтений
+ * (`read`, круг 39) впереди команды других проектов, и имена соавторов этого проекта были бы
+ * неправдой.
+ * @param {{position?: number, scope?: string}} data
+ * @param {{author?: string, busy?: boolean|number}[]} [others] присутствие проекта
+ * @returns {{stage: 'srv:queued', label: string, scope: string, position: number}}
+ */
+export function queuedStage(data, others = []) {
+  const position = data && Number.isFinite(data.position) ? data.position : 0;
+  const scope = queuedScope(data);
+  const ahead = scope !== 'project' ? [] : (Array.isArray(others) ? others : [])
+    .filter((p) => p && (p.busy === true || (typeof p.busy === 'number' && p.busy > 0)))
+    .map((p) => p.author || 'Без имени');
+  return { stage: 'srv:queued', label: queuedLabel(position, ahead, scope), scope, position };
 }
 
 /**
@@ -355,7 +384,9 @@ const ERROR_WORDS = {
   internal: ['Внутренняя ошибка агента — сообщите администратору', 'Команда не выполнена, текст остался в строке.'],
   /* K3: модель ответила слишком большим, слишком глубоким или не-JSON ответом — разово. */
   llm_bad_response: ['Ответ модели не удалось разобрать — попробуйте ещё раз', 'Текст команды остался в строке.'],
-  engine: ['Версия редактора устарела', 'Обновите страницу.'],
+  /* Круг 39 (N1): `engine` от Orchestrator — его движок и движок сервиса документов разошлись
+     (сервер обновляется): перезагрузка страницы тут не поможет, правки руками сохраняются. */
+  engine: ['Сервер агента и сервер документов сейчас разных версий', 'Команда не выполнена — так бывает, пока сервер обновляется. Правки руками сохраняются; текст остался в строке.'],
 };
 
 /* Коды, у которых текст сервера человеку не добавляет ничего, кроме совета администратору
@@ -532,6 +563,9 @@ export function agreeVerb(who, phrase) {
 }
 
 /** Какой правки касалась отброшенная операция: существительное и согласованный глагол. */
+/** create с непустым списком детей — «сгруппировать» существующие слои. */
+const isGroupCreate = (op) => !!(op && op.op === 'create' && op.node && Array.isArray(op.node.children) && op.node.children.length);
+
 function droppedSubject(op, nameOf) {
   const o = op && typeof op === 'object' ? op : {};
   const nm = (id) => {
@@ -552,6 +586,8 @@ function droppedSubject(op, nameOf) {
     case 'move': return { noun: `Перенос${nm(o.id)}`, failed: 'не применился' };
     case 'create': {
       const n = cutText(cleanText(o.node && (o.node.name || o.node.text)), 40, { ellipsis: true });
+      // круг 39: «сгруппировать» (create с перечисленными детьми, wrapOps) — это обёртка, не новый слой
+      if (isGroupCreate(o)) return { noun: `Рамка${n ? ` «${n}»` : ''}`, failed: 'не создана' };
       return { noun: `Добавление${n ? ` «${n}»` : ' слоя'}`, failed: 'не применилось' };
     }
     case 'remove': return { noun: `Удаление${nm(o.id)}`, failed: 'не применилось' };
@@ -563,6 +599,10 @@ function droppedSubject(op, nameOf) {
 /** Причина отказа словами; who — кто помешал (для removed/orphan). */
 function droppedReason(d, who, many) {
   const reason = d && (d.limit || d.reason);
+  // круг 39: группа, все слои которой удалены (core.rebase отбросил пустую рамку)
+  if (reason === 'removed' && !many && isGroupCreate(d.op)) {
+    return who ? `${whoDid(who, 'удалил')} слои, которые в неё входили` : 'слоёв, которые в неё входили, уже нет';
+  }
   switch (reason) {
     case 'removed':
       return who ? `${whoDid(who, 'удалил')} ${many ? 'эти слои' : 'этот слой'}` : (many ? 'эти слои уже удалены' : 'этот слой уже удалён');
@@ -693,14 +733,17 @@ export function tooLargeWords(e = {}, limits = {}) {
  * @param {{title?: string}} [tx]
  * @param {string} [utterance]
  */
-export function stoppedWriteWords(tx, utterance = '') {
+export function stoppedWriteWords(tx, utterance = '', platform = {}) {
   const what = String((tx && tx.title) || utterance || '').trim();
   const short = what.length > 80 ? `${what.slice(0, 79)}…` : what;
+  // круг 39: клавиша — по платформе, на телефоне без клавиш — только кнопка
+  const key = keyLabel('Mod+Z', platform);
+  const how = `Отменить — кнопкой «Отменить»${key ? ` или ${key}` : ''}.`;
   return {
     title: 'Агент успел записать правку до остановки — можно отменить',
     // круг 29, п.7: кнопка стоит справа от текста на широком экране и под ним на узком —
     // «кнопкой ниже» было неправдой на половине экранов; называем её саму
-    note: short ? `«${short}» уже на холсте. Отменить — кнопкой «Отменить» или Ctrl+Z.` : 'Отменить — кнопкой «Отменить» или Ctrl+Z.',
+    note: short ? `«${short}» уже на холсте. ${how}` : how,
   };
 }
 
@@ -1218,9 +1261,28 @@ export function normalizeResult(r) {
     summary: String(x.summary || '').trim(),
     // круг 27: что сделано, словами по операциям (= tx.title записи) — для «Истории»
     title: typeof x.title === 'string' ? x.title.trim() : '',
+    // круг 39 (N5д): план — отдельно от итога (сервер прежней версии клал его в summary)
+    plan: typeof x.plan === 'string' ? x.plan.trim() : (x.plan && typeof x.plan.summary === 'string' ? x.plan.summary.trim() : ''),
     warnings: Array.isArray(x.warnings) ? x.warnings.map((w) => String(w || '')).filter(Boolean) : [],
     select: Array.isArray(x.select) ? x.select.filter((id) => typeof id === 'string') : [],
   };
+}
+
+/**
+ * Круг 39 (N6б): заголовок итога команды агента и вторая строка. Заголовок — что сделано
+ * (`result.title`, = tx.title записи, словами по операциям); без него — `summary`. Вторая
+ * строка — слова модели, если они о другом; план (то, что агент собирался сделать до работы)
+ * второй строкой не повторяется — он в будущем времени и итогом не является.
+ * @param {{title?: string, summary?: string, plan?: string, variant?: {label?: string}|null}} r
+ * @returns {{headline: string, aside: string}}
+ */
+export function agentHeadline({ title = '', summary = '', plan = '', variant = null } = {}) {
+  const t = cleanText(title);
+  const s = cleanText(summary);
+  const p = cleanText(plan);
+  if (variant) return { headline: `Принят вариант «${cleanText(variant.label) || 'без названия'}»`, aside: t || s };
+  const headline = t || s || 'Готово';
+  return { headline, aside: s && s !== headline && s !== p ? s : '' };
 }
 
 /**
@@ -1319,9 +1381,24 @@ function saidWords(s, drop = true) {
  * должны найтись в имени; чем меньше в имени лишнего, тем выше оценка.
  */
 export function nameMatches(name, phrase) {
-  const want = saidWords(phrase).map(stemWord).filter((w) => w.length >= 3);
+  return stemsMatch(nameStems(name), wantStems(phrase));
+}
+/* Круг 39 (N6е): на документе в 20 тыс. слоёв разбор фразы и имени на каждом узле стоил
+   100+ мс на нажатие. Фраза разбирается один раз, основы имён — кешем (имя → основы). */
+const wantStems = (phrase) => saidWords(phrase).map(stemWord).filter((w) => w.length >= 3);
+const STEMS_CACHE = new Map();
+const STEMS_CACHE_MAX = 60000;
+function nameStems(name) {
+  const key = String(name || '');
+  let got = STEMS_CACHE.get(key);
+  if (got) return got;
+  got = saidWords(key, false).map(stemWord).filter(Boolean);
+  if (STEMS_CACHE.size >= STEMS_CACHE_MAX) STEMS_CACHE.clear();
+  STEMS_CACHE.set(key, got);
+  return got;
+}
+function stemsMatch(have, want) {
   if (!want.length) return 0;
-  const have = saidWords(name, false).map(stemWord).filter(Boolean);
   if (!have.length) return 0;
   let hits = 0;
   for (const w of want) {
@@ -1344,12 +1421,16 @@ export function artboardsByName(doc, phrase) {
 /** Узлы, чьё имя похоже на сказанное. Внутри активного артборда — дороже. */
 export function nodesByName(doc, phrase, { activeId = null, artboardsToo = true } = {}) {
   if (!doc || !doc.nodes) return [];
+  const want = wantStems(phrase);
+  if (!want.length) return [];
   const inside = activeId && doc.nodes[activeId] ? new Set(subtreeIds(doc, activeId)) : new Set();
   const out = [];
-  for (const [id, n] of Object.entries(doc.nodes)) {
+  for (const id in doc.nodes) {
+    if (!Object.prototype.hasOwnProperty.call(doc.nodes, id)) continue;
+    const n = doc.nodes[id];
     if (!n || n.type === 'page') continue;
     if (!artboardsToo && isArtboard(doc, id)) continue;
-    const score = nameMatches(n.name || placeholderName(doc, n), phrase);
+    const score = stemsMatch(nameStems(n.name || placeholderName(doc, n)), want);
     if (!score) continue;
     out.push({ id, node: n, score: score + (inside.has(id) ? 0.5 : 0) });
   }
@@ -1658,7 +1739,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'theme', group: 'Вид', title: 'Тема интерфейса', hint: 'Тёмная, светлая или как в системе; без слова — следующая', slash: ['тема', 'theme'], args: [{ name: 'какая', kind: 'enum', values: ['тёмная', 'светлая', 'системная'], optional: true }], bare: true, example: '/тема тёмная', phrases: ['тёмная тема интерфейса', 'светлый интерфейс', 'как в системе'] },
 
   /* — Выделение — */
-  { id: 'select-all', group: 'Выделение', title: 'Выделить всё на доске', hint: 'Верхние слои активной доски, кроме скрытых и запертых', slash: ['выделить всё', 'select all'], keys: '⌘A', phrases: ['выдели всё', 'выбери всё на доске'] },
+  { id: 'select-all', group: 'Выделение', title: 'Выделить всё на доске', hint: 'Верхние слои активной доски, кроме скрытых и запертых', slash: ['выделить всё', 'select all'], keys: 'Mod+A', phrases: ['выдели всё', 'выбери всё на доске'] },
   { id: 'deselect', group: 'Выделение', title: 'Снять выделение', hint: '', slash: ['снять выделение', 'снять', 'deselect'], keys: 'Esc', phrases: ['сними выделение', 'убери выделение'] },
   { id: 'select-parent', group: 'Выделение', title: 'Выделить родителя', hint: 'Рамку, в которой лежит выделенный слой', slash: ['родитель', 'parent'], phrases: ['выдели родителя', 'на уровень выше'], needs: 'selection' },
   { id: 'select-children', group: 'Выделение', title: 'Выделить детей', hint: 'Слои внутри выделенной рамки', slash: ['дети', 'children'], phrases: ['выдели детей', 'на уровень ниже'], needs: 'selection' },
@@ -1668,7 +1749,7 @@ export const SHELL_COMMANDS = deepFreeze([
 
   /* — Правка: обычные транзакции, отмена одним шагом — */
   { id: 'delete', group: 'Правка', title: 'Удалить', hint: 'Удалить выделенные слои', slash: ['удалить', 'delete'], keys: 'Del', phrases: ['удали выделенное', 'удалить выбранное'], edit: true, needs: 'selection' },
-  { id: 'duplicate', group: 'Правка', title: 'Дублировать', hint: 'Копия рядом с оригиналом', slash: ['дублировать', 'копия', 'duplicate'], keys: '⌘D', phrases: ['дублируй', 'сделай копию'], edit: true, needs: 'selection' },
+  { id: 'duplicate', group: 'Правка', title: 'Дублировать', hint: 'Копия рядом с оригиналом', slash: ['дублировать', 'копия', 'duplicate'], keys: 'Mod+D', phrases: ['дублируй', 'сделай копию'], edit: true, needs: 'selection' },
   { id: 'rename', group: 'Правка', title: 'Переименовать', hint: 'Новое имя выделенного слоя', slash: ['переименовать', 'имя', 'rename'], args: [{ name: 'новое имя', kind: 'text' }], example: '/переименовать Шапка', phrases: ['переименуй в «Шапка»'], edit: true, needs: 'selection' },
   { id: 'hide', group: 'Правка', title: 'Скрыть', hint: 'Сделать слой невидимым — он остаётся в списке слоёв', slash: ['скрыть', 'hide'], phrases: ['скрой выделенное', 'сделай невидимым'], edit: true, needs: 'selection' },
   { id: 'show', group: 'Правка', title: 'Показать', hint: 'Вернуть видимость скрытому слою', slash: ['показать', 'show'], phrases: ['сделай видимым', 'верни видимость'], edit: true, needs: 'selection' },
@@ -1678,8 +1759,8 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'lower', group: 'Правка', title: 'Опустить в порядке', hint: 'На место позже среди соседей — ниже в списке слоёв', slash: ['ниже', 'опустить', 'down'], phrases: ['опусти', 'ниже в списке'], edit: true, needs: 'selection' },
   { id: 'to-start', group: 'Правка', title: 'В начало', hint: 'Первым среди соседей', slash: ['в начало', 'first'], phrases: ['перемести в начало', 'поставь первым'], edit: true, needs: 'selection' },
   { id: 'to-end', group: 'Правка', title: 'В конец', hint: 'Последним среди соседей', slash: ['в конец', 'last'], phrases: ['перемести в конец', 'поставь последним'], edit: true, needs: 'selection' },
-  { id: 'wrap', group: 'Правка', title: 'Обернуть в рамку', hint: 'Сгруппировать выделенных соседей в новую рамку', slash: ['обернуть', 'группа', 'group'], keys: '⌘G', phrases: ['оберни в рамку', 'сгруппируй'], edit: true, needs: 'selection' },
-  { id: 'ungroup', group: 'Правка', title: 'Разгруппировать', hint: 'Достать детей из рамки и убрать саму рамку', slash: ['разгруппировать', 'ungroup'], keys: '⇧⌘G', phrases: ['разгруппируй', 'разбери группу'], edit: true, needs: 'selection' },
+  { id: 'wrap', group: 'Правка', title: 'Обернуть в рамку', hint: 'Сгруппировать выделенных соседей в новую рамку', slash: ['обернуть', 'группа', 'group'], keys: 'Mod+G', phrases: ['оберни в рамку', 'сгруппируй'], edit: true, needs: 'selection' },
+  { id: 'ungroup', group: 'Правка', title: 'Разгруппировать', hint: 'Достать детей из рамки и убрать саму рамку', slash: ['разгруппировать', 'ungroup'], keys: 'Shift+Mod+G', phrases: ['разгруппируй', 'разбери группу'], edit: true, needs: 'selection' },
   { id: 'align', group: 'Правка', title: 'Выровнять детей', hint: 'Как стоят дети в выделенной рамке', slash: ['выровнять', 'align'], args: [{ name: 'как', kind: 'enum', values: ALIGN_VALUES }], example: '/выровнять влево', phrases: ['выровняй детей по центру', 'выровнять содержимое влево'], edit: true, needs: 'selection' },
   { id: 'direction', group: 'Правка', title: 'Направление', hint: 'Дети рамки — строкой или колонкой', slash: ['направление', 'поток', 'direction'], args: [{ name: 'как', kind: 'enum', values: ['строка', 'колонка'] }], example: '/направление строка', phrases: ['расположи в строку', 'в колонку'], edit: true, needs: 'selection' },
   { id: 'gap-more', group: 'Правка', title: 'Зазор больше', hint: 'Зазор между детьми рамки — на шаг шкалы отступов больше', slash: ['зазор больше', 'зазор+', 'gap+'], phrases: ['увеличь зазор', 'зазор больше'], edit: true, needs: 'selection' },
@@ -1704,8 +1785,8 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'new-board', group: 'Файл', title: 'Новая доска', hint: 'Пустая доска рядом с остальными', slash: ['новая доска', 'new board'], phrases: ['новая доска', 'пустая доска'] },
 
   /* — История — */
-  { id: 'undo', group: 'История', title: 'Отменить', hint: 'Последнюю правку или несколько', slash: ['отменить', 'отмена', 'undo'], keys: '⌘Z', args: [{ name: 'сколько', kind: 'number', optional: true }], bare: true, example: '/отменить 3', phrases: ['отмени', 'отмени три раза'] },
-  { id: 'redo', group: 'История', title: 'Повторить', hint: 'Вернуть отменённое', slash: ['повторить', 'redo'], keys: '⇧⌘Z', args: [{ name: 'сколько', kind: 'number', optional: true }], bare: true, example: '/повторить 2', phrases: ['верни обратно', 'вперёд два раза'] },
+  { id: 'undo', group: 'История', title: 'Отменить', hint: 'Последнюю правку или несколько', slash: ['отменить', 'отмена', 'undo'], keys: 'Mod+Z', args: [{ name: 'сколько', kind: 'number', optional: true }], bare: true, example: '/отменить 3', phrases: ['отмени', 'отмени три раза'] },
+  { id: 'redo', group: 'История', title: 'Повторить', hint: 'Вернуть отменённое', slash: ['повторить', 'redo'], keys: 'Shift+Mod+Z', args: [{ name: 'сколько', kind: 'number', optional: true }], bare: true, example: '/повторить 2', phrases: ['верни обратно', 'вперёд два раза'] },
 
   /* — Агент — */
   { id: 'stop', group: 'Агент', title: 'Стоп', hint: 'Остановить работу агента', slash: ['стоп', 'stop'], phrases: ['стоп', 'хватит'] },
@@ -1714,10 +1795,49 @@ export const SHELL_COMMANDS = deepFreeze([
 
   /* — Справка — */
   { id: 'help', group: 'Справка', title: 'Команды', hint: 'Справка: все команды оболочки по группам', slash: ['помощь', 'команды', 'help', '?'], phrases: ['команды', 'что ты умеешь'] },
-  { id: 'palette', group: 'Справка', title: 'Палитра команд', hint: 'Поиск команды по названию, «/» или фразе', slash: [], keys: '⌘K', phrases: [], inPalette: false },
+  { id: 'palette', group: 'Справка', title: 'Палитра команд', hint: 'Поиск команды по названию, «/» или фразе', slash: [], keys: 'Mod+K', phrases: [], inPalette: false },
 ]);
 
 const CMD_BY_ID = new Map(SHELL_COMMANDS.map((c) => [c.id, c]));
+
+/**
+ * Круг 39 (N6в): клавиши в таблице хранятся абстрактно («Mod+A», «Shift+Mod+G»): Mod — Ctrl на
+ * Windows и Linux, ⌘ на macOS. Подпись — по платформе: «Ctrl+Shift+G» или «⇧⌘G».
+ * На устройстве без клавиатуры (телефон) подписи нет вовсе — пустая строка.
+ * @param {string} keys
+ * @param {{mac?: boolean, touch?: boolean}} [o]
+ */
+export function keyLabel(keys, { mac = false, touch = false } = {}) {
+  const k = String(keys || '').trim();
+  if (!k || touch) return '';
+  const parts = k.split('+').filter(Boolean);
+  const key = parts.pop();
+  const shift = parts.includes('Shift');
+  const mod = parts.includes('Mod');
+  const alt = parts.includes('Alt');
+  if (mac) return `${shift ? '⇧' : ''}${alt ? '⌥' : ''}${mod ? '⌘' : ''}${key}`;
+  return [mod ? 'Ctrl' : '', shift ? 'Shift' : '', alt ? 'Alt' : '', key].filter(Boolean).join('+');
+}
+
+/**
+ * Платформа по `navigator`: macOS/iOS — ⌘, прочее — Ctrl; «без клавиш» — грубый указатель
+ * без наведения (телефон, планшет без клавиатуры). Без navigator (тесты) — Ctrl и клавиши есть.
+ * @param {object} [nav] navigator
+ * @param {(q: string) => boolean} [mq] matchMedia(q).matches
+ */
+export function keyPlatform(nav = (typeof navigator !== 'undefined' ? navigator : null), mq = null) {
+  const plat = nav ? String((nav.userAgentData && nav.userAgentData.platform) || nav.platform || '') : '';
+  const ua = nav ? String(nav.userAgent || '') : '';
+  const mac = /mac|iphone|ipad|ipod/i.test(plat) || (!plat && /Mac OS X|iPhone|iPad/.test(ua));
+  let touch = false;
+  try { touch = !!(mq && mq('(hover: none) and (pointer: coarse)')); } catch { touch = false; }
+  return { mac, touch };
+}
+
+/** «Ctrl+Z» / «⌘Z» — как назвать отмену на этой платформе; на телефоне — пусто. */
+export function undoKeyWords(platform = {}) {
+  return keyLabel('Mod+Z', platform);
+}
 
 /** Запись таблицы по id. */
 export function shellCommand(id) {
@@ -2084,7 +2204,10 @@ function paletteBase() {
     const a = c.args && c.args[0];
     const base = { id: c.id, group: c.group, hint: c.hint || '', keys: c.keys || '', phrases: c.phrases };
     if (!a || a.optional && (c.bare || a.kind !== 'enum')) {
-      rows.push({ ...base, key: c.id, title: c.title, example: commandExample(c), run: slash });
+      /* Круг 39 (UX): голая строка исполняет ровно «/тема» — подпись не должна обещать
+         «/тема тёмная» (пример с аргументом остаётся в справке и у строк со значением). */
+      const example = a ? slash : commandExample(c);
+      rows.push({ ...base, key: c.id, title: c.title, example, run: slash });
     }
     if (a && a.kind === 'enum') {
       for (const v of a.values) {
@@ -2112,7 +2235,9 @@ export function paletteRows(query, ctx = {}) {
   const limit = Number.isFinite(ctx.limit) ? ctx.limit : 200;
   if (!q) return PALETTE_BASE.slice(0, limit);
   const out = [];
-  const exact = slashIntent(`/${rawQ}`, { doc: ctx.doc || null, activeId: ctx.activeArtboardId || null });
+  /* Круг 39 (N6е): строке палитры документ не нужен — она только узнаёт команду и её
+     целиковость; поиск слоя по имени (по всем узлам документа) — при исполнении. */
+  const exact = slashIntent(`/${rawQ}`, { doc: null, activeId: null });
   const exactId = commandIdOf(exact);
   const qWords = q.split(' ');
   for (const r of PALETTE_BASE) {
@@ -2167,37 +2292,28 @@ export function selectionRoots(doc, ids) {
   return list.filter((id) => !ancestors(doc, id).some((a) => list.includes(a.id)));
 }
 
-/** Дублировать: копия поддерева рядом, со сдвигом там, где места задаёт pos (как Ctrl+D). */
-export function duplicateOps(doc, ids) {
-  const roots = selectionRoots(doc, ids);
-  const list = [];
-  const newIds = [];
-  for (const id of roots) {
-    const node = nodeOf(doc, id);
-    const parent = node && nodeOf(doc, node.parent);
-    if (!parent) continue;
-    const clone = cloneSubtree(doc, id);
-    if (!clone.rootId) continue;
-    const index = (parent.children || []).indexOf(id) + 1;
-    clone.nodes.forEach((n, i) => {
-      const flat = { ...n };
-      if (flat.children) flat.children = [];
-      if (i === 0) {
-        flat.name = `${flat.name || titleOf(doc, id)} копия`;
-        const L = resolveLayout(doc, parent.layout);
-        if (parent.id === doc.root || L.mode === 'none') {
-          const pos = flat.pos || { x: 0, y: 0 };
-          flat.pos = { x: r2((pos.x || 0) + 16), y: r2((pos.y || 0) + 16) };
-        } else if (flat.override) {
-          flat.override = { ...flat.override, x: r2(flat.override.x + 16), y: r2(flat.override.y + 16) };
-        }
-        list.push(OPS.create(flat, index));
-        newIds.push(flat.id);
-      } else list.push(OPS.create(flat));
-    });
-  }
-  if (!list.length) return { error: 'Копировать нечего' };
-  return { ops: list, ids: newIds, words: `Дублировал ${quoted(doc, roots)}` };
+/**
+ * Дублировать (круг 39, N3): операции — `core.duplicateOps`, единственная реализация копии
+ * (перепись внутренних ссылок и пропсов, новое имя компонента у копии мастера, «родитель +
+ * ребёнок» — одна копия, сдвиг там, где место задаёт pos); оболочка добавляет только слова.
+ * Отказ — словами без id.
+ * @returns {{ops: object[], ids: string[], words: string}|{error: string}}
+ */
+export function duplicateOps(doc, ids, o = {}) {
+  let r;
+  try { r = CORE_NS.duplicateOps(doc, ids, o); } catch (e) { r = { error: e }; }
+  if (!r || r.error || !Array.isArray(r.ops) || !r.ops.length) return { error: dupErrorWords(r && r.error) };
+  const roots = Array.isArray(r.roots) && r.roots.length ? r.roots : selectionRoots(doc, ids);
+  return { ops: r.ops, ids: Array.isArray(r.ids) ? r.ids : [], words: `Дублировал ${quoted(doc, roots)}` };
+}
+
+/** Отказ копии словами: без id и кода (они — в консоли разработчика, не человеку). */
+function dupErrorWords(err) {
+  const msg = cleanText(typeof err === 'string' ? err : (err && (err.message || err.code)) || '');
+  if (!msg) return 'Копировать нечего';
+  if (/^Копировать нечего/.test(msg)) return msg;   // ядро уже говорит словами
+  if (isJargon(msg) || /\b[a-z]{1,4}_[a-z0-9]{4,}\b/i.test(msg)) return 'Копию сделать не вышло — этот слой так не копируется';
+  return `Копию сделать не вышло: ${msg.charAt(0).toLowerCase()}${msg.slice(1)}`;
 }
 
 /** Переименовать выделенные (обычно один слой). */
@@ -2288,8 +2404,14 @@ export function reorderOps(doc, ids, to) {
   }
   const where = { up: 'выше', down: 'ниже', first: 'в начало', last: 'в конец' }[to] || '';
   if (!list.length) return { error: { up: 'Выше некуда — слой и так первый', down: 'Ниже некуда — слой и так последний', first: 'Слой и так первый', last: 'Слой и так последний' }[to] || 'Порядок не изменился' };
-  const verb = to === 'up' ? 'Поднял' : to === 'down' ? 'Опустил' : 'Переставил';
-  return { ops: list, words: `${verb} ${quoted(doc, movedAll)}${to === 'up' || to === 'down' ? ' в порядке' : ` ${where}`}` };
+  // круг 39 (UX): «Опустил «…» в порядке» — тяжело; говорим, куда в списке слоёв
+  const words = {
+    up: `Поднял ${quoted(doc, movedAll)} выше в списке слоёв`,
+    down: `Опустил ${quoted(doc, movedAll)} ниже в списке слоёв`,
+    first: `Поставил ${quoted(doc, movedAll)} ${movedAll.length > 1 ? 'первыми' : 'первым'} в списке слоёв`,
+    last: `Поставил ${quoted(doc, movedAll)} ${movedAll.length > 1 ? 'последними' : 'последним'} в списке слоёв`,
+  }[to] || `Переставил ${quoted(doc, movedAll)} ${where}`.trim();
+  return { ops: list, words };
 }
 
 /** Рамка без свободной раскладки: у неё есть дети и поток. */
@@ -2335,15 +2457,16 @@ export function wrapOps(doc, ids, { rects = null, name = 'Группа' } = {}) 
     frame.layout = { mode: 'none', gap: zero, padding: pad0, align: 'start', justify: 'start', wrap: false };
     frame.size = { w: { mode: 'fixed', value: r2(x2 - x1) }, h: { mode: 'fixed', value: r2(y2 - y1) } };
     frame.pos = { x: r2(x1 - pr.x), y: r2(y1 - pr.y) };
-    order.forEach((k, i) => {
-      moves.push(OPS.move(k, id, i));
-      moves.push(OPS.set(k, 'pos', { x: r2(rs[i].x - x1), y: r2(rs[i].y - y1) }));
-    });
+    order.forEach((k, i) => moves.push(OPS.set(k, 'pos', { x: r2(rs[i].x - x1), y: r2(rs[i].y - y1) })));
   } else {
     frame.layout = { mode: raw.mode, gap: raw.gap, padding: pad0, align: raw.align, justify: 'start', wrap: false };
     frame.size = { w: { mode: 'hug' }, h: { mode: 'hug' } };
-    order.forEach((k, i) => moves.push(OPS.move(k, id, i)));
   }
+  /* Круг 39: дети перечислены в самом create («сгруппировать» одной операцией ядра), а не
+     ходами move после него: слияние вычёркивает из списка удалённых соавтором (§9.6), а если
+     не осталось ни одного — отбрасывает и сам create (core.rebase): рамка не переживает
+     своих слоёв, пустой «Группы» не бывает ни у кого. */
+  frame.children = order.slice();
   list.push(OPS.create(frame, index));
   for (const op of moves) list.push(op);
   return { ops: list, id, words: `Обернул ${quoted(doc, order)} в рамку «${name}»` };
@@ -2408,7 +2531,10 @@ export function directionOps(doc, ids, mode) {
   const list = frames.filter((id) => normalizeLayout(nodeOf(doc, id).layout).mode !== mode)
     .map((id) => OPS.set(id, 'layout.mode', mode));
   if (!list.length) return { error: mode === 'row' ? 'Дети уже стоят строкой' : 'Дети уже стоят колонкой' };
-  return { ops: list, words: `${mode === 'row' ? 'Выстроил строкой' : 'Выстроил колонкой'} детей ${quoted(doc, list.map((o) => o.id))}` };
+  // круг 39 (UX): «Выстроил строкой детей «…»» — тяжело; «Дети «Карточка» теперь строкой»
+  const ids2 = list.map((o) => o.id);
+  const whose = ids2.length === 1 ? `«${cutText(titleOf(doc, ids2[0]), 60, { ellipsis: true })}»` : `в ${ids2.length} ${plural(ids2.length, 'рамке', 'рамках', 'рамках')}`;
+  return { ops: list, words: `Дети ${whose} теперь ${mode === 'row' ? 'строкой' : 'колонкой'}` };
 }
 /* Доска со свободной раскладкой — холст, а не поток: направление ей не задаём. */
 function isArtboardFree(doc, id) {

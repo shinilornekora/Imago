@@ -10,10 +10,12 @@
  * объектом, http.js превращает его в DocError).
  */
 
+import { createHash } from 'node:crypto';
 import * as core from '../../src/core.js';
 import { createDoc } from '../../src/core.js';
 import { DocError, badRequest, tooLarge } from './errors.js';
 import { MAX_DOC_NODES, MAX_DOC_BYTES, MAX_VALUE_DEPTH, cleanMeta, cutText, cleanDeep, showValue } from './limits.js';
+import { EXPAND_LIMIT, expandOver } from './expand.js';
 
 const PROJECT_KINDS = new Set(['design', 'library']);
 const MAX_PROJECT_NAME = 200;
@@ -86,7 +88,8 @@ export function importDocError(d, maxNodes) {
     if (err === null || err === undefined || err === false) return null;
     const out = { message: typeof err === 'string' ? err
       : err && typeof err === 'object' && typeof err.message === 'string' ? err.message : 'документ не прошёл проверку' };
-    if (typeof r.limit === 'string' && /^[a-z_]{1,32}$/.test(r.limit)) out.limit = r.limit;
+    // предел раскрытия движок может назвать по-своему ('expand') — наружу один код (круг 39)
+    if (typeof r.limit === 'string' && /^[a-z_]{1,32}$/.test(r.limit)) out.limit = /^expand/.test(r.limit) ? EXPAND_LIMIT : r.limit;
     if (Number.isFinite(r.max)) out.max = r.max;
     return out;
   }
@@ -110,7 +113,7 @@ export function createIdOf(v) {
  * JSON.stringify в цикле событий.
  * @param {any} body разобранное тело
  * @param {{maxNodes?: number, maxDocBytes?: number, onWarn?: (msg: string) => void}} [o]
- * @returns {{name: string, kind: string, createId?: string, docJson: string, docBytes: number}}
+ * @returns {{name: string, kind: string, createId?: string, createHash?: string, docJson: string, docBytes: number}}
  */
 export function prepareProject(body, { maxNodes = MAX_DOC_NODES, maxDocBytes = MAX_DOC_BYTES, onWarn = () => {} } = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw badRequest('тело должно быть объектом');
@@ -149,14 +152,86 @@ export function prepareProject(body, { maxNodes = MAX_DOC_NODES, maxDocBytes = M
     if (treeDepth(doc, MAX_TREE_DEPTH) > MAX_TREE_DEPTH) {
       throw badRequest(`doc: вложенность глубже ${MAX_TREE_DEPTH} уровней`, { detail: { limit: 'depth', max: MAX_TREE_DEPTH } });
     }
+    // круг 39 (N2): предел раскрытия экземпляров компонентов (движок: expandCost) — документ, чьё
+    // раскрытие больше предела, не принимается сразу, а не роняет решатель у каждого открывшего
+    const expand = expandOver(doc);
+    if (expand) {
+      throw badRequest(`doc: ${expand.message}`, {
+        detail: { limit: EXPAND_LIMIT, ...(Number.isFinite(expand.max) ? { max: expand.max } : {}), ...(Number.isFinite(expand.cost) ? { cost: Math.round(expand.cost) } : {}) }
+      });
+    }
   }
   if (name) doc.meta = { ...(doc.meta || {}), name };
   const docJson = JSON.stringify(doc);
   const docBytes = Buffer.byteLength(docJson, 'utf8');
   if (docBytes > maxDocBytes) throw tooLarge('doc: больше предела документа', { detail: { limit: 'doc_bytes', max: maxDocBytes } });
   const out = { name, kind, docJson, docBytes };
-  if (createId) out.createId = createId;
+  if (createId) {
+    out.createId = createId;
+    out.createHash = createHashOf(body);
+  }
   return out;
+}
+
+/**
+ * Отпечаток тела создания (круг 39, N4г): sha256 НОРМАЛИЗОВАННОГО тела — того, что определяет
+ * создаваемый проект: имя (после чистки), вид (по умолчанию design), документ (как прислан — до
+ * приведения: у пустого createDoc id случайные; ключи объектов — по порядку, перестановка ключей
+ * в JSON отпечатка не меняет), demo. `create_id` и поля, которых сервис не читает, — не в счёт.
+ * Повтор того же тела — тот же отпечаток (200 existing); другое имя, вид, документ, demo —
+ * другой (409 conflict).
+ * @param {object} body
+ * @returns {string}
+ */
+export function createHashOf(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const name = b.name === undefined || b.name === null ? '' : projectName(b.name);
+  const kind = b.kind === undefined || b.kind === null ? 'design' : String(b.kind);
+  const norm = { v: 1, name, kind, demo: b.demo === true, doc: b.doc === undefined || b.doc === null ? null : b.doc };
+  const h = createHash('sha256');
+  canonicalJson(norm, (part) => h.update(part));
+  return h.digest('hex');
+}
+
+/** Метка «готовый кусок текста» в стеке обхода canonicalJson (не значение документа). */
+const RAW = Symbol('raw');
+
+/**
+ * JSON с ключами объектов по порядку — кусками в `out` (документ в мегабайты не собирается
+ * второй строкой; обход без рекурсии — глубина документа не роняет стек).
+ * @param {any} v
+ * @param {(part: string) => void} out
+ */
+export function canonicalJson(v, out) {
+  const stack = [v];
+  while (stack.length) {
+    const x = stack.pop();
+    if (x && typeof x === 'object' && x[RAW] !== undefined) {
+      out(x[RAW]);
+      continue;
+    }
+    if (x === null || typeof x !== 'object') {
+      const t = JSON.stringify(x);
+      out(t === undefined ? 'null' : t);
+      continue;
+    }
+    if (Array.isArray(x)) {
+      out('[');
+      stack.push({ [RAW]: ']' });
+      for (let i = x.length - 1; i >= 0; i--) {
+        stack.push(x[i]);
+        if (i > 0) stack.push({ [RAW]: ',' });
+      }
+      continue;
+    }
+    out('{');
+    const keys = Object.keys(x).filter((k) => x[k] !== undefined).sort();
+    stack.push({ [RAW]: '}' });
+    for (let i = keys.length - 1; i >= 0; i--) {
+      stack.push(x[keys[i]]);
+      stack.push({ [RAW]: (i > 0 ? ',' : '') + JSON.stringify(keys[i]) + ':' });
+    }
+  }
 }
 
 /** Ошибка из потока импорта → простой объект (structured clone теряет класс DocError). */

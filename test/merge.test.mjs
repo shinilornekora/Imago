@@ -193,10 +193,12 @@ test('§9.6 create: ребёнок, ставший из-за чужого move �
   assert.equal(m.doc.nodes.a.parent, 'wrap');
   assert.equal(m.doc.nodes.x.parent, 'ab', 'x остался на месте');
   assert.deepEqual(m.doc.nodes.ab.children, ['x']);
-  // сам родитель в детях — тоже вычёркивается
+  // сам родитель в детях — тоже вычёркивается; а раз группировать больше нечего — create
+  // отброшен (круг 39: пустая группа не создаётся), причина — цикл
   const self = merge(head, [ops.create(frame('w2', 'p', {}, { children: ['p'] }))]);
-  assert.equal(self.dropped.length, 0);
-  assert.deepEqual(self.ops[0].node.children, []);
+  assert.deepEqual(self.dropped.map((d) => [d.index, d.reason]), [[0, 'cycle']]);
+  assert.deepEqual(self.ops, []);
+  assert.ok(!self.doc.nodes.w2);
 });
 
 test('§9.6 create: родитель удалён — переприкрепление к ближайшему живому предку по цепочке надгробий, в конец', () => {

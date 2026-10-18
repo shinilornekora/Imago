@@ -372,6 +372,22 @@ export function createHub({
       }
       return;
     }
+    if (ev.kind === 'engine') {
+      // круг 39: проект записан движком новее этого экземпляра — живого потока здесь не будет
+      // (голова не держится): сокетам — честный 503 cause:'engine' и закрытие 4503; переподключение
+      // попадёт на обновлённый экземпляр или снова получит 503
+      clearFrames(room);
+      const text = JSON.stringify({
+        type: 'error', error: true, code: 'unavailable', retryable: true,
+        message: 'проект записан более новой версией редактора — этот сервер нужно обновить',
+        detail: { cause: 'engine', engine: ev.engine, found: ev.found }
+      });
+      for (const ws of [...room.sockets]) {
+        send(ws, text);
+        ws.close(CLOSE.unavailable, 'engine');
+      }
+      return;
+    }
     if (ev.kind === 'project') {
       // I4: имя (и сводка) проекта изменились — здесь или на другом экземпляре
       const text = JSON.stringify({ type: 'project', project: ev.project });
@@ -641,12 +657,12 @@ export function createHub({
     }, (e) => {
       ws.pumping = false;
       if (ws.readyState !== ws.OPEN) return;
-      // повторяется только сбой хранилища (viaStorage: cause storage|timeout) и занятость его
-      // чтений (busy); журнал, который не дочитывается за снимком, — не сбой связи: закрыть
-      // сразу, а не читать снимок по кругу
+      // повторяется только сбой хранилища (viaStorage: cause storage|timeout|schema — круг 35: база
+      // восстанавливается) и занятость его чтений (busy); журнал, который не дочитывается за
+      // снимком, — не сбой связи: закрыть сразу, а не читать снимок по кругу
       const cause = e instanceof DocError && e.detail && typeof e.detail === 'object' ? e.detail.cause : undefined;
       const transient = ws.ready && e instanceof DocError
-        && (e.code === 'busy' || (e.code === 'unavailable' && (cause === 'storage' || cause === 'timeout')));
+        && (e.code === 'busy' || (e.code === 'unavailable' && (cause === 'storage' || cause === 'timeout' || cause === 'schema')));
       ws.pumpFails = (ws.pumpFails || 0) + 1;
       if (!transient || ws.pumpFails > PUMP_RETRIES) {
         fail(ws, e);
@@ -878,7 +894,7 @@ export function createHub({
       send(ws, {
         type: 'hello',
         project: projectSummary({ ...project, head_seq }),
-        head_seq, engine: ENGINE_VERSION, epoch: head.epoch, tip: head.chain || '',
+        head_seq, engine: Number.isInteger(dslts.engine) ? dslts.engine : ENGINE_VERSION, epoch: head.epoch, tip: head.chain || '',
         gone: decision !== 'live' && decision !== 'tail'
       });
       if (ws.pendingProject) {

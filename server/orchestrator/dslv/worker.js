@@ -15,7 +15,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { getHeapStatistics } from 'node:v8';
 import * as core from '../../../src/core.js';
-import { runCommand, runVariants, BrainError, SCHEMAS, raceAbort, INTERNAL_MESSAGE } from '../../../src/brain.js';
+import { runCommand, runVariants, BrainError, SCHEMAS, raceAbort, INTERNAL_MESSAGE, expandOverflow } from '../../../src/brain.js';
 
 const testHooks = !!(workerData && workerData.testHooks);
 // проверка: медленный старт воркера (загрузка модулей под нагрузкой) — круг 29
@@ -58,6 +58,29 @@ function pick(o, keys) {
   const out = {};
   for (const k of keys) if (o[k] !== undefined) out[k] = o[k];
   return out;
+}
+
+/**
+ * Круг 39 (N2): последняя черта DSLV — правка, после которой раскрытие экземпляров выходит за
+ * предел ядра, не уходит на запись, каким бы путём brain её ни собрал (ответ модели проходит
+ * эту проверку ещё в круге починки, `materialize`; здесь — местные пути без модели: «сделай
+ * компонентом», отсоединение…). Документ после правки — превью brain, иначе applyOps.
+ */
+function guardExpand(doc, res) {
+  if (!res || typeof res !== 'object' || res.error || !Array.isArray(res.ops) || !res.ops.length) return res;
+  let after = res.preview && res.preview.doc;
+  if (!after) {
+    try {
+      const r = core.applyOps(doc, res.ops);
+      after = r && !r.error ? r.doc : null;
+    } catch { after = null; }
+  }
+  const over = expandOverflow(core, doc, after);
+  if (!over) return res;
+  return {
+    ops: [], warnings: res.warnings || [],
+    error: { kind: 'model', code: 'not_applied', message: `${over.message.charAt(0).toUpperCase()}${over.message.slice(1)}. Правка не записана` },
+  };
 }
 
 /** Результат brain → то, что нужно главному потоку (без превью-документа и геометрии). */
@@ -124,9 +147,9 @@ async function run(id, job) {
     let result;
     if (job.mode === 'variants') {
       const list = await runVariants({ ...common, n: job.n || 3 });
-      result = { variants: (list || []).map(slim) };
+      result = { variants: (list || []).map((v) => slim(guardExpand(job.doc, v))) };
     } else {
-      result = slim(await runCommand(common));
+      result = slim(guardExpand(job.doc, await runCommand(common)));
     }
     parentPort.postMessage({ type: 'done', id, result });
   } catch (e) {

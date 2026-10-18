@@ -228,6 +228,8 @@ button, input, textarea { font: inherit; color: inherit; }
   cursor: text;
 }
 .docname:hover { background: var(--panel-2); border-bottom-color: var(--text); }
+/* Круг 39: имя проекта ещё не пришло (подключаемся) — пустое поле не рисует пунктир-заглушку */
+.docname:empty:not(:focus) { display: none; }
 /* В фокусе многоточие убираем и даём полю вырасти: браузер прокручивает к каретке, а
    text-overflow поверх этого показывал «куме…» и пустоту — длинное имя набиралось
    вслепую (круг 15, п.6). В покое имя снова обрезается, а целиком живёт в title. */

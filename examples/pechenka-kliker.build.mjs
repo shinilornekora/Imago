@@ -32,7 +32,8 @@ const cookieArt = {
   ],
 };
 
-const P0 = (n) => { if (n && n.layout && n.layout.padding === undefined) n.layout.padding = 0; if (n && n.children) n.children.forEach(P0); return n; };
+// ноль — тоже шаг шкалы (SPEC §6): в документе нет чисел отступов и скруглений, только ссылки
+const P0 = (n) => { if (n && n.layout && n.layout.padding === undefined) n.layout.padding = 'spacing.0'; if (n && n.children) n.children.forEach(P0); return n; };
 const T = (text, style, extra = {}) => ({ type: 'text', text, style, size: { w: 'hug', h: 'hug' }, ...extra });
 const row = (children, extra = {}) => ({ type: 'frame', layout: { mode: 'row', gap: 'spacing.5', align: 'center', justify: 'start', wrap: false }, size: { w: 'fill', h: 'hug' }, children, ...extra });
 const col = (children, extra = {}) => ({ type: 'frame', layout: { mode: 'column', gap: 'spacing.3', align: 'start', justify: 'start', wrap: false }, size: { w: 'fill', h: 'hug' }, children, ...extra });
@@ -61,7 +62,7 @@ const cookie = (sz) => ({ type: 'frame', name: 'Сцена печеньки', la
 
 const progress = (w) => col([
   row([T('До уровня 8', 'caption', { color: 'muted', name: 'Прогресс · подпись' }), T('1 284 / 2 000', 'caption', { name: 'Прогресс · число' })], { name: 'Прогресс · строка', layout: { mode: 'row', gap: 'spacing.4', align: 'center', justify: 'between', wrap: false } }),
-  { type: 'frame', name: 'Полоса', layout: { mode: 'row', gap: 0, align: 'center', justify: 'start', wrap: false }, size: { w: 'fill', h: 10 }, fill: 'surfaceAlt', radius: 'radii.7',
+  { type: 'frame', name: 'Полоса', layout: { mode: 'row', gap: 'spacing.0', align: 'center', justify: 'start', wrap: false }, size: { w: 'fill', h: 10 }, fill: 'surfaceAlt', radius: 'radii.7',
     children: [{ type: 'rect', name: 'Заполнение', size: { w: Math.round(w * 0.64), h: 10 }, fill: 'accent', radius: 'radii.7' }] },
 ], { name: 'Прогресс уровня' });
 
@@ -75,7 +76,7 @@ const upgradeCard = ([icon, name, sub, price, ok]) => ({
   type: 'frame', name: `Улучшение · ${name}`, layout: { mode: 'row', gap: 'spacing.5', padding: 'spacing.5', align: 'center', justify: 'start', wrap: false }, size: { w: 'fill', h: 'hug' },
   fill: 'surface', radius: 'radii.4', stroke: 'line', ...(ok ? live : { opacity: 0.7 }),
   children: [
-    { type: 'frame', name: `${name} · значок`, layout: { mode: 'row', gap: 0, align: 'center', justify: 'center', wrap: false }, size: { w: 48, h: 48 }, fill: ok ? 'accentSoft' : 'surfaceAlt', radius: 'radii.3', children: [T(icon, 'heading', { name: `${name} · эмодзи` })] },
+    { type: 'frame', name: `${name} · значок`, layout: { mode: 'row', gap: 'spacing.0', align: 'center', justify: 'center', wrap: false }, size: { w: 48, h: 48 }, fill: ok ? 'accentSoft' : 'surfaceAlt', radius: 'radii.3', children: [T(icon, 'heading', { name: `${name} · эмодзи` })] },
     col([T(name, 'body', { name: `${name} · имя`, size: { w: 'fill', h: 'hug' } }), T(sub, 'caption', { color: 'muted', name: `${name} · уровень`, size: { w: 'fill', h: 'hug' } })], { name: `${name} · текст`, layout: { mode: 'column', gap: 'spacing.1', align: 'start', justify: 'start', wrap: false } }),
     { type: 'frame', name: `${name} · купить`, layout: { mode: 'row', gap: 'spacing.2', padding: ['spacing.3', 'spacing.5'], align: 'center', justify: 'center', wrap: false }, size: { w: 'hug', h: 'hug' },
       fill: ok ? 'accent' : 'surfaceAlt', radius: 'radii.7',
@@ -112,6 +113,12 @@ apply(r.ops, 'desktop');
 
 const ill = Object.values(doc.nodes).filter((n) => n.role === 'illustration');
 apply(ill.flatMap((n) => [core.ops.set(n.id, 'states', { hover: { scale: 1.04, lift: 'spacing.2' }, press: { scale: 0.93 } }), core.ops.set(n.id, 'motion', { duration: 'motion.fast', easing: 'spring' })]), 'cookie states');
+/* Круг 39 (N6г): рамку иллюстрации brain мог собрать числами (gap/padding/radius 0) — переводим
+   на ссылки здесь же, иначе первое открытие примера делало «Миграцию формата» и говорило
+   «файл из прежней версии». После перевода переводить нечего — проверяем. */
+apply(core.ensureScaleRefsOps(doc), 'scale refs');
+if (core.ensureScaleRefsOps(doc).length) throw new Error('числа мимо ссылок шкал остались');
+if (core.ensureLibraryOps(doc).length) throw new Error('библиотеки нет — импорт завёл бы её миграцией');
 const issues = core.validate(doc).filter((v) => v.severity !== 'info');
 console.log('warns:', warns);
 console.log('validate:', issues.map((v) => `${v.severity} ${v.code} ${v.message}`).slice(0, 20));

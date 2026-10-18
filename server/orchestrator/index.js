@@ -59,6 +59,7 @@ const num = (v) => (v === undefined || v === null || v === '' ? undefined : Numb
  *   variantsTtlMs?: number, tracePath?: string, testHooks?: boolean, fetch?: typeof fetch,
  *   bodyTimeoutMs?: number, headersTimeoutMs?: number, requestTimeoutMs?: number,
  *   connectionsCheckingIntervalMs?: number,
+ *   dslr?: {fullConcurrency?: number, fullBytes?: number, fullQueue?: number, fullTimeoutMs?: number, pageTimeoutMs?: number, readBudgetMs?: number, timeoutRetries?: number},
  *   log?: {info: Function, warn: Function}
  * }} [opts] всё необязательно — умолчания из окружения
  */
@@ -84,7 +85,14 @@ export async function start(opts = {}) {
   };
 
   const doc = createDocClient({ baseUrl: documentUrl, fetch: opts.fetch });
-  const dslr = createDslrClient({ doc, log });
+  /* Круг 39 (N5а): семафор полных чтений — DSLR_FULL_CONCURRENCY одновременно и DSLR_FULL_BYTES
+     байтов JSON документов, ещё нужных командам; тестам — opts.dslr (и сроки чтения) */
+  const dslrOpts = {
+    ...(num(env.DSLR_FULL_CONCURRENCY) ? { fullConcurrency: num(env.DSLR_FULL_CONCURRENCY) } : {}),
+    ...(num(env.DSLR_FULL_BYTES) ? { fullBytes: num(env.DSLR_FULL_BYTES) } : {}),
+    ...(opts.dslr && typeof opts.dslr === 'object' ? opts.dslr : {}),
+  };
+  const dslr = createDslrClient({ doc, log, ...dslrOpts });
   const dslts = createDsltsClient({ doc, log });
   const duil = createDuil({ dslr, log });
   const dslv = createDslv({
@@ -105,7 +113,7 @@ export async function start(opts = {}) {
   const pipeline = createPipeline({
     dslr, dslts, duil, dslv, llm, traces, log, instance, startedAt,
     docHealth: () => doc.health(),
-    docHealthDetail: () => doc.healthDetail(),
+    docHealthDetail: (o) => doc.healthDetail(o),
     maxQueue: opts.queueMax !== undefined ? opts.queueMax : num(env.QUEUE_MAX),
     variantsTtlMs: opts.variantsTtlMs,
   });
@@ -155,6 +163,7 @@ export async function start(opts = {}) {
     close,
     pipeline,
     traces,
+    doc,
     dslr,
     dslts,
     dslv,

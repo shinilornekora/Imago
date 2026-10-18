@@ -22,7 +22,7 @@ import { cleanBody as cleanBodyOf, projectName as projectNameOf, prepareProject 
 import {
   MAX_BODY_BYTES, MAX_LIMIT, MAX_DOC_NODES, MAX_DOC_BYTES, MAX_TRACE_BYTES, TRACES_DEFAULT, TRACES_MAX,
   HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, BUSY_RETRY_S, MAX_VALUE_DEPTH, PROJECTS_PAGE, PROJECTS_PAGE_MAX,
-  WRITE_BODY_BYTES, BODY_TIMEOUT_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
+  WRITE_BODY_BYTES, BODY_TIMEOUT_MS, BODY_FIRST_BYTE_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS,
   HISTORY_PAGE, HISTORY_PAGE_MAX, HEALTH_PING_MS, HEALTH_CACHE_MS,
   isCleanText, cleanText, cleanMeta, cutText, cleanDeep, showValue, undoPartOf
 } from './limits.js';
@@ -95,7 +95,7 @@ export function applyServerTimeouts(server) {
  * повторить.
  * @returns {Promise<Buffer|null>}
  */
-function readBody(req, max = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS) {
+function readBody(req, max = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS, onChunk = null, firstByteMs = 0) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -120,12 +120,35 @@ function readBody(req, max = MAX_BODY_BYTES, timeoutMs = BODY_TIMEOUT_MS) {
       timer = setTimeout(() => stop(new DocError(408, 'timeout', `тело запроса не пришло за ${Math.round(timeoutMs / 1000)} с`, { retryable: true, detail: { limit: 'body_timeout', ms: timeoutMs } })), timeoutMs);
       if (timer.unref) timer.unref();
     }
+    // круг 39: тело объявлено, а первый байт не пришёл за firstByteMs — 408 сразу (молчащее
+    // соединение не держит запрос и место до общего срока тела)
+    let first = null;
+    const expectBody = (Number.isFinite(declared) && declared > 0) || /chunked/i.test(String(req.headers['transfer-encoding'] || ''));
+    if (firstByteMs > 0 && expectBody && (!(timeoutMs > 0) || firstByteMs < timeoutMs)) {
+      first = setTimeout(() => {
+        if (size === 0) stop(new DocError(408, 'timeout', `тело запроса не начало приходить за ${Math.round(firstByteMs / 1000)} с`, { retryable: true, detail: { limit: 'body_first_byte', ms: firstByteMs } }));
+      }, firstByteMs);
+      if (first.unref) first.unref();
+      const clear = () => clearTimeout(first);
+      req.once('data', clear);
+      req.once('end', clear);
+      req.once('close', clear);
+    }
     req.on('data', (chunk) => {
       if (done) return;
       size += chunk.length;
       if (size > max) {
         stop(tooLarge(`тело больше ${max} байт`, { detail: { limit: 'body_bytes', max } }));
         return;
+      }
+      // круг 35: бюджет байт тел записи — по прочитанному (onChunk бросает — отказ, чтение стоп)
+      if (onChunk) {
+        try {
+          onChunk(chunk.length);
+        } catch (e) {
+          stop(e);
+          return;
+        }
       }
       chunks.push(chunk);
     });
@@ -300,13 +323,15 @@ function historyItem(m) {
 
 /**
  * @param {{dslr: object, dslts: object, storage: object, staticDir?: string, internalToken?: string, log?: object,
- *   writes?: {max?: number, queue?: number, retryAfter?: number, bodyBytes?: number, bodyTimeoutMs?: number}}} deps
+ *   writes?: {max?: number, queue?: number, retryAfter?: number, bodyBytes?: number, bodyTimeoutMs?: number, firstByteMs?: number}}} deps
  *   `writes` — запись по HTTP (`POST …/tx`, `POST /api/projects`, `PATCH`): семафор (одновременно и в
  *   очереди; сверх — 503 busy), бюджет байт читаемых тел на экземпляр, таймаут тела;
  *   `importer` — пул подготовки импорта (import-pool.js, круг 33); нет — подготовка здесь же
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void}
  */
 export function createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log = console, writes = {}, importer = null }) {
+  /** Версия движка экземпляра (круг 39: секвенсор знает её; прежний — версия кода). */
+  const instanceEngine = dslts && Number.isInteger(dslts.engine) ? dslts.engine : ENGINE_VERSION;
   const retryAfter = writes.retryAfter || BUSY_RETRY_S;
   // запись по HTTP — под семафором (§9.10)
   const writeGate = createSemaphore({
@@ -317,28 +342,34 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
   });
   const bodyBudget = writes.bodyBytes > 0 ? writes.bodyBytes : WRITE_BODY_BYTES;
   const bodyTimeoutMs = writes.bodyTimeoutMs !== undefined ? writes.bodyTimeoutMs : BODY_TIMEOUT_MS;
+  const firstByteMs = writes.firstByteMs !== undefined ? writes.firstByteMs : BODY_FIRST_BYTE_MS;
   let bodyBytesUsed = 0;
 
   /**
-   * Запись (круг 27): тело читается в бюджете байт экземпляра (заявленный
-   * Content-Length, без него — предел тела; бюджет занят — 503 busy, тело не читаем),
-   * слот семафора записи берётся только ПОСЛЕ того, как тело дочитано: медленное тело
-   * держит байты бюджета (и не дольше таймаута тела), но не слот. Разбор JSON и вся
-   * работа — уже под слотом.
+   * Запись (круг 27): тело читается в бюджете байт экземпляра, слот семафора записи берётся
+   * только ПОСЛЕ того, как тело дочитано: медленное тело держит байты бюджета (и не дольше
+   * таймаута тела), но не слот. Разбор JSON и вся работа — уже под слотом.
+   * Круг 35: бюджет занимают ПРОЧИТАННЫЕ байты, а не заявленный Content-Length: прежде 16
+   * соединений, объявивших по 4 МБ и шлющих по байту в секунду, держали весь бюджет пустыми
+   * обещаниями — честная запись получала 503 до таймаута тела. Теперь сверх бюджета — 503 busy
+   * тому, чей очередной кусок тела не влез (тело одно больше бюджета — читается, если других нет).
    * @param {(body: any) => Promise<void>} fn
    */
   async function writeRoute(req, fn, max = MAX_BODY_BYTES, prepare = null) {
     const declared = Number(req.headers['content-length']);
     if (Number.isFinite(declared) && declared > max) throw tooLarge(`тело больше ${max} байт`, { detail: { limit: 'body_bytes', max } });
-    const need = Number.isFinite(declared) && declared >= 0 ? declared : max;
-    if (bodyBytesUsed > 0 && bodyBytesUsed + need > bodyBudget) {
-      throw new DocError(503, 'busy', 'сервер принимает слишком много записей сразу — повторите чуть позже', {
-        retryable: true, retryAfter, detail: { limit: 'body_bytes_total' }
-      });
-    }
-    bodyBytesUsed += need;
+    let held = 0;
+    const take = (n) => {
+      if (bodyBytesUsed - held > 0 && bodyBytesUsed + n > bodyBudget) {
+        throw new DocError(503, 'busy', 'сервер принимает слишком много записей сразу — повторите чуть позже', {
+          retryable: true, retryAfter, detail: { limit: 'body_bytes_total' }
+        });
+      }
+      bodyBytesUsed += n;
+      held += n;
+    };
     try {
-      const buf = await readBody(req, max, bodyTimeoutMs);
+      const buf = await readBody(req, max, bodyTimeoutMs, take, firstByteMs);
       // круг 33: тяжёлая подготовка тела (импорт) — до слота записи: слот держит только запись
       if (prepare) {
         const prep = await prepare(buf);
@@ -347,7 +378,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         await writeGate.run(() => fn(parseBody(buf)));
       }
     } finally {
-      bodyBytesUsed -= need;
+      bodyBytesUsed -= held;
     }
   }
   const root = staticDir ? path.resolve(staticDir) : null;
@@ -434,7 +465,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
       }
       // круг 33: схема годна, а долгое дозаполнение миграции (009) идёт фоном — сервис рабочий
       const backfill = storage.backfillState || null;
-      sendJSON(res, 200, { ok: true, engine: ENGINE_VERSION, storage: 'up', ...(backfill ? { detail: { backfill } } : {}) });
+      sendJSON(res, 200, { ok: true, engine: instanceEngine, storage: 'up', ...(backfill ? { detail: { backfill } } : {}) });
       return;
     }
 
@@ -539,10 +570,17 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
   async function createProjectRoute(req, res) {
     await writeRoute(req, async (prep) => {
       const project = await viaStorage(storage.createProject({
-        name: prep.name, kind: prep.kind, docJson: prep.docJson, engine: ENGINE_VERSION,
-        ...(prep.createId ? { createId: prep.createId } : {})
+        name: prep.name, kind: prep.kind, docJson: prep.docJson, engine: instanceEngine,
+        ...(prep.createId ? { createId: prep.createId, createHash: prep.createHash } : {})
       }));
       const existing = project.existing === true;
+      // круг 39 (N4г): тот же create_id, а тело другое (имя, вид, документ, demo) — не «тот же
+      // проект»: 409. Отпечаток неизвестен (проект создан до 013 или прежним экземпляром) — сверка по виду
+      if (existing && createConflict(project, prep)) {
+        throw new DocError(409, 'conflict', 'create_id уже занят проектом, созданным другим телом запроса — для нового проекта нужен новый create_id', {
+          retryable: false, detail: { cause: 'create_id', param: 'create_id' }
+        });
+      }
       sendJSON(res, existing ? 200 : 201, {
         id: project.id, name: existing ? cleanMeta(project.name) : project.name, kind: project.kind,
         head_seq: existing ? project.head_seq : 0, engine: project.engine, epoch: project.epoch,
@@ -550,6 +588,13 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         ...(existing ? { existing: true } : {})
       });
     }, MAX_BODY_BYTES, (buf) => (importer ? importer.run(buf) : prepareInline(buf)));
+  }
+
+  /** Повтор create_id с другим телом? (круг 39: отпечаток нормализованного тела, importer.createHashOf) */
+  function createConflict(project, prep) {
+    const stored = typeof project.create_hash === 'string' && project.create_hash ? project.create_hash : null;
+    if (stored && typeof prep.createHash === 'string' && prep.createHash) return stored !== prep.createHash;
+    return project.kind !== prep.kind;
   }
 
   /** Подготовка без пула потоков (обработчик собран без него — тесты прежних кругов). */

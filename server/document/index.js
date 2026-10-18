@@ -21,14 +21,17 @@
  *   RECENT_TXS, RECENT_BYTES   память головы о последних транзакциях (500 выжимок, 16 МиБ)
  *   WRITE_BODY_BYTES, BODY_TIMEOUT_MS   HTTP-запись: бюджет читаемых тел на экземпляр (64 МиБ;
  *                    сверх — 503 busy) и срок тела (30000 мс; дольше — 408)
- *   HEADS_BYTES      головы секвенсора в памяти — байты документов (256 МиБ); сверх — выгрузка давно
+ *   HEADS_BYTES      головы секвенсора в памяти — байты документов, выжимок и надгробий (256 МиБ); сверх — выгрузка давно
  *                    не тронутых голов без сокетов и без записи (круг 33)
  *   IMPORT_CONCURRENCY, IMPORT_QUEUE   подготовка импорта (`POST /api/projects` с документом) в потоках:
  *                    одновременно (2) и в очереди (8); сверх — 503 busy (круг 33)
+ *   IMPORT_TASK_MS   срок задачи импорта: очередь + подготовка (30000 мс; дольше — 503, круг 35)
  *   SNAPSHOT_CACHE_BYTES   кеш сериализованных снимков полного открытия (128 МиБ; 0 — без кеша, круг 33)
  *   Числа — целые; пустое — умолчание из limits.js; негодное — предупреждение в лог и умолчание
  *   (опечатка в окружении не должна снимать предел). Итог — `svc.config`.
  *   STATIC_DIR       каталог клиента (index.html, app.js, styles.css, src/*.js) — для прогонов без nginx
+ *   IMAGO_ENGINE     версия движка экземпляра — ТОЛЬКО для стендов смешанных версий (круг 39): можно
+ *                    понизить (не ниже ENGINE_MIN_READ), но не поднять выше версии движка кода
  *
  * Порт открывается СРАЗУ, до миграций базы (SPEC §9.11): пока они идут,
  * `GET /api/health` и все прочие маршруты отвечают 503 `migrating` (`detail:
@@ -66,12 +69,13 @@ import { createSequencer } from './dslts.js';
 import { createHub } from './hub.js';
 import { createRequestHandler } from './http.js';
 import { createImportPool } from './import-pool.js';
+import { resolveEngine } from './engine.js';
 import { migrating, setStorageLog } from './errors.js';
 import {
   SNAPSHOT_EVERY, SNAPSHOT_KEEP, HEAVY_CONCURRENCY, HEAVY_QUEUE, RETRY_AFTER_S, PAGE_BYTES, VERIFY_MS, PRESENCE_TTL_MS,
   WS_INFLIGHT, WS_CONNECTING, HTTP_WRITE_CONCURRENCY, HTTP_WRITE_QUEUE, QUEUE_PROJECT_BYTES, QUEUE_PROJECT_TXS, QUEUE_TOTAL_BYTES,
   DB_TIMEOUT_MS, TOMB_KEEP_SEQ, TOMB_PRUNE_EVERY, TOMB_MAX, RECENT_TXS, RECENT_BYTES, WRITE_BODY_BYTES, BODY_TIMEOUT_MS,
-  HEADS_BYTES, IMPORT_CONCURRENCY, IMPORT_QUEUE, SNAPSHOT_CACHE_BYTES
+  HEADS_BYTES, IMPORT_CONCURRENCY, IMPORT_QUEUE, IMPORT_TASK_MS, SNAPSHOT_CACHE_BYTES
 } from './limits.js';
 
 /**
@@ -103,6 +107,8 @@ export const ENV_LIMITS = Object.freeze({
   HEADS_BYTES: ['headsBytes', HEADS_BYTES, 1024 * 1024],
   IMPORT_CONCURRENCY: ['importConcurrency', IMPORT_CONCURRENCY, 1],
   IMPORT_QUEUE: ['importQueue', IMPORT_QUEUE, 0],
+  // круг 35: срок задачи импорта (очередь + подготовка в потоке)
+  IMPORT_TASK_MS: ['importTaskMs', IMPORT_TASK_MS, 1000],
   SNAPSHOT_CACHE_BYTES: ['snapshotCacheBytes', SNAPSHOT_CACHE_BYTES, 0],
 });
 
@@ -172,6 +178,9 @@ export function limitsFrom(opts, env, log) {
  *   frameCache?: {frames?: number, roomBytes?: number, totalBytes?: number},
  *   presence?: {tickMs?: number, roomFrames?: number, batchBytes?: number, busPerTick?: number},
  *   importInlineBytes?: number,
+ *   importTaskMs?: number,         // срок задачи импорта (круг 35; IMPORT_TASK_MS)
+ *   importWorkerUrl?: URL,         // модуль потока импорта (тестам)
+ *   engine?: number,               // версия движка экземпляра (круг 39; тестам смешанных версий — ниже; IMAGO_ENGINE)
  *   log?: {info:Function, warn:Function}
  * }} [opts] всё необязательно — умолчания из окружения и limits.js
  */
@@ -205,6 +214,8 @@ export async function launch(opts = {}) {
   const databaseUrl = opts.databaseUrl !== undefined ? opts.databaseUrl : env.DATABASE_URL;
   const internalToken = opts.internalToken !== undefined ? opts.internalToken : (env.INTERNAL_TOKEN || '');
   const instanceId = opts.instanceId || 'doc_' + randomBytes(5).toString('hex');
+  // круг 39: версия движка экземпляра — движка; тестам и стендам смешанных версий — ниже (engine.js)
+  const engine = resolveEngine(opts.engine, env, log);
 
   let storage = opts.storage;
   if (!storage) {
@@ -269,14 +280,15 @@ export async function launch(opts = {}) {
       queue: num(opts.heavyQueue, HEAVY_QUEUE),
       retryAfter: num(opts.retryAfter, RETRY_AFTER_S)
     });
-    const dslr = createReader({ storage, heavy, pageBytes: num(opts.pageBytes, PAGE_BYTES), snapshotCacheBytes: config.snapshotCacheBytes });
+    const dslr = createReader({ storage, heavy, pageBytes: num(opts.pageBytes, PAGE_BYTES), snapshotCacheBytes: config.snapshotCacheBytes, engine });
     const dslts = createSequencer({
       storage, instanceId, snapshotEvery, snapshotKeep, idleMs: opts.idleMs,
       verifyMs: num(opts.verifyMs, VERIFY_MS),
       mergeBudgetMs: opts.mergeBudgetMs, maxDocNodes: opts.maxDocNodes, maxDocBytes: opts.maxDocBytes, log,
       queueProjectBytes: config.queueProjectBytes, queueProjectTxs: config.queueProjectTxs, queueTotalBytes: config.queueTotalBytes,
       tombKeepSeq: config.tombKeepSeq, tombPruneEvery: config.tombPruneEvery, tombMax: config.tombMax,
-      recentTxs: config.recentTxs, recentBytes: config.recentBytes, headsBytes: config.headsBytes
+      recentTxs: config.recentTxs, recentBytes: config.recentBytes, headsBytes: config.headsBytes,
+      engine
     });
     // шина присутствия между экземплярами (SPEC §9.9): эфемерный канал хранилища
     const bus = typeof storage.publish === 'function' && typeof storage.onNotify === 'function'
@@ -297,12 +309,14 @@ export async function launch(opts = {}) {
     const importer = createImportPool({
       // пределы документа — те же, что и прежде у создания (MAX_DOC_*), а не опции секвенсора
       size: config.importConcurrency, queue: config.importQueue, log,
-      ...(opts.importInlineBytes !== undefined ? { inlineBytes: opts.importInlineBytes } : {})
+      ...(opts.importInlineBytes !== undefined ? { inlineBytes: opts.importInlineBytes } : {}),
+      taskMs: config.importTaskMs,
+      ...(opts.importWorkerUrl ? { workerUrl: opts.importWorkerUrl } : {})
     });
     handler = createRequestHandler({ dslr, dslts, storage, staticDir, internalToken, log, writes, importer });
     parts.importer = importer;
     state = 'ready';
-    log.info(`[document] слушаю http://${host}:${actualPort} · готов за ${Date.now() - t0} мс · движок ${ENGINE_VERSION} · хранилище ${storage.kind} · экземпляр ${instanceId}${staticDir ? ` · статика ${path.resolve(staticDir)}` : ''}`);
+    log.info(`[document] слушаю http://${host}:${actualPort} · готов за ${Date.now() - t0} мс · движок ${engine}${engine !== ENGINE_VERSION ? ` (понижен с ${ENGINE_VERSION})` : ''} · хранилище ${storage.kind} · экземпляр ${instanceId}${staticDir ? ` · статика ${path.resolve(staticDir)}` : ''}`);
     svc = { server, port: actualPort, url, storage, dslr, dslts, hub, importer, instanceId, config, close };
     return svc;
   })();

@@ -151,6 +151,19 @@ export async function ddlUp(ctx) {
   await ddl(ctx);
 }
 
+/**
+ * Круг 35: DDL уже на месте (колонки и триггер)? Второй экземпляр, увидев, что не учтена только
+ * эта миграция и её DDL сделан, не ждёт замка всё дозаполнение (его ведёт держатель замка).
+ * @param {import('pg').Client} client
+ */
+export async function ddlApplied(client) {
+  const r = (await client.query(
+    `SELECT (SELECT count(*)::int FROM pg_attribute WHERE attrelid = to_regclass('operations') AND attname IN ('ops_bytes', 'ops_count') AND NOT attisdropped) AS cols,
+            (SELECT count(*)::int FROM pg_trigger WHERE tgrelid = to_regclass('operations') AND tgname = 'operations_size') AS trg`
+  )).rows[0];
+  return r.cols === 2 && r.trg === 1;
+}
+
 export async function up(ctx) {
   await ddlUp(ctx);
   await fillUp(ctx);

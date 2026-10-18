@@ -24,12 +24,12 @@ import * as CORE from './src/core.js';
 import { makeProvider, runCommand, runVariants } from './src/brain.js';
 /* Круг 22 (SPEC §9.5): клиент-реплика. Документ в серверном режиме живёт в ней, а не в
    localStorage/db; оболочка получает view и шлёт транзакции. */
-import { createSync, idbStorage, memoryStorage, droppedLine, statusLine, LIMITS } from './src/sync.js';
+import { createSync, idbStorage, memoryStorage, droppedLine, statusLine, engineWords, LIMITS } from './src/sync.js';
 /* Круг 23 (SPEC §10): агент на сервере. Команда уходит в Orchestrator, стадии приходят
    потоком SSE, транзакция агента — по сокету Hub, как любая чужая. Без сервера — brain здесь. */
 import * as AGENT from './src/agent.js';
 import {
-  AGENT_MODE_WORDS, decideAgentMode, agentModeTitle, serverStageRec, queuedLabel, retryLabel,
+  AGENT_MODE_WORDS, decideAgentMode, agentModeTitle, serverStageRec, retryLabel,
   shellIntentFromServer, agentErrorWords, isModelError, normalizeResult, variantsFromServer,
   tooLargeWords, stoppedWriteWords, historyForServer,
   // круг 25: режим агента по /agent/health, отказ сервера агента, dropped словами, строки по кодовым точкам
@@ -100,6 +100,10 @@ let saveTimer = null;
    к серверу подключиться не может (CSP) и остаётся демонстрацией без сервера. */
 let server = null;   // {engine, project, sync, status, others, migrated, list}
 let serverProbe = null;
+/* Круг 39 (N6а): серверный режим ожидается (ссылка, отметка, серверная сборка), а `server`
+   ещё не заведён — ждём /api/health. Холст пуст не потому, что строить нечего: приглашения
+   «Скажите, что построить», имени «Пустая страница» и «Агент не подключён» здесь не место. */
+let serverBooting = false;
 const CLIENT_KEY = 'imago.client.v1';   // id вкладки-браузера: по нему свои транзакции узнаются в рассылке
 /* Отметка «последний раз работали с сервером»: {projectId, name, at}. По ней (или по ?project=
    в ссылке) оболочка входит в серверный режим, даже когда /api/health молчит: документ и
@@ -180,11 +184,19 @@ async function boot() {
 
   // серверный режим ожидается (ссылка или отметка) — демо-документу на холсте делать нечего:
   // документ придёт из журнала или от сервера, а до того холст пуст
-  state.doc = serverAnticipated() ? createDoc('empty') : createDoc();
+  serverBooting = serverAnticipated();
+  state.doc = serverBooting ? createDoc('empty') : createDoc();
   state.geo = solve(state.doc);
 
+  /* Круг 39 (N3, N6в): Ctrl/⌘+A и Ctrl/⌘+D — команды таблицы оболочки («Выделить всё на доске»,
+     «Дублировать»), откуда бы ни нажали: с холста, из списка слоёв, с кнопки. Ловим их на окне
+     в фазе захвата раньше сцены (она вешает свой обработчик позже): у сцены своя «рамка во весь
+     мир» и своё дублирование без слов — две истины одной команды. */
+  globalThis.addEventListener('keydown', onModKeyCapture, true);
   stage = new Stage(dom.canvas, {
     onSelect: (ids) => setSelection(ids),
+    // круг 39 (N3): ⌘/Ctrl+D сцены — та же команда таблицы со словами и «Отменить» (если перехват мимо)
+    onDuplicate: () => applyShellIntent({ kind: 'duplicate' }, ''),
     // круг 37: сдвиг детали с Shift — по одной оси (stageOps)
     onCommit: ({ ops, label }) => commit(stageOps(ops), label || 'Правка', 'human'),
     onUndo: () => keyUndo(false),
@@ -509,6 +521,8 @@ async function apiJson(path, init = {}) {
        («Имя не сохранилось: хранилище недоступно» при «в сети · всё сохранено» — разнобой).
        Реплика держит «сервер не может сохранить», пока health или запись не скажут иное. */
     if (storageDownError(e) && server && server.sync && typeof server.sync.storageFailed === 'function') server.sync.storageFailed();
+    // круг 39 (N1): 426 по HTTP (досылка пачками, импорт) — те же слова, что от сокета
+    if (res.status === 426 && server) onSyncError({ code: 'engine', engine: e.detail && Number.isFinite(e.detail.engine) ? e.detail.engine : null });
     throw e;
   }
   return body;
@@ -629,10 +643,11 @@ async function initServer(health) {
     state.providerKind = null;
     setRunnable(false);
   }
+  serverBooting = false;
   server = {
     engine: health ? health.engine : null, project: null, sync: null, others: [], migrated: false, list: [], listNext: null,
     status: {
-      online: false, pending: 0, syncing: true, error: null,
+      online: false, pending: 0, syncing: true, error: null, connecting: true,
       // круг 30: /api/health сказал «хранилище лежит» — так и говорим с первой отрисовки
       ...(health && health.storage === 'down' ? { storage: 'down', label: 'сервер не может сохранить' } : {}),
     },
@@ -852,7 +867,7 @@ function openProject(project) {
   server.goneShown = false;
   server.others = [];
   server.waiting = false;
-  server.status = { online: false, pending: 0, syncing: true, error: null };
+  server.status = { online: false, pending: 0, syncing: true, error: null, connecting: true };
   setProjectUrl(project.id);
   rememberServerMode(server.project);
   state.selection = [];
@@ -1100,8 +1115,14 @@ function noteRemoteRewind(tx) {
 function onSyncStatus(s) {
   if (!server) return;
   const wasHealthy = syncHealthy();
+  const prev = server.status || {};
   server.status = s;
   renderSyncStatus();
+  // круг 39 (N6а): первое подключение кончилось — приглашение пустого холста (если оно к месту)
+  if (!!prev.connecting !== !!s.connecting) { renderEmptyState(); setDocNameText(docTitle()); }
+  /* Круг 39 (UX): связь с сервером пропала — Orchestrator за тем же NGINX, скорее всего, тоже
+     недоступен: спросить его сразу, а не ждать плановой проверки (до 30 с «агент: сервер»). */
+  if (prev.online && !s.online && !s.connecting) probeAgent({ force: true });
   /* Круг 33, п.4: реплика снова сохраняет — сразу спросить и Orchestrator. Иначе карточка
      «Сервер агента не видит документ» и знак агента ждали плановой проверки (до 30 с), хотя
      строка состояния уже говорила «всё сохранено». */
@@ -1128,7 +1149,8 @@ function onSyncStatus(s) {
   if (s.error === 'not_found' && opened) projectGoneMsg();
   if (s.online) refreshProjectMeta();
   // круг 23: сеть вернулась — спросить и Orchestrator; режим агента зависит от связи
-  if (s.online && (!serverAgent.health || !serverAgent.health.ok)) probeAgent();
+  // круг 39: связь только что вернулась — спросить сразу, а не через паузу между проверками
+  if (s.online && (!serverAgent.health || !serverAgent.health.ok)) probeAgent({ force: !prev.online });
   else agentModeChanged();
   // локальная копия могла отстать: миграцию шлём, когда реплика догнала сервер
   if (s.online && !s.syncing && !s.error) maybeMigrate();
@@ -1404,9 +1426,12 @@ function onSyncPresence(list) {
 function onSyncError(e) {
   if (!server || !e) return;
   if (e.code === 'engine') {
-    showMsg('error', 'Версия редактора устарела', {
-      note: 'Сервер работает с другой версией движка — правки не принимаются. Обновите страницу.',
-      actions: [{ label: 'Обновить', primary: true, onClick: () => location.reload() }],
+    // круг 39 (N1): 426 / hello с другой версией движка — слова у реплики (engineWords)
+    const w = engineWords(e.engine, CORE.ENGINE_VERSION);
+    showMsg(w.newer ? 'error' : 'warn', w.title, {
+      note: w.note,
+      role: 'engine',
+      actions: [{ label: 'Обновить страницу', primary: true, onClick: () => location.reload() }],
     });
     return;
   }
@@ -1618,7 +1643,10 @@ function dropperOf(d) {
   if (!d) return null;
   if (d.by && typeof d.by === 'object') return d.by;
   const op = d.op || {};
-  const id = d.reason === 'orphan' ? (op.node && op.node.parent) || op.parent : op.id;
+  // круг 39: отброшенная пустая группа (create с детьми) — кто удалил её слои
+  const kids = op.op === 'create' && op.node && Array.isArray(op.node.children) ? op.node.children : null;
+  const id = d.reason === 'orphan' ? (op.node && op.node.parent) || op.parent
+    : kids && kids.length ? kids[0] : op.id;
   if (!id) return null;
   const sync = server && server.sync;
   if (sync && typeof sync.whoRemoved === 'function') {
@@ -1796,10 +1824,34 @@ function setAuthor(name) {
 
 /** Имя документа в шапке: в серверном режиме это имя проекта — meta.name операциями не правится. */
 function docTitle() {
-  if (server && server.project) return server.project.name || 'Без названия';
+  // круг 39: имя ещё не пришло (проект открывается по ссылке без отметки) — пусто, а не «Без названия»
+  if (server && server.project) return server.project.name || (server.sync && server.sync.view && !projectConnecting() ? 'Без названия' : '');
   // круг 31: список проектов не пришёл — открыто ничего; «Пустая страница» была бы выдумкой
-  if (server) return 'Проект не открыт';
+  if (server && server.listWait) return 'Проект не открыт';
+  // круг 39 (N6а): проект выбирается или сервер ещё не ответил — имя из отметки, если она про него
+  // имени ещё нет — пусто: «подключаюсь к проекту…» уже говорит строка состояния рядом
+  if (server || serverBooting) return bootProjectName();
   return (state.doc && state.doc.meta && state.doc.meta.name) || 'Без названия';
+}
+
+/** Имя проекта, который откроется: из отметки, если ссылка ведёт туда же (или ссылки нет). */
+function bootProjectName() {
+  const m = serverMark();
+  const id = projectIdFromUrl();
+  return m && m.name && (!id || m.projectId === id) ? cutText(cleanText(m.name), 120) : '';
+}
+
+/**
+ * Круг 39 (N6а): проект ещё подключается — до первого hello (или первой неудачи) одно
+ * нейтральное состояние: без приглашения «Скажите, что построить» и без красных статусов.
+ */
+function projectConnecting() {
+  if (!server) return serverBooting;
+  if (server.listWait) return false;
+  const s = server.status || {};
+  if (s.error || s.storage === 'down') return false;
+  if (!(server.sync && server.sync.view)) return true;
+  return !s.online && !!s.connecting;
 }
 
 async function renameProject(name) {
@@ -1828,14 +1880,15 @@ function renderSyncStatus() {
   let text = '';
   let kind = 'off';
   const opened = !!(server.sync && server.sync.view);
-  if (s.error === 'engine') { text = 'версия движка устарела — обновите страницу'; kind = 'error'; }
+  if (s.error === 'engine') { text = s.label || statusLine(s); kind = 'error'; }
   else if (s.error === 'not_found') { text = s.label || 'проект не найден на сервере'; kind = 'error'; }
   /* J4 (круг 29): сервер на связи, но его хранилище не пишет — правки ждут в очереди.
      Круг 30: раньше «сервер недоступен» и «открываю проект…» — вкладка, открытая при лежащей
      базе, говорит то же, что вкладка с отказом записи (слова — у реплики, `s.label`). */
   else if (s.storage === 'down') { text = s.label || (s.pending ? 'сервер не может сохранить — правки ждут' : 'сервер не может сохранить'); kind = 'error'; }
   else if (s.error === 'unreachable') { text = 'сервер недоступен'; kind = 'error'; }
-  else if (!opened) { text = 'открываю проект…'; kind = 'busy'; }
+  // круг 39 (N6а): до первого hello — одно нейтральное «подключаюсь к проекту…», не красное
+  else if (!opened || (!s.online && s.connecting)) { text = s.connecting && s.label ? s.label : 'подключаюсь к проекту…'; kind = 'busy'; }
   else {
     /* Слова статуса — у реплики (statusLine, SPEC §9.5): одна формулировка на всех, кто
        показывает её состояние. Оболочка добавляет лишь то, чего реплика не знает: сокет
@@ -1896,7 +1949,7 @@ function renderNetPill(s, kind) {
   const n = Number(s.pending) || 0;
   const wait = n ? ` · ${n} ${plural(n, 'правка ждёт', 'правки ждут', 'правок ждут')}` : '';
   const noNet = typeof navigator !== 'undefined' && navigator.onLine === false;
-  const text = s.error === 'engine' ? 'обновите страницу'
+  const text = s.error === 'engine' ? (engineWords(s.engine, s.ownEngine).newer ? 'обновите страницу' : `сервер обновляется${wait}`)
     : s.error === 'not_found' ? 'проекта нет на сервере'
       : s.storage === 'down' ? `не сохраняется${wait}`
         : noNet || kind === 'off' ? `нет сети${wait}` : `сервер недоступен${wait}`;
@@ -2110,7 +2163,8 @@ function agentReady() {
  * (круг 25, п.1), и перед этим Orchestrator спрашивается ещё раз.
  */
 function commandReady() {
-  return agentReady() || !!server;
+  // круг 39: серверный режим ожидается (ждём /api/health) — команда тоже получит честный ответ
+  return agentReady() || !!server || serverBooting;
 }
 
 /**
@@ -2220,6 +2274,11 @@ function onAgentHealthChanged(prev, next) {
   }
   if (role === 'agent-restart') return;
   if (!words) return;
+  /* Круг 39 (UX): «…снова на связи» — только после того, как о пропаже было сказано. Первые
+     ответы health при открытии проекта (сервис документа ещё подключался) человек не видел —
+     «снова» ему ни о чём. */
+  if (words.back && !serverAgent.downSaid) return;
+  serverAgent.downSaid = !words.back;
   // о возвращении тостом не говорим, если и о пропаже не говорили бы: смена проекта, первый ответ
   dropHealthToast();
   const t = toast(words.text, words.kind, 6000);
@@ -2243,6 +2302,9 @@ function renderAgentStatus() {
   const host = dom['agent-status'];
   if (!host) return;
   if (!server) { host.hidden = true; return; }
+  /* Круг 39 (N6а): «агент недоступен» — только по ответу /agent/health. Пока его нет (первая
+     проверка в пути), знака нет вовсе: про подключение уже говорит строка синхронизации. */
+  if (!serverAgent.health && !state.provider) { host.hidden = true; return; }
   const mode = agentMode();
   const words = AGENT_MODE_WORDS[mode];
   const title = agentModeTitle(mode, serverAgent.health, AGENT_KIND_WORDS[state.providerKind] || '');
@@ -2478,13 +2540,11 @@ function lostDetached(d, why) {
 function onServerAgentEvent(ev, runId, variants) {
   if (!ev || runId !== state.runSeq) return;
   if (ev.type === 'queued') {
-    const pos = ev.data && Number.isFinite(ev.data.position) ? ev.data.position : 0;
-    setAgentPresence({ queued: pos > 0 ? pos : true });
-    // чья команда впереди — по присутствию: у тех, над чьими командами агент сейчас работает
-    // круг 27: `scope: 'workers'` — команда ждёт свободного исполнителя агента, не очередь проекта
-    const scope = ev.data && ev.data.scope === 'workers' ? 'workers' : 'project';
-    const ahead = scope === 'workers' ? [] : (server ? server.others : []).filter((p) => p && (p.busy === true || (typeof p.busy === 'number' && p.busy > 0)));
-    onAgentStage({ stage: 'srv:queued', label: queuedLabel(pos, ahead.map((p) => p.author || 'Без имени'), scope) }, 0, runId);
+    /* чья команда впереди — по присутствию, и только в очереди проекта; `workers` (круг 27) и
+       `read` (круг 39: полное чтение ждёт семафора агента) — очереди агента, не проекта */
+    const rec = SHELL.queuedStage(ev.data, server ? server.others : []);
+    setAgentPresence({ queued: rec.position > 0 ? rec.position : true });
+    onAgentStage({ stage: rec.stage, label: rec.label }, 0, runId);
   } else if (ev.type === 'stage') {
     setAgentPresence({ busy: true });
     onAgentStage(serverStageRec(ev.data), variants ? 3 : 0, runId);
@@ -2780,12 +2840,13 @@ function presentServerResult(raw, utterance, { variant = null } = {}) {
     showMsg('warn', w.title, { note: w.note, role: 'dropped', actions: [retryAction(utterance)] });
     return;
   }
-  const headline = variant ? `Принят вариант «${variant.label || 'без названия'}»` : (r.summary || 'Готово');
-  const aside = variant ? r.summary : '';
+  /* Круг 39 (N6б): заголовок итога — что сделано (`result.title`, слова по операциям), а не
+     пересказ плана, написанный до работы («Ставлю стиль h1.»). Слова модели — второй строкой. */
+  const { headline, aside } = SHELL.agentHeadline({ title: r.title, summary: r.summary, plan: r.plan, variant });
   const partly = typeof res.cannot === 'string' ? res.cannot.trim() : '';
   const followups = Array.isArray(res.followups) ? res.followups.slice(0, 3).map(String) : [];
   const label = variant ? `${utterance} · ${variant.label || 'вариант'}` : utterance;
-  rememberPair(utterance, r.summary || headline);
+  rememberPair(utterance, headline);
   if (!variant) addChat('you', utterance);
   addChat('agent', headline, followups, aside);
   state.awaitingClarify = null;
@@ -2926,7 +2987,7 @@ function settlePreReloadTx(pre, tx, prevDoc, diff) {
   addChat('agent', `Команда «${clip(pre.utterance, 60)}», начатая до перезагрузки, выполнена: ${human}`);
   rememberPair(pre.utterance, human);
   showMsg('result', 'Команда, начатая до перезагрузки, выполнена', {
-    note: `«${clip(pre.utterance, 60)}» — ${human.charAt(0).toLowerCase()}${human.slice(1)}.${undoable ? ' Отменить — кнопкой «Отменить» или Ctrl+Z.' : ''}`,
+    note: `«${clip(pre.utterance, 60)}» — ${human.charAt(0).toLowerCase()}${human.slice(1)}.${undoable ? ` Отменить — кнопкой «Отменить»${keyOr('Mod+Z')}.` : ''}`,
     actions: undoable ? [{ label: 'Отменить', onClick: () => undoTx(tx.tx_id) }] : [],
     undoTx: undoable ? tx.tx_id : null,
   });
@@ -3002,7 +3063,7 @@ function stoppedCommandFor(tx, mine, at = Date.now()) {
 /** Транзакция остановленной команды: шаг истории (Ctrl+Z отменит) и одна честная строка. */
 function settleStoppedTx(stopped, tx, prevDoc, diff) {
   serverAgent.stopped.delete(stopped.commandId);
-  const words = stoppedWriteWords(tx, stopped.utterance);
+  const words = stoppedWriteWords(tx, stopped.utterance, keyPlatformNow());
   settleAgentTx(tx, prevDoc, diff, { label: stopped.utterance, human: tx.title || stopped.utterance, select: [] });
   addChat('agent', words.title, [], words.note);
   rememberPair(stopped.utterance, tx.title || words.title);
@@ -3263,10 +3324,13 @@ function fillProjects(body, list, { loading } = {}) {
     /* Одноимённые различаем точным временем правки и числом правок: «5 минут назад» у
        двух «Новых проектов» подряд не говорит, какой из них какой (круг 29, п.7). */
     const twin = names.get(p.name || '') > 1;
-    const when = twin ? exactWhen(p.updated_at || p.created_at) : whenWords(p.updated_at);
+    /* Круг 39 (UX): в одном списке не смешиваем «18.10 в 02:10:40» и «2 минуты назад» — у всех
+       «менялся … назад»; одноимённым к этому — точное время и число правок. */
+    const when = whenWords(p.updated_at || p.created_at);
+    const exact = twin ? exactWhen(p.updated_at || p.created_at) : '';
     const edits = twin && Number.isFinite(Number(p.head_seq))
       ? (Number(p.head_seq) ? `${p.head_seq} ${plural(Number(p.head_seq), 'правка', 'правки', 'правок')}` : 'без правок') : '';
-    meta.textContent = [p.id === current ? 'открыт' : '', p.kind === 'library' ? 'библиотека' : '', when ? `менялся ${when}` : '', edits].filter(Boolean).join(' · ');
+    meta.textContent = [p.id === current ? 'открыт' : '', p.kind === 'library' ? 'библиотека' : '', when ? `менялся ${when}` : '', exact, edits].filter(Boolean).join(' · ');
     const rename = document.createElement('button');
     rename.type = 'button';
     rename.className = 'btn ghost small';
@@ -3383,9 +3447,11 @@ function updateAgentDot() {
   const model = onServer && serverAgent.health && serverAgent.health.model ? `, ${serverAgent.health.model}` : '';
   const kind = onServer ? `сервер${model}` : (AGENT_KIND_WORDS[state.providerKind] || 'модель');
   const st = !agentReady() ? 'off' : (state.busy ? 'busy' : 'ready');
+  // круг 39: первая проверка сервера агента ещё в пути — «не отвечает» было бы неправдой
+  const checking = (serverBooting || (server && !serverAgent.health)) && !state.provider;
   const words = {
     // круг 25: в серверном режиме агент — сервер; «откройте настройки» там не помогут
-    off: server ? 'Сервер агента не отвечает — правки руками сохраняются' : 'Агент не подключён — откройте настройки',
+    off: checking ? 'Подключаюсь к серверу агента…' : server ? 'Сервер агента не отвечает — правки руками сохраняются' : 'Агент не подключён — откройте настройки',
     ready: `Агент подключён: ${kind}`,
     busy: `Агент работает: ${kind}`,
   }[st];
@@ -3451,6 +3517,7 @@ function refreshIssuesSoon() {
     const sig = (m) => [...m].map(([id, l]) => `${id}:${l.map((n) => n.message).join('|')}`).join(';');
     if (sig(next) === sig(state.issues)) return;
     state.issues = next;
+    dropResolvedIssueToast();
     renderLayers();
   }, 400);
 }
@@ -3484,6 +3551,7 @@ function commit(opsList, label, who = 'human', extra = {}) {
   // ручная правка не снимает предложение отменить работу агента (п.11):
   // человек правит параллельно и всё равно вправе откатить агента — вопросом «было ещё N правок»
   if (who === 'agent') dropUndoOffer();
+  else dropStaleStepCard();
 
   /* Круг 20, п.4. Вставка шага шкалы переписывает ссылки у десятков узлов, не сдвигая ни
      одного пикселя: рамки на них врали бы про объём правки (см. diffOf). Такая транзакция
@@ -3517,8 +3585,8 @@ function announceHuman(tx, diff) {
   if (!removed && touched < LOUD_NODES) return;
   showMsg('plain', tx.human || tx.label || 'Правка', {
     note: removed
-      ? `${removed === 1 ? 'Слой удалён' : 'Слои удалены'} — вернуть можно здесь или по Ctrl+Z.`
-      : 'Вернуть можно здесь или по Ctrl+Z.',
+      ? `${removed === 1 ? 'Слой удалён' : 'Слои удалены'} — ${backHint().charAt(0).toLowerCase()}${backHint().slice(1)}`
+      : backHint(),
     actions: [{ label: 'Отменить', onClick: () => undoTx(tx.id) }],
     undoTx: tx.id,
     ms: 9000,
@@ -3640,6 +3708,7 @@ function serverCommit(opsList, label, who = 'human', extra = {}) {
     state.cursor = state.history.length;
   }
   if (who === 'agent') dropUndoOffer();
+  else if (!service && !extra.system) dropStaleStepCard();
   const diff = extra.noFrames ? { created: [], changed: [], removed: [], moved: [] } : diffOf(applied, prevGeo);
   if (!extra.noRender) {
     const hadIssues = state.issues;
@@ -3925,6 +3994,7 @@ function undo() {
   const tx = state.history[state.cursor - 1];
   lastOverwrite = '';
   if (!stepHistory(true)) return false;
+  restoreStepSelection(tx, true);
   const clash = lastOverwrite;
   lastOverwrite = '';
   // «Отменено: Заглушка: edit» — двойное двоеточие; факт правки точнее имени намерения (п.13)
@@ -3935,6 +4005,17 @@ function undo() {
     actions: [{ label: 'Вернуть', onClick: () => redo() }],
   });
   return true;
+}
+
+/**
+ * Круг 39 (UX): правка командой таблицы помнит выделение до и после. Отмена «Дублировать»
+ * снимала копию вместе с выделением — теперь выделен снова оригинал; повтор — снова копия.
+ */
+function restoreStepSelection(tx, back) {
+  const list = tx && (back ? tx.selBefore : tx.selAfter);
+  if (!Array.isArray(list) || !list.length || !state.doc) return;
+  const keep = list.filter((id) => nodeById(state.doc, id));
+  if (keep.length) setSelection(keep);
 }
 
 /**
@@ -3970,6 +4051,7 @@ function redo() {
   const tx = state.history[state.cursor];
   lastOverwrite = '';
   if (!stepHistory(false)) return false;
+  restoreStepSelection(tx, false);
   const clash = lastOverwrite;
   lastOverwrite = '';
   const what = tx && (tx.human || tx.label);
@@ -5387,7 +5469,11 @@ function layoutIssues(doc, geo) {
 function issueText(note) {
   // круг 20, п.5: dead-scale-ref пишет «layout.gap → шага «spacing.99» нет» — путь и ссылку
   // переводим в слова инспектора («зазор», «№99») тем же переводчиком, что реплики агента
-  const t = humanizePaths(shellWord(String((note && note.message) || note || '')));
+  /* Круг 39 (UX): «на 58.29×0» — дробные пиксели и «×0»; размер словами, как в репликах агента
+     («на 58 px по ширине»). */
+  const t = humanizePaths(shellWord(String((note && note.message) || note || '')))
+    .replace(/на\s+(\d+(?:[.,]\d+)?)\s*[×x]\s*(\d+(?:[.,]\d+)?)/g,
+      (all, w2, h2) => sizeWords(Number(String(w2).replace(',', '.')), Number(String(h2).replace(',', '.'))));
   if (!state.doc || !state.doc.nodes) return t;
   return t.replace(/«([A-Za-z0-9_]+)»/g, (all, id) => (
     state.doc.nodes[id] ? `«${nodeTitleById(state.doc, id)}»` : all));
@@ -5425,13 +5511,29 @@ function freshIssues(before, after) {
 }
 
 /** Один тост на правку, а не на каждое замечание: остальное видно значком в рельсе. */
+let issueToast = null;   // круг 39: {el, keys} — тост раскладки и замечания, о которых он
 function announceIssues(fresh) {
   if (!fresh.length) return;
   const first = fresh[0];
   const more = fresh.length > 1 ? ` · и ещё ${fresh.length - 1}` : '';
   // круг 19, п.7: «Раскладка: компонента в документе нет» звучало бы небылицей —
   // у замечаний о компонентах свой зачин
-  toast(`${issueTopic(first.code)}: ${clip(issueText(first), 84)}${more}`, 'warn', 8000);
+  if (issueToast && issueToast.el) issueToast.el.remove();
+  const el = toast(`${issueTopic(first.code)}: ${clip(issueText(first), 84)}${more}`, 'warn', 8000);
+  issueToast = { el, keys: fresh.map(issueKey) };
+}
+const issueKey = (n) => `${n.nodeId}|${n.code}|${n.message}`;
+/**
+ * Круг 39 (UX): замечание, о котором говорит тост, ушло (отмена, следующая правка) — тост
+ * уходит сразу, а не висит свои 8 с поверх уже целой раскладки.
+ */
+function dropResolvedIssueToast() {
+  const t = issueToast;
+  if (!t) return;
+  if (!t.el || !t.el.isConnected) { issueToast = null; return; }
+  const live = new Set();
+  for (const list of state.issues.values()) for (const n of list) live.add(issueKey(n));
+  if (!t.keys.some((k) => live.has(k))) { t.el.remove(); issueToast = null; }
 }
 
 let issuesGeo = null;   // геометрия, по которой посчитаны state.issues
@@ -5456,6 +5558,7 @@ function renderAll(opts = {}) {
   if (state.geo && state.geo === issuesGeo) refreshIssuesSoon();
   else state.issues = layoutIssues(state.doc, state.geo);
   issuesGeo = state.geo;
+  dropResolvedIssueToast();
   /* На холсте мог стоять предпросмотр варианта. Любая перерисовка документа (отмена,
      правка руками, возврат истории) снимает его — иначе холст показывает документ,
      а плашка сверху уверяет «Вариант 1 — предпросмотр», и «Взять этот» упирается
@@ -5642,8 +5745,9 @@ function activeArtboardIsEmpty() {
 function renderEmptyState() {
   const host = dom['empty-state'];
   if (!host) return;
-  // круг 22: проект ещё не открыт (ждём журнал или сервер) — холст пуст не потому, что нечего строить
-  if (server && !(server.sync && server.sync.view)) { host.hidden = true; return; }
+  // круг 22: проект ещё не открыт (ждём журнал или сервер) — холст пуст не потому, что нечего строить;
+  // круг 39 (N6а): и до первого hello — копия из журнала могла отстать от сервера
+  if ((server && !(server.sync && server.sync.view)) || projectConnecting()) { host.hidden = true; return; }
   const empty = docIsEmpty();
   const blank = !empty && activeArtboardIsEmpty();
   host.hidden = !(empty || blank);
@@ -5914,6 +6018,16 @@ function renderLayers() {
     if (isArtboard(state.doc, id)) set.delete(id);   // выбрали артборд — показываем, что внутри
   }
   host.textContent = '';
+  /* Круг 39 (N6а): проект ещё не прочитан — «Слоёв пока нет» и «Компонентов пока нет» были
+     бы неправдой о документе, которого ещё не видно. */
+  if (serverBooting || (server && !(server.sync && server.sync.view))) {
+    const note = document.createElement('div');
+    note.className = 'layers-empty';
+    note.textContent = server && server.listWait ? 'Проект не открыт.' : 'Подключаюсь к проекту…';
+    host.appendChild(note);
+    host.removeAttribute('aria-activedescendant');
+    return;
+  }
 
   const lib = libraryNode(state.doc);
   const rows = [];
@@ -6180,7 +6294,7 @@ function deleteNodes(ids) {
      холста и «Удалить «Строка статуса»» из рельса, будто это разные события (п.10). */
   const said = (r.tx && r.tx.human) || label;
   showMsg('plain', said, {
-    note: 'Вернуть можно здесь или по Ctrl+Z.',
+    note: backHint(),
     ms: 9000,
     actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
     undoTx: r.tx.id,
@@ -6421,7 +6535,7 @@ function placeInstance(masterId) {
   if (!r.ok) return;
   setSelection([born]);
   showMsg('plain', `Поставил «${componentName(master)}» в «${nodeTitleById(state.doc, home.parent)}»`, {
-    note: 'Что у него можно менять — в панели справа. Вернуть можно здесь или по Ctrl+Z.',
+    note: `Что у него можно менять — в панели справа. ${backHint()}`,
     ms: 9000,
     actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
     undoTx: r.tx.id,
@@ -6559,7 +6673,7 @@ function makeComponentNow(id, name, props) {
     ? `У экземпляров можно менять: ${clean.map((p) => p.name).join(', ')}.`
     : 'Свойства можно объявить у самого компонента — он в группе «Библиотека» в панели слоёв.';
   showMsg('result', `«${name}» — теперь компонент`, {
-    note: `Заготовка уехала в библиотеку, на её месте — экземпляр. ${what} Вернуть можно здесь или по Ctrl+Z.`,
+    note: `Заготовка уехала в библиотеку, на её месте — экземпляр. ${what} ${backHint()}`,
     ms: 13000,
     actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
     undoTx: r.tx.id,
@@ -6589,7 +6703,7 @@ function detachInstance(id) {
   // род имени компонента заранее неизвестен («Кнопка отсоединён»), поэтому согласуем
   // фразу со словом «экземпляр», а имя берём в кавычки
   showMsg('plain', `Экземпляр «${title}» отсоединён от компонента`, {
-    note: 'Это обычная копия: правки компонента её больше не касаются. Вернуть можно здесь или по Ctrl+Z.',
+    note: `Это обычная копия: правки компонента её больше не касаются. ${backHint()}`,
     ms: 10000,
     actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
     undoTx: r.tx.id,
@@ -6878,8 +6992,8 @@ function removeProp(masterId, propName) {
   if (!r.ok) return;
   showMsg('plain', `Свойство «${propName}» убрано у компонента «${componentName(master)}»`, {
     note: touched
-      ? `Значение пропало у ${touched} ${plural(touched, 'экземпляра', 'экземпляров', 'экземпляров')}. Вернуть можно здесь или по Ctrl+Z.`
-      : 'Вернуть можно здесь или по Ctrl+Z.',
+      ? `Значение пропало у ${touched} ${plural(touched, 'экземпляра', 'экземпляров', 'экземпляров')}. ${backHint()}`
+      : backHint(),
     ms: 9000,
     actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
     undoTx: r.tx.id,
@@ -7054,7 +7168,7 @@ function addProp(masterId, p) {
   if (!r.ok) return;
   closeSheet();
   showMsg('result', `«${componentName(master)}»: объявлено свойство «${p.name}»`, {
-    note: 'Теперь оно правится у каждого экземпляра в панели справа. Вернуть можно здесь или по Ctrl+Z.',
+    note: `Теперь оно правится у каждого экземпляра в панели справа. ${backHint()}`,
     ms: 10000,
     actions: [{ label: 'Отменить', onClick: () => undoTx(r.tx.id) }],
     undoTx: r.tx.id,
@@ -8713,7 +8827,9 @@ function startNextRun() {
   const rest = state.queue.length;
   toast(`Агент освободился — начинаю: «${clip(next.text, 60)}»`
     + (rest ? ` · в очереди ещё ${rest}` : ''), 'plain', 6000);
-  setTimeout(() => runUtterance(next.text, { variants: next.variants }), 60);
+  /* Круг 39 (UX): итог предыдущей команды (с припиской и «Отменить») остаётся на экране, пока
+     следующая из очереди работает, — раньше он мелькал на 0,2 с и пропадал. */
+  setTimeout(() => runUtterance(next.text, { variants: next.variants, keepResult: true }), 60);
 }
 
 /**
@@ -8794,7 +8910,7 @@ function applyHistoryAction(action, utterance) {
   return ok;
 }
 
-async function runUtterance(text, { variants = false, toModel = false, local = false } = {}) {
+async function runUtterance(text, { variants = false, toModel = false, local = false, keepResult = false } = {}) {
   const utterance = String(text || '').trim();
   if (!utterance) {
     /* Сюда приходит только пустая СТРОКА: нераспознанную речь голосовой путь до сюда
@@ -8875,7 +8991,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
   state.stageGoal = '';
   state.stageSteps = [];
   state.variantSeen = [];
-  hideMsg();
+  if (!(keepResult && msgUndoTx)) hideMsg();
   if (!variants) hideVariants();
   setBusy(true);
   showStage({ stage: 'classify', label: 'Разбираю запрос', detail: utterance });
@@ -10115,6 +10231,12 @@ function hideMsg() {
 
 /** Предложение отменить живёт ровно до следующего изменения истории. */
 function dropUndoOffer() { if (msgUndoTx || msgTransient) hideMsg(); }
+/**
+ * Круг 39 (UX): новая своя правка — карточка «Отменено — … / Вернуть» (или «Вернул — … /
+ * Отменить») устарела: «Вернуть» после новой правки ничего не вернёт. Карточки с отменой
+ * конкретной транзакции (итог агента, правка командой) живут дальше — их «Отменить» честное.
+ */
+function dropStaleStepCard() { if (msgTransient && !msgUndoTx) hideMsg(); }
 
 function showVariants(list, utterance, baseStamp) {
   const host = dom.variants;
@@ -10931,12 +11053,15 @@ function commitTableEdit(r, intent, { select = null } = {}) {
     showMsg('plain', (r && r.error) || 'Править нечего', { ms: 6000 });
     return true;
   }
-  const res = commit(r.ops, label, 'human', { human: r.words, quiet: true });
+  // круг 39 (UX): отмена возвращает выделение, с которым команду дали (копию сняли — снова оригинал)
+  const res = commit(r.ops, label, 'human', {
+    human: r.words, quiet: true, selBefore: liveSelection(), ...(select && select.length ? { selAfter: select.slice() } : {}),
+  });
   if (!res || !res.ok) return true;
   if (select && select.length) setSelection(select.filter((id) => nodeById(state.doc, id)));
   const said = (res.tx && res.tx.human) || r.words || label;
   showMsg('plain', said, {
-    note: 'Вернуть можно здесь или по Ctrl+Z.',
+    note: backHint(),
     ms: 7000,
     transient: true,
     ...(res.tx ? { actions: [{ label: 'Отменить', onClick: () => undoTx(res.tx.id) }], undoTx: res.tx.id } : {}),
@@ -10955,7 +11080,7 @@ function applyTableCommand(intent, said) {
     case 'help': openCommandsHelp(); return true;
     case 'slash-unknown': {
       showMsg('plain', `Команды «/${intent.name}» нет`, {
-        note: 'Все команды — в палитре (Ctrl+K или «/») и в справке «Команды».',
+        note: `Все команды — в палитре (${keyText('Mod+K') ? `${keyText('Mod+K')} или «/»` : '«/» в строке команд'}) и в справке «Команды».`,
         actions: [{ label: 'Все команды', onClick: () => { hideMsg(); openCommandsHelp(); } }],
         ms: 8000,
       });
@@ -11001,6 +11126,9 @@ function applyTableCommand(intent, said) {
     case 'order': return commitTableEdit(SHELL.reorderOps(doc, sel, intent.to), intent);
     case 'wrap': {
       const r = SHELL.wrapOps(doc, sel, { rects });
+      /* дети перечислены в самом create (SHELL.wrapOps): если соавтор успел удалить их все,
+         слияние отбросит и рамку (core.rebase, круг 39) — пустой «Группы» не будет нигде,
+         второй транзакцией убирать нечего */
       return commitTableEdit(r, intent, { select: r.id ? [r.id] : null });
     }
     case 'ungroup': {
@@ -11109,10 +11237,10 @@ function renderPalette() {
     ex.textContent = r.example || '';
     main.append(title, ex);
     li.appendChild(main);
-    if (r.keys) {
+    if (keyText(r.keys)) {
       const k = document.createElement('kbd');
       k.className = 'pal-key';
-      k.textContent = r.keys;
+      k.textContent = keyText(r.keys);
       li.appendChild(k);
     }
     if (r.hint) li.title = r.hint;
@@ -11203,8 +11331,8 @@ function openCommandsHelp() {
 function fillCommandsHelp(body) {
   const note = document.createElement('p');
   note.className = 'note';
-  note.textContent = 'Эти команды оболочка выполняет сама — без агента и без сети. Наберите «/» в строке команд '
-    + 'или нажмите Ctrl+K: откроется поиск. Всё, чего здесь нет, скажите словами — это работа агента.';
+  note.textContent = 'Эти команды оболочка выполняет сама — без агента и без сети. Наберите «/» в строке команд'
+    + `${keyText('Mod+K') ? ` или нажмите ${keyText('Mod+K')}` : ''}: откроется поиск. Всё, чего здесь нет, скажите словами — это работа агента.`;
   body.appendChild(note);
   for (const g of SHELL.helpGroups()) {
     const rows = g.commands.map((c) => {
@@ -11224,9 +11352,9 @@ function fillCommandsHelp(body) {
         sl.textContent = c.example || SHELL.slashOf(c);
         head.appendChild(sl);
       }
-      if (c.keys) {
+      if (keyText(c.keys)) {
         const k = document.createElement('kbd');
-        k.textContent = c.keys;
+        k.textContent = keyText(c.keys);
         head.appendChild(k);
       }
       b.appendChild(head);
@@ -11790,7 +11918,11 @@ function bindUi() {
     if (server && server.sync) server.sync.reconnect();
     onNetworkBack();
   });
-  globalThis.addEventListener('offline', () => { if (server && server.sync) server.sync.offline(); });
+  globalThis.addEventListener('offline', () => {
+    if (server && server.sync) server.sync.offline();
+    // круг 39: сети нет — и сервер агента недостижим; «агент: сервер» в шапке было бы неправдой
+    if (server && !serverAgent.absent) markAgentDown();
+  });
   // имя документа — строка, а не разметка: вставляем ровно текст (п.15)
   const plainInsert = (e, text) => {
     e.preventDefault();
@@ -11858,14 +11990,7 @@ function bindUi() {
       applyShellIntent({ kind: e.shiftKey ? 'ungroup' : 'wrap' }, '');
       return;
     }
-    /* Ctrl+A вне холста выделял весь текст страницы, хотя после «выделить всё» человек
-       ждёт узлы (круг 11, п.14). Сцена ловит своё событие раньше и ставит defaultPrevented —
-       значит сюда доходит только случай «фокус не на холсте». */
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a' && !typing && !e.defaultPrevented) {
-      e.preventDefault();
-      const all = allSelectableIds();
-      if (all.length) setSelection(all);
-    }
+    /* Ctrl+A и Ctrl+D — в onModKeyCapture (круг 39): одна команда таблицы откуда угодно. */
     // отмена работает из любого места оболочки; сцена ловит своё событие раньше (capture) и ставит defaultPrevented
     /* Круг 20, п.4. Числовое поле, в котором ничего не набрано сверх записанного (шаг шкалы
        после Enter, зазор в инспекторе), для Ctrl+Z — не «печать»: набора, который можно
@@ -11891,22 +12016,25 @@ function bindUi() {
 }
 
 /**
- * «Выделить всё» теми же правилами, что и рамка на холсте: верхние узлы каждого артборда,
- * без скрытых и запертых. Если внутри пусто — сами артборды.
+ * Круг 39 (N3, N6в): Ctrl/⌘+A — «Выделить всё на доске» (как `/выделить всё`), Ctrl/⌘+D —
+ * «Дублировать» (как `/дублировать`): одна запись таблицы, одна подпись, одна реализация.
+ * Работает с холста, из списка слоёв и с любой кнопки; в полях ввода Ctrl+A — выделение
+ * текста, как у браузера. Просмотр и открытая шторка — не место правкам: туда не вмешиваемся.
  */
-function allSelectableIds() {
-  const doc = state.doc;
-  if (!doc) return [];
-  const rects = (state.geo && state.geo.rects) || {};
-  const out = [];
-  for (const ab of artboards(doc)) {
-    for (const cid of (ab.children || [])) {
-      const n = nodeById(doc, cid);
-      if (!n || n.visible === false || n.locked) continue;
-      if (rects[cid]) out.push(cid);
-    }
-  }
-  return out.length ? out : artboards(doc).map((a) => a.id);
+function onModKeyCapture(e) {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.isComposing) return;
+  const k = e.code === 'KeyA' || String(e.key).toLowerCase() === 'a' || String(e.key).toLowerCase() === 'ф' ? 'a'
+    : e.code === 'KeyD' || String(e.key).toLowerCase() === 'd' || String(e.key).toLowerCase() === 'в' ? 'd' : '';
+  if (!k) return;
+  const t = e.target;
+  const typing = !!(t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable));
+  if (typing) return;
+  if (dom.sheet && !dom.sheet.hidden && dom.sheet.contains(t)) return;
+  if (typeof previewOn === 'function' && previewOn()) return;
+  if (!state.doc) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  applyShellIntent({ kind: k === 'a' ? 'select-all' : 'duplicate' }, '');
 }
 
 /**
@@ -12623,7 +12751,7 @@ let scalesPendingFocus = null;
 
 function fillScales(body) {
   body.appendChild(noteEl('Зазоры, отступы и скругления в документе ссылаются на шаги этих шкал. '
-    + 'Правка шага переверстывает всё, что на него ссылается; отмена — Ctrl+Z.'));
+    + `Правка шага переверстывает всё, что на него ссылается; ${keyText('Mod+Z') ? `отмена — ${keyText('Mod+Z')}` : 'отмена — кнопкой «Отменить»'}.`));
   const order = scalesFocus === 'radii' ? ['radii', 'spacing'] : ['spacing', 'radii'];
   for (const scale of order) body.appendChild(scaleEditor(scale));
   if (scalesPendingFocus) {
@@ -12903,7 +13031,7 @@ function fillExport(body) {
   imp.addEventListener('click', importJson);
   const impNote = document.createElement('div');
   impNote.className = 'note';
-  impNote.textContent = 'Файл станет открытым документом. Прежний вернётся кнопкой «Отменить» или Ctrl+Z.';
+  impNote.textContent = `Файл станет открытым документом. Прежний вернётся кнопкой «Отменить»${keyOr('Mod+Z')}.`;
   body.appendChild(group('Импорт', [imp, impNote]));
 }
 
@@ -13515,6 +13643,31 @@ function toast(text, kind = 'plain', ms = 5000) {
   dom.toasts.appendChild(t);
   setTimeout(() => t.remove(), ms);
   return t;
+}
+
+/* Круг 39 (N6в): клавиши — по платформе (Ctrl на Windows/Linux, ⌘ на macOS), на телефоне без
+   клавиатуры о них не говорим вовсе. Платформа считается один раз. */
+let keyPf = null;
+function keyPlatformNow() {
+  if (!keyPf) {
+    const mq = typeof matchMedia === 'function' ? (q) => matchMedia(q).matches : null;
+    keyPf = SHELL.keyPlatform(typeof navigator !== 'undefined' ? navigator : null, mq);
+  }
+  return keyPf;
+}
+/** «Ctrl+Z» / «⌘Z» / '' (телефон). */
+function keyText(keys) {
+  return SHELL.keyLabel(keys, keyPlatformNow());
+}
+/** « или Ctrl+Z» — хвост фразы; на телефоне пусто. */
+function keyOr(keys) {
+  const k = keyText(keys);
+  return k ? ` или ${k}` : '';
+}
+/** «Вернуть можно здесь или по Ctrl+Z.» — на телефоне «Вернуть можно здесь.» */
+function backHint() {
+  const k = keyText('Mod+Z');
+  return k ? `Вернуть можно здесь или по ${k}.` : 'Вернуть можно здесь.';
 }
 
 function plural(n, one, few, many) {
