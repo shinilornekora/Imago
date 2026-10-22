@@ -1939,6 +1939,12 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'export', group: 'Файл', title: 'Экспорт', hint: 'SVG, PNG или JSON; без формата — окно экспорта', slash: ['экспорт', 'export'], args: [{ name: 'формат', kind: 'enum', values: ['svg', 'png', 'json'], optional: true }], bare: true, example: '/экспорт png', phrases: ['экспорт png', 'экспортируй в svg'] },
   { id: 'import', group: 'Файл', title: 'Импорт JSON', hint: 'Открыть документ из файла', slash: ['импорт', 'import'], phrases: ['импорт', 'импортируй файл'] },
   { id: 'new-board', group: 'Файл', title: 'Новая доска', hint: 'Пустая доска рядом с остальными', slash: ['новая доска', 'new board'], phrases: ['новая доска', 'пустая доска'] },
+  /* круг 46: проекты — и без сервера (соло-режим), и на сервере (та же шторка «Проекты») */
+  { id: 'projects', group: 'Файл', title: 'Проекты', hint: 'Все проекты: открыть, создать, переименовать, дублировать, удалить', slash: ['проекты', 'projects'], keys: 'Mod+O', phrases: ['покажи проекты', 'мои проекты'] },
+  { id: 'project-new', group: 'Файл', title: 'Новый проект', hint: 'Пустой документ отдельным проектом; без имени — «Новый проект»', slash: ['новый проект', 'new project'], args: [{ name: 'имя', kind: 'text', optional: true }], bare: true, example: '/новый проект Лендинг', phrases: ['создай новый проект', 'новый документ', 'новый файл'] },
+  { id: 'project-open', group: 'Файл', title: 'Открыть проект', hint: 'Проект по имени; похожих несколько — список «Проекты» с ними', slash: ['открыть', 'открыть проект', 'open'], args: [{ name: 'имя', kind: 'text' }], example: '/открыть Лендинг', phrases: ['открой проект Лендинг'] },
+  { id: 'project-rename', group: 'Файл', title: 'Переименовать проект', hint: 'Новое имя открытого проекта (оно же в шапке)', slash: ['переименовать проект', 'rename project'], args: [{ name: 'новое имя', kind: 'text' }], example: '/переименовать проект Лендинг', phrases: ['переименуй проект в «Лендинг»'] },
+  { id: 'project-duplicate', group: 'Файл', title: 'Дублировать проект', hint: 'Копия открытого проекта отдельным проектом', slash: ['дублировать проект', 'копия проекта', 'duplicate project'], phrases: ['дублируй проект', 'сделай копию проекта'] },
 
   /* — История — */
   { id: 'undo', group: 'История', title: 'Отменить', hint: 'Последнюю правку или несколько', slash: ['отменить', 'отмена', 'undo'], keys: 'Mod+Z', args: [{ name: 'сколько', kind: 'number', optional: true }], bare: true, example: '/отменить 3', phrases: ['отмени', 'отмени три раза'] },
@@ -2093,6 +2099,8 @@ const PLAIN_INTENTS = {
   settings: () => ({ kind: 'sheet', what: 'settings' }),
   import: () => ({ kind: 'import' }),
   'new-board': () => ({ kind: 'new-board' }),
+  projects: () => ({ kind: 'projects' }),
+  'project-duplicate': () => ({ kind: 'project-duplicate' }),
   stop: () => ({ kind: 'stop' }),
   variants: () => ({ kind: 'variants' }),
   'variants-close': () => ({ kind: 'variants-close' }),
@@ -2129,6 +2137,18 @@ const SLASH_ARGS = {
   rename(rest, raw, ctx, cmd) {
     const name = renameValue(raw);
     return name ? { kind: 'rename', name } : bad(cmd, 'Скажите новое имя');
+  },
+  'project-new'(rest, raw) {
+    const name = renameValue(raw);
+    return name ? { kind: 'project-new', name } : { kind: 'project-new' };
+  },
+  'project-open'(rest, raw, ctx, cmd) {
+    const name = renameValue(raw);
+    return name ? { kind: 'project-open', name } : bad(cmd, 'Скажите, какой проект открыть');
+  },
+  'project-rename'(rest, raw, ctx, cmd) {
+    const name = renameValue(raw);
+    return name ? { kind: 'project-rename', name } : bad(cmd, 'Скажите новое имя проекта');
   },
   align(rest, raw, ctx, cmd) {
     const how = argPick(rest, ALIGN_WORDS);
@@ -2233,6 +2253,9 @@ const NATURAL = [
   ['inspector', /^(?:скрой|скрыть|спрячь|спрятать|закрой|закрыть|убери|сверни) инспектор$/, () => ({ kind: 'inspector', on: false })],
   ['scales', /^(?:(?:покажи|открой|показать|открыть) )?(?:шкалы|токены|шкалы отступов)$/],
   ['import', /^(?:импорт|импортировать|импортируй)(?: файл| json| документ)?$|^(?:загрузи|загрузить) файл$/],
+  ['projects', /^(?:(?:покажи|открой|показать|открыть) )?(?:мои |все )?проекты$|^список проектов$/],
+  ['project-new', /^(?:(?:создай|создать|сделай|сделать|заведи|завести|начни|начать|открой|открыть) )?(?:новый|чистый|пустой) (?:проект|документ|файл)$/, () => ({ kind: 'project-new' })],
+  ['project-duplicate', /^(?:дублируй|продублируй|скопируй|дублировать|продублировать|скопировать) проект$|^(?:сделай|создай|сделать|создать) копию проекта$/],
   ['help', /^(?:команды|какие есть команды|список команд|(?:покажи|открой) команды|что ты умеешь|что умеешь|что ты можешь|помощь|справка)$/],
 ];
 
@@ -2240,6 +2263,10 @@ const NATURAL = [
 const RE_DIRECTION = /^(?:(?:расположи|расположить|поставь|сделай|выстрой|перестрой)\s+)?(в строку|строкой|в колонку|колонкой|в столбец)$/;
 const RE_ALIGN_KIDS = /^(?:выровняй|выровнять)\s+(?:детей|содержимое|вложенные|дочерние)\s+(.+)$/;
 const RE_RENAME = /^\s*(?:переименуй|переименовать|переименуйте)(?:\s+(?:слой|это|выделенное|его|её))?\s+в\s+(.+?)\s*$/i;
+/* круг 46: проекты словами — имя проекта берётся из набранного (регистр и кавычки) */
+const RE_PROJECT_OPEN = /^\s*(?:открой|открыть|откройте|перейди в|перейти в|переключись на|переключиться на)\s+проект\s+(.+?)\s*$/i;
+const RE_PROJECT_RENAME = /^\s*(?:переименуй|переименовать|переименуйте)\s+проект\s+в\s+(.+?)\s*$/i;
+const RE_PROJECT_NEW_NAMED = /^\s*(?:создай|создать|заведи|завести)\s+(?:новый\s+)?проект\s+(.+?)\s*$/i;
 
 /** Новые фразы таблицы → намерение; null — не они. */
 function naturalIntent(t, said) {
@@ -2253,6 +2280,12 @@ function naturalIntent(t, said) {
     const how = argPick(al[1], ALIGN_WORDS);
     if (how) return { kind: 'align', how };
   }
+  const po = RE_PROJECT_OPEN.exec(String(said || ''));
+  if (po) { const name = renameValue(po[1]); if (name) return { kind: 'project-open', name }; }
+  const pr = RE_PROJECT_RENAME.exec(String(said || ''));
+  if (pr) { const name = renameValue(pr[1]); if (name) return { kind: 'project-rename', name }; }
+  const pn = RE_PROJECT_NEW_NAMED.exec(String(said || ''));
+  if (pn) { const name = renameValue(pn[1]); if (name) return { kind: 'project-new', name }; }
   const rn = RE_RENAME.exec(String(said || ''));
   if (rn) {
     const name = renameValue(rn[1]);
@@ -2316,6 +2349,11 @@ export function commandIdOf(intent) {
     case 'export': return 'export';
     case 'import': return 'import';
     case 'new-board': return 'new-board';
+    case 'projects': return 'projects';
+    case 'project-new': return 'project-new';
+    case 'project-open': return 'project-open';
+    case 'project-rename': return 'project-rename';
+    case 'project-duplicate': return 'project-duplicate';
     case 'undo': return 'undo';
     case 'redo': return 'redo';
     case 'stop': return 'stop';
@@ -3498,4 +3536,377 @@ export function freeModeOps(frame, doc, rects, pad, mode) {
     for (const k of kids) if (k.pos !== undefined) out.push({ id: k.id, path: 'pos', value: undefined });
   }
   return out;
+}
+
+/* ======================= круг 46: проекты без сервера (соло-режим) ======================= */
+/*
+ * В соло-режиме (артефакт, dist/local) документов много, как файлов в Figma. Тела документов —
+ * в IndexedDB (большие в localStorage не влезают), запасной путь — localStorage с честным
+ * предупреждением о размере, последний — память вкладки («проекты не сохраняются в этом
+ * браузере»). Список — лёгкий индекс в localStorage: {id, name, created_at, updated_at, boards,
+ * nodes, bytes, view, board, tab}. Все обращения к хранилищам — в try/catch.
+ * Две вкладки: BroadcastChannel (и событие storage на индексе) — список обновляется; запись
+ * поверх более новой записи другой вкладки не проходит молча (`conflict`).
+ * Без DOM: окружение (indexedDB, localStorage, BroadcastChannel) передаётся явно — тестам свои.
+ */
+
+export const SOLO_INDEX_KEY = 'imago.projects.v1';
+export const SOLO_EXIT_KEY = 'imago.projects.exit.v1';
+export const SOLO_BODY_PREFIX = 'imago.project.';
+export const SOLO_CHANNEL = 'imago-projects';
+export const SOLO_IDB = 'imago-projects';
+/** Запасной путь: тело больше — localStorage, скорее всего, не примет (≈5 МБ на сайт). */
+export const SOLO_LOCAL_WARN_BYTES = 2 * 1024 * 1024;
+
+const soloId = () => `pr_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+const nowIso = (now) => new Date(now()).toISOString();
+
+/** Сводка документа для индекса: досок и слоёв. */
+export function soloDocStats(doc) {
+  let boards = 0;
+  try { boards = artboards(doc).length; } catch { boards = 0; }
+  return { boards, nodes: userNodeCount(doc) };
+}
+
+/** «Новый проект», «Новый проект 2»… — свободное имя среди списка. */
+export function freshSoloName(list, base = 'Новый проект') {
+  const taken = new Set((list || []).map((p) => p && cleanText(p.name)).filter(Boolean));
+  const b = cleanText(base) || 'Новый проект';
+  if (!taken.has(b)) return b;
+  for (let i = 2; i < 10000; i++) if (!taken.has(`${b} ${i}`)) return `${b} ${i}`;
+  return `${b} ${Date.now()}`;
+}
+
+/** «Шапка копия», «Шапка копия 2»… — имя дубликата проекта. */
+export function copySoloName(list, name) {
+  return freshSoloName(list, `${cleanText(name) || 'Без названия'} копия`);
+}
+
+/** Строка списка: «2 доски · 48 слоёв · менялся 5 минут назад» (время — словами оболочки). */
+export function soloMetaLine(p, when = '') {
+  const b = Number(p && p.boards) || 0;
+  const n = Number(p && p.nodes) || 0;
+  const bits = [
+    b ? `${b} ${plural(b, 'доска', 'доски', 'досок')}` : 'без досок',
+    `${n} ${plural(n, 'слой', 'слоя', 'слоёв')}`,
+  ];
+  if (when) bits.push(`менялся ${when}`);
+  return bits.join(' · ');
+}
+
+/** Поиск по имени: все слова запроса — в имени (регистр и «ё/е» не важны). */
+export function filterSoloProjects(list, query) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е');
+  const words = norm(query).split(/\s+/).filter(Boolean);
+  if (!words.length) return (list || []).slice();
+  return (list || []).filter((p) => { const n = norm(p && p.name); return words.every((w) => n.includes(w)); });
+}
+
+/**
+ * Проект по сказанному имени: точное совпадение — он; иначе все, где имя похоже.
+ * @returns {{one: object|null, many: object[]}}
+ */
+export function findSoloProject(list, name) {
+  const want = cleanText(name).toLowerCase().replace(/ё/g, 'е');
+  if (!want) return { one: null, many: [] };
+  const all = (list || []).filter((p) => p && p.id);
+  const exact = all.filter((p) => cleanText(p.name).toLowerCase().replace(/ё/g, 'е') === want);
+  if (exact.length === 1) return { one: exact[0], many: exact };
+  const like = exact.length ? exact : all.filter((p) => nameMatches(p.name || '', name) > 0 || cleanText(p.name).toLowerCase().replace(/ё/g, 'е').includes(want));
+  return { one: like.length === 1 ? like[0] : null, many: like };
+}
+
+/* ---- хранилища тел ---- */
+
+/** Тела в памяти вкладки (последний запасной путь и тесты). */
+export function memoryBodies() {
+  const m = new Map();
+  return {
+    kind: 'memory',
+    async get(id) { return m.has(id) ? JSON.parse(m.get(id)) : null; },
+    async put(id, payload) { m.set(id, JSON.stringify(payload)); },
+    async del(id) { m.delete(id); },
+  };
+}
+
+/** Тела в localStorage (запасной путь: размер ограничен). */
+export function localBodies(ls) {
+  return {
+    kind: 'local',
+    async get(id) { const raw = ls.getItem(SOLO_BODY_PREFIX + id); return raw ? JSON.parse(raw) : null; },
+    async put(id, payload) { ls.setItem(SOLO_BODY_PREFIX + id, JSON.stringify(payload)); },
+    async del(id) { ls.removeItem(SOLO_BODY_PREFIX + id); },
+  };
+}
+
+/** Тела в IndexedDB: база SOLO_IDB, хранилище «bodies». Открытие — промисом; не вышло — бросает. */
+export function idbBodies(idb, name = SOLO_IDB) {
+  let dbp = null;
+  const open = () => {
+    if (dbp) return dbp;
+    dbp = new Promise((resolve, reject) => {
+      let req;
+      try { req = idb.open(name, 1); } catch (e) { reject(e); return; }
+      req.onupgradeneeded = () => { try { const db = req.result; if (!db.objectStoreNames.contains('bodies')) db.createObjectStore('bodies'); } catch (e) { reject(e); } };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('IndexedDB не открылась'));
+      req.onblocked = () => reject(new Error('IndexedDB занята'));
+    });
+    dbp.catch(() => { dbp = null; });
+    return dbp;
+  };
+  const run = async (mode, fn) => {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let tx;
+      try { tx = db.transaction('bodies', mode); } catch (e) { reject(e); return; }
+      const store = tx.objectStore('bodies');
+      let out;
+      let req;
+      try { req = fn(store); } catch (e) { reject(e); return; }
+      if (req) req.onsuccess = () => { out = req.result; };
+      tx.oncomplete = () => resolve(out);
+      tx.onerror = () => reject(tx.error || (req && req.error) || new Error('IndexedDB: запись не прошла'));
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB: транзакция прервана'));
+    });
+  };
+  return {
+    kind: 'idb',
+    open,
+    async get(id) { const v = await run('readonly', (s) => s.get(id)); return v == null ? null : (typeof v === 'string' ? JSON.parse(v) : v); },
+    async put(id, payload) { await run('readwrite', (s) => s.put(JSON.stringify(payload), id)); },
+    async del(id) { await run('readwrite', (s) => s.delete(id)); },
+  };
+}
+
+/* ---- индекс ---- */
+
+export function memoryIndex() {
+  let data = { v: 1, list: [], current: null };
+  return { kind: 'memory', load() { return JSON.parse(JSON.stringify(data)); }, save(d) { data = JSON.parse(JSON.stringify(d)); } };
+}
+
+export function localIndex(ls) {
+  return {
+    kind: 'local',
+    load() {
+      const raw = ls.getItem(SOLO_INDEX_KEY);
+      const d = raw ? JSON.parse(raw) : null;
+      return d && Array.isArray(d.list) ? d : { v: 1, list: [], current: null };
+    },
+    save(d) { ls.setItem(SOLO_INDEX_KEY, JSON.stringify(d)); },
+  };
+}
+
+/** Работает ли localStorage на самом деле (в приватном режиме и песочнице — бросает). */
+export function usableLocalStorage(ls) {
+  try {
+    if (!ls) return null;
+    const k = 'imago.probe';
+    ls.setItem(k, '1');
+    ls.removeItem(k);
+    return ls;
+  } catch { return null; }
+}
+
+/**
+ * Хранилище проектов соло-режима.
+ * @param {{bodies?: object, index?: object, channel?: object|null, now?: () => number, tab?: string,
+ *          ls?: Storage|null, mode?: string, warn?: string}} o
+ */
+export function createSoloStore(o = {}) {
+  const now = o.now || (() => Date.now());
+  const tab = o.tab || `t_${Math.random().toString(36).slice(2, 10)}`;
+  const bodies = o.bodies || memoryBodies();
+  const index = o.index || memoryIndex();
+  const ls = o.ls || null;
+  const channel = o.channel || null;
+  const listeners = new Set();
+  const mode = o.mode || bodies.kind;
+  let warn = o.warn || (bodies.kind === 'memory' ? 'memory' : bodies.kind === 'local' ? 'local' : '');
+  let cache = null;
+
+  const load = () => {
+    try { cache = index.load(); } catch { cache = cache || { v: 1, list: [], current: null }; }
+    if (!cache || !Array.isArray(cache.list)) cache = { v: 1, list: [], current: null };
+    return cache;
+  };
+  const save = (d) => {
+    cache = d;
+    try { index.save(d); return true; } catch { warn = warn || 'index'; return false; }
+  };
+  const emit = (msg) => { for (const fn of listeners) { try { fn(msg); } catch { /* слушатель не роняет хранилище */ } } };
+  const post = (msg) => { try { if (channel) channel.postMessage({ ...msg, tab }); } catch { /* канала нет — другие вкладки узнают по storage */ } };
+  if (channel) {
+    try {
+      channel.onmessage = (ev) => {
+        const m = ev && ev.data;
+        if (!m || typeof m !== 'object' || m.tab === tab) return;
+        load();
+        emit(m);
+      };
+    } catch { /* без канала */ }
+  }
+  const entryOf = (id) => load().list.find((p) => p.id === id) || null;
+  const touchEntry = (d, id, patch) => {
+    const i = d.list.findIndex((p) => p.id === id);
+    if (i < 0) return null;
+    d.list[i] = { ...d.list[i], ...patch };
+    return d.list[i];
+  };
+
+  const api = {
+    tab, mode,
+    get warn() { return warn; },
+    /** Список, новые по правке сверху. */
+    list() {
+      return load().list.slice().sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+    },
+    entry: entryOf,
+    current() { return load().current || null; },
+    setCurrent(id) { const d = load(); d.current = id; save(d); },
+    /** Вид проекта (масштаб, сдвиг, активная доска) — в индексе, без записи тела. */
+    setView(id, view, board) {
+      const d = load();
+      if (touchEntry(d, id, { view: view || null, board: board || null })) save(d);
+    },
+    async read(id) {
+      return bodies.get(id);
+    },
+    /**
+     * Записать тело проекта. `base` — updated_at, который эта вкладка знает: запись другой
+     * вкладки новее — {conflict} без записи (если не `force`).
+     */
+    async write(id, payload, { base = null, force = false } = {}) {
+      const d = load();
+      const e = d.list.find((p) => p.id === id);
+      if (!e) return { ok: false, missing: true };
+      if (!force && base && e.updated_at && e.updated_at > base && e.tab && e.tab !== tab) {
+        return { ok: false, conflict: true, entry: { ...e } };
+      }
+      let text = '';
+      try { text = JSON.stringify(payload); } catch { return { ok: false, error: 'документ не сериализуется' }; }
+      await bodies.put(id, payload);
+      const stats = soloDocStats(payload && payload.doc);
+      let at = nowIso(now);
+      if (base && at <= base) at = new Date(Date.parse(base) + 1).toISOString();
+      const d2 = load();
+      const name = cleanText(payload && payload.doc && payload.doc.meta && payload.doc.meta.name) || e.name;
+      const entry = touchEntry(d2, id, { name, updated_at: at, ...stats, bytes: text.length, tab });
+      if (!entry) return { ok: false, missing: true };
+      save(d2);
+      post({ type: 'saved', id, updated_at: at });
+      const big = bodies.kind === 'local' && text.length > SOLO_LOCAL_WARN_BYTES;
+      return { ok: true, entry: { ...entry }, big };
+    },
+    async create({ name = '', payload, id = '' } = {}) {
+      const d = load();
+      const pid = id || soloId();
+      const nm = cutText(cleanText(name), 120) || freshSoloName(d.list);
+      const body = { ...payload, doc: { ...payload.doc, meta: { ...(payload.doc.meta || {}), name: nm } } };
+      await bodies.put(pid, body);
+      const at = nowIso(now);
+      const entry = { id: pid, name: nm, created_at: at, updated_at: at, ...soloDocStats(body.doc), bytes: JSON.stringify(body).length, view: null, board: null, tab };
+      const d2 = load();
+      d2.list.push(entry);
+      save(d2);
+      post({ type: 'list' });
+      return { ...entry };
+    },
+    async rename(id, name) {
+      const nm = cutText(cleanText(name), 120);
+      if (!nm) return null;
+      const body = await bodies.get(id);
+      if (body && body.doc) await bodies.put(id, { ...body, doc: { ...body.doc, meta: { ...(body.doc.meta || {}), name: nm } } });
+      const d = load();
+      const e = touchEntry(d, id, { name: nm });
+      if (!e) return null;
+      save(d);
+      post({ type: 'list' });
+      return { ...e };
+    },
+    async duplicate(id) {
+      const e = entryOf(id);
+      const body = await bodies.get(id);
+      if (!e || !body) return null;
+      return api.create({ name: copySoloName(load().list, e.name), payload: { ...body, history: [], cursor: 0 } });
+    },
+    /** Удалить; вернёт надгробие (запись и тело) для «Вернуть». */
+    async remove(id) {
+      const d = load();
+      const e = d.list.find((p) => p.id === id);
+      if (!e) return null;
+      let body = null;
+      try { body = await bodies.get(id); } catch { body = null; }
+      d.list = d.list.filter((p) => p.id !== id);
+      if (d.current === id) d.current = null;
+      save(d);
+      try { await bodies.del(id); } catch { /* тело останется сиротой — не страшно */ }
+      post({ type: 'list' });
+      return { entry: { ...e }, payload: body };
+    },
+    async restore(tomb) {
+      if (!tomb || !tomb.entry || !tomb.payload) return null;
+      await bodies.put(tomb.entry.id, tomb.payload);
+      const d = load();
+      if (!d.list.some((p) => p.id === tomb.entry.id)) d.list.push({ ...tomb.entry });
+      save(d);
+      post({ type: 'list' });
+      return { ...tomb.entry };
+    },
+    /** Запись при уходе со страницы — синхронно (IndexedDB не успевает): localStorage. */
+    saveOnExit(id, payload) {
+      if (!ls) return false;
+      try { ls.setItem(SOLO_EXIT_KEY, JSON.stringify({ id, payload, at: nowIso(now), tab })); return true; } catch { return false; }
+    },
+    /** Запись при уходе, сделанная до перезагрузки: новее тела — переносится в тело. */
+    async adoptExit() {
+      if (!ls) return null;
+      let rec = null;
+      try { rec = JSON.parse(ls.getItem(SOLO_EXIT_KEY) || 'null'); } catch { rec = null; }
+      if (!rec || !rec.id || !rec.payload) return null;
+      const e = entryOf(rec.id);
+      try { ls.removeItem(SOLO_EXIT_KEY); } catch { /* снимем в следующий раз */ }
+      if (!e || (e.updated_at && rec.at <= e.updated_at)) return null;
+      await bodies.put(rec.id, rec.payload);
+      const d = load();
+      touchEntry(d, rec.id, { updated_at: rec.at, ...soloDocStats(rec.payload.doc), tab: rec.tab || tab });
+      save(d);
+      return rec.id;
+    },
+    /** Сообщения других вкладок: {type:'saved', id, updated_at} / {type:'list'}. */
+    onRemote(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+    /** Событие storage окна (индекс поменяла другая вкладка без канала). */
+    storageEvent(ev) {
+      if (!ev || ev.key !== SOLO_INDEX_KEY) return;
+      const before = cache ? new Map(cache.list.map((p) => [p.id, p.updated_at])) : new Map();
+      load();
+      for (const p of cache.list) {
+        if (p.tab !== tab && before.has(p.id) && p.updated_at > before.get(p.id)) emit({ type: 'saved', id: p.id, updated_at: p.updated_at });
+      }
+      emit({ type: 'list' });
+    },
+    close() { try { if (channel) channel.close(); } catch { /* уже закрыт */ } },
+  };
+  return api;
+}
+
+/**
+ * Открыть хранилище проектов в этом окружении: IndexedDB → localStorage → память.
+ * @param {{indexedDB?: any, localStorage?: any, BroadcastChannel?: any, now?: () => number}} env
+ */
+export async function openSoloStore(env = {}) {
+  const ls = usableLocalStorage(env.localStorage);
+  let bodies = null;
+  if (env.indexedDB) {
+    try { const b = idbBodies(env.indexedDB); await b.open(); bodies = b; } catch { bodies = null; }
+  }
+  if (!bodies && ls) bodies = localBodies(ls);
+  if (!bodies) bodies = memoryBodies();
+  // список без localStorage не переживёт перезагрузку — тогда и тела в памяти: честно «не сохраняются»
+  if (!ls) bodies = memoryBodies();
+  const index = ls ? localIndex(ls) : memoryIndex();
+  let channel = null;
+  try { channel = env.BroadcastChannel ? new env.BroadcastChannel(SOLO_CHANNEL) : null; } catch { channel = null; }
+  return createSoloStore({ bodies, index, channel, ls, now: env.now });
 }

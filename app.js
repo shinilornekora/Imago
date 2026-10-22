@@ -465,8 +465,11 @@ async function initCapabilities() {
   // сокет переподключится сам — прежний режим тут был бы подменой документа демо-макетом
   if (health || serverAnticipated()) { await initServer(health); return; }
 
-  const restored = db ? await restoreFromDb() : await restoreFromLocal();
+  // круг 46: без сервера проектов много — хранилище проектов (прежний документ станет первым)
+  const restored = await initSoloProjects();
   maybeShowIntro(restored);
+  // хранилище закрыто — важнее приветствия: плашка встаёт поверх него
+  soloStorageNotice();
 }
 
 /* ------------------------------ серверный режим ------------------------------ */
@@ -3421,7 +3424,7 @@ function whenWords(iso) {
 
 /** Шторка «Проекты»: список, новый, переименование, переход — без перезагрузки страницы. */
 async function openProjects() {
-  if (!server) return;
+  if (!server) { if (solo) openSoloProjects(); return; }
   openSheet('Проекты', (body) => fillProjects(body, server.list, { loading: true }), { size: 'auto', key: 'projects' });
   await loadProjectsSheet();
 }
@@ -11239,6 +11242,16 @@ function applyShellIntent(intent, said) {
       setPreview(intent.on !== false, { say: true });
       return true;
     }
+    // круг 46: проекты — на сервере и без него (группа «Файл»)
+    case 'projects':
+    case 'project-new':
+    case 'project-open':
+    case 'project-rename':
+    case 'project-duplicate': {
+      if (!server && !solo) { showMsg('plain', 'Проекты ещё открываются — повторите через секунду.', { ms: 5000 }); return true; }
+      applyProjectCommand(intent);
+      return true;
+    }
     case 'new-board': {
       const r = addArtboard();
       if (r && r.ok) showMsg('result', 'Новая доска готова', { note: 'Скажите, что на ней построить.', ms: 7000 });
@@ -12254,6 +12267,8 @@ function bindUi() {
     setDocNameText(name);
     // круг 22: в серверном режиме имя — у проекта (PATCH), meta.name операциями не правится
     if (server) { renameProject(name); return; }
+    // круг 46: имя в шапке — имя проекта (список и шторка узнают его сразу)
+    if (solo && solo.current) { if (name !== ((state.doc.meta || {}).name || '')) renameSoloProject(solo.current, name); return; }
     state.doc = { ...state.doc, meta: { ...state.doc.meta, name } };
     scheduleSave();
   });
@@ -12377,6 +12392,15 @@ function bindUi() {
  */
 function onModKeyCapture(e) {
   if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.isComposing) return;
+  // круг 46: Mod+O — «Проекты» откуда угодно (браузер иначе открыл бы диалог файла)
+  const lo = String(e.key).toLowerCase();
+  if (e.code === 'KeyO' || lo === 'o' || lo === 'щ') {
+    if (!server && !solo) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    applyProjectCommand({ kind: 'projects' });
+    return;
+  }
   const k = e.code === 'KeyA' || String(e.key).toLowerCase() === 'a' || String(e.key).toLowerCase() === 'ф' ? 'a'
     : e.code === 'KeyD' || String(e.key).toLowerCase() === 'd' || String(e.key).toLowerCase() === 'в' ? 'd' : '';
   if (!k) return;
@@ -13753,6 +13777,8 @@ function importJson() {
         });
         return;
       }
+      // круг 46: без сервера файл становится новым проектом, открытый остаётся как был
+      if (!server && solo) { await importAsSoloProject(taken, f.name); return; }
       const wasName = docName(state.doc);
       const nowName = docName(taken.doc);
       // свёрнутые ветки старого документа к новому не относятся; пустой список означал бы
@@ -14046,6 +14072,590 @@ function plural(n, one, few, many) {
   return many;
 }
 
+/* ------------------ круг 46: проекты без сервера (соло-режим) ------------------ */
+/*
+ * В соло-режиме (артефакт, dist/local) проектов много, как файлов в Figma. Хранилище —
+ * SHELL.openSoloStore (тела в IndexedDB, список в localStorage). Открытый проект — solo.current;
+ * его документ живёт в state.doc, как и раньше, и сохраняется тем же scheduleSave/saveNow, но в
+ * хранилище проектов. Выделение — своё у каждого проекта на сессию, вид и активная доска — в
+ * индексе, история и разговор — в теле проекта (как прежде у единственного документа).
+ */
+let solo = null;   // {store, current, base, sessions: Map, tombs: Map, conflict}
+const SOLO_MIGRATED_KEY = 'imago.projects.migrated.v1';
+
+/** localStorage, если к нему вообще можно прикоснуться (в песочнице доступ бросает). */
+function lsOrNull() {
+  try { return globalThis.localStorage || null; } catch { return null; }
+}
+
+/**
+ * Проекты соло-режима: открыть хранилище, перенести единственный прежний документ первым
+ * проектом (один раз), открыть текущий. true — документ взят из проекта (или из прежней копии).
+ */
+async function initSoloProjects() {
+  let store = null;
+  try {
+    store = await SHELL.openSoloStore({
+      indexedDB: (() => { try { return globalThis.indexedDB || null; } catch { return null; } })(),
+      localStorage: lsOrNull(),
+      BroadcastChannel: typeof BroadcastChannel === 'function' ? BroadcastChannel : null,
+    });
+  } catch { store = SHELL.createSoloStore({}); }
+  solo = { store, current: null, base: null, sessions: new Map(), tombs: new Map(), conflict: null };
+  try { await store.adoptExit(); } catch { /* запись ухода не прочиталась — тело то, что было */ }
+  store.onRemote(onSoloRemote);
+  try { globalThis.addEventListener('storage', (ev) => { if (solo) solo.store.storageEvent(ev); }); } catch { /* без событий окна */ }
+  if (dom['btn-projects']) dom['btn-projects'].hidden = false;
+  const list = store.list();
+  if (list.length) {
+    const want = store.current() && list.some((p) => p.id === store.current()) ? store.current() : list[0].id;
+    const ok = await loadSoloProject(want, { first: true });
+    if (ok) return true;
+    // текущий не прочитался — следующий по свежести
+    for (const p of list) if (p.id !== want && await loadSoloProject(p.id, { first: true })) return true;
+  }
+  // проектов нет: один раз — перенос прежнего документа (imago.doc.v1 / хранилище артефакта)
+  let migrated = '';
+  try { migrated = (lsOrNull() && lsOrNull().getItem(SOLO_MIGRATED_KEY)) || ''; } catch { migrated = ''; }
+  let restored = false;
+  if (!migrated && !list.length) restored = db ? await restoreFromDb() : await restoreFromLocal();
+  // прежний документ не открылся — человек решает его судьбу; проект заведём после решения
+  if (state.saveBlocked) return false;
+  if (migrated || list.length) { state.doc = createDoc('empty'); state.geo = solve(state.doc); state.history = []; state.cursor = 0; state.chat = []; state.pairs = []; }
+  const name = migrated || list.length ? SHELL.freshSoloName(store.list()) : docName(state.doc);
+  const entry = await store.create({ name, payload: savePayload() });
+  try { const ls = lsOrNull(); if (ls) ls.setItem(SOLO_MIGRATED_KEY, entry.id); } catch { /* метка не легла — индекс всё равно не пуст */ }
+  solo.current = entry.id;
+  solo.base = entry.updated_at;
+  store.setCurrent(entry.id);
+  state.doc = { ...state.doc, meta: { ...state.doc.meta, name: entry.name } };
+  setDocNameText(docTitle());
+  renderAll();
+  return restored;
+}
+
+/** Плашка о хранилище: в памяти — «не сохраняются», в localStorage — «места мало». Один раз. */
+function soloStorageNotice() {
+  if (!solo || solo.noticeShown) return;
+  const w = solo.store.warn;
+  if (!w) return;
+  solo.noticeShown = true;
+  if (w === 'memory') {
+    showMsg('warn', 'Проекты не сохраняются в этом браузере', {
+      note: 'Хранилище браузера закрыто для этой страницы (приватный режим или запрет сайтам хранить данные). Работа живёт, пока открыта вкладка, — сохраняйте её экспортом в JSON.',
+      role: 'solo-storage',
+      actions: [{ label: 'Экспорт', primary: true, onClick: () => openExport() }],
+    });
+  } else if (w === 'local') {
+    toast('Проекты хранятся в памяти браузера без IndexedDB — места мало (около 5 МБ на все). Большие проекты сохраняйте экспортом.', 'plain', 10000);
+  }
+}
+
+/** Сохранить открытый проект сейчас — перед уходом к другому. false — не сохранился (сказано). */
+async function flushSoloSave() {
+  if (!solo || !solo.current) return true;
+  // вид и активная доска — в индексе, без записи тела
+  try { solo.store.setView(solo.current, viewSnapshot(), activeArtboardId()); } catch { /* вид не важнее работы */ }
+  if (!state.dirty) return true;
+  clearTimeout(saveTimer);
+  for (let i = 0; i < 20 && saveFlight; i++) await new Promise((r) => setTimeout(r, 50));
+  await saveNow();
+  return !state.dirty;
+}
+
+function viewSnapshot() {
+  if (!stage || !viewIsSane(stage.view)) return null;
+  return { zoom: stage.view.zoom, pan: { x: stage.view.pan.x, y: stage.view.pan.y } };
+}
+
+/**
+ * Прочитать проект и сделать его открытым: документ, история, разговор, выделение этой сессии,
+ * вид из индекса. Ничего не пишет. false — тело не прочиталось (сказано словами).
+ */
+async function loadSoloProject(id, { first = false } = {}) {
+  const store = solo.store;
+  const entry = store.entry(id);
+  let payload = null;
+  try { payload = await store.read(id); } catch { payload = null; }
+  if (!entry || !payload || !payload.doc) {
+    if (!first) toast(`Проект «${clip((entry && entry.name) || 'без имени', 40)}» не прочитался из хранилища браузера.`, 'error', 9000);
+    return false;
+  }
+  let taken = null;
+  try { taken = adoptDoc(payload.doc); } catch (e) {
+    toast(`Проект «${clip(entry.name, 40)}» не открылся: ${afterColon(humanError(e))}`, 'error', 9000);
+    return false;
+  }
+  const sess = solo.sessions.get(id) || {};
+  state.doc = { ...taken.doc, meta: { ...(taken.doc.meta || {}), name: entry.name } };
+  state.geo = taken.geo;
+  // с ухода проект не менялся (та же запись) — история и разговор этой сессии целиком
+  const same = !!(sess.history && sess.at && sess.at === entry.updated_at);
+  if (same) {
+    state.chat = sess.chat;
+    state.pairs = sess.pairs;
+    state.history = sess.history;
+    state.cursor = sess.cursor;
+  } else {
+    state.chat = sanitizeChat(payload.chat);
+    state.pairs = sanitizePairs(payload.pairs);
+    const past = sanitizeHistory(payload.history, payload.cursor);
+    state.history = past.list;
+    state.cursor = past.cursor;
+  }
+  state.collapsed = Array.isArray(payload.collapsed) && payload.collapsed.length ? new Set(payload.collapsed.filter((x) => typeof x === 'string')) : null;
+  state.selection = (sess.selection || []).filter((x) => state.doc.nodes[x]);
+  // активная доска из индекса (после перезагрузки выделения нет): не первая — выделяем её, как вкладка
+  if (!state.selection.length && entry.board && state.doc.nodes[entry.board]) {
+    const boards = artboards(state.doc);
+    if (boards.length > 1 && boards[0].id !== entry.board && boards.some((b) => b.id === entry.board)) state.selection = [entry.board];
+  }
+  state.awaitingClarify = null;
+  state.lastFit = null;
+  state.issues = new Map();
+  state.dirty = false;
+  state.docRev += 1;
+  state.saveBlocked = null;
+  solo.current = id;
+  solo.base = entry.updated_at || null;
+  solo.conflict = null;
+  store.setCurrent(id);
+  hideVariants();
+  setDocNameText(docTitle());
+  renderAll();
+  // вид проекта — из индекса; нет — вписать
+  if (entry.view && viewIsSane(entry.view)) {
+    withView(() => applyView(entry.view));
+    state.userView = true;
+    rememberView();
+    updateZoomLabel(stage.view);
+  } else fitSmart();
+  refreshSheet();
+  if (taken.lost) showMsg('warn', 'Проект открыт не полностью', { note: `${taken.lost} ${plural(taken.lost, 'слой', 'слоя', 'слоёв')} прочитать не удалось.` });
+  return true;
+}
+
+/**
+ * Открыть другой проект: команда агента, идущая сейчас, к нему не относится — останавливаем
+ * (её правка не ляжет в чужой документ), открытый проект сохраняем до ухода.
+ */
+async function openSoloProject(id, { quiet = false } = {}) {
+  if (!solo || !id) return false;
+  if (id === solo.current) return true;
+  if (solo.switching) return false;
+  solo.switching = true;
+  try {
+    const stopped = state.running ? state.lastUtterance : '';
+    if (state.running) stopAgent();
+    if (state.queue.length) state.queue = [];
+    // прогон дожидаемся до конца: его правка и слова не должны лечь в другой проект
+    for (let i = 0; i < 80 && state.running; i++) await new Promise((r) => setTimeout(r, 50));
+    if (state.running) {
+      showMsg('warn', 'Агент ещё заканчивает команду', {
+        note: 'Другой проект открою, когда он остановится, — иначе его правка легла бы не туда. Попробуйте через пару секунд.',
+        ms: 8000,
+      });
+      return false;
+    }
+    if (!(await flushSoloSave())) {
+      if (!solo.conflict) {
+        showMsg('error', 'Проект не сохранился — другой не открываю', {
+          note: 'Иначе правки этого проекта пропали бы. Сохраните его экспортом в JSON и попробуйте снова.',
+          actions: [{ label: 'Экспорт', primary: true, onClick: () => openExport() }],
+        });
+      }
+      return false;
+    }
+    // сессия проекта: выделение, а ещё полная история и разговор (в теле они урезаны пределом)
+    if (solo.current) {
+      solo.sessions.set(solo.current, {
+        selection: state.selection.slice(), history: state.history, cursor: state.cursor,
+        chat: state.chat, pairs: state.pairs, at: solo.base,
+      });
+    }
+    hideMsg();
+    const ok = await loadSoloProject(id);
+    if (ok && stopped && !quiet) {
+      restoreCommand(stopped);
+      toast(`Команда «${clip(stopped, 50)}» остановлена: открыт другой проект. Текст остался в строке.`, 'plain', 8000);
+    }
+    return ok;
+  } finally { solo.switching = false; }
+}
+
+/** Новый проект: пустой документ, имя «Новый проект» (или своё). */
+async function newSoloProject(name = '') {
+  if (!solo) return false;
+  const doc = createDoc('empty');
+  const nm = cutText(cleanText(name), 120) || SHELL.freshSoloName(solo.store.list());
+  let entry;
+  try { entry = await solo.store.create({ name: nm, payload: { doc, chat: [], pairs: [], history: [], cursor: 0, savedAt: Date.now() } }); }
+  catch (e) { toast(`Проект не создался: ${afterColon(humanError(e))}`, 'error', 9000); return false; }
+  const ok = await openSoloProject(entry.id);
+  if (ok) toast(`Открыт новый проект «${clip(entry.name, 50)}» — имя правится в шапке.`, 'plain', 6000);
+  if (state.sheetOpen === 'projects') redrawSoloProjects();
+  return ok;
+}
+
+async function renameSoloProject(id, name) {
+  const nm = cutText(cleanText(name), 120);
+  if (!solo || !nm) return null;
+  if (id === solo.current) {
+    state.doc = { ...state.doc, meta: { ...state.doc.meta, name: nm } };
+    setDocNameText(docTitle());
+    scheduleSave();
+  }
+  let e = null;
+  try { e = await solo.store.rename(id, nm); } catch (err) { toast(`Имя не сохранилось: ${afterColon(humanError(err))}`, 'error', 8000); }
+  if (state.sheetOpen === 'projects') redrawSoloProjects();
+  return e;
+}
+
+async function duplicateSoloProject(id = solo && solo.current) {
+  if (!solo || !id) return null;
+  if (id === solo.current && !(await flushSoloSave())) return null;
+  let e = null;
+  try { e = await solo.store.duplicate(id); } catch (err) { toast(`Копия не сохранилась: ${afterColon(humanError(err))}`, 'error', 9000); return null; }
+  if (!e) return null;
+  if (state.sheetOpen === 'projects') redrawSoloProjects();
+  toastAction(`Сделал копию «${clip(e.name, 50)}»`, 'Открыть', () => openSoloProject(e.id).then(() => closeSheet()), 8000);
+  return e;
+}
+
+/**
+ * Удалить проект; тело держим до закрытия тоста «Вернуть» (и до перезагрузки). Удалили
+ * открытый — открываем самый свежий из оставшихся, а если их нет — новый пустой.
+ */
+async function deleteSoloProject(id) {
+  if (!solo) return;
+  const wasCurrent = id === solo.current;
+  if (wasCurrent) { clearTimeout(saveTimer); state.dirty = false; }
+  let tomb = null;
+  try { tomb = await solo.store.remove(id); } catch (e) { toast(`Не удалилось: ${afterColon(humanError(e))}`, 'error', 8000); return; }
+  if (!tomb) return;
+  // открытого больше нет: его тело в надгробии — свежее того, что в памяти, не бывает (правки сохранены выше)
+  if (wasCurrent) {
+    if (tomb.payload && state.doc) tomb.payload = { ...tomb.payload, ...savePayload() };
+    solo.current = null;
+    const rest = solo.store.list();
+    if (rest.length) await loadSoloProject(rest[0].id);
+    else await newSoloProject();
+  }
+  solo.tombs.set(id, tomb);
+  if (state.sheetOpen === 'projects') redrawSoloProjects();
+  const t = toastAction(`Удалил «${clip(tomb.entry.name, 50)}»`, 'Вернуть', async () => {
+    const back = solo.tombs.get(id);
+    if (!back) return;
+    solo.tombs.delete(id);
+    try { await solo.store.restore(back); } catch (e) { toast(`Не вернулся: ${afterColon(humanError(e))}`, 'error', 8000); return; }
+    toast(`Вернул «${clip(back.entry.name, 50)}»`, 'plain', 4000);
+    if (state.sheetOpen === 'projects') redrawSoloProjects();
+  }, 10000);
+  // тост закрылся — надгробие больше не нужно
+  setTimeout(() => { if (!t.isConnected) solo.tombs.delete(id); }, 10500);
+}
+
+/** Тост с одной кнопкой («Вернуть», «Открыть»). */
+function toastAction(text, label, onClick, ms = 8000) {
+  const t = toast(text, 'plain', ms);
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 't-action';
+  b.textContent = label;
+  b.addEventListener('click', () => { t.remove(); onClick(); });
+  t.appendChild(b);
+  return t;
+}
+
+/** Другая вкладка: список поменялся или открытый проект сохранён там новее. */
+function onSoloRemote(msg) {
+  if (!solo || !msg) return;
+  if (state.sheetOpen === 'projects') redrawSoloProjects();
+  if (msg.type === 'saved' && msg.id === solo.current && msg.updated_at && (!solo.base || msg.updated_at > solo.base)) {
+    // здесь несохранённых правок нет — просто берём свежую версию; есть — решает человек
+    if (!state.dirty && !state.running && !solo.switching) { reloadSoloFresh(); return; }
+    soloConflict();
+    return;
+  }
+  // имя открытого проекта поменяли в другой вкладке — шапка и документ узнают его сразу
+  const e = solo.current ? solo.store.entry(solo.current) : null;
+  if (e && e.name && state.doc && e.name !== ((state.doc.meta || {}).name || '')) {
+    state.doc = { ...state.doc, meta: { ...state.doc.meta, name: e.name } };
+    if (document.activeElement !== dom.docname) setDocNameText(docTitle());
+  }
+  // открытый проект удалили в другой вкладке — здесь он цел, и сохранение вернёт его в список
+  if (msg.type === 'list' && solo.current && !solo.store.entry(solo.current)) {
+    toast('Этот проект удалили в другой вкладке. Здесь он открыт — первая же правка вернёт его в список.', 'plain', 9000);
+  }
+}
+
+/** Другая вкладка сохранила открытый проект, здесь правок нет: открыть её версию тихо. */
+async function reloadSoloFresh() {
+  const id = solo.current;
+  solo.sessions.set(id, { selection: state.selection.slice() });
+  const view = viewSnapshot();
+  if (!(await loadSoloProject(id))) return;
+  // вид этой вкладки — её: человек смотрел сюда, прыгать нечему
+  if (view) { withView(() => applyView(view)); state.userView = true; rememberView(); updateZoomLabel(stage.view); }
+  toast('Проект обновлён: его сохранили в другой вкладке.', 'plain', 4000);
+}
+
+/** Проект сохранён в другой вкладке позже: молча не затираем — решает человек. */
+function soloConflict() {
+  if (!solo || solo.conflict) return;
+  solo.conflict = { at: Date.now() };
+  showMsg('warn', 'Проект изменён в другой вкладке', {
+    note: 'Там его сохранили позже, чем здесь. Пока вы не решите, эта вкладка его не сохраняет.',
+    role: 'solo-conflict',
+    actions: [
+      { label: 'Открыть свежую версию', primary: true, onClick: async () => {
+        const id = solo.current;
+        solo.conflict = null;
+        state.dirty = false;
+        clearTimeout(saveTimer);
+        hideMsg();
+        solo.current = null;
+        await loadSoloProject(id);
+        toast('Открыта свежая версия проекта.', 'plain', 4000);
+      } },
+      { label: 'Оставить мою', onClick: async () => {
+        solo.conflict = null;
+        hideMsg();
+        state.dirty = true;
+        let r = null;
+        try { r = await solo.store.write(solo.current, savePayload(), { force: true }); } catch { r = null; }
+        if (r && r.ok) { solo.base = r.entry.updated_at; state.dirty = false; toast('Оставил версию этой вкладки — она сохранена.', 'plain', 5000); }
+        else toast('Не сохранилось — попробуйте ещё раз или сохраните экспортом.', 'error', 8000);
+      } },
+    ],
+  });
+}
+
+/** Шторка «Проекты» соло-режима: тот же вид, что у серверной. query — отбор по имени. */
+function openSoloProjects({ query = '' } = {}) {
+  if (!solo) return;
+  solo.query = query;
+  openSheet('Проекты', fillSoloProjects, { size: 'auto', key: 'projects' });
+}
+
+function redrawSoloProjects() {
+  if (!solo || state.sheetOpen !== 'projects') return;
+  const focus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.role : '';
+  openSheet('Проекты', fillSoloProjects, { size: 'auto', key: 'projects' });
+  if (focus === 'projects-search') {
+    const q = dom['sheet-body'] && dom['sheet-body'].querySelector('[data-role="projects-search"]');
+    if (q) { q.focus(); try { q.setSelectionRange(q.value.length, q.value.length); } catch { /* поле без выделения */ } }
+  }
+}
+
+function fillSoloProjects(body) {
+  const store = solo.store;
+  const all = store.list();
+  const warn = store.warn;
+  if (warn === 'memory' || warn === 'local') {
+    const n = document.createElement('div');
+    n.className = 'note';
+    n.dataset.role = 'solo-storage';
+    n.textContent = warn === 'memory'
+      ? 'Проекты не сохраняются в этом браузере: хранилище закрыто для страницы. Работа живёт, пока открыта вкладка, — сохраняйте её экспортом.'
+      : 'Проекты хранятся без IndexedDB — места мало (около 5 МБ на все). Большие сохраняйте экспортом.';
+    body.appendChild(n);
+  }
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'btn subtle wide';
+  // как в серверной шторке (круг 29, п.7): кнопка — действием, новый проект — «Новый проект N»
+  add.textContent = 'Создать проект';
+  add.addEventListener('click', async () => {
+    add.disabled = true;
+    if (await newSoloProject()) closeSheet();
+    else add.disabled = false;
+  });
+  body.appendChild(add);
+  // поиск — когда проектов больше восьми (или пришли с отбором по имени)
+  let list = all;
+  if (all.length > 8 || solo.query) {
+    const q = document.createElement('input');
+    q.className = 'field';
+    q.type = 'search';
+    q.dataset.role = 'projects-search';
+    q.placeholder = 'Найти проект по имени';
+    q.setAttribute('aria-label', 'Найти проект по имени');
+    q.value = solo.query || '';
+    q.addEventListener('input', () => { solo.query = q.value; redrawSoloProjects(); });
+    body.appendChild(q);
+    list = SHELL.filterSoloProjects(all, solo.query || '');
+  }
+  if (!list.length) {
+    const p = document.createElement('div');
+    p.className = 'empty-note';
+    p.textContent = all.length ? 'Проектов с таким именем нет.' : 'Проектов пока нет.';
+    body.appendChild(p);
+    return;
+  }
+  for (const p of list) body.appendChild(soloProjectItem(p));
+}
+
+function soloProjectItem(p) {
+  const current = solo.current;
+  const item = document.createElement('div');
+  item.className = 'pitem';
+  item.dataset.current = String(p.id === current);
+  item.dataset.id = p.id;
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'pname';
+  open.textContent = p.name || 'Без названия';
+  open.title = p.id === current ? 'Открыт сейчас' : 'Открыть проект';
+  open.addEventListener('click', async () => {
+    if (p.id === current) { closeSheet(); return; }
+    if (await openSoloProject(p.id)) closeSheet();
+  });
+  const meta = document.createElement('span');
+  meta.className = 'pwhen';
+  meta.textContent = [p.id === current ? 'открыт' : '', SHELL.soloMetaLine(p, whenWords(p.updated_at || p.created_at))].filter(Boolean).join(' · ');
+  const mk = (label, fn, cls = 'btn ghost small') => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener('click', fn);
+    return b;
+  };
+  const rename = mk('Переименовать', () => {
+    const input = document.createElement('input');
+    input.className = 'field pname-edit';
+    input.value = p.name || '';
+    input.maxLength = 120;
+    input.setAttribute('aria-label', 'Новое имя проекта');
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      const name = cutText(cleanText(input.value), 120);
+      if (save && name && name !== p.name) await renameSoloProject(p.id, name);
+      else redrawSoloProjects();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+    open.replaceWith(input);
+    input.focus();
+    input.select();
+  });
+  const dup = mk('Дублировать', () => duplicateSoloProject(p.id));
+  const del = mk('Удалить', () => {
+    // подтверждение — здесь же, в строке: confirm() в артефакте не работает
+    const ask = document.createElement('div');
+    ask.className = 'pconfirm';
+    ask.setAttribute('role', 'group');
+    ask.setAttribute('aria-label', 'Подтверждение удаления');
+    const q = document.createElement('span');
+    q.textContent = `Удалить «${clip(p.name || 'Без названия', 40)}»? Вернуть можно будет из тоста.`;
+    const yes = mk('Удалить', async () => { yes.disabled = true; await deleteSoloProject(p.id); }, 'btn danger small');
+    const no = mk('Оставить', () => { ask.remove(); acts.hidden = false; del.focus(); });
+    ask.append(q, yes, no);
+    acts.hidden = true;
+    item.appendChild(ask);
+    no.focus();
+  });
+  const head = document.createElement('div');
+  head.className = 'phead';
+  head.append(open);
+  const acts = document.createElement('div');
+  acts.className = 'pacts';
+  acts.append(rename, dup, del);
+  item.append(head, meta, acts);
+  return item;
+}
+
+/** «Открыть проект «…»» словами: один — открываем, несколько — шторка с отбором, нет — слова. */
+async function openProjectByName(name) {
+  if (server) {
+    if (!server.list || !server.list.length) { try { const page = await fetchProjectsPage(); server.list = page.projects; server.listNext = page.next; } catch { /* шторка скажет сама */ } }
+    const f = SHELL.findSoloProject(server.list || [], name);
+    if (f.one) { if (!server.project || f.one.id !== server.project.id) openProject(f.one); toast(`Открыт проект «${clip(f.one.name, 50)}»`, 'plain', 4000); return; }
+    openProjects();
+    if (!f.many.length) showMsg('plain', `Проекта «${clip(name, 40)}» нет`, { note: 'Вот все проекты — выберите в списке.', ms: 7000 });
+    return;
+  }
+  if (!solo) return;
+  const f = SHELL.findSoloProject(solo.store.list(), name);
+  if (f.one) {
+    if (f.one.id === solo.current) { toast(`Проект «${clip(f.one.name, 50)}» уже открыт`, 'plain', 4000); return; }
+    if (await openSoloProject(f.one.id)) toast(`Открыт проект «${clip(f.one.name, 50)}»`, 'plain', 4000);
+    return;
+  }
+  if (f.many.length) { openSoloProjects({ query: name }); return; }
+  openSoloProjects();
+  showMsg('plain', `Проекта «${clip(name, 40)}» нет`, { note: 'Вот все проекты — выберите в списке или создайте новый.', ms: 7000 });
+}
+
+/** Команды таблицы о проектах — на сервере и без него. true — разобрано. */
+async function applyProjectCommand(intent) {
+  switch (intent.kind) {
+    case 'projects':
+      if (server) openProjects(); else openSoloProjects();
+      return true;
+    case 'project-new':
+      if (server) {
+        try {
+          const p = await createProject(intent.name || freshProjectName(server.list));
+          openProject(p);
+          toast(`Открыт новый проект «${clip(p.name || '', 50)}» — имя правится в шапке.`, 'plain', 6000);
+        } catch (e) { toast(`Проект не создался: ${afterColon(humanError(e))}`, 'error', 8000); }
+      } else await newSoloProject(intent.name || '');
+      return true;
+    case 'project-open':
+      await openProjectByName(intent.name);
+      return true;
+    case 'project-rename':
+      if (server) { renameProject(intent.name); setDocNameText(cutText(cleanText(intent.name), 120)); }
+      else if (solo && solo.current) await renameSoloProject(solo.current, intent.name);
+      toast(`Проект называется «${clip(cleanText(intent.name), 50)}»`, 'plain', 4000);
+      return true;
+    case 'project-duplicate':
+      if (server) await duplicateServerProject();
+      else await duplicateSoloProject();
+      return true;
+    default: return false;
+  }
+}
+
+/** Копия проекта на сервере: новый проект с нынешним документом одним запросом. */
+async function duplicateServerProject() {
+  const view = server && server.sync && server.sync.view;
+  if (!view) { toast('Копировать нечего: проект ещё не открыт.', 'error', 6000); return; }
+  const name = SHELL.copySoloName(server.list || [], docTitle());
+  let plan;
+  try { plan = SHELL.rescuePlan(view, { name }); } catch { plan = null; }
+  if (!plan || !plan.whole) { toast('Проект слишком большой для копии одним запросом — сохраните его экспортом и импортируйте.', 'error', 9000); return; }
+  try {
+    const p = await apiJson('/api/projects', { method: 'POST', body: plan.body });
+    toastAction(`Сделал копию «${clip(p.name || name, 50)}»`, 'Открыть', () => openProject(p), 8000);
+  } catch (e) { toast(`Копия не создалась: ${SHELL.rescueFailWords(e)}.`, 'error', 9000); }
+}
+
+/** Импорт в соло-режиме: файл становится новым проектом, открытый остаётся как был. */
+async function importAsSoloProject(taken, fileName) {
+  const name = cutText(cleanText(docName(taken.doc)), 120) || cutText(cleanText(String(fileName || '').replace(/\.json$/i, '')), 120) || SHELL.freshSoloName(solo.store.list());
+  const was = docName(state.doc);
+  let entry;
+  try {
+    entry = await solo.store.create({ name: SHELL.freshSoloName(solo.store.list(), name), payload: { doc: taken.doc, chat: [], pairs: [], history: [], cursor: 0, savedAt: Date.now() } });
+  } catch (e) { showMsg('error', 'Файл не загрузился', { note: `Хранилище браузера не приняло его: ${afterColon(humanError(e))}` }); return; }
+  closeSheet();
+  if (!(await openSoloProject(entry.id))) return;
+  const bits = [`слоёв: ${Object.keys(taken.doc.nodes).length}`, `прежний «${clip(was, 40)}» — в «Проектах»`];
+  if (taken.lost) bits.push(`не прочитал ${taken.lost} ${plural(taken.lost, 'слой', 'слоя', 'слоёв')}`);
+  showMsg(taken.lost ? 'warn' : 'result', `Загрузил «${clip(entry.name, 50)}» новым проектом`, {
+    note: bits.join(' · '),
+    actions: [{ label: 'Проекты', onClick: () => openSoloProjects() }],
+  });
+}
+
 /* -------------------------------- сохранение --------------------------------- */
 
 function scheduleSave() {
@@ -14159,6 +14769,8 @@ async function saveNow() {
     if (state.docRev === rev) { state.dirty = false; return; }
     rearmSave();   // правка новее записанной: флаг не снимаем, запись назначаем заново
   };
+  // круг 46: открыт проект соло-режима — пишем в хранилище проектов, прежние ключи не трогаем
+  if (solo && solo.current) { await saveSoloNow(payload, done); return; }
   if (db) {
     saveFlight = true;
     try {
@@ -14196,6 +14808,13 @@ async function saveNow() {
 function saveOnExit() {
   // круг 22: журнал реплики дописывается сейчас, не дожидаясь паузы в 200 мс
   if (server) { if (server.sync) server.sync.flush(); return; }
+  if (solo && solo.current) {
+    try { solo.store.setView(solo.current, viewSnapshot(), activeArtboardId()); } catch { /* вид не важнее работы */ }
+    if (!state.dirty || state.saveBlocked || solo.conflict) return;
+    clearTimeout(saveTimer);
+    try { solo.store.saveOnExit(solo.current, savePayload()); } catch { /* места нет — осталась последняя запись */ }
+    return;
+  }
   if (!state.dirty || state.saveBlocked) return;
   clearTimeout(saveTimer);
   const payload = savePayload();
@@ -14205,6 +14824,55 @@ function saveOnExit() {
     const p = db.doc('docs/current').set(payload);
     if (p && typeof p.catch === 'function') p.catch(() => { /* не успели — осталась копия рядом */ });
   } catch { /* хранилище не ответило — осталась копия в памяти браузера */ }
+}
+
+/**
+ * Запись открытого проекта соло-режима. Проект сохранили в другой вкладке позже нашей
+ * последней записи — молча не затираем: плашка «Проект изменён в другой вкладке».
+ */
+async function saveSoloNow(payload, done) {
+  if (solo.conflict) {
+    // плашку закрыли крестиком, не решив: правка не сохраняется — напоминаем той же плашкой
+    if (!dom.dockmsg || dom.dockmsg.hidden || dom.dockmsg.dataset.role !== 'solo-conflict') { solo.conflict = null; soloConflict(); }
+    return;
+  }
+  saveFlight = true;
+  let r = null;
+  let err = null;
+  try { r = await solo.store.write(solo.current, payload, { base: solo.base }); }
+  catch (e) { err = e; }
+  finally { saveFlight = false; }
+  if (r && r.conflict) { soloConflict(); return; }
+  if (r && r.ok) {
+    solo.base = r.entry.updated_at;
+    solo.failWarned = false;
+    done();
+    if (r.big && !solo.bigWarned) {
+      solo.bigWarned = true;
+      toast('Проект большой для памяти браузера без IndexedDB — сохраните его экспортом, чтобы не потерять.', 'plain', 10000);
+    }
+    if (state.sheetOpen === 'projects') redrawSoloProjects();
+    return;
+  }
+  state.dirty = true;
+  if (!solo.failWarned) {
+    solo.failWarned = true;
+    showMsg('error', 'Проект не сохраняется', {
+      note: `Хранилище браузера не приняло запись${err ? `: ${afterColon(humanError(err))}` : ''}. Сохраните проект файлом — он не пропадёт.`,
+      actions: [{ label: 'Экспорт', primary: true, onClick: openExport }],
+    });
+  }
+}
+
+/** Прежний документ не открылся, человек выбрал «Начать заново»: нынешний — первым проектом. */
+async function startSoloAfterBlock() {
+  try {
+    const entry = await solo.store.create({ name: docName(state.doc) || SHELL.freshSoloName(solo.store.list()), payload: savePayload() });
+    try { const ls = lsOrNull(); if (ls) ls.setItem(SOLO_MIGRATED_KEY, entry.id); } catch { /* метка не легла */ }
+    solo.current = entry.id;
+    solo.base = entry.updated_at;
+    solo.store.setCurrent(entry.id);
+  } catch { /* хранилище не приняло — скажет первая запись */ }
 }
 
 /** Копия из памяти браузера: сырой текст (для копии непрочитанного) и разобранные данные. */
@@ -14329,6 +14997,8 @@ function blockSaving(payload, why, from) {
         onClick: () => {
           state.saveBlocked = null;
           hideMsg();
+          // круг 46: проектов ещё нет — нынешний документ становится первым, прежняя копия цела
+          if (solo && !solo.current) startSoloAfterBlock();
           scheduleSave();
           toast('Дальше сохраняю как обычно. Копия прежнего документа осталась на месте.', 'plain', 7000);
         },

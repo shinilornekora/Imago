@@ -342,6 +342,18 @@ button, input, textarea { font: inherit; color: inherit; }
 .pitem[data-current="true"] .pname { font-weight: 600; cursor: default; }
 .pname-edit { flex: 1; min-width: 0; }
 .pwhen { font-size: var(--t-xs); color: var(--muted); }
+/* Круг 46: проекты без сервера — действия строкой под именем, подтверждение удаления там же
+   (confirm() в артефакте не работает). Кнопки мелкие и тихие: главное в строке — имя. */
+.pacts { display: flex; flex-wrap: wrap; gap: 2px; margin: 2px 0 0 -6px; }
+.pacts .btn.small { padding: 3px 6px; }
+.pacts[hidden] { display: none; }
+.pconfirm {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px;
+  padding: 6px 8px; border-radius: 8px; font-size: var(--t-sm);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+}
+.pconfirm > span { flex: 1 1 100%; min-width: 0; }
 /* правка ещё не подтверждена сервером — своя пилюля рядом с «без следа на экране» */
 .hfoot .tagpill.wait { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 
@@ -1450,6 +1462,8 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 /* Замечание раскладки после ручной правки — предупреждение, не авария (п.5). */
 .toast[data-kind="warn"] { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
 .toast .t-action { margin-left: auto; color: var(--accent); cursor: pointer; white-space: nowrap; }
+button.t-action { background: none; border: 0; padding: 0; font: inherit; font-weight: 600; }
+button.t-action:hover { text-decoration: underline; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } }
 
 /* Предпросмотр варианта на холсте: пока он виден, холст показывает не документ —
