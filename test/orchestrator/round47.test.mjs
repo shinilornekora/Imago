@@ -38,7 +38,7 @@ const userParts = (body) => {
 
 test('круг 47: образ и вердикт — в result; стадии прежними ключами; снимок — картинкой модели', async (t) => {
   const document = await startDocument();
-  const llm = await startFakeLlm({ plan: PLAN_CREATE, direction: DIRECTION, tree: [TREE_OK, TREE_OK], critique: CRIT_BAD });
+  const llm = await startFakeLlm({ plan: PLAN_CREATE, direction: DIRECTION, tree: [TREE_OK, TREE_OK], critique: [CRIT_BAD, { ...CRIT_BAD, score: 7, verdict: 'ok', issues: [], fixes: [] }] });
   const orch = await startOrch({ document, llm: { baseUrl: llm.base, vision: true }, art: { fakeShot: SHOT } });
   t.after(async () => { await orch.close(); await document.close(); await llm.close(); });
   const p = await createProject(document);
@@ -50,8 +50,19 @@ test('круг 47: образ и вердикт — в result; стадии пр
   assert.equal(res.critique.score, 4);
   assert.equal(res.critique.seen, 'image');
   assert.equal(res.critique.revised, true, 'доработка легла');
+  // круг 52: второй взгляд на доработку — в result и в трассе
+  assert.equal(res.critique.after.score, 7);
+  assert.equal(res.critique.recheck, 'better');
   const names = llm.completions().map((c) => c.schema);
-  assert.deepEqual(names, ['plan', 'direction', 'tree', 'critique', 'tree']);
+  assert.deepEqual(names, ['plan', 'direction', 'tree', 'critique', 'tree', 'critique']);
+  let tr = null;
+  for (let i = 0; i < 50 && !tr; i++) {
+    tr = orch.traces.recent().find((x) => x.tx_id === res.tx_id) || null;
+    if (!tr) await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(tr, 'трасса записана');
+  assert.equal(tr.critique.after_score, 7);
+  assert.equal(tr.critique.recheck, 'better');
   const crit = llm.completions().find((c) => c.schema === 'critique');
   const parts = userParts(crit.body);
   assert.ok(Array.isArray(parts), 'реплика критика — частями');
