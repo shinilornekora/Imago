@@ -693,14 +693,14 @@ export function rescueOrphanHint(p, hints = []) {
   if (!Number.isFinite(at)) return null;
   const fits = (Array.isArray(hints) ? hints : []).filter((h) => h && p.id !== h.keep && cleanText(p.name) === cleanText(h.name)
     && at >= (Number(h.since) || 0) - 60 * 1000 && at <= (Number(h.at) || Date.now()) + 1000);
-  // две попытки с одним именем: окна могут перекрыться — берём ту, что началась позже всех до создания
-  // проекта (ближайшую), иначе сирота второй попытки получила бы ключ первой и DELETE ответил бы 409
+  // две попытки с одним именем: окна могут перекрыться — берём ту, чьё начало ближе всех ко времени
+  // создания проекта (первая попытка создаётся сразу после начала). Не «последнюю до создания»: часы
+  // сервера, отстающие на секунды, отдали бы сироте второй попытки ключ первой (критик кода r45c)
   let best = null;
+  let bestD = Infinity;
   for (const h of fits) {
-    const since = Number(h.since) || 0;
-    if (!best) { best = h; continue; }
-    const b = Number(best.since) || 0;
-    if ((since <= at && (b > at || since > b)) || (since > at && b > at && since < b)) best = h;
+    const d = Math.abs(at - (Number(h.since) || 0));
+    if (d < bestD) { best = h; bestD = d; }
   }
   return best;
 }

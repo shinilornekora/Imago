@@ -187,6 +187,10 @@ test('r45 (S2–S4): окно сироты — ровно на краях; creat
   assert.equal(SHELL.rescueOrphanHint(row(t0 + 1000), [h1, h2]).createId, 'k1');
   assert.equal(SHELL.rescueOrphanHint(row(t0 + 31000), [h1, h2]).createId, 'k2');
   assert.equal(SHELL.rescueOrphanHint(row(t0 + 31000), [h2, h1]).createId, 'k2', 'от порядка подсказок не зависит');
+  // часы сервера отстают на 3 с: сирота второй попытки «создана» до её начала — всё равно её ключ
+  assert.equal(SHELL.rescueOrphanHint(row(t0 + 27000), [h1, h2]).createId, 'k2');
+  assert.equal(SHELL.rescueOrphanHint(row(t0 + 14000), [h1, h2]).createId, 'k1', 'ближе к первой — первая');
+  assert.equal(SHELL.rescueOrphanHint(row(t0 + 16000), [h1, h2]).createId, 'k2', 'ближе ко второй — вторая');
 });
 
 test('r45 (S9): прежний оркестратор без полей document/llm — знак зелёный', () => {
