@@ -3943,10 +3943,12 @@ export function artSummary(direction, critique, opts = {}) {
     && Number.isFinite(Number(c.score)) ? Math.round(Math.max(0, Math.min(10, Number(c.score))) * 10) / 10 : null;
   if (c && c.seen === 'signals') {
     const n = Array.isArray(c.signals) ? c.signals.length : 0;
-    const low = (x) => (x ? `${x.charAt(0).toLowerCase()}${x.slice(1)}` : '');
-    verdict = c.revised ? `Самопроверка: ${n} ${plural(n, 'примета', 'приметы', 'примет')} шаблона → доработал${first ? `: ${low(first)}` : ''}`
-      : c.verdict === 'revise' ? `Самопроверка: ${n} ${plural(n, 'примета', 'приметы', 'примет')} шаблона, доработка не легла — оставил собранное`
-        : n ? `Самопроверка: почти без шаблона — ${low(first)}` : 'Самопроверка: шаблонных ходов не нашёл';
+    // приметы — короткой формой (полная фраза — для модели); старый сервер short не шлёт — первая фраза
+    const shorts = (Array.isArray(c.short) ? c.short : []).map((x) => str(x, 40)).filter(Boolean);
+    const what = shorts.length ? shorts.slice(0, 2).join(', ') : (first ? `${first.charAt(0).toLowerCase()}${first.slice(1)}` : '');
+    verdict = c.revised ? `Самопроверка: ${what || 'шаблонные ходы'} → доработал`
+      : c.verdict === 'revise' ? `Самопроверка: ${what || 'шаблонные ходы'} — доработка не легла, оставил собранное`
+        : n ? `Самопроверка: в целом не шаблонно; ${what}` : 'Самопроверка: шаблонных ходов не нашёл';
   } else if (c && score !== null) {
     const s10 = String(score).replace('.', ',');
     verdict = c.revised ? `Первая сборка — ${s10} из 10 → доработал${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}`

@@ -344,7 +344,8 @@ test('круг 47: без зрения или без снимка модель-�
   assert.ok(res.critique.fixes.length);
   assert.equal(res.critique.revised, true);
   assert.match(provider.calls[provider.calls.length - 1].messages.at(-1).content, /Самопроверка нашла/);
-  assert.match(artSummary(null, res.critique).verdict, /^Самопроверка: \d приметы? шаблона → доработал/);
+  assert.match(artSummary(null, res.critique).verdict, /^Самопроверка: [а-яё ,]+ → доработал$/);
+  assert.ok(res.critique.short.length && res.critique.short.every((x) => x.length <= 40), 'человеку — короткие формы примет');
 });
 
 test('круг 47: арт-директор сломался — команда как раньше; критик без оценки — собранное остаётся', async () => {
@@ -502,7 +503,8 @@ test('круг 47: карточка итога — образ, образцы п
   assert.equal(artSummary(normalizeDirection(DIRECTION), { score: 9, verdict: 'ok', seen: 'image' }, { blocked: true }).verdict, '');
   assert.equal(artSummary(null, { seen: 'signals', signals: [], verdict: 'ok' }).verdict, 'Самопроверка: шаблонных ходов не нашёл');
   assert.equal(artSummary(null, { seen: 'signals', signals: ['Почти весь текст по центру'], issues: ['Почти весь текст по центру'], verdict: 'ok' }).verdict,
-    'Самопроверка: почти без шаблона — почти весь текст по центру');
+    'Самопроверка: в целом не шаблонно; почти весь текст по центру');
+  assert.equal(artSummary(null, { seen: 'signals', signals: ['x'], short: ['всё по центру'], verdict: 'ok' }).verdict, 'Самопроверка: в целом не шаблонно; всё по центру');
   assert.match(artSummary(null, { seen: 'signals', signals: ['a', 'b'], verdict: 'revise' }).verdict, /доработка не легла/);
   assert.deepEqual(artSummary({ fonts: { display: 'Prata', text: 'Prata' } }, null).families, ['Prata'], 'один шрифт — один образец');
 });
@@ -574,4 +576,35 @@ test('круг 47: при арт-направлении правила 4 и 5 п
   assert.match(p2.calls.find((c) => c.schema === 'tree').messages[0].content, /Предпочитай токены/);
   // схема дерева принимает style объектом — грамматика локальной модели его не запрещает
   assert.ok(JSON.stringify(SCHEMAS.tree.schema).includes('"fontSize"'));
+});
+
+test('круг 47: кегль акцента — отдельным полем fontSize (12…96) только при образе; мусорные числа стиля не роняют команду', async () => {
+  const doc = empty();
+  const d = normalizeDirection(DIRECTION);
+  const { tree } = applyDirection({ type: 'frame', children: [
+    { type: 'text', text: '240', style: 'display', fontSize: 300 },
+    { type: 'text', text: 'мало', style: 'body', fontSize: 2 },
+  ] }, d, doc, { asArtboard: true });
+  assert.equal(tree.children[0].style.fontSize, 96);
+  assert.equal(tree.children[0].style.font, 'Prata');
+  assert.equal(tree.children[0].fontSize, undefined);
+  assert.equal(tree.children[1].style.fontSize, 12);
+  assert.deepEqual(SCHEMAS.tree.schema.properties.style, { type: 'string' }, 'style в схеме — снова строка: без объектов внутри anyOf');
+  // мусор в style от модели (объект с негодным кеглем) — команда не падает
+  for (const bad of ['x', -5, null, 1e9]) {
+    const t = clone(TREE);
+    t.children[0].style = { token: 'display', fontSize: bad };
+    const provider = fake({ plan: PLAN, tree: t });
+    const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, direction: false, critic: false });
+    assert.equal(res.error, undefined, `${bad}: ${JSON.stringify(res.error)}`);
+    const st = byName(res.preview.doc, 'Заголовок').style;
+    if (typeof st === 'object' && 'fontSize' in st) assert.ok(st.fontSize >= 6 && st.fontSize <= 400);
+  }
+  // без образа поле fontSize ничего не меняет
+  const t2 = clone(TREE);
+  t2.children[0].fontSize = 80;
+  const p2 = fake({ plan: PLAN, tree: t2 });
+  const r2 = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider: p2, engine: core, direction: false, critic: false });
+  assert.equal(r2.error, undefined);
+  assert.equal(core.resolveTextStyle(r2.preview.doc, byName(r2.preview.doc, 'Заголовок')).fontSize, 34);
 });

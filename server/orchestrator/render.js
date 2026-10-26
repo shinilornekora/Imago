@@ -102,21 +102,26 @@ export function createRenderer(opts = {}) {
   }
 
   /**
-   * Файлы семейства в нужных начертаниях (только существующих у семейства). Загрузка общая:
-   * ждущие команды делят один промис; общий срок снимка её не обрывает — она доходит в фоне и
-   * кладёт файлы в кеш (или неудачу — на failTtl).
+   * Файлы семейства в нужных начертаниях (только существующих у семейства). Кеш — по начертанию
+   * («Manrope:700»): разные наборы весов не скачиваются дважды. Загрузка общая: ждущие команды
+   * делят промис; общий срок снимка её не обрывает — она доходит в фоне и кладёт файлы в кеш
+   * (или неудачу семейства — на failTtl).
    */
   function family(name, want) {
     const f = catalogFont(name);
     if (!f) return Promise.resolve([]);
-    const ws = [...new Set((want && want.length ? want : f.weights).map((w) => nearestWeight(f.family, w)))].sort((a, b) => a - b);
-    const key = `${f.family}:${ws.join(',')}`;
     if ((failed.get(f.family) || 0) > now()) return Promise.resolve([]);
+    const ws = [...new Set((want && want.length ? want : [400]).map((w) => nearestWeight(f.family, w)))].sort((a, b) => a - b);
+    return Promise.all(ws.map((w) => face(f, w))).then((lists) => lists.flat());
+  }
+
+  function face(f, w) {
+    const key = `${f.family}:${w}`;
     let p = fonts.get(key);
     if (p) { fonts.delete(key); fonts.set(key, p); return p; }   // свежесть для вытеснения
     p = (async () => {
       try {
-        const url = `${CSS_ORIGIN}?family=${encodeURIComponent(f.family).replace(/%20/g, '+')}:wght@${ws.join(';')}`;
+        const url = `${CSS_ORIGIN}?family=${encodeURIComponent(f.family).replace(/%20/g, '+')}:wght@${w}`;
         const css = (await get(url, (r) => readCapped(r, 256 * 1024))).toString('utf8');
         const files = [...css.matchAll(/url\((https:\/\/fonts\.gstatic\.com\/[^)\s'"]+\.ttf)\)/g)].map((m) => m[1]);
         const out = [];
@@ -139,7 +144,8 @@ export function createRenderer(opts = {}) {
       }
     })();
     fonts.set(key, p);
-    while (fonts.size > FONT_CACHE_FAMILIES) fonts.delete(fonts.keys().next().value);
+    // предел — по начертаниям: у семейства их на доске обычно 1-3
+    while (fonts.size > FONT_CACHE_FAMILIES * 3) fonts.delete(fonts.keys().next().value);
     return p;
   }
 

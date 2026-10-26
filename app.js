@@ -161,6 +161,8 @@ function stageErrorNote(e) {
  */
 const docFontsSeen = new Set();
 let docFontsDoc = null;
+/** семейство → промис «стили пришли» (load/error у <link>): до него FontFaceSet семейства не знает */
+const docFontsReady = new Map();
 function ensureDocFonts(doc) {
   if (!doc || doc === docFontsDoc || typeof document === 'undefined' || !document.head) return;
   docFontsDoc = doc;
@@ -176,7 +178,10 @@ function ensureDocFonts(doc) {
       link.href = href;
       link.dataset.font = f.family;
       // не пришло (нет сети) — забыть, чтобы следующий документ попробовал снова
-      link.addEventListener('error', () => { docFontsSeen.delete(f.family); docFontsDoc = null; link.remove(); }, { once: true });
+      docFontsReady.set(f.family, new Promise((resolve) => {
+        link.addEventListener('load', () => resolve(true), { once: true });
+        link.addEventListener('error', () => { docFontsSeen.delete(f.family); docFontsDoc = null; docFontsReady.delete(f.family); link.remove(); resolve(false); }, { once: true });
+      }));
       document.head.appendChild(link);
     }
   } catch { /* без шрифтов холст нарисует запасным */ }
@@ -192,14 +197,18 @@ async function renderForCritic({ doc, geo, artboardId }) {
   // рисует настоящий шрифт в чужих переносах строк
   try {
     if (document.fonts && typeof document.fonts.load === 'function') {
-      const fams = fontsInDoc(doc).filter((f) => catalogFont(f));
-      // уже на странице — раскладка черновика посчитана ими же, перемерять (весь документ) незачем
-      const missing = fams.filter((f) => { try { return !document.fonts.check(`16px "${f}"`, 'Аа0'); } catch { return true; } });
+      const fams = fontsInDoc(doc).map((f) => catalogFont(f)).filter(Boolean).map((f) => f.family);
+      // пока стили не разобраны, check() для неизвестного семейства — true (по спецификации): сначала
+      // ждём сами стили, потом начертания; уже готовые на странице — перемерять (весь документ) незачем
+      const pending = fams.filter((f) => docFontsReady.has(f));
+      const missing = fams.filter((f) => { try { return pending.includes(f) || !document.fonts.check(`16px "${f}"`, 'Аа0'); } catch { return true; } });
       if (missing.length) {
         await Promise.race([
-          Promise.all(missing.map((f) => document.fonts.load(`16px "${f}"`, 'Аа0').catch(() => null))),
+          Promise.all(missing.map((f) => Promise.resolve(docFontsReady.get(f))
+            .then(() => document.fonts.load(`16px "${f}"`, 'Аа0')).catch(() => null))),
           new Promise((r) => setTimeout(r, 4000)),
         ]);
+        for (const f of missing) if (document.fonts.check(`16px "${f}"`, 'Аа0')) docFontsReady.delete(f);
         await new Promise((r) => setTimeout(r, 0));
         geo = CORE.solve(doc);
       }

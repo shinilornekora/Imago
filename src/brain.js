@@ -888,8 +888,10 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
       color: colorSchema(),
       radius: scaleValueSchema(),
       text: { type: 'string' },
-      // круг 47: стиль — токен строкой либо {token, fontSize} (крупный акцент при арт-направлении)
-      style: { anyOf: [{ type: 'string' }, { type: 'object', properties: { token: { type: 'string' }, fontSize: { type: 'number' } }, required: ['token'] }] },
+      style: { type: 'string' },
+      // круг 47: кегль крупного акцента — отдельным числом (объект внутри anyOf на шести уровнях
+      // раздувал бы грамматику llama.cpp); берётся только при арт-направлении, 12…96
+      fontSize: { type: 'number' },
       align: { type: 'string', enum: ['left', 'center', 'right'] },
       src: { type: 'string' },
       // круг 36 (SPEC §11): тень, прозрачность, состояния и движение
@@ -946,7 +948,8 @@ const TREE_HINT = `{
   fill?: string,                       // имя токена цвета или #rrggbb
   stroke?: string, color?: string, radius?: "radii.<шаг>" | number,   // скругление — ссылкой на шаг шкалы скруглений
   text?: string,                       // только для type:"text"
-  style?: string | {token: string, fontSize: number},  // имя типографического токена, только для type:"text"; объект — только при АРТ-НАПРАВЛЕНИИ, 1-2 крупным акцентам
+  style?: string,                      // имя типографического токена, только для type:"text"
+  fontSize?: number,                   // ТОЛЬКО при АРТ-НАПРАВЛЕНИИ и только 1-2 крупным акцентам: кегль до 96
   align?: "left"|"center"|"right",   // выключка текста
   src?: string,                        // только для type:"image"
   shadow?: "shadow.sm"|"shadow.md"|"shadow.lg"|"none", opacity?: number,   // тень и прозрачность в покое
@@ -1988,7 +1991,7 @@ function directedRules() {
   return DSL_RULES
     .replace(/^4\. Цвета .*$/m, '4. Цвета (fill, stroke, color) — #rrggbb из палитры АРТ-НАПРАВЛЕНИЯ ниже. Токены цвета документа в этом макете не пиши.')
     .replace(/^5\. Типографика .*$/m, '5. Типографика текста — style: имя типографического токена ИЗ СПИСКА ВЫШЕ; одному-двум главным акцентам —'
-      + ' style:{token:"display", fontSize:<до 96>}. Остальным fontSize числом не пиши.');
+      + ' ещё поле fontSize:<до 96> рядом со style:"display". Остальным fontSize не пиши.');
 }
 
 const CONTENT_RULES = `СОДЕРЖИМОЕ
@@ -7390,6 +7393,20 @@ function normStyle(raw, doc, warn, what, opts = {}) {
   const names = Object.keys(types);
   const edit = opts.mode === 'edit';
   if (raw && typeof raw === 'object') {
+    // круг 47: числовые поправки стиля от модели — числом и в границах, иначе ядро отвергнет весь
+    // узел (bad-node) и с ним команду; негодное — мимо, не повод для аварии
+    const LIM = { fontSize: [6, 400], fontWeight: [100, 900], lineHeight: [0, 800], letterSpacing: [-50, 100] };
+    let fixed = null;
+    for (const k of Object.keys(LIM)) {
+      if (!(k in raw)) continue;
+      const v = raw[k];
+      const ok = typeof v === 'number' && Number.isFinite(v) && v >= LIM[k][0] && v <= LIM[k][1];
+      if (ok) continue;
+      if (!fixed) fixed = { ...raw };
+      if (typeof v === 'number' && Number.isFinite(v)) fixed[k] = Math.min(LIM[k][1], Math.max(LIM[k][0], v));
+      else delete fixed[k];
+    }
+    if (fixed) return normStyle(fixed, doc, warn, what, opts);
     // {token:"h1", fontWeight:700}: токен — по тем же правилам, свои поправки остаются
     if (raw.token === undefined || raw.token === null || raw.token === '') return raw;
     const token = normStyle(String(raw.token), doc, warn, what, opts);
@@ -10768,8 +10785,9 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
       .filter((b) => b && b.type === 'frame' && b.role !== 'library' && typeof b.fill === 'string' && HEX_RE.test(b.fill.trim()));
     if (own.length) {
       const names = own.slice(0, 3).map((b) => `«${cutText(strOf(b.name) || 'Доска', 40)}»`).join(', ');
-      note(`${own.length === 1 ? `Экран ${names} собран` : `Экраны ${names}${own.length > 3 ? ' и другие' : ''} собраны`} в собственной палитре`
-        + ' — цвета темы документа их не перекрасят. Чтобы перекрасить такой экран, скажите «перекрась экран … в тёмное»');
+      note(own.length === 1
+        ? `Экран ${names} собран в собственной палитре — цвета темы документа его не перекрасят. Чтобы перекрасить его, скажите «перекрась экран ${names.slice(1, -1)} в тёмное»`
+        : `Экраны ${names}${own.length > 3 ? ' и другие' : ''} собраны в собственной палитре — цвета темы документа их не перекрасят. Чтобы перекрасить такой экран, скажите «перекрась экран … в тёмное»`);
     }
   }
   return ops;
@@ -11762,7 +11780,7 @@ export function directionBrief(dir, { forCritic = false } = {}) {
       + ` плашки ${P.surface}, текст ${P.text}, подписи ${P.muted}, кнопки и акценты ${P.accent} / ${P.accent2},`
       + ` текст на них ${P.onAccent}. Токены цвета документа (canvas, surface, text, accent…) здесь не пиши.`,
     'ШРИФТЫ ставит приложение: в style пиши токен как обычно (display, title — заголовки; heading, body, caption — текст).'
-      + ' Одному-двум главным акцентам (крупная цифра, слово-заголовок) можно style:{token:"display", fontSize:<до 96>}.',
+      + ' Одному-двум главным акцентам (крупная цифра, слово-заголовок) можно поле fontSize:<до 96> рядом со style:"display".',
     'МОТИВЫ воплоти слоями тем, что есть в макете: rect/ellipse (плашка, пятно, полоса) с rotate, градиент в fill'
       + ` ("linear-gradient(135deg, ${P.accent}, ${P.accent2})"), обводка stroke, тень, крупная цифра,`
       + ' иллюстрация предмета {type:"illustration", name, size:{w,h}, draw:"…"}. Слоёв поверх друг друга нет:'
@@ -11840,7 +11858,7 @@ export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
   let biggest = 0;
   const scan = (n, d) => {
     if (!n || typeof n !== 'object' || d > MAX_TREE_DEPTH + 2) return;
-    if (strOf(n.type).toLowerCase() === 'text') biggest = Math.max(biggest, sizeOf(n).size);
+    if (strOf(n.type).toLowerCase() === 'text') biggest = Math.max(biggest, sizeOf(n).size, typeof n.fontSize === 'number' ? Math.min(96, n.fontSize) : 0);
     if (Array.isArray(n.children)) for (const c of n.children) scan(c, d + 1);
   };
   scan(out, 0);
@@ -11854,6 +11872,13 @@ export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
     }
     const fillHex = typeof n.fill === 'string' && HEX6.test(hexNorm(n.fill)) ? hexNorm(n.fill) : under;
     if (type === 'text') {
+      // кегль крупного акцента — отдельным полем дерева (§14.1): в стиль, 12…96
+      if (typeof n.fontSize === 'number' && Number.isFinite(n.fontSize)) {
+        const fs = Math.round(Math.min(96, Math.max(12, n.fontSize)));
+        const base = typeof n.style === 'string' ? { token: n.style.trim() } : n.style && typeof n.style === 'object' ? { ...n.style } : { token: 'display' };
+        n.style = { ...base, fontSize: fs };
+      }
+      delete n.fontSize;
       const st = n.style;
       const { token, own, size } = sizeOf(n);
       const mine = st && typeof st === 'object' && catalogFont(strOf(st.font));
@@ -12056,6 +12081,21 @@ const SIGNAL_FIXES = [
   [/Цвета решения/, 'Заливки и цвета текста — #rrggbb из палитры решения вместо токенов документа'],
   [/одинаковых светлых карточек/, 'Первую карточку выделить: заливка акцентом решения и крупная цифра; остальные — плашками без фона'],
 ];
+/** Примета словами для человека — коротко (полная фраза — модели), SPEC §14.5. */
+const SIGNAL_SHORT = [
+  [/шрифтом по умолчанию/, 'шрифт по умолчанию'],
+  [/Шрифт заголовков из решения/, 'шрифт образа не стоит'],
+  [/Нет крупного акцента/, 'нет крупного акцента'],
+  [/выровнен по центру/, 'всё по центру'],
+  [/Ни одного графического мотива/, 'нет графического мотива'],
+  [/Цвета решения/, 'палитра образа не использована'],
+  [/одинаковых светлых карточек/, 'одинаковые карточки подряд'],
+];
+export function signalShort(sig) {
+  for (const [re, short] of SIGNAL_SHORT) if (re.test(sig)) return short;
+  return cutText(String(sig || ''), 40);
+}
+
 function signalFixes(signals) {
   const out = [];
   for (const sig of signals) for (const [re, fix] of SIGNAL_FIXES) if (re.test(sig) && !out.includes(fix)) out.push(fix);
@@ -12120,6 +12160,7 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
     const crit = {
       score: null, generic: signals.length >= SIGNALS_REVISE, verdict: signals.length >= SIGNALS_REVISE ? 'revise' : 'ok',
       issues: signals.slice(0, 5), fixes: signalFixes(signals), praise: '', seen: 'signals', signals,
+      short: signals.map(signalShort),
     };
     if (crit.verdict === 'revise' && !crit.fixes.length) crit.verdict = 'ok';
     emit('critic', signals.length ? `Примет шаблона: ${signals.length}${crit.verdict === 'ok' ? ' — оставляю' : ''}` : 'Примет шаблона нет',
@@ -12623,7 +12664,7 @@ async function runCommandCore(options = {}) {
       { role: 'user', content: userTurn },
     ];
 
-    emit('generate', intent === 'create' ? 'Строю дерево макета' : intent === 'theme' ? 'Подбираю токены'
+    emit('generate', intent === 'create' ? (direction ? `${cutText(direction.concept, 70)} · ${direction.fonts.display} + ${direction.fonts.text}` : 'Строю дерево макета') : intent === 'theme' ? 'Подбираю токены'
       : intent === 'illustration' ? 'Рисую иллюстрацию' : 'Собираю правки');
     let data = await ask(schemaEntry, messages, { stage: 'generate', ...(intent === 'illustration' ? { maxTokens: ART_TOKENS } : {}) });
 

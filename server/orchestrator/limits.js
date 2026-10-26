@@ -166,7 +166,7 @@ export const SSE_PING_MS = 15000;
  * TTF с Google Fonts), сколько семейств держит кеш воркера, потолок файла шрифта.
  */
 export const RENDER_FONT_TIMEOUT_MS = 8000;
-export const FONT_CACHE_FAMILIES = 12;
+export const FONT_CACHE_FAMILIES = 12;   // кеш снимка держит до 3 начертаний на семейство
 export const RENDER_FONT_MAX_BYTES = 4 * 1024 * 1024;
 /** Общий срок снимка (все шрифты и рисование); дольше — критик смотрит описание доски. */
 export const RENDER_DEADLINE_MS = 12000;
