@@ -584,8 +584,8 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
           if (!cid) throw badRequest('create_id: строка — удаляется только пустой проект своего создания', { detail: { param: 'create_id' } });
           const r = await viaStorage(dslts.deleteEmpty(id, cid));
           if (r.status === 'not_found') throw notFound();
-          if (r.status === 'create_id') throw new DocError(409, 'conflict', 'проект создан не этим create_id — удалить его так нельзя', { retryable: false, detail: { cause: 'create_id', param: 'create_id' } });
-          if (r.status === 'not_empty') throw new DocError(409, 'conflict', 'в проекте уже есть правки — пустым он не считается и не удаляется', { retryable: false, detail: { cause: 'not_empty' } });
+          if (r.status === 'create_id') throw new DocError(409, 'conflict', 'проект создан не этим create_id или это не макет (библиотека) — удалить его так нельзя', { retryable: false, detail: { cause: 'create_id', param: 'create_id' } });
+          if (r.status === 'not_empty') throw new DocError(409, 'conflict', 'в проекте уже есть правки или на него ссылается импорт — пустым он не считается и не удаляется', { retryable: false, detail: { cause: 'not_empty' } });
           res.writeHead(204, { 'Cache-Control': 'no-store' });
           res.end();
         }, MAX_TRACE_BYTES);
