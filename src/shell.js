@@ -101,12 +101,30 @@ export function decideAgentMode({ inProject = false, health = null, hasProvider 
   return hasProvider ? 'browser' : 'off';
 }
 
+/**
+ * Круг 45 (UX r44): знак агента в шапке — в тон тосту. Сервер агента выбран, но документа он не
+ * видит (или модель на нём не отвечает) — точка жёлтая и подпись с причиной, а не зелёное
+ * «агент: сервер» рядом с тостом «Сервер агента не видит документ».
+ * @returns {{dot: 'on'|'off'|'error', words: string}}
+ */
+export function agentBadge(mode, health) {
+  const h = health && health.ok === true ? health : null;
+  if (mode === 'server') {
+    // прежний оркестратор полей document/llm не отдаёт — молчание не считаем поломкой (критик r45 S9)
+    if (h && h.document !== undefined && h.document !== 'up') return { dot: 'off', words: 'агент: сервер без документа' };
+    if (h && h.llm !== undefined && h.llm !== 'up') return { dot: 'off', words: 'агент: сервер без модели' };
+    return { dot: 'on', words: AGENT_MODE_WORDS.server };
+  }
+  if (mode === 'browser') return { dot: 'off', words: AGENT_MODE_WORDS.browser };
+  return { dot: 'error', words: AGENT_MODE_WORDS.off };
+}
+
 /** Подробности о режиме — для подсказки у строки состояния. */
 export function agentModeTitle(mode, health, providerWords = '') {
   const h = health && health.ok === true ? health : null;
   if (mode === 'server') {
-    if (h && h.document !== 'up' && storageReason(h)) return 'Команды агента выполняет сервер, но база данных сервера сейчас недоступна — команды не выполняются, правки руками ждут в очереди';
-    if (h && h.document !== 'up') return 'Команды агента выполняет сервер, но сейчас он не видит документ — правки руками сохраняются';
+    if (h && h.document !== undefined && h.document !== 'up' && storageReason(h)) return 'Команды агента выполняет сервер, но база данных сервера сейчас недоступна — команды не выполняются, правки руками ждут в очереди';
+    if (h && h.document !== undefined && h.document !== 'up') return 'Команды агента выполняет сервер, но сейчас он не видит документ — правки руками сохраняются';
     if (h && h.llm === 'unconfigured') return 'Команды агента выполняет сервер, но модель на нём не настроена — это забота администратора';
     if (h && h.llm !== 'up') return 'Команды агента выполняет сервер, но модель на нём сейчас не отвечает — попробуйте позже';
     return 'Команды агента выполняет сервер';
@@ -652,8 +670,8 @@ export function rescueFailWords(e) {
 
 /**
  * Круг 43: спасение сохранилось новым проектом, а первая попытка — отдельным (409: её ключ занят
- * проектом с прежним документом; или тело первой попытки не пережило перезагрузку). Удалять
- * проект оболочке нечем (API удаления у сервиса нет) — говорим, что он есть и где его узнать.
+ * проектом с прежним документом; или тело первой попытки не пережило перезагрузку). Говорим, что
+ * он есть и где его узнать; круг 45 — в «Проектах» его можно удалить кнопкой (пустой, свой ключ).
  * @param {{name?: string, certain?: boolean}} o
  */
 export function rescueOrphanWords(o = {}) {
@@ -663,12 +681,129 @@ export function rescueOrphanWords(o = {}) {
     : `Если первая попытка всё же успела сохраниться, в «Проектах» будет ещё один «${name}» без последних правок — он помечен «первая попытка»; работа — в открытом сейчас.`;
 }
 
+/**
+ * Подсказка, по которой проект списка похож на пустую первую попытку спасения (круг 43), или null.
+ * Круг 45: список сервиса отдаёт `created_at`; прежний сервис его не отдаёт — у пустого проекта
+ * `updated_at` совпадает со временем создания, берём его. У подсказки может быть `createId` —
+ * ключ первой попытки: им сирота удаляется (`DELETE /api/projects/:id`).
+ */
+export function rescueOrphanHint(p, hints = []) {
+  if (!p || typeof p !== 'object' || Number(p.head_seq || 0) !== 0) return null;
+  const at = Date.parse(p.created_at || p.updated_at || '');
+  if (!Number.isFinite(at)) return null;
+  const fits = (Array.isArray(hints) ? hints : []).filter((h) => h && p.id !== h.keep && cleanText(p.name) === cleanText(h.name)
+    && at >= (Number(h.since) || 0) - 60 * 1000 && at <= (Number(h.at) || Date.now()) + 1000);
+  // две попытки с одним именем: окна могут перекрыться — берём ту, чьё начало ближе всех ко времени
+  // создания проекта (первая попытка создаётся сразу после начала). Не «последнюю до создания»: часы
+  // сервера, отстающие на секунды, отдали бы сироте второй попытки ключ первой (критик кода r45c)
+  let best = null;
+  let bestD = Infinity;
+  for (const h of fits) {
+    const d = Math.abs(at - (Number(h.since) || 0));
+    if (d < bestD) { best = h; bestD = d; }
+  }
+  return best;
+}
+
+/**
+ * Круг 45, проход 3 (UX r45c): пометка сирот по всему списку — одна подсказка помечает не больше
+ * ОДНОЙ строки. Одноимённую пустую попытку соавтора (или другой вкладки) в том же окне иначе
+ * назвали бы «своей первой попыткой» с кнопкой «Удалить». Строка подсказке — ближайшая по времени
+ * создания к началу спасения (`since`); строки из `h.not` (сервер ответил «не этот create_id») —
+ * не её. → Map id → подсказка.
+ */
+export function rescueOrphanMatches(list = [], hints = []) {
+  /* Назначение по каждому имени — оптимальное, а не жадное (критик кода r45d): подсказки по началу
+     спасения и строки по времени создания идут в одном порядке, поэтому лучшее назначение сохраняет
+     порядок; динамика — сначала больше пар, затем меньше сумма расстояний. Жадное «ближайшая пара
+     первой» при h1 = t0, h2 = t0+10 с и строках t0+6 с, t0+30 с отдавало обе строки чужим ключам. */
+  const timeOf = (p) => Date.parse((p && (p.created_at || p.updated_at)) || '');
+  const out = new Map();
+  const groups = new Map();
+  for (const h of Array.isArray(hints) ? hints : []) {
+    if (!h || typeof h.name !== 'string') continue;
+    const k = cleanText(h.name);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(h);
+  }
+  for (const [name, hs] of groups) {
+    hs.sort((a, b) => (Number(a.since) || 0) - (Number(b.since) || 0));
+    const rows = (Array.isArray(list) ? list : []).filter((p) => p && cleanText(p.name) === name && hs.some((h) => rescueOrphanHint(p, [h]) === h))
+      .sort((a, b) => timeOf(a) - timeOf(b));
+    const fits = (h, p) => !(Array.isArray(h.not) && h.not.includes(p.id)) && rescueOrphanHint(p, [h]) === h;
+    const H = hs.length;
+    const R = rows.length;
+    // dp[i][j] = [пар, сумма] для первых i подсказок и j строк; лучше — больше пар, при равенстве меньше сумма
+    const better = (a, b) => (a[0] !== b[0] ? a[0] > b[0] : a[1] < b[1]);
+    const dp = Array.from({ length: H + 1 }, () => Array.from({ length: R + 1 }, () => [0, 0]));
+    const how = Array.from({ length: H + 1 }, () => new Array(R + 1).fill(0));
+    for (let i = 0; i <= H; i++) {
+      for (let j = 0; j <= R; j++) {
+        if (!i && !j) continue;
+        let best = null;
+        let via = 0;
+        if (i > 0) { best = dp[i - 1][j]; via = 1; }
+        if (j > 0 && (!best || better(dp[i][j - 1], best))) { best = dp[i][j - 1]; via = 2; }
+        if (i > 0 && j > 0 && fits(hs[i - 1], rows[j - 1])) {
+          const prev = dp[i - 1][j - 1];
+          const cand = [prev[0] + 1, prev[1] + Math.abs(timeOf(rows[j - 1]) - (Number(hs[i - 1].since) || 0))];
+          if (better(cand, best)) { best = cand; via = 3; }
+        }
+        dp[i][j] = best;
+        how[i][j] = via;
+      }
+    }
+    for (let i = H, j = R; i > 0 || j > 0;) {
+      const v = how[i][j];
+      if (v === 3) { out.set(rows[j - 1].id, hs[i - 1]); i--; j--; } else if (v === 1) i--; else j--;
+    }
+  }
+  return out;
+}
+
+/** Тело первой попытки спасения хранится до стольких символов JSON: больше — sessionStorage может не принять. */
+export const RESCUE_BODY_KEEP = 1_500_000;
+
+/**
+ * Запись задания спасения для sessionStorage (круг 43; круг 45 — вынесено из app.js ради
+ * поведенческого теста, мутант RS2). Тело создания хранится только у одной пачки, пока проекта
+ * нет, и только до `keep` символов: с ним повтор после перезагрузки идёт тем же create_id.
+ * → {rec, body, full, lean}: `full` — строка с телом (если есть), `lean` — без него (запас, когда
+ * хранилище не приняло полную).
+ */
+export function rescueMemo(job, { from = '', sig = '', now = Date.now(), keep = RESCUE_BODY_KEEP } = {}) {
+  let body = '';
+  try {
+    if (job && !job.project && job.plan && job.plan.whole && job.plan.body) {
+      const text = JSON.stringify(job.plan.body);
+      if (text.length <= keep) body = text;
+    }
+  } catch { body = ''; }
+  const rec = {
+    from, project: job && job.project ? { id: job.project.id, name: job.project.name || '' } : null,
+    create_id: (job && job.createId) || '', body_sig: (job && job.bodySig) || '',
+    done: job ? job.done : 0, total: job ? job.total : 0, sig, at: now, started_at: (job && job.startedAt) || now,
+    ...(job && job.orphan ? { orphan: job.orphan } : {}),
+  };
+  const lean = JSON.stringify(rec);
+  return { rec, body, lean, full: body ? JSON.stringify({ ...rec, body }) : lean };
+}
+
 /** Похоже ли, что проект списка — пустая первая попытка спасения (помета в «Проектах», круг 43). */
 export function isRescueOrphan(p, hints = []) {
-  if (!p || typeof p !== 'object') return false;
-  const at = Date.parse(p.created_at || '');
-  return (Array.isArray(hints) ? hints : []).some((h) => h && p.id !== h.keep && cleanText(p.name) === cleanText(h.name)
-    && Number(p.head_seq || 0) === 0 && Number.isFinite(at) && at >= (Number(h.since) || 0) - 60 * 1000 && at <= (Number(h.at) || Date.now()) + 1000);
+  return !!rescueOrphanHint(p, hints);
+}
+
+/** Круг 45: итог удаления сироты словами (`status` ответа или ошибки DELETE). */
+export function orphanDeleteWords(name, e = null) {
+  const n = cutText(cleanText(name || ''), 60, { ellipsis: true }) || 'Без названия';
+  if (!e) return `Удалил пустую первую попытку «${n}».`;
+  const d = (e && e.detail) || {};
+  if (e.status === 409 && d.cause === 'not_empty') return `«${n}» не удалил: в нём уже есть правки.`;
+  if (e.status === 409) return `«${n}» не удалил: это не первая попытка из этой вкладки.`;
+  if (e.status === 404) return `«${n}» уже удалён.`;
+  if (e.status === 405 || e.status === 501) return `«${n}» не удалил: сервер ещё не умеет удалять проекты.`;
+  return `«${n}» не удалил: ${rescueFailWords(e)}.`;
 }
 
 /**
@@ -685,6 +820,59 @@ export function appliedLine(text, { ops = 0, dropped = 0 } = {}) {
   if (!a && d) return `${t} — не применилась`;
   if (!d) return t;
   return `${t} · не легло ${d} из ${a + d}`;
+}
+
+/**
+ * Круг 45 (UX r44): порядок ленты «Истории» — один у всех соавторов. Чужие — по `seq` подтверждения
+ * (новые сверху; без номера — по времени). Свои идут в порядке стека отмены, а между чужими встают по
+ * `seq` своей подтверждённой записи; неподтверждённая своя (ещё в пути) — новее всего подтверждённого.
+ * Прежде свои вставали по времени ВКЛАДКИ: офлайн-правка Ани оказывалась ниже правки Бориса,
+ * легшей раньше, а у Бориса — наоборот.
+ * @param {{at?: number, seq?: number|null}[]} own стек отмены, от старых к новым
+ * @param {{seq?: number, created_at?: string}[]} others чужие записи журнала
+ * @returns {{own?: number, other?: number}[]} индексы в исходных списках, новые сверху
+ */
+export function historyOrder(own = [], others = []) {
+  const timeOf = (t) => { const v = Date.parse((t && t.created_at) || ''); return Number.isFinite(v) ? v : 0; };
+  const num = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  const theirs = others.map((t, i) => ({ i, seq: num(t && t.seq), at: timeOf(t) }))
+    .sort((a, b) => (a.seq !== null && b.seq !== null ? b.seq - a.seq : b.at - a.at));
+  const out = [];
+  let k = 0;
+  for (let j = own.length - 1; j >= 0; j--) {
+    const tx = own[j] || {};
+    const seq = num(tx.seq);
+    const at = Number(tx.at) || 0;
+    // чужая выше своей, если она новее: по номерам, когда они есть у обеих; своя без номера — в пути
+    const newer = (o) => (seq !== null && o.seq !== null ? o.seq > seq : seq === null && tx.pending ? false : o.at >= at);
+    while (k < theirs.length && newer(theirs[k])) out.push({ other: theirs[k++].i });
+    out.push({ own: j });
+  }
+  while (k < theirs.length) out.push({ other: theirs[k++].i });
+  return out;
+}
+
+/**
+ * Круг 45 (критик кода r45 Д1/Д2): ключи своих записей для `historyOrder`. Правка из нескольких частей
+ * встаёт по НОВЕЙШЕЙ части: соавтор видит её строку журнала с номером последней части, и порядок
+ * у обоих должен совпасть. Номер берётся из журнала по частям правки (`id`, `parts`; не отмены),
+ * без журнала — из `seq` самой записи.
+ * @param {{id?: string, at?: number, seq?: number, pending?: boolean, parts?: string[], lastParts?: string[]}[]} history
+ * @param {{tx_id?: string, seq?: number}[]} journal
+ * @returns {{at: number, seq: number|null, pending: boolean}[]}
+ */
+export function ownHistoryKeys(history = [], journal = []) {
+  const seqOf = new Map();
+  for (const t of journal || []) if (t && t.tx_id && Number.isFinite(t.seq)) seqOf.set(t.tx_id, t.seq);
+  return (history || []).map((tx) => {
+    // только части самой правки: отмена или повтор (lastTx, lastParts) у соавтора — своя строка «Отменил»,
+    // а правка остаётся на своём номере (критик кода r45b Д1′)
+    const ids = [tx && tx.id, ...((tx && tx.parts) || [])].filter(Boolean);
+    let seq = null;
+    for (const id of ids) { const v = seqOf.get(id); if (Number.isFinite(v) && (seq === null || v > seq)) seq = v; }
+    if (seq === null && Number.isFinite(tx && tx.seq)) seq = tx.seq;
+    return { at: Number(tx && tx.at) || 0, seq, pending: !!(tx && tx.pending) };
+  });
 }
 
 /** «52 008» — тысячи через неразрывный пробел. */
@@ -1506,11 +1694,15 @@ export function nameMatches(name, phrase) {
 const wantStems = (phrase) => saidWords(phrase).map(stemWord).filter((w) => w.length >= 3);
 const STEMS_CACHE = new Map();
 const STEMS_CACHE_MAX = 60000;
+let stemsComputed = 0;   // сколько основ посчитано заново (не из кеша) — тестам: тёплый поиск не считает ни одной
+/** Круг 45: счётчик основ имён, посчитанных мимо кеша (для теста скорости «/выделить …» без часов). */
+export function nameStemsComputed() { return stemsComputed; }
 function nameStems(name) {
   const key = String(name || '');
   let got = STEMS_CACHE.get(key);
   if (got) return got;
   // слова уже в нижнем регистре и без знаков (saidWords) — основа сразу, без второй чистки
+  stemsComputed++;
   got = [];
   for (const w of saidWords(key, false)) if (w) got.push(w.length > 4 ? w.slice(0, w.length - 2) : w);
   if (STEMS_CACHE.size >= STEMS_CACHE_MAX) STEMS_CACHE.clear();

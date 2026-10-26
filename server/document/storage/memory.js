@@ -147,6 +147,20 @@ export function createMemoryStorage() {
       return clone(project);
     },
 
+    /** Как у pg (круг 45): пустой проект своего create_id. */
+    async deleteEmptyProject(id, createId) {
+      const p = projects.get(String(id));
+      if (!p) return { status: 'not_found' };
+      if (typeof createId !== 'string' || !createId || byCreateId.get(createId) !== p.id || p.kind !== 'design') return { status: 'create_id' };
+      const j = journals.get(p.id);
+      if (p.head_seq !== 0 || (j && j.bySeq.length)) return { status: 'not_empty' };
+      projects.delete(p.id);
+      byCreateId.delete(createId);
+      createHashes.delete(p.id);
+      for (const m of [journals, snapshots, epochs, traces]) m.delete(p.id);
+      return { status: 'deleted' };
+    },
+
     /** Проект по create_id (круг 33, L1) или null. */
     async projectByCreateId(createId) {
       const id = typeof createId === 'string' ? byCreateId.get(createId) : undefined;

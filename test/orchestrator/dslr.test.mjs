@@ -281,3 +281,19 @@ test('параллельные чтения одного проекта идут
   assert.ok(sb.seq >= sa.seq);
   assert.equal(dslr.peek('p1').seq, 2);
 });
+
+test('круг 45 (code-r44): негодный ответ сервиса на чтение — document_failed словами для человека, без имени сервиса и кода', async () => {
+  const seed = core.createDoc();
+  for (const bad of [{ status: 400, body: { error: true } }, { status: 200, body: 'мусор' }]) {
+    const s = fakeService(seed);
+    const net = { async get() { return bad; } };
+    const dslr = createDslrClient({ doc: net, log: quiet });
+    await assert.rejects(dslr.read('p1'), (e) => {
+      assert.equal(e.code, 'document_failed');
+      assert.doesNotMatch(e.message, /Document service|\b\d{3}\b/, e.message);
+      assert.match(e.message, /Сервер документов/);
+      return true;
+    });
+    void s;
+  }
+});

@@ -110,13 +110,14 @@ test('r41 (арх. Н2): «Сохранить как новый» — тот ж�
   assert.equal(SHELL.rescueFailWords({ status: 500, message: 'TypeError: x is undefined' }), 'сервер не ответил как надо');
   const app = read('app.js');
   // отпечаток тела рядом с create_id в sessionStorage
-  assert.match(app, /create_id: job\.createId \|\| '', body_sig: job\.bodySig \|\| ''/);
+  // (круг 45: запись — SHELL.rescueMemo, поведение — test/shell-r45.test.mjs)
+  assert.match(read('src/shell.js'), /create_id: \(job && job\.createId\) \|\| '', body_sig: \(job && job\.bodySig\) \|\| ''/);
   // после перезагрузки: другое тело — новый ключ
   // (круг 43: тот же ключ — с тем же телом, иначе тело первой попытки из sessionStorage или новый ключ)
   assert.match(app, /if \(same\) \{\s*const job = \{ from: sync, plan, project: null, createId, bodySig/);
-  assert.match(app, /createId: newCreateId\(\), bodySig, seq: 0[^\n]*\n\s*orphan: \{ name, since: startedAt, certain: false \}/);
+  assert.match(app, /createId: newCreateId\(\), bodySig, seq: 0[^\n]*\n\s*orphan: \{ name, since: startedAt, certain: false[,}]/);
   // 409 — новый ключ один раз, а не тот же повтор
-  assert.match(app, /if \(!\(e && e\.status === 409\)\) throw e;[\s\S]{0,250}job\.createId = newCreateId\(\);/);
+  assert.match(app, /if \(!\(e && e\.status === 409\)\) throw e;[\s\S]{0,400}job\.createId = newCreateId\(\);/);
   // в тостах спасения — слова оболочки
   const save = app.slice(app.indexOf('async function saveAsNewProject'), app.indexOf('const RESCUE_KEY'));
   assert.doesNotMatch(save, /afterColon\(humanError\(e\)\)/);
@@ -166,7 +167,7 @@ test('r41 (UX): нет сети у компьютера — «Нет сети»,
 
 /* ------------------------------ «/выделить …» на 20 тыс. слоёв ------------------------------ */
 
-test('r41 (код): «/выделить заг» на 20 тыс. слоёв — быстрее 30 мс (основы имён — заранее, в простое)', () => {
+test('r41 (код): «/выделить заг» на 20 тыс. слоёв — без пересчёта основ имён (основы — заранее, в простое)', () => {
   let doc = core.createDoc();
   const b = core.artboards(doc)[0].id;
   const ops = [];
@@ -176,15 +177,19 @@ test('r41 (код): «/выделить заг» на 20 тыс. слоёв — 
   let r = { next: 0, ids: null };
   do r = SHELL.warmNameStems(doc, { from: r.next, count: 1500, ids: r.ids }); while (r.next < r.ids.length);
   const ctx = { doc, activeArtboardId: b };
+  /* Круг 45: скорость — не часами. Предел 30 мс срывался под нагрузкой соседних прогонов и при этом едва
+     отличал тёплый поиск (≈ 14 мс) от поиска без кеша основ имён (≈ 34 мс). Суть требования — после
+     прогрева в простое запрос не считает основы заново: это и проверяем счётчиком, точно и без часов;
+     часы — только грубая граница от провала на порядок. */
   for (const q of ['/выделить заг', 'выдели заголовок 5']) {
-    let best = Infinity;
-    for (let k = 0; k < 5; k++) {
-      const t = performance.now();
-      const hit = SHELL.shellIntent(q, ctx);
-      best = Math.min(best, performance.now() - t);
-      assert.equal(hit.kind, 'select');
-    }
-    assert.ok(best < 30, `«${q}»: ${best.toFixed(1)} мс`);
+    const before = SHELL.nameStemsComputed();
+    const t = performance.now();
+    const hit = SHELL.shellIntent(q, ctx);
+    const took = performance.now() - t;
+    assert.equal(hit.kind, 'select');
+    // запрос сам — одна-две основы (слова запроса), имена слоёв — все из кеша
+    assert.ok(SHELL.nameStemsComputed() - before <= 3, `«${q}»: посчитано заново ${SHELL.nameStemsComputed() - before} основ`);
+    assert.ok(took < 500, `«${q}»: ${took.toFixed(1)} мс`);
   }
   // внутри активной доски — выше: слой другой доски с тем же именем идёт после
   const other = core.artboards(doc)[1].id;

@@ -288,7 +288,8 @@ export function txColumns(tx) {
 /** Сводка проекта для списка и `hello` (SPEC §9.2, §9.3). */
 export function projectSummary(p) {
   // имя — метаданные: без управляющих и bidi-символов и у проектов, названных до круга 31
-  return { id: p.id, name: typeof p.name === 'string' ? cleanMeta(p.name) : p.name, kind: p.kind, head_seq: p.head_seq, updated_at: p.updated_at };
+  // круг 45 (UX Д9): created_at — оболочка по нему узнаёт пустую сироту спасения в «Проектах»
+  return { id: p.id, name: typeof p.name === 'string' ? cleanMeta(p.name) : p.name, kind: p.kind, head_seq: p.head_seq, created_at: p.created_at, updated_at: p.updated_at };
 }
 
 /** Сводка головы: сводка + эпоха и tip (SPEC §9.8, `?head=1`). */

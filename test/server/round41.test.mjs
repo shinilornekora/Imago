@@ -49,7 +49,8 @@ async function journal(h, P) {
 /* ------------------------------ Н3. наследная запись ------------------------------ */
 
 describe('круг 41 (Н3): наследная негодная запись не блокирует снимки', () => {
-  const engines = [...new Set([E, Math.max(ENGINE_MIN_READ, E - 1)])];
+  // круг 45: наследная — только движка строго ниже своего (запись своей версии — тест ниже)
+  const engines = E - 1 >= ENGINE_MIN_READ ? [E - 1] : [];
   for (const b of list) {
     for (const recEngine of engines) {
       it(`журнал «круга 32» с \`set layout..gap\` (движок ${recEngine}) + 120 правок — снимки 50 и 100 есть, открытие от снимка = переигрыванию с seq 0 · ${b.name}`, { skip: !b.available, timeout: 60000 }, async () => {
@@ -99,6 +100,34 @@ describe('круг 41 (Н3): наследная негодная запись н
       });
     }
   }
+
+  it('круг 45 (arch-r44 Д1): негодная запись СВОЕЙ версии — не наследная: голова «с пропуском», снимков нет, громкий лог · memory', async () => {
+    const box = logBox();
+    const svc = await startFor('memory', { verifyMs: 0, snapshotEvery: 4, log: box.log });
+    try {
+      const h = api(svc.url);
+      const P = (await h.post('/api/projects', { name: 'своя', demo: true })).body.id;
+      const d = (await h.get(`/api/projects/${P}`)).body.snapshot.doc;
+      const board = core.artboards(d)[0];
+      // «будущий круг» той же версии с более широкой проверкой записал opacity 1.5
+      const wide = [{ op: 'set', id: board.id, path: 'opacity', value: 1.5 }];
+      assert.ok(core.applyOps(d, wide).error, 'нынешнее ядро запись отвергает');
+      const rec = await svc.storage.commitTx(P, { tx_id: uid('tx'), base_seq: 0, ops: wide, dropped: [], notes: [], engine: E, author_kind: 'human' });
+      assert.equal(rec.status, 'committed');
+      await svc.dslts.unload(P);
+      for (let i = 1; i < 10; i++) assert.equal((await h.post(`/api/projects/${P}/tx`, tx(i, [{ op: 'set', id: d.root, path: 'name', value: 'v' + i }]))).status, 201);
+      await svc.dslts.flush();
+      assert.equal(svc.dslts.isHoley(P), true, 'голова с пропуском');
+      assert.equal(svc.dslts.legacySkipsOf(P), 0, 'не наследная');
+      assert.deepEqual(await svc.storage.snapshotSeqs(P), [0], 'снимков без этой записи нет');
+      assert.ok(box.lines.some((l) => /СВОЕЙ версии/.test(l) && /без подъёма ENGINE_VERSION/.test(l)), box.lines.join(' | '));
+      // журнал правку хранит: экземпляр с широкой проверкой поднимет её из журнала
+      const all = await journal(h, P);
+      assert.deepEqual(all[0].ops, wide);
+    } finally {
+      await svc.close();
+    }
+  });
 
   it('запись неизвестной версии, которую движок не применяет, — голова «с пропуском», снимков нет · memory', async () => {
     const box = logBox();

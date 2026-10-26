@@ -86,11 +86,20 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
     return guardTxs(await viaStorage(storage.txsAfter(projectId, seq, limit, { maxBytes: pageBytes })));
   }
 
+  /**
+   * Снимка нет (arch-r45 Д2): проект могли удалить между чтением его строки и снимка (DELETE пустой
+   * сироты, круг 45) — тогда это 404, а не «журнал не с чего переигрывать» (503, повторяемый).
+   */
+  async function noSnapshotOr404(projectId, why) {
+    if (!(await viaStorage(storage.getProject(projectId)))) throw notFound();
+    throw why ? noSnapshot(storage, why) : noSnapshot(storage);
+  }
+
   /** Снимок под семафором тяжёлых чтений. */
   async function snapshotOf(projectId) {
     return heavy.run(async () => {
       const snapshot = await viaStorage(storage.latestSnapshot(projectId));
-      if (!snapshot) throw noSnapshot(storage);
+      if (!snapshot) await noSnapshotOr404(projectId);
       guard(snapshot.engine);
       return snapshot;
     });
@@ -146,7 +155,7 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
       return { seq: r.seq, json: r.json };
     }
     const meta = await viaStorage(storage.latestSnapshotMeta(projectId));
-    if (!meta) throw noSnapshot(storage);
+    if (!meta) await noSnapshotOr404(projectId);
     guard(meta.engine);
     const key = snapKey(projectId, meta.seq, meta.chain, meta.epoch, isoAt(meta.created_at));
     const hit = snapCache.get(key);
@@ -185,7 +194,7 @@ export function createReader({ storage, heavy = createSemaphore(), pageBytes = P
         guard(m.engine);
         return m;
       }
-      throw noSnapshot(storage, 'у проекта нет снимка');
+      await noSnapshotOr404(projectId, 'у проекта нет снимка');
     }
     return snapshotOf(projectId);
   }
