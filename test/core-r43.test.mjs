@@ -26,7 +26,7 @@ const FORMAT_HISTORY = {
   // проход 3–4 — операции отмены (behavior.exact: все пробы set и операций ещё раз с exact);
   // формат тот же, состав отпечатка шире
   2: {
-    hash: '21a2397860acaec2-hl',
+    hash: '88865043fcdd1989-hl',
     sections: {
       enums: '3d5f4badd56fba2b-fk',
       fields: 'c19ec158ee571d7a-br',
@@ -38,19 +38,19 @@ const FORMAT_HISTORY = {
       refs: 'eec439faf7e0f954-9k',
       tokens: '64506054ac161ae6-4h',
       'behavior.dressed': 'c6092bb5cc3d0433-5o',
-      'behavior.exact': '92db587a5e7adbfc-3k6',
+      'behavior.exact': '678beb549aca1b82-3ku',
       'behavior.fields': 'b776fa05a7074603-5r28',
       'behavior.nested': '8d622e246577c17e-14s9',
       'behavior.nodes': 'f67d12ae3ab43950-1i',
       'behavior.ops': '6eeb8110c37a3706-364',
-      'behavior.results': '14913d2fb2001589-b8c',
+      'behavior.results': 'f8b39ecb3d7ddb95-bbo',
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
       'behavior.tokens': 'cd226f5ed7cee580-25s0'
     }
   },
   // круг 48–49: поле theme доски (FIELD_RULES.theme, limits.theme, behavior.theme) и фактура в заливке (enums.patternKinds, limits.pattern)
   3: {
-    hash: 'e5ea66a3bdd599e5-io',
+    hash: '3f75a79847d9ed1e-io',
     sections: {
       enums: 'a4ee2310d7cfdd06-ja',
       fields: '5e1b972410a4a2da-ci',
@@ -62,12 +62,12 @@ const FORMAT_HISTORY = {
       refs: 'eec439faf7e0f954-9k',
       tokens: '64506054ac161ae6-4h',
       'behavior.dressed': 'c6092bb5cc3d0433-5o',
-      'behavior.exact': '2630659439482f4e-3mj',
+      'behavior.exact': 'e8c7698ee92f58d4-3n7',
       'behavior.fields': 'bb9ce5d777789289-60ls',
       'behavior.nested': 'dfe50ac232b8c270-156x',
       'behavior.nodes': 'f67d12ae3ab43950-1i',
       'behavior.ops': '19a88724b0f91cfe-38h',
-      'behavior.results': 'd2312fdb9cd7641d-bac',
+      'behavior.results': '23dff7d7422006f9-bdo',
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
       'behavior.theme': '3270e63f4d344859-78',
       'behavior.tokens': '69c5ec17004eed79-26k0'

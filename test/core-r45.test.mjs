@@ -94,9 +94,7 @@ test('круг45: мутанты keepFieldForm и ветвей отмены (exa
     // проход 4 (arch-r45d Д1‴): мягкая проверка узла в set и ветвь «причина была и до правки»
     'checkNode в set строгий': ['let err = checkNode(next, draft, !!op.exact);', 'let err = checkNode(next, draft, false);'],
     'проба без негодных полей строгая': ['checkNode(probe, draft, !!op.exact)', 'checkNode(probe, draft, false)'],
-    /* «прежняя причина строгая» (checkNode(withoutBadFields(node…), draft, false)) — эквивалентен для
-       документов этого движка: мягкая проверка прежнего узла чиста (его положили операции), и тогда
-       исход один при любой строгости; отличие — только у узла, негодного ещё до круга 29 не по полю */
+    'прежняя причина строгая': ['checkNode(withoutBadFields(node, parts[0]), draft, !!op.exact)', 'checkNode(withoutBadFields(node, parts[0]), draft, false)'],
     'без «причина была и до правки»': ['if (err && !fieldProblem(next, parts[0])) {', 'if (false) {']
   };
   const dir = mkdtempSync(join(tmpdir(), 'imago-mut-'));
