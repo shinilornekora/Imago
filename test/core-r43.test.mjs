@@ -50,7 +50,7 @@ const FORMAT_HISTORY = {
   },
   // круг 48–49: поле theme доски (FIELD_RULES.theme, limits.theme, behavior.theme) и фактура в заливке (enums.patternKinds, limits.pattern)
   3: {
-    hash: 'e5ea66a3bdd599e5-io',
+    hash: '3f75a79847d9ed1e-io',
     sections: {
       enums: 'a4ee2310d7cfdd06-ja',
       fields: '5e1b972410a4a2da-ci',
@@ -62,12 +62,12 @@ const FORMAT_HISTORY = {
       refs: 'eec439faf7e0f954-9k',
       tokens: '64506054ac161ae6-4h',
       'behavior.dressed': 'c6092bb5cc3d0433-5o',
-      'behavior.exact': '2630659439482f4e-3mj',
+      'behavior.exact': 'e8c7698ee92f58d4-3n7',
       'behavior.fields': 'bb9ce5d777789289-60ls',
       'behavior.nested': 'dfe50ac232b8c270-156x',
       'behavior.nodes': 'f67d12ae3ab43950-1i',
       'behavior.ops': '19a88724b0f91cfe-38h',
-      'behavior.results': 'd2312fdb9cd7641d-bac',
+      'behavior.results': '23dff7d7422006f9-bdo',
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
       'behavior.theme': '3270e63f4d344859-78',
       'behavior.tokens': '69c5ec17004eed79-26k0'
