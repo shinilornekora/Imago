@@ -22,9 +22,10 @@ const { ENGINE_VERSION, ENGINE_MIN_READ, FORMAT_SIGNATURE, formatSignature, crea
 const FORMAT_HISTORY = {
   1: null,
   // круг 45: в отпечаток добавлен поведенческий корпус (behavior.*, results — что получилось), пределы тени и
-  // имени контура — таблицами (limits.shadow, vector.maxPathName); формат тот же, состав отпечатка шире
+  // имени контура — таблицами (limits.shadow, vector.maxPathName); проход 2 — «одетые» поля (behavior.dressed);
+  // формат тот же, состав отпечатка шире
   2: {
-    hash: '5d401a111d45fff7-fc',
+    hash: 'f73c5dbafef23398-gh',
     sections: {
       enums: '3d5f4badd56fba2b-fk',
       fields: 'c19ec158ee571d7a-br',
@@ -35,11 +36,12 @@ const FORMAT_HISTORY = {
       paths: 'b234b2d53b1b8147-3p',
       refs: 'eec439faf7e0f954-9k',
       tokens: '64506054ac161ae6-4h',
+      'behavior.dressed': '7ea289aceaeb4d92-40',
       'behavior.fields': 'b776fa05a7074603-5r28',
       'behavior.nested': '8d622e246577c17e-14s9',
       'behavior.nodes': 'f67d12ae3ab43950-1i',
       'behavior.ops': '6eeb8110c37a3706-364',
-      'behavior.results': 'bdb869bbe5c481c5-4au',
+      'behavior.results': '988ce9573c84d0c1-4xc',
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
       'behavior.tokens': 'cd226f5ed7cee580-25s0'
     }

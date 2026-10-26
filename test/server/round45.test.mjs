@@ -9,7 +9,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { uid, createDoc } from '../../src/core.js';
 import { CODE_ENGINE } from '../../server/document/engine.js';
-import { backends, startFor, api, connect, wsUrl } from './helpers.mjs';
+import { backends, startFor, startTwin, api, connect, wsUrl, waitFor } from './helpers.mjs';
 
 const tx = (base_seq, list) => ({ tx_id: uid('tx'), base_seq, ops: list, engine: CODE_ENGINE });
 const cidOf = () => 'rescue_' + uid('c').replace(/[^A-Za-z0-9_-]/g, '');
@@ -90,6 +90,13 @@ describe('круг 45: сирота спасения — created_at в спис�
         assert.equal(libDel.body.detail.cause, 'create_id', 'библиотека — не сирота, а не «есть правки»');
         assert.equal(libDel.body.retryable, false);
         assert.equal((await h.get(`/api/projects/${lib}`)).status, 200);
+        // ключ в адресе (прокси режет тело DELETE) — то же самое; в теле и адресе разные — 400
+        const cid4 = cidOf();
+        const q = (await h.post('/api/projects', { name: 'сирота в адресе', doc: createDoc(), create_id: cid4 })).body.id;
+        assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cid4}`, { create_id: cidOf() })).status, 400);
+        assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cidOf()}`)).status, 409);
+        assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cid4}`)).status, 204);
+        assert.equal((await h.get(`/api/projects/${q}`)).status, 404);
         // не-uuid — 404, а не ошибка базы
         assert.equal((await del(h, 'нет-такого', { create_id: cid3 })).status, 404);
         // OPTIONS называет DELETE
@@ -123,6 +130,65 @@ describe('круг 45: сирота спасения — created_at в спис�
         }
       } finally {
         await svc.close();
+      }
+    });
+    it(`DELETE на одном экземпляре — второй по шине снимает голову и закрывает сокеты 4404, чтение там — 404 · ${b.name}`, { skip: !b.available }, async () => {
+      const a = await startFor(b.name);
+      const twin = await startTwin(b.name, a);
+      try {
+        const ha = api(a.url);
+        const hb = api(twin.url);
+        const cid = cidOf();
+        const id = (await ha.post('/api/projects', { name: 'сирота', doc: createDoc(), create_id: cid })).body.id;
+        assert.equal((await hb.get(`/api/projects/${id}`)).status, 200);
+        await twin.dslts.headOf(id);
+        const ws = connect(wsUrl(twin, id, { since: 0, client: 'B' }));
+        await ws.opened;
+        assert.equal((await del(ha, id, { create_id: cid })).status, 204);
+        const closed = await Promise.race([ws.closed, new Promise((r) => setTimeout(() => r({ code: 'не закрыт за 3 с' }), 3000))]);
+        assert.equal(closed.code, 4404, 'сокет второго экземпляра закрыт по шине (missing)');
+        await waitFor(() => !twin.dslts.isLoaded(id), 'голова на втором экземпляре снята');
+        assert.equal((await hb.get(`/api/projects/${id}`)).status, 404);
+      } finally {
+        await twin.close();
+        await a.close();
+      }
+    });
+
+    it(`проект удалён между чтением строки и снимка — 404 и на чтение, и на запись, а не 503 «нет снимка» · ${b.name}`, { skip: !b.available }, async () => {
+      const a = await startFor(b.name);
+      try {
+        const h = api(a.url);
+        const st = a.storage;
+        // окно детерминировано: снимок «не нашёлся», потому что строку проекта как раз удалили
+        const patch = (id, cid) => {
+          const orig = { latestSnapshot: st.latestSnapshot, latestSnapshotMeta: st.latestSnapshotMeta };
+          for (const k of Object.keys(orig)) {
+            st[k] = async (pid, ...rest) => {
+              if (pid === id) { await st.deleteEmptyProject(id, cid); for (const j of Object.keys(orig)) st[j] = orig[j]; }
+              return orig[k].call(st, pid, ...rest);
+            };
+          }
+          return () => { for (const j of Object.keys(orig)) st[j] = orig[j]; };
+        };
+        // чтение (DSLR)
+        const c1 = cidOf();
+        const r1 = (await h.post('/api/projects', { name: 'окно чтения', doc: createDoc(), create_id: c1 })).body.id;
+        await a.dslts.unload(r1);
+        let undo = patch(r1, c1);
+        const read = await h.get(`/api/projects/${r1}`);
+        undo();
+        assert.equal(read.status, 404, 'чтение: ' + read.text);
+        // запись (DSLTS: голова без снимка перепроверяет проект)
+        const c2 = cidOf();
+        const r2 = (await h.post('/api/projects', { name: 'окно записи', doc: createDoc(), create_id: c2 })).body.id;
+        await a.dslts.unload(r2);
+        undo = patch(r2, c2);
+        const write = await h.post(`/api/projects/${r2}/tx`, tx(0, [{ op: 'set', id: 'x', path: 'name', value: 'w' }]));
+        undo();
+        assert.equal(write.status, 404, 'запись: ' + write.text);
+      } finally {
+        await a.close();
       }
     });
   }

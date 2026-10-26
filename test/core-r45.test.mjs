@@ -72,3 +72,28 @@ test('круг45: поведенческий корпус детерминиро
   const sizes = Object.fromEntries(Object.entries(a).map(([k, v]) => [k, v.length]));
   assert.ok(sizes.fields > 100000 && sizes.nested > 20000 && sizes.tokens > 20000 && sizes.ops > 1000, JSON.stringify(sizes));
 });
+
+/* Круг 45, проход 2 (arch-r45b Д1′): правка «сохранения формы» при set меняет отпечаток.
+   Мутант — копия src/core.js с одной заменой (ядро без импортов, грузится само). */
+test('круг45: мутанты keepFieldForm (строка поверх объекта, радиус и зазор поверх ссылки) меняют отпечаток формата', { timeout: 60000 }, async () => {
+  const { readFileSync, writeFileSync, mkdtempSync, rmSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const { pathToFileURL } = await import('node:url');
+  const src = readFileSync(new URL('../src/core.js', import.meta.url), 'utf8');
+  const mutants = {
+    'строка поверх объекта заменяет объект': ["if (typeof value === 'string' && cur && typeof cur === 'object') return cur;", ''],
+    'radius без keepRadiusForm': ["if (field === 'radius') return keepRadiusForm(doc, node.radius, value);", ''],
+    'layout.gap без keepScaleForm': ["if (parts.length === 2 && parts[1] === 'gap') return keepScaleForm(doc, cur.gap, value, 'spacing');", '']
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'imago-mut-'));
+  try {
+    for (const [name, [from, to]] of Object.entries(mutants)) {
+      assert.equal(src.split(from).length, 2, `${name}: строка мутации есть в ядре ровно один раз`);
+      const file = join(dir, name.replace(/\W+/g, '_') + '.mjs');
+      writeFileSync(file, src.replace(from, to));
+      const m = await import(pathToFileURL(file).href);
+      assert.notEqual(m.FORMAT_SIGNATURE.hash, core.FORMAT_SIGNATURE.hash, `${name}: отпечаток должен измениться`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

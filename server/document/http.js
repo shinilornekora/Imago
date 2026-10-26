@@ -572,7 +572,11 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         // круг 45 (§9.19): удалить можно только пустую сироту спасения — тело {create_id} того
         // создания, без единой записи журнала; любой другой проект этим путём не удаляется
         await writeRoute(req, async (body) => {
-          const cid = body && typeof body === 'object' && typeof body.create_id === 'string' ? body.create_id : '';
+          // ключ — в теле или в `?create_id=` (часть прокси режет тело у DELETE); оба — должны совпасть
+          const fromBody = body && typeof body === 'object' && typeof body.create_id === 'string' ? body.create_id : '';
+          const fromQuery = url.searchParams.get('create_id') || '';
+          if (fromBody && fromQuery && fromBody !== fromQuery) throw badRequest('create_id в теле и в адресе разные', { detail: { param: 'create_id' } });
+          const cid = fromBody || fromQuery;
           if (!cid) throw badRequest('create_id: строка — удаляется только пустой проект своего создания', { detail: { param: 'create_id' } });
           const r = await viaStorage(dslts.deleteEmpty(id, cid));
           if (r.status === 'not_found') throw notFound();

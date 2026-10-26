@@ -3613,14 +3613,17 @@ async function deleteOrphan(p, hint, btn) {
     const used = e && e.status === 409 && e.detail && e.detail.cause === 'not_empty';
     if (gone || used) forgetOrphan(hint.createId);
     if (gone && Array.isArray(server.list)) server.list = server.list.filter((x) => x.id !== p.id);
-    if (gone && dom.dockmsg && !dom.dockmsg.hidden && dom.dockmsg.dataset.role === 'rescue-orphan') hideMsg();
+    // 409 not_empty: пометки «первая попытка» больше нет — и карточка о ней уже неправда (UX r45b М1)
+    if ((gone || used) && dom.dockmsg && !dom.dockmsg.hidden && dom.dockmsg.dataset.role === 'rescue-orphan') hideMsg();
     reload = used;
     toast(SHELL.orphanDeleteWords(p.name, e), gone ? 'plain' : 'error', 8000);
   }
   if (reload) await loadProjectsSheet();
   else redrawProjects();
-  const add = dom['sheet-body'] && dom['sheet-body'].querySelector('button');
-  if (add && state.sheetOpen === 'projects') add.focus();
+  // фокус — на первую строку списка, а не на «Создать проект»: тост итога ложится на ту кнопку (UX r45b М2)
+  const body = dom['sheet-body'];
+  const next = body && (body.querySelector('.pitem .pname') || body.querySelector('button'));
+  if (next && state.sheetOpen === 'projects') next.focus();
 }
 
 function redrawProjects() {
@@ -13052,7 +13055,11 @@ function otherEditItem(t) {
   // отмена и повтор — своей подписью («Отменил: …»): описание операций назвало бы их новой правкой
   const rewind = /^(?:Отменил|Вернул):/.test(title);
   // круг 30: все операции выпали при слиянии — сама правка не применилась (а не «без изменений»)
-  const base = emptyTx(t) ? (title ? human(title) : 'Правка') : human((rewind ? title : described) || title || (t.ops_count
+  /* круг 45 (UX r45b М3): у правки руками подпись транзакции — те же слова, что у автора в его «Истории»
+     («Открепил «Шапка»»), и те же, что увидит соавтор после перезагрузки; описание по операциям
+     («Замок да → не задан…») — только запас. «Обернул» — по тому, что легло (круг 43). */
+  const authored = !agent && title && !/^Обернул /.test(title);
+  const base = emptyTx(t) ? (title ? human(title) : 'Правка') : human((rewind || authored ? title : described) || title || (t.ops_count
     ? `${t.ops_count} ${plural(t.ops_count, 'изменение', 'изменения', 'изменений')}`
     : 'Правка без изменений'));
   // круг 43: по метаданным журнала — не легло ничего («— не применилась») или часть («· не легло 1 из 3»)

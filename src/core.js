@@ -5117,7 +5117,9 @@ function formatBehavior() {
     /* Круг 45 (arch-r45 Д1): кроме «принял/отказал» — и ЧТО получилось: отпечаток документа после
        каждой принятой пробы (семейство `results`). Иначе изменение семантики применения (индекс
        `create` через floor вместо round, иное приведение значения), принимаемое обоими, проходило
-       мимо отпечатка, и экземпляры одной версии строили из одного журнала разные документы. */
+       мимо отпечатка, и экземпляры одной версии строили из одного журнала разные документы.
+       Хэшируются хранимые `nodes` и `tokens`; раскрытие экземпляров (propValue при показе) в них не
+       входит — оно не хранится и журналом не переигрывается (критик кода r45b R2). */
     let res = '';
     const rootId = doc.root;
     const libId = libraryNode(doc).id;
@@ -5184,6 +5186,35 @@ function formatBehavior() {
     }
     for (const list of opProbes) op += tryOps(list);
     out.ops = op;
+
+    /* Круг 45, проход 2 (arch-r45b Д1′): «одетые» поля — объект и ссылки на шкалы. На голых узлах
+       пробы ветви keepFieldForm (строка поверх объекта, число поверх ссылки радиуса, отступа,
+       зазора, подъёма) не исполнялись: правка «сохранения формы» проходила мимо отпечатка. Узлы
+       создаются в той же пачке, что и правка: документ-проба и прежние пробы не меняются. */
+    let dr = '';
+    const dressed = [
+      { op: 'create', node: { type: 'frame', id: 'nd', parent: 'pb', children: [], size: sz, stroke: { color: 'accent', width: 3 },
+        fill: { token: 'surface', opacity: 0.5 }, radius: 'radii.2', states: { hover: { lift: 'spacing.1' } },
+        layout: { mode: 'column', gap: 'spacing.4', padding: { t: 'spacing.2', r: 'spacing.2', b: 'spacing.2', l: 'spacing.2' } } } },
+      { op: 'create', node: { type: 'frame', id: 'nq', parent: 'pb', children: [], size: sz, stroke: 'accent', fill: 'surface',
+        radius: ['radii.1', 'radii.1', 'radii.2', 'radii.2'], layout: { mode: 'row', gap: 8, padding: 'spacing.2' } } },
+      { op: 'create', node: { type: 'text', id: 'nt', parent: 'nd', characters: 'т', style: { token: 'body', fontSize: 20 }, color: { token: 'text' },
+        size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } }
+    ];
+    const dressedSets = [
+      ['stroke', ['accent', 'line', { color: 'accent' }, { color: 'accent', width: 1 }, { token: 'accent' }]],
+      ['fill', ['surface', 'accent', { token: 'surface' }, { color: 'surface' }, { value: 'surface' }]],
+      ['color', ['text', { token: 'text' }, 'muted']],
+      ['style', ['body', { token: 'body' }, 'title']],
+      ['radius', [0, 4, 8, 12, 'radii.2', 'radii.99', -1, [4, 4, 8, 8], [4, 4, 8, 9], [8, 8, 8, 8]]],
+      ['layout', [{ mode: 'column', gap: 4 }, { mode: 'column', gap: 8, padding: 4 }, { mode: 'column', gap: 6, padding: { t: 4, r: 2 } }]],
+      ['layout.gap', [4, 8, 6, 'spacing.3', 'spacing.99', -1]], ['layout.padding', [4, 8, { t: 4 }, [4, 2], [4, 2, 4, 2]]], ['layout.padding.t', [4, 6]],
+      ['states', [{ hover: { lift: 2 } }, { hover: { lift: 4, opacity: 0.9 } }]], ['states.hover', [{ lift: 2 }, { lift: 6 }]], ['states.hover.lift', [2, 4]]
+    ];
+    for (const id of ['nd', 'nq', 'nt']) {
+      for (const [path, vals] of dressedSets) for (const value of vals) dr += tryOps([...dressed, { op: 'set', id, path, value }]);
+    }
+    out.dressed = dr;
     out.results = res;
     probeCache = out;
     return out;

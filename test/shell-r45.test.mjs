@@ -141,8 +141,14 @@ test('r45 (код Д1/Д2): ключи своих записей — правк�
   assert.deepEqual(ania, [{ own: 0 }, { other: 0 }], 'у Ани: своя выше правки Бориса');
   const boris = SHELL.historyOrder(SHELL.ownHistoryKeys([{ id: 'b1', at: 2 }], journal), [{ seq: 13 }]);
   assert.deepEqual(boris, [{ other: 0 }, { own: 0 }], 'у Бориса: правка Ани выше его');
-  // отмена из частей (lastParts) — тоже по новейшей
-  assert.equal(SHELL.ownHistoryKeys([{ id: 'x', lastParts: ['u1', 'u2'] }], [{ tx_id: 'u1', seq: 20 }, { tx_id: 'u2', seq: 21 }])[0].seq, 21);
+  /* отмена из частей (lastParts) номер правки НЕ двигает: у Бориса отмена Ани — своя строка «Отменил»,
+     правка Ани остаётся на seq 10, ниже его seq 11; у Ани должно быть так же (критик кода r45b Д1′) */
+  const undoJournal = [{ tx_id: 'a', seq: 10 }, { tx_id: 'b', seq: 11 }, { tx_id: 'u1', seq: 12 }, { tx_id: 'u2', seq: 13 }];
+  const undone = SHELL.ownHistoryKeys([{ id: 'a', lastParts: ['u1', 'u2'], at: 1 }], undoJournal);
+  assert.equal(undone[0].seq, 10);
+  assert.deepEqual(SHELL.historyOrder(undone, [{ seq: 11 }]), [{ other: 0 }, { own: 0 }], 'у Ани: Борис выше, как у Бориса');
+  assert.deepEqual(SHELL.historyOrder(SHELL.ownHistoryKeys([{ id: 'a', lastTx: 'u1', at: 1 }], undoJournal), [{ seq: 11 }]),
+    [{ other: 0 }, { own: 0 }], 'отмена одной транзакцией — так же');
   // журнала нет — номер самой записи; нет и его — null; в пути — pending
   assert.equal(SHELL.ownHistoryKeys([{ id: 'z', seq: 7 }], [])[0].seq, 7);
   assert.deepEqual(SHELL.ownHistoryKeys([{ id: 'z', at: 3, pending: true }], []), [{ at: 3, seq: null, pending: true }]);

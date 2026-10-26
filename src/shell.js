@@ -799,7 +799,7 @@ export function historyOrder(own = [], others = []) {
 /**
  * Круг 45 (критик кода r45 Д1/Д2): ключи своих записей для `historyOrder`. Правка из нескольких частей
  * встаёт по НОВЕЙШЕЙ части: соавтор видит её строку журнала с номером последней части, и порядок
- * у обоих должен совпасть. Номер берётся из журнала по всем частям (`id`, `parts`, `lastParts`),
+ * у обоих должен совпасть. Номер берётся из журнала по частям правки (`id`, `parts`; не отмены),
  * без журнала — из `seq` самой записи.
  * @param {{id?: string, at?: number, seq?: number, pending?: boolean, parts?: string[], lastParts?: string[]}[]} history
  * @param {{tx_id?: string, seq?: number}[]} journal
@@ -809,7 +809,9 @@ export function ownHistoryKeys(history = [], journal = []) {
   const seqOf = new Map();
   for (const t of journal || []) if (t && t.tx_id && Number.isFinite(t.seq)) seqOf.set(t.tx_id, t.seq);
   return (history || []).map((tx) => {
-    const ids = [tx && tx.id, ...((tx && tx.parts) || []), ...((tx && tx.lastParts) || [])].filter(Boolean);
+    // только части самой правки: отмена или повтор (lastTx, lastParts) у соавтора — своя строка «Отменил»,
+    // а правка остаётся на своём номере (критик кода r45b Д1′)
+    const ids = [tx && tx.id, ...((tx && tx.parts) || [])].filter(Boolean);
     let seq = null;
     for (const id of ids) { const v = seqOf.get(id); if (Number.isFinite(v) && (seq === null || v > seq)) seq = v; }
     if (seq === null && Number.isFinite(tx && tx.seq)) seq = tx.seq;
