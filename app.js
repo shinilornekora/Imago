@@ -13020,9 +13020,15 @@ function onImageDragOver(e) {
 }
 
 function onImageDrop(e) {
-  const file = imageFileOf(e.dataTransfer && e.dataTransfer.files);
-  if (!file) return;
+  const files = e.dataTransfer && e.dataTransfer.files;
+  if (!files || !files.length) return;
+  // любой файл с холста — наш: иначе браузер откроет его вместо редактора
   e.preventDefault();
+  const file = imageFileOf(files);
+  if (!file) {
+    showMsg('error', 'Этот файл на макет не ляжет', { note: 'Подойдут картинки PNG, JPEG, GIF и WebP.', ms: 7000 });
+    return;
+  }
   insertImageFile(file, { x: e.clientX, y: e.clientY });
 }
 
@@ -13083,9 +13089,10 @@ async function insertImageFile(file, client) {
   let at = null;
   if (client && stage && typeof stage.toWorld === 'function') {
     const w = stage.toWorld(client.x, client.y);
-    const hit = artboards(state.doc).find((a) => {
+    // верхняя видимая доска под точкой (позже в списке — выше на холсте)
+    const hit = artboards(state.doc).slice().reverse().find((a) => {
       const r = state.geo.rects[a.id];
-      return r && w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h;
+      return a.visible !== false && r && w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h;
     });
     selection = hit ? [hit.id] : [];
     at = { x: w.x, y: w.y };
@@ -13095,6 +13102,14 @@ async function insertImageFile(file, client) {
   const r = SHELL.imageInsertOps(state.doc, {
     selection, src: ready.src, width: ready.width, height: ready.height, fileName: file.name || '',
     at, ids: { board: `ab_${stamp}`, image: `img_${stamp}` }, boards: artboards(state.doc).length,
+    innerWidth: (id) => {
+      const r = state.geo.rects[id];
+      const n = nodeById(state.doc, id);
+      if (!r || !n) return null;
+      const pad = n.layout ? resolveLayout(state.doc, n.layout).padding : null;
+      return r.w - (pad ? (Number(pad.l) || 0) + (Number(pad.r) || 0) : 0);
+    },
+    origin: (id) => { const r = state.geo.rects[id]; return r ? { x: r.x, y: r.y } : null; },
   });
   if (r.error) { showMsg('error', `Картинку не вставил: ${r.error}`, { ms: 7000 }); return; }
   const res = commit(r.ops, 'Картинка');

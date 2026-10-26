@@ -55,12 +55,48 @@ test('круг55: куда ложится картинка — в выделен
   assert.equal(imageInsertOps(doc, { src: SRC, width: 1, height: 1, fileName: 'a b\u0000.png', at: { x: 0, y: 0 }, ids }).ops[1].node.name, 'a b');
 });
 
+test('круг55: ширина по рамке, узкая рамка — картинка за ней, рамка без потока — в точку броска, скрытая — мимо', () => {
+  const doc = quiet(() => core.createDoc());
+  const board = core.artboards(doc)[0];
+  const LAY = { mode: 'row', gap: 0, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false };
+  let d = core.applyOps(doc, [
+    core.ops.create({ id: 'card', type: 'frame', parent: board.id, size: { w: { mode: 'fixed', value: 300 }, h: { mode: 'hug' } }, layout: LAY, children: [] }),
+    core.ops.create({ id: 'chip', type: 'frame', parent: board.id, size: { w: { mode: 'fixed', value: 80 }, h: { mode: 'hug' } }, layout: LAY, children: [] }),
+    core.ops.create({ id: 'free', type: 'frame', parent: board.id, size: { w: { mode: 'fixed', value: 300 }, h: { mode: 'fixed', value: 300 } }, children: [] }),
+    core.ops.create({ id: 'ghost', type: 'frame', parent: board.id, visible: false, size: { w: { mode: 'fixed', value: 300 }, h: { mode: 'hug' } }, layout: LAY, children: [] }),
+  ]);
+  assert.equal(d.error, undefined, JSON.stringify(d.error));
+  d = d.doc;
+  const widths = { card: 280, chip: 80, free: 300, ghost: 300 };
+  const base = { src: SRC, width: 1200, height: 600, at: { x: 150, y: 260 }, ids, innerWidth: (id) => widths[id] || null, origin: (id) => (id === 'free' ? { x: 100, y: 200 } : null) };
+  const card = imageInsertOps(d, { ...base, selection: ['card'] });
+  assert.equal(card.into, 'card');
+  assert.deepEqual(card.ops[0].node.size, { w: { mode: 'fixed', value: 280 }, h: { mode: 'fixed', value: 140 } }, 'не шире рамки');
+  const chip = imageInsertOps(d, { ...base, selection: ['chip'] });
+  assert.equal(chip.into, board.id, 'в узкую рамку не кладём — за ней');
+  assert.equal(chip.ops[0].index, d.nodes[board.id].children.indexOf('chip') + 1);
+  const free = imageInsertOps(d, { ...base, selection: ['free'] });
+  assert.deepEqual(free.ops[0].node.pos, { x: 50, y: 60 }, 'рамка без потока — в точку броска');
+  const ghost = imageInsertOps(d, { ...base, selection: ['ghost'] });
+  assert.notEqual(ghost.into, 'ghost', 'в скрытую рамку не кладём');
+  for (const r of [card, chip, free, ghost]) assert.equal(core.applyOps(d, r.ops).error, undefined);
+});
+
 test('круг55: картинка-образец в словах — не предмет рисования', () => {
   for (const s of ['собери экран в цветах этой картинки', 'сделай лендинг в стиле фото', 'экран как на картинке', 'по референсу собери онбординг',
     'в палитре вставленной картинки собери экран', 'карточка в духе этого снимка']) {
     assert.ok(new RegExp(RE_IMAGE_REF.source, 'iu').test(s), s);
     assert.equal(looksIllustration(withoutImageRef(s)), false, s);
   }
+  for (const s of ['в цветах этого скриншота собери экран', 'экран как на этом скрине', 'в цветах этих картинок', 'собери экран по этой картинке',
+    'используй цвета этой картинки', 'возьми цвета с картинки', 'в стиле фотографии']) {
+    assert.ok(RE_IMAGE_REF.test(s), s);
+  }
+  for (const s of ['нарисуй картинку с котом', 'добавь картинку в шапку', 'сделай экран в стиле фотореализма', 'галерея в стиле фото-галереи', 'сделай по образцу']) {
+    assert.ok(!RE_IMAGE_REF.test(s), s);
+  }
+  assert.equal(RE_IMAGE_REF.flags.includes('g'), false, 'без g: .test не помнит прошлый вызов');
+  assert.ok(RE_IMAGE_REF.test('в цветах фото') && RE_IMAGE_REF.test('в цветах фото'));
   for (const s of ['нарисуй картинку с котом', 'добавь картинку в шапку']) assert.equal(withoutImageRef(s).trim(), s, s);
   assert.notEqual(classifyUtterance('собери экран кофейни в цветах этой картинки', { hasSelection: true }).intent, 'illustration');
   assert.ok(!classifyUtterance('собери экран кофейни в цветах этой картинки', { hasSelection: true }).art);
@@ -154,4 +190,20 @@ test('круг55: в браузере — вставка из буфера и б
     await browser.close();
     srv.close();
   }
+});
+
+test('круг55: картинка на настоящем экране — место правки, а не образец', async () => {
+  let doc = quiet(() => core.createDoc());
+  const board = core.artboards(doc)[0];
+  const r = imageInsertOps(doc, { selection: [board.id], src: SRC, width: 600, height: 400, at: { x: 0, y: 0 }, ids });
+  doc = core.applyOps(doc, r.ops).doc;
+  const before = core.artboards(doc).length;
+  const PATCH_TREE = { type: 'frame', name: 'Кнопка', children: [{ type: 'text', name: 'Текст', text: 'Заказать', style: 'body' }] };
+  const calls = [];
+  const provider = { name: 'f', async ready() { return true; },
+    async complete(m, sc) { calls.push(sc.name); const v = { plan: { intent: 'create', title: 'Кнопка', summary: 'Добавлю кнопку', steps: ['Кнопка'] }, tree: PATCH_TREE, direction: DIRECTION }[sc.name]; if (!v) throw new Error('нет ' + sc.name); return clone(v); } };
+  const res = await runCommand({ doc, selection: r.select, utterance: 'добавь кнопку в цветах этой картинки', provider, engine: core, critic: false });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(core.artboards(res.preview.doc).length, before, 'кнопка — на этом же экране');
+  assert.ok(!calls.includes('illustration'));
 });

@@ -2636,10 +2636,18 @@ const RE_ART_ANOTHER = rx('(ещ[её]|нов(ый|ого|ую|ое|ая)|дру
  * Круг 55 (SPEC §21): картинка как ОБРАЗЕЦ, а не предмет — «в цветах этой картинки», «в стиле фото»,
  * «как на картинке», «по референсу». Такую картинку не рисуют, по ней решают вид.
  */
-export const RE_IMAGE_REF = /(?:в|по)\s+(?:цвет\p{L}*|стил\p{L}*|дух\p{L}*|мотив\p{L}*|настроени\p{L}*|палитр\p{L}*|гамм\p{L}*|тон\p{L}*)\s+(?:(?:эт|т|мо|наш|вставленн|положенн|выделенн)\p{L}*\s+)?(?:картинк\p{L}*|фото\p{L}*|фотк\p{L}*|изображени\p{L}*|снимк\p{L}*|снимок|референс\p{L}*|образц\p{L}*)|как\s+на\s+(?:(?:эт|т)\p{L}*\s+)?(?:картинк\p{L}*|фото\p{L}*|изображени\p{L}*|снимк\p{L}*|референс\p{L}*)|по\s+(?:эт\p{L}*\s+)?(?:референс\p{L}*|образц\p{L}*)/giu;
+export const RE_IMAGE_REF = new RegExp([
+  // «в цветах (этой) картинки», «в стиле фото», «в палитре скриншота»
+  String.raw`(?:в|по)\s+(?:цвет\p{L}*|стил\p{L}*|дух\p{L}*|мотив\p{L}*|настроени\p{L}*|палитр\p{L}*|гамм\p{L}*|тон\p{L}*)\s+DEM PIC`,
+  // «как на (этой) картинке», «по (этой) картинке», «по референсу»
+  String.raw`(?:как\s+на|по)\s+DEM PIC`,
+  // «(возьми|используй) цвета (с|из|этой) картинки»
+  String.raw`цвет\p{L}*\s+(?:(?:с|из|со)\s+)?DEM PIC`,
+].join('|').replace(/DEM /g, String.raw`(?:(?:эт|т|мо|наш|вставленн|положенн|выделенн)\p{L}*\s+)?`)
+  .replace(/PIC/g, String.raw`(?:картин(?:к\p{L}*|ок)|фото(?:графи\p{L}*|чк\p{L}*|к\p{L}*)?(?![\p{L}-])|изображени\p{L}*|снимк\p{L}*|снимок|скрин\p{L}*|референс\p{L}*)`), 'iu');
 /** Реплика без слов о картинке-образце (для поиска предмета, который надо нарисовать). */
 export function withoutImageRef(utterance) {
-  return String(utterance == null ? '' : utterance).replace(RE_IMAGE_REF, ' ');
+  return String(utterance == null ? '' : utterance).replace(new RegExp(RE_IMAGE_REF.source, 'giu'), ' ');
 }
 
 /** Есть ли в реплике предмет-картинка. */
@@ -14220,8 +14228,10 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
     && (RE_NEW_ARTBOARD.test(planText) || RE_WHOLE_SCREEN.test(planText));
   /* Круг 55 (SPEC §21): выделена картинка (или доска из одних картинок) и о ней сказано как об образце
    * («собери экран в цветах этой картинки») — выделение показывает образец, а не место: новая доска. */
-  const pictureRef = scope.kind === 'selection' && RE_IMAGE_REF.test(spoken) && picturesOnly(doc, scope.ids);
-  RE_IMAGE_REF.lastIndex = 0;
+  /* Картинка на настоящем экране («добавь кнопку в цветах этой картинки») — место правки, а не образец:
+   * образец — это вставленная картинка на своей доске (доска из одних картинок) или когда просят экран. */
+  const pictureRef = scope.kind === 'selection' && RE_IMAGE_REF.test(spoken) && picturesOnly(doc, scope.ids)
+    && (saidWhole || scope.ids.every((id) => picturesOnly(doc, [artboardOf(doc, id) || id])));
   const explicit = saidNew || pictureRef;
   // круг 27: выделение агента («вот что я сделал») просьбу собрать экран не перебивает
   const wholeScreen = saidWhole && (scope.kind !== 'selection' || scope.selectionBy === 'agent') && !RE_HERE_PLACE.test(spoken);
