@@ -11165,9 +11165,6 @@ const STAGE_LABELS = {
   // круг 47 (SPEC §14): арт-направление, критик и доработка
   direct: 'Ищу образ',
   critic: 'Смотрю на результат',
-  // круг 50: выключенное человеком или сервисом — словами в ленте стадий
-  'direct-off': 'Без образа: арт-направление выключено (/образ вкл)',
-  'critic-off': 'Без самопроверки: она выключена (/самопроверка вкл)',
   revise: 'Дорабатываю',
   done: 'Готово',
   error: 'Не вышло',
@@ -12166,7 +12163,7 @@ export function readDirection(engine, doc, boardId) {
     else stale.push(`fonts.${k}`);
   }
   // образ устарел вместе с решением: роли были — и ни одна не живая (доску перекрасили)
-  const hadRoles = DIRECTION_ROLES.some((k) => own(P, k));
+  const hadRoles = DIRECTION_ROLES.some((k) => own(P, k) && typeof P[k] === 'string' && HEX6.test(hexNorm(P[k].slice(0, 16))));
   if (hadRoles && !Object.keys(palette).length) { if (concept) stale.push('concept'); concept = ''; }
   if (!concept && !Object.keys(palette).length && !Object.keys(fonts).length) return null;
   return { concept, palette, fonts, stale };
@@ -12405,7 +12402,9 @@ function neighboursLine(engine, doc, geo, skip = null) {
     const b = nodeOf(doc, id);
     // круг 50: образ доски — из её поля direction, через читателя (только годное и живое)
     const dir = readDirection(engine, doc, id);
-    lines.push(`- «${cutText(strOf(b.name) || 'Доска', 40)}»: фон ${look.bg || '—'}; шрифты ${look.fonts.slice(0, 2).join(' / ') || DEFAULT_FONT}`
+    // имя доски — данные документа: без управляющих символов и кавычек (из «…» не выйти)
+    const name = cutText(strOf(b.name).slice(0, 160).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/[«»"“”„`]/g, '').replace(/\s+/g, ' ').trim(), 40) || 'Доска';
+    lines.push(`- «${name}»: фон ${look.bg || '—'}; шрифты ${look.fonts.slice(0, 2).join(' / ') || DEFAULT_FONT}`
       + (look.accents.length ? `; акценты ${look.accents.slice(0, 2).join(', ')}` : '')
       + (dir && dir.concept ? `; образ «${cutText(dir.concept, 80)}»` : ''));
   }
@@ -12742,6 +12741,8 @@ async function runCommandCore(options = {}) {
     critic: criticOpt = true,
     /** Круг 50 (SPEC §17.3): false — шрифты из сети выключены: арт-директор шрифтов не выбирает. */
     webFonts = true,
+    /** Круг 50: кто выключил direction/critic — {direction?: 'service'|'person', critic?: …}; по умолчанию человек. */
+    artOffBy = null,
     render = null,
   } = options;
 
@@ -13122,8 +13123,19 @@ async function runCommandCore(options = {}) {
     // доски на IBM Plex — не образ, а разнобой)
     const newBoard = !!(placement.asArtboard || placement.screenInSelection);
     // круг 50: выключенное видно — новый экран без образа не выглядит «просто неудачным»
-    if (intent === 'create' && directionOpt === false && newBoard) emit('direct-off', '');
-    if (intent === 'create' && criticOpt === false && newBoard && !insideVariants) emit('critic-off', '');
+    /* Круг 50 (SPEC §17.2): выключенное видно в итоге команды — новый экран без образа не выглядит
+     * «просто неудачным». Кто выключил — человек (совет, как включить) или сервис (включить нельзя). */
+    if (intent === 'create' && newBoard) {
+      const by = (k) => (artOffBy && artOffBy[k] === 'service' ? 'service' : 'person');
+      if (directionOpt === false) {
+        warn(by('direction') === 'service' ? 'Экран собран без образа: арт-направление выключено на сервере агента'
+          : 'Экран собран без образа: арт-направление выключено. Включить: /образ вкл');
+      }
+      if (criticOpt === false && !insideVariants) {
+        warn(by('critic') === 'service' ? 'Собранный экран не проверен: самопроверка выключена на сервере агента'
+          : 'Собранный экран не проверен: самопроверка выключена. Включить: /самопроверка вкл');
+      }
+    }
     if (intent === 'create' && directionOpt !== false && newBoard) {
       emit('direct', '');
       try {
@@ -15405,7 +15417,7 @@ async function runVariantsCore(options = {}) {
     sharedPlan = true,
     // круг 50: выключенные арт-направление и шрифты из сети действуют и на варианты (критика
     // внутри вариантов нет вовсе — insideVariants, поэтому critic сюда не передаётся)
-    direction = true, webFonts = true,
+    direction = true, webFonts = true, artOffBy = null,
   } = options;
   const count = Math.max(1, Math.min(6, Number(n) || 3));
   /* Если сюда прилетела сама просьба о вариантах («три варианта: сделай шапку компактнее»),
@@ -15510,7 +15522,7 @@ async function runVariantsCore(options = {}) {
       insideVariants: true,
       // общий план приходит готовым: стадия «Планирую» модель уже не зовёт
       ...(shared ? { plan: { ...shared, steps: [...(shared.steps || [])], targets: [...(shared.targets || [])] } } : {}),
-      persona, activeArtboardId, history, geo, modelTier, selectionBy, direction, webFonts,
+      persona, activeArtboardId, history, geo, modelTier, selectionBy, direction, webFonts, artOffBy,
       temperature: persona.temperature,
       variantHint: total > 1 ? variantInstruction(persona, index, total, [], others) : '',
       stagePrefix: prefix,

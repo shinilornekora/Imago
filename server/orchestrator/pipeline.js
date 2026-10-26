@@ -44,7 +44,7 @@ const BRAIN_STAGE = {
   plan: 'llm', generate: 'llm', retry: 'llm', variant: 'llm',
   materialize: 'validate', validate: 'validate', repair: 'repair',
   // круг 47 (SPEC §14): образ — шаг модели, критик — проверка, доработка — починка
-  direct: 'llm', critic: 'validate', revise: 'repair', 'direct-off': 'llm', 'critic-off': 'validate',
+  direct: 'llm', critic: 'validate', revise: 'repair',
 };
 
 const LABELS = {
@@ -500,6 +500,11 @@ export function createPipeline(deps) {
           ...(cmd.art && cmd.art.direction === false ? { direction: false } : {}),
           ...(cmd.art && cmd.art.critic === false ? { critic: false } : {}),
           ...(cmd.art && cmd.art.webFonts === false ? { webFonts: false } : {}),
+          // кто выключил: сервис (окружение) — человеку не советуем «/образ вкл»
+          offBy: {
+            ...(art.direction === false ? { direction: 'service' } : cmd.art && cmd.art.direction === false ? { direction: 'person' } : {}),
+            ...(art.critic === false ? { critic: 'service' } : cmd.art && cmd.art.critic === false ? { critic: 'person' } : {}),
+          },
         },
         ...(cmd.test ? { test: cmd.test } : {}),
       };

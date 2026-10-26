@@ -29,6 +29,8 @@ test('круг50: фразы — только целиком', () => {
   assert.deepEqual(intent('проверяй себя'), { kind: 'agent-setting', what: 'critic', on: true });
   assert.deepEqual(intent('грузи шрифты из сети'), { kind: 'agent-setting', what: 'webFonts', on: true });
   assert.deepEqual(intent('выключи веб шрифты'), { kind: 'agent-setting', what: 'webFonts', on: false });
+  assert.deepEqual(intent('выключи шрифты'), { kind: 'agent-setting', what: 'webFonts', on: false });
+  assert.deepEqual(intent('собирай со шрифтами из сети'), { kind: 'agent-setting', what: 'webFonts', on: true });
   assert.equal((intent('собери без образа') || {}).kind === 'agent-setting', false, 'разовая форма — не настройка');
   for (const said of ['выключи образ на кнопке', 'сделай образ ярче', 'шрифты из сети красивые']) {
     const got = intent(said);

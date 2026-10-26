@@ -13684,7 +13684,10 @@ async function exportSvg() {
  */
 function fontWarning(fonts, missing, what) {
   // круг 50: шрифты из сети выключены человеком — сказать, что их в файле нет
-  if (fonts === 'off' && settings.webFonts === false) return `Шрифты из сети выключены — начертания в ${what} не встроены: у получателя текст будет шрифтами его системы.`;
+  if (fonts === 'off' && settings.webFonts === false) {
+    return what === 'SVG' ? 'Шрифты из сети выключены — начертания в SVG не встроены: у получателя текст будет шрифтами его системы.'
+      : `Шрифты из сети выключены — ${what} нарисован шрифтами системы.`;
+  }
   if (fonts !== 'partial' && fonts !== 'missing') return '';
   const list = (Array.isArray(missing) ? missing : []).filter(Boolean).slice(0, 3).join(', ');
   const head = fonts === 'missing'
