@@ -3077,21 +3077,25 @@ function expandDoc(doc) {
     }
   }
   const shapes = new Map();
-  if (!collide) {
-    for (let k = 0; k < owned.length; k += 3) {
-      const form = owned[k + 2];
-      // глубина экземпляра под доской (как у placeNode) + высота поддерева: в пределе MAX_DEPTH полная
-      // раскладка ничего в нём не обрезает — ни при мере, ни при размещении
-      const reach = boardDepth(doc, owned[k]) + form.height;
-      if (reach <= MAX_DEPTH) shapes.set(owned[k], form.sig);
-    }
+  // deep — раскрытие какого-то экземпляра доходит до MAX_DEPTH: полная раскладка его обрезает, и где
+  // именно — зависит от глубины экземпляра, которую меняет перенос предка (объект экземпляра тот же).
+  // solveAfter такой документ раскладывает полностью, образца у такого экземпляра нет
+  let deep = false;
+  for (let k = 0; k < owned.length; k += 3) {
+    const form = owned[k + 2];
+    // глубина экземпляра под доской (как у placeNode) + высота поддерева: в пределе MAX_DEPTH полная
+    // раскладка ничего в нём не обрезает — ни при мере, ни при размещении
+    const reach = boardDepth(doc, owned[k]) + form.height;
+    if (reach > MAX_DEPTH) deep = true;
+    else if (!collide) shapes.set(owned[k], form.sig);
   }
+  for (const id of skipped) if (boardDepth(doc, id) + 1 > MAX_DEPTH) deep = true;   // заглушка — два уровня
   if (skipped.length) {
     logOnce('expand:limit', `раскрытие экземпляров дало бы ${bigCount(total)} узлов — больше предела ${MAX_EXPANDED_NODES}: `
       + `${skipped.length} экземпляров не раскрыты`);
-    return { nodes: out, count, skipped, shapes, collide };
+    return { nodes: out, count, skipped, shapes, collide, deep };
   }
-  return { nodes: out, count, shapes, collide };
+  return { nodes: out, count, shapes, collide, deep };
 }
 
 /** Круг 54: глубина узла под своей доской (доска — 0, её ребёнок — 1); Infinity — цепочка оборвана. */
@@ -7135,7 +7139,7 @@ function solveWith(doc, opts, seed, pre) {
   // круг 51: заготовка для следующей раскладки по месту правки — по просьбе (incremental). Круг 54: и с
   // экземплярами — память держит общую карту «документ + раскрытые», по ней ищутся грязные узлы
   if (options.incremental === true || seed) {
-    SOLVE_MEMO.set(geo, { doc, nodes: ctx.nodes, seq: ctx.seq, collide: !!ex.collide, fn: options.measureText || null, epoch: measureEpochValue, meas: ctx.measCache, flow: ctx.flowCache, span: ctx.span });
+    SOLVE_MEMO.set(geo, { doc, nodes: ctx.nodes, seq: ctx.seq, collide: !!ex.collide, deep: !!ex.deep, fn: options.measureText || null, epoch: measureEpochValue, meas: ctx.measCache, flow: ctx.flowCache, span: ctx.span });
   }
   const forced = options.selfTest === true;
   if ((selfTestState === 0 || forced) && !options.__inSelfTest && !seed) {
@@ -7183,7 +7187,8 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   const ex = expandDoc(nextDoc);
   const nodes = ex.count && isObj(nextDoc && nextDoc.nodes) ? { ...nextDoc.nodes, ...ex.nodes } : null;
   // коллизия id раскрытия с узлом документа (до или после правки): отрезки поддеревьев не те — полная
-  if (ex.collide || memo.collide) return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes });
+  // раскрытие у предела глубины (до или после): обрезка зависит от глубины — тоже полная
+  if (ex.collide || memo.collide || ex.deep || memo.deep) return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes });
   // грязного больше половины (правка мастера с тысячами экземпляров) — полная раскладка дешевле:
   // ей не нужно ни снимать записи кешей, ни сверять размеры чистых; раскрытие она берёт готовое
   const half = Math.floor(Object.keys(nodes || nextDoc.nodes).length / 2);

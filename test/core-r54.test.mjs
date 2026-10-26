@@ -345,3 +345,30 @@ test('круг54: предел глубины — по глубине экзем
     assert.deepEqual(geo.rects.B, plain.rects.B);
   }
 });
+
+test('круг54: перенос предка меняет глубину экземпляра у предела — solveAfter раскладывает полностью (вверх и вниз)', () => {
+  const doc0 = libDoc((board, lib) => {
+    const L = [{ op: 'create', node: { type: 'frame', id: 'M', parent: lib, children: [], layout: { mode: 'row', padding: 1 }, size: hug } }];
+    let p = 'M';
+    for (let i = 0; i < 20; i++) { L.push({ op: 'create', node: { type: 'frame', id: 'm' + i, parent: p, children: [], layout: { mode: 'row', padding: 1 }, size: hug } }); p = 'm' + i; }
+    L.push({ op: 'create', node: { type: 'rect', id: 'leaf', parent: p, size: fx(10, 10) } }, { op: 'set', id: 'M', path: 'component', value: { name: 'M' } });
+    p = board;
+    for (let i = 0; i < 240; i++) { L.push({ op: 'create', node: { type: 'frame', id: 'f' + i, parent: p, children: [], layout: { mode: 'row' }, size: hug } }); p = 'f' + i; }
+    L.push({ op: 'create', node: { type: 'instance', id: 'B', parent: p, of: 'M' } },
+      { op: 'create', node: { type: 'frame', id: 'S', parent: 'f10', children: [], layout: { mode: 'row' }, size: hug } });
+    return L;
+  });
+  for (const plain of [false, true]) {
+    const opt = plain ? PLAIN : OPTS;
+    let doc = doc0;
+    let geo = quiet(() => solve(doc, { ...opt, incremental: true }));
+    for (const op of [[{ op: 'move', id: 'f40', parent: 'S', index: 0 }], [{ op: 'move', id: 'f40', parent: 'f39', index: 0 }]]) {
+      const next = applyOps(doc, op).doc;
+      const inc = quiet(() => solveAfter(geo, doc, next, op, opt));
+      const full = quiet(() => solve(next, PLAIN));
+      assert.equal(hashGeometry(inc), hashGeometry(full), `${plain ? 'без образцов' : 'с образцами'}: ${op[0].parent}`);
+      doc = next;
+      geo = inc;
+    }
+  }
+});
