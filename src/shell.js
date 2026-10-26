@@ -3373,6 +3373,7 @@ export function gradientOf(p) {
 /** Вид краски: 'none' | 'token' | 'color' | 'gradient'. */
 export function paintKind(p) {
   if (p === undefined || p === null || p === '') return 'none';
+  if (patternOf(p)) return 'pattern';   // круг 49 (SPEC §16)
   if (gradientOf(p)) return 'gradient';
   if (typeof p === 'string') return HEX_RE.test(p) || /^(rgb|hsl)a?\(/i.test(p) ? 'color' : 'token';
   if (isObj(p)) {
@@ -3402,10 +3403,11 @@ export function stopColor(stop, colors) {
   return null;
 }
 
-/** Один цвет, которым краску показать в кружке (у градиента — первый стоп). */
+/** Один цвет, которым краску показать в кружке (у градиента — первый стоп, у фактуры — цвет узора). */
 export function paintHex(p, colors) {
   const k = paintKind(p);
   if (k === 'none') return null;
+  if (k === 'pattern') return paintHex(patternOf(p).color, colors);
   if (k === 'gradient') {
     const stops = Array.isArray(gradientOf(p).stops) ? gradientOf(p).stops : [];
     return stops.length ? stopColor(stops[0], colors) : null;
@@ -3497,10 +3499,38 @@ function shade(hex) {
   return `#${ch(1)}${ch(3)}${ch(5)}`;
 }
 
-/** Краска словами: «акцент», «#F4A261», «градиент #F4A261–#E76F51, 90°», «нет». */
+/* Круг 49 (SPEC §16): фактура в заливке. */
+export const PATTERN_KINDS = Object.freeze(['dots', 'lines', 'grid', 'checks', 'waves', 'grain']);
+export const PATTERN_RU = Object.freeze({ dots: 'горошек', lines: 'полосы', grid: 'сетка', checks: 'шахматка', waves: 'волны', grain: 'зерно' });
+/** Фактура краски — или null. */
+export function patternOf(p) {
+  return isObj(p) && isObj(p.pattern) ? p.pattern : null;
+}
+/**
+ * Фактура с изменениями (вид, цвет узора, подложка, шаг, угол). Из сплошной краски — горошек цвета
+ * «muted» по прежнему цвету (он становится подложкой): вид узнаётся сразу, отмена вернёт как было.
+ */
+export function patternWith(p, change = {}, colors = null) {
+  const cur = patternOf(p);
+  const base = cur ? { ...cur } : { kind: 'dots', color: colors && typeof colors.muted === 'string' ? 'muted' : '#5b6270' };
+  if (!cur && p !== undefined && p !== null && p !== '' && !gradientOf(p)) base.bg = paintToken(p) || paintHex(p, colors) || undefined;
+  const out = { ...base, ...change };
+  if (!PATTERN_KINDS.includes(out.kind)) out.kind = 'dots';
+  for (const k of Object.keys(out)) if (out[k] === undefined || out[k] === null || out[k] === '') delete out[k];
+  if (out.size !== undefined) out.size = Math.max(4, Math.min(200, Math.round(Number(out.size) || 12)));
+  if (out.angle !== undefined) out.angle = clampAngle(out.angle);
+  return { pattern: out };
+}
+
+/** Краска словами: «акцент», «#F4A261», «градиент #F4A261–#E76F51, 90°», «фактура «горошек»: акцент по фону», «нет». */
 export function paintWord(p, ctx = {}) {
   const k = paintKind(p);
   if (k === 'none') return 'нет';
+  if (k === 'pattern') {
+    const pt = patternOf(p);
+    const w = (v) => (typeof v === 'string' ? paintWord(v, ctx) : '');
+    return `фактура «${PATTERN_RU[pt.kind] || pt.kind}»: ${w(pt.color)}${pt.bg ? ` по ${w(pt.bg)}` : ''}`;
+  }
   const colors = ctx.colors || (ctx.tokens && ctx.tokens.colors) || null;
   const one = (c, tok) => {
     if (tok) {

@@ -30,12 +30,12 @@ function rng(seed) {
 
 /* ============================== N1 ============================== */
 
-test('круг39 N1: ENGINE_VERSION 2, читает записи с ENGINE_MIN_READ 1; новее и мусор — нет', () => {
-  assert.equal(ENGINE_VERSION, 2);
+test('круг39 N1: ENGINE_VERSION 2 (с круга 48 — 3), читает записи с ENGINE_MIN_READ 1; новее и мусор — нет', () => {
+  assert.equal(ENGINE_VERSION, 3);
   assert.equal(ENGINE_MIN_READ, 1);
   assert.ok(ENGINE_MIN_READ <= ENGINE_VERSION);
-  for (const v of [1, 2, undefined, null]) assert.equal(engineReadable(v), true, `читается ${v}`);
-  for (const v of [0, 3, 99, -1, 1.5, '2', '1', NaN, Infinity, {}, [2]]) assert.equal(engineReadable(v), false, `не читается ${String(v)}`);
+  for (const v of [1, 2, 3, undefined, null]) assert.equal(engineReadable(v), true, `читается ${v}`);
+  for (const v of [0, 4, 99, -1, 1.5, '2', '1', NaN, Infinity, {}, [2]]) assert.equal(engineReadable(v), false, `не читается ${String(v)}`);
 });
 
 test('круг39 N1: журнал движка 1 (формат до кругов 36–37) переигрывается движком 2 как раньше', () => {

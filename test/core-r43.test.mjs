@@ -47,6 +47,31 @@ const FORMAT_HISTORY = {
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
       'behavior.tokens': 'cd226f5ed7cee580-25s0'
     }
+  },
+  // круг 48–49: поле theme доски (FIELD_RULES.theme, limits.theme, behavior.theme) и фактура в заливке (enums.patternKinds, limits.pattern)
+  3: {
+    hash: '3f75a79847d9ed1e-io',
+    sections: {
+      enums: 'a4ee2310d7cfdd06-ja',
+      fields: '5e1b972410a4a2da-ci',
+      keys: '9d176db7128ae455-ov',
+      limits: '387934fdb1c46dc7-h5',
+      nodes: '7dc93e5430fcaa92-3o',
+      ops: 'ed069dfdf38ec707-17',
+      paths: 'b234b2d53b1b8147-3p',
+      refs: 'eec439faf7e0f954-9k',
+      tokens: '64506054ac161ae6-4h',
+      'behavior.dressed': 'c6092bb5cc3d0433-5o',
+      'behavior.exact': 'e8c7698ee92f58d4-3n7',
+      'behavior.fields': 'bb9ce5d777789289-60ls',
+      'behavior.nested': 'dfe50ac232b8c270-156x',
+      'behavior.nodes': 'f67d12ae3ab43950-1i',
+      'behavior.ops': '19a88724b0f91cfe-38h',
+      'behavior.results': '23dff7d7422006f9-bdo',
+      'behavior.svg': '3d023ee1e6c9c4bb-2z',
+      'behavior.theme': '3270e63f4d344859-78',
+      'behavior.tokens': '69c5ec17004eed79-26k0'
+    }
   }
 };
 
