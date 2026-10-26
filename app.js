@@ -198,7 +198,8 @@ async function renderForCritic({ doc, geo, artboardId }) {
   // раскладку черновика считали до прихода новых гарнитур: дождаться их и перемерить, иначе снимок
   // рисует настоящий шрифт в чужих переносах строк
   try {
-    if (document.fonts && typeof document.fonts.load === 'function') {
+    // круг 50: шрифты из сети выключены — ждать нечего, снимок системными
+    if (settings.webFonts !== false && document.fonts && typeof document.fonts.load === 'function') {
       const fams = fontsInDoc(doc).map((f) => catalogFont(f)).filter(Boolean).map((f) => f.family);
       // пока стили не разобраны, check() для неизвестного семейства — true (по спецификации): сначала
       // ждём сами стили, потом начертания; уже готовые на странице — перемерять (весь документ) незачем
@@ -216,7 +217,7 @@ async function renderForCritic({ doc, geo, artboardId }) {
       }
     }
   } catch { /* перемерить не вышло — снимок по прежней раскладке */ }
-  return CORE.boardPNG(doc, artboardId, { geo });
+  return CORE.boardPNG(doc, artboardId, { geo, fonts: settings.webFonts !== false });
 }
 
 /**
@@ -13682,6 +13683,8 @@ async function exportSvg() {
  * (`embedded` | `partial` | `missing` | `none` | `off`) и списком начертаний (круг 11, п.18).
  */
 function fontWarning(fonts, missing, what) {
+  // круг 50: шрифты из сети выключены человеком — сказать, что их в файле нет
+  if (fonts === 'off' && settings.webFonts === false) return `Шрифты из сети выключены — начертания в ${what} не встроены: у получателя текст будет шрифтами его системы.`;
   if (fonts !== 'partial' && fonts !== 'missing') return '';
   const list = (Array.isArray(missing) ? missing : []).filter(Boolean).slice(0, 3).join(', ');
   const head = fonts === 'missing'
@@ -13973,12 +13976,13 @@ function fillSettings(body) {
   body.appendChild(group('Голос', [always, voiceNote]));
   // круг 50 (SPEC §17.2): то же, что команды «/образ», «/самопроверка», «/шрифты из сети»
   const artRow = (label, key, what) => row(label, segField(['on', 'off'], settings[key] === false ? 'off' : 'on',
-    (v) => { setAgentSetting(what, v === 'on'); openSettings(); }, ['Включено', 'Выключено']));
+    (v) => { setAgentSetting(what, v === 'on'); openSettings(); }, ['Вкл', 'Выкл']));
   const artNote = document.createElement('div');
   artNote.className = 'note';
   artNote.textContent = 'Арт-направление: перед новым экраном агент решает образ, палитру и шрифты. Самопроверка: смотрит на собранное '
-    + 'и дорабатывает шаблонное (дольше и дороже). Шрифты из сети: гарнитуры Google Fonts на холсте и в экспорте; выключены — только шрифты системы.';
-  body.appendChild(group('Живой дизайн', [
+    + 'и дорабатывает шаблонное (дольше и дороже). Шрифты из сети: гарнитуры макета из Google Fonts на холсте, в снимке и в экспорте; '
+    + 'выключены — макет шрифтами системы (шрифт самого интерфейса грузится как раньше). Это настройки: действуют, пока их не поменять.';
+  body.appendChild(group('Агент: оформление', [
     artRow('Арт-направление', 'artDirection', 'direction'),
     artRow('Самопроверка', 'artCritic', 'critic'),
     artRow('Шрифты из сети', 'webFonts', 'webFonts'),
@@ -15477,11 +15481,11 @@ function sanitizePairs(list) {
 /** Круг 50 (SPEC §17.2): настройки живого дизайна — ключ в settings и слова. */
 const AGENT_SETTING = {
   direction: { key: 'artDirection', title: 'Арт-направление', onWord: 'включено', offWord: 'выключено', slash: '/образ',
-    onSay: 'Новые экраны — снова с образом: палитра и шрифты под предмет.', offSay: 'Новые экраны собираю без образа — в оформлении документа.' },
+    onSay: 'Новые экраны — снова с образом: палитра и мотивы под предмет (если сервис агента его не выключил).', offSay: 'Новые экраны собираю без образа — в оформлении документа.' },
   critic: { key: 'artCritic', title: 'Самопроверка', onWord: 'включена', offWord: 'выключена', slash: '/самопроверка',
-    onSay: 'После сборки смотрю на экран и дорабатываю шаблонное.', offSay: 'Собранный экран больше не проверяю — быстрее, но шаблонное останется.' },
+    onSay: 'После сборки смотрю на экран и дорабатываю шаблонное (если сервис агента её не выключил).', offSay: 'Собранный экран больше не проверяю — быстрее, но шаблонное останется.' },
   webFonts: { key: 'webFonts', title: 'Шрифты из сети', onWord: 'включены', offWord: 'выключены', slash: '/шрифты из сети',
-    onSay: 'Гарнитуры снова загружаются из Google Fonts.', offSay: 'Шрифты из сети больше не загружаю и не встраиваю в экспорт: холст — шрифтами системы, агент шрифтов не выбирает. Уже загруженные останутся до перезагрузки страницы.' },
+    onSay: 'Гарнитуры снова загружаются из Google Fonts.', offSay: 'Шрифты макета из сети больше не загружаю и не встраиваю в снимок и экспорт: макет — шрифтами системы, агент шрифтов не выбирает. Уже загруженные останутся до перезагрузки страницы.' },
 };
 
 /** Выключенное человеком — для brain в браузере и для сервера (только false). */
@@ -15503,7 +15507,9 @@ function setAgentSetting(what, on, { say = false } = {}) {
     if (stage && stage.opts) stage.opts.embedFonts = !!on;
     if (on) { docFontsDoc = null; ensureDocFonts(state.doc); }
   }
-  if (say) showMsg('result', was === !!on ? `${w.title} и так ${on ? w.onWord : w.offWord}` : `${w.title} ${on ? w.onWord : w.offWord}`, { note: on ? w.onSay : w.offSay, ms: 8000 });
+  // это настройка, а не разовая просьба — так и говорим
+  const keep = ` Это настройка — действует, пока не ${on ? 'выключите' : 'включите'}: ${w.slash} ${on ? 'выкл' : 'вкл'}.`;
+  if (say) showMsg('result', was === !!on ? `${w.title} и так ${on ? w.onWord : w.offWord}` : `${w.title} ${on ? w.onWord : w.offWord}`, { note: (on ? w.onSay : w.offSay) + keep, ms: 9000 });
 }
 
 function loadSettings() {

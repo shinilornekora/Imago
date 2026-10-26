@@ -12870,15 +12870,16 @@ async function boardPNG(doc, artboardId, opts = {}) {
   const geo = opts.geo && opts.geo.rects ? opts.geo : solve(doc);
   const rect = geo.rects[artboardId];
   if (!rect || !(rect.w > 0) || !(rect.h > 0)) return null;
-  const hs = headlessStage(doc, geo, artboardId, true);
-  try { await hs.prepareFonts(artboardId); } catch (e) { /* без гарнитур — системным */ }
+  // круг 50: opts.fonts === false — шрифты из сети выключены: снимок без загрузки гарнитур
+  const hs = headlessStage(doc, geo, artboardId, opts.fonts !== false);
+  if (opts.fonts !== false) { try { await hs.prepareFonts(artboardId); } catch (e) { /* без гарнитур — системным */ } }
   // внешние картинки — в data: (SVG внутри <img> чужие адреса не грузит); не вышло — без них
   let srcMap;
   try { const ext = hs._externalImages(artboardId); if (ext.length) srcMap = await inlineImageSrcs(ext); } catch (e) { srcMap = undefined; }
   const maxW = isNum(opts.maxWidth) && opts.maxWidth > 0 ? opts.maxWidth : SHOT_CRITIC_W;
   const k = Math.min(1, maxW / rect.w);
   const maxH = (isNum(opts.maxHeight) && opts.maxHeight > 0 ? opts.maxHeight : SHOT_CRITIC_H) / k;
-  const out = renderSVG(doc, artboardId, { geo, fonts: true, srcMap, maxHeight: maxH });
+  const out = renderSVG(doc, artboardId, { geo, fonts: opts.fonts !== false, srcMap, maxHeight: maxH });
   if (!out) return null;
   const W = Math.max(1, Math.round(out.width * k));
   const H = Math.max(1, Math.round(out.height * k));

@@ -44,7 +44,7 @@ const BRAIN_STAGE = {
   plan: 'llm', generate: 'llm', retry: 'llm', variant: 'llm',
   materialize: 'validate', validate: 'validate', repair: 'repair',
   // круг 47 (SPEC §14): образ — шаг модели, критик — проверка, доработка — починка
-  direct: 'llm', critic: 'validate', revise: 'repair',
+  direct: 'llm', critic: 'validate', revise: 'repair', 'direct-off': 'llm', 'critic-off': 'validate',
 };
 
 const LABELS = {

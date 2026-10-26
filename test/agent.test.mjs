@@ -743,3 +743,23 @@ test('круг 33 (ORCH): stop и apply несут client той вкладки,
   await apply('cmd_w', 'b', { baseUrl: srv.baseUrl, client: 'x'.repeat(200) });
   assert.equal('client' in srv.log.filter((r) => r.path === '/agent/apply').at(-1).body, false);
 });
+
+test('круг 50: настройки живого дизайна — в теле команды только выключенное', async (t) => {
+  const bodies = [];
+  const srv = await fakeServer({
+    'POST /agent/command': async (req, body, res) => {
+      bodies.push(body);
+      streamHead(res);
+      res.write(sse('result', { tx_id: 'tx_1', seq: 1, applied: 1, dropped: [], summary: 'ok' }));
+      res.write(sse('done', {}));
+      res.end();
+    },
+  });
+  t.after(() => srv.close());
+  await runServerCommand({ baseUrl: srv.baseUrl, project: 'p', text: 'x', art: { direction: false, critic: true, webFonts: false, vision: false } });
+  await runServerCommand({ baseUrl: srv.baseUrl, project: 'p', text: 'x', art: { direction: true } });
+  await runServerCommand({ baseUrl: srv.baseUrl, project: 'p', text: 'x' });
+  assert.deepEqual(bodies[0].art, { direction: false, webFonts: false });
+  assert.equal(bodies[1].art, undefined, 'включённое не шлём');
+  assert.equal(bodies[2].art, undefined);
+});
