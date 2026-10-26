@@ -101,6 +101,23 @@ export function decideAgentMode({ inProject = false, health = null, hasProvider 
   return hasProvider ? 'browser' : 'off';
 }
 
+/**
+ * Круг 45 (UX r44): знак агента в шапке — в тон тосту. Сервер агента выбран, но документа он не
+ * видит (или модель на нём не отвечает) — точка жёлтая и подпись с причиной, а не зелёное
+ * «агент: сервер» рядом с тостом «Сервер агента не видит документ».
+ * @returns {{dot: 'on'|'off'|'error', words: string}}
+ */
+export function agentBadge(mode, health) {
+  const h = health && health.ok === true ? health : null;
+  if (mode === 'server') {
+    if (h && h.document !== 'up') return { dot: 'off', words: 'агент: сервер без документа' };
+    if (h && h.llm !== 'up') return { dot: 'off', words: 'агент: сервер без модели' };
+    return { dot: 'on', words: AGENT_MODE_WORDS.server };
+  }
+  if (mode === 'browser') return { dot: 'off', words: AGENT_MODE_WORDS.browser };
+  return { dot: 'error', words: AGENT_MODE_WORDS.off };
+}
+
 /** Подробности о режиме — для подсказки у строки состояния. */
 export function agentModeTitle(mode, health, providerWords = '') {
   const h = health && health.ok === true ? health : null;
@@ -652,8 +669,8 @@ export function rescueFailWords(e) {
 
 /**
  * Круг 43: спасение сохранилось новым проектом, а первая попытка — отдельным (409: её ключ занят
- * проектом с прежним документом; или тело первой попытки не пережило перезагрузку). Удалять
- * проект оболочке нечем (API удаления у сервиса нет) — говорим, что он есть и где его узнать.
+ * проектом с прежним документом; или тело первой попытки не пережило перезагрузку). Говорим, что
+ * он есть и где его узнать; круг 45 — в «Проектах» его можно удалить кнопкой (пустой, свой ключ).
  * @param {{name?: string, certain?: boolean}} o
  */
 export function rescueOrphanWords(o = {}) {
@@ -663,12 +680,63 @@ export function rescueOrphanWords(o = {}) {
     : `Если первая попытка всё же успела сохраниться, в «Проектах» будет ещё один «${name}» без последних правок — он помечен «первая попытка»; работа — в открытом сейчас.`;
 }
 
+/**
+ * Подсказка, по которой проект списка похож на пустую первую попытку спасения (круг 43), или null.
+ * Круг 45: список сервиса отдаёт `created_at`; прежний сервис его не отдаёт — у пустого проекта
+ * `updated_at` совпадает со временем создания, берём его. У подсказки может быть `createId` —
+ * ключ первой попытки: им сирота удаляется (`DELETE /api/projects/:id`).
+ */
+export function rescueOrphanHint(p, hints = []) {
+  if (!p || typeof p !== 'object' || Number(p.head_seq || 0) !== 0) return null;
+  const at = Date.parse(p.created_at || p.updated_at || '');
+  if (!Number.isFinite(at)) return null;
+  return (Array.isArray(hints) ? hints : []).find((h) => h && p.id !== h.keep && cleanText(p.name) === cleanText(h.name)
+    && at >= (Number(h.since) || 0) - 60 * 1000 && at <= (Number(h.at) || Date.now()) + 1000) || null;
+}
+
+/** Тело первой попытки спасения хранится до стольких символов JSON: больше — sessionStorage может не принять. */
+export const RESCUE_BODY_KEEP = 1_500_000;
+
+/**
+ * Запись задания спасения для sessionStorage (круг 43; круг 45 — вынесено из app.js ради
+ * поведенческого теста, мутант RS2). Тело создания хранится только у одной пачки, пока проекта
+ * нет, и только до `keep` символов: с ним повтор после перезагрузки идёт тем же create_id.
+ * → {rec, body, full, lean}: `full` — строка с телом (если есть), `lean` — без него (запас, когда
+ * хранилище не приняло полную).
+ */
+export function rescueMemo(job, { from = '', sig = '', now = Date.now(), keep = RESCUE_BODY_KEEP } = {}) {
+  let body = '';
+  try {
+    if (job && !job.project && job.plan && job.plan.whole && job.plan.body) {
+      const text = JSON.stringify(job.plan.body);
+      if (text.length <= keep) body = text;
+    }
+  } catch { body = ''; }
+  const rec = {
+    from, project: job && job.project ? { id: job.project.id, name: job.project.name || '' } : null,
+    create_id: (job && job.createId) || '', body_sig: (job && job.bodySig) || '',
+    done: job ? job.done : 0, total: job ? job.total : 0, sig, at: now, started_at: (job && job.startedAt) || now,
+    ...(job && job.orphan ? { orphan: job.orphan } : {}),
+  };
+  const lean = JSON.stringify(rec);
+  return { rec, body, lean, full: body ? JSON.stringify({ ...rec, body }) : lean };
+}
+
 /** Похоже ли, что проект списка — пустая первая попытка спасения (помета в «Проектах», круг 43). */
 export function isRescueOrphan(p, hints = []) {
-  if (!p || typeof p !== 'object') return false;
-  const at = Date.parse(p.created_at || '');
-  return (Array.isArray(hints) ? hints : []).some((h) => h && p.id !== h.keep && cleanText(p.name) === cleanText(h.name)
-    && Number(p.head_seq || 0) === 0 && Number.isFinite(at) && at >= (Number(h.since) || 0) - 60 * 1000 && at <= (Number(h.at) || Date.now()) + 1000);
+  return !!rescueOrphanHint(p, hints);
+}
+
+/** Круг 45: итог удаления сироты словами (`status` ответа или ошибки DELETE). */
+export function orphanDeleteWords(name, e = null) {
+  const n = cutText(cleanText(name || ''), 60, { ellipsis: true }) || 'Без названия';
+  if (!e) return `Удалил пустую первую попытку «${n}».`;
+  const d = (e && e.detail) || {};
+  if (e.status === 409 && d.cause === 'not_empty') return `«${n}» не удалил: в нём уже есть правки.`;
+  if (e.status === 409) return `«${n}» не удалил: это не первая попытка из этой вкладки.`;
+  if (e.status === 404) return `«${n}» уже удалён.`;
+  if (e.status === 405 || e.status === 501) return `«${n}» не удалил: сервер ещё не умеет удалять проекты.`;
+  return `«${n}» не удалил: ${rescueFailWords(e)}.`;
 }
 
 /**
@@ -685,6 +753,36 @@ export function appliedLine(text, { ops = 0, dropped = 0 } = {}) {
   if (!a && d) return `${t} — не применилась`;
   if (!d) return t;
   return `${t} · не легло ${d} из ${a + d}`;
+}
+
+/**
+ * Круг 45 (UX r44): порядок ленты «Истории» — один у всех соавторов. Чужие — по `seq` подтверждения
+ * (новые сверху; без номера — по времени). Свои идут в порядке стека отмены, а между чужими встают по
+ * `seq` своей подтверждённой записи; неподтверждённая своя (ещё в пути) — новее всего подтверждённого.
+ * Прежде свои вставали по времени ВКЛАДКИ: офлайн-правка Ани оказывалась ниже правки Бориса,
+ * легшей раньше, а у Бориса — наоборот.
+ * @param {{at?: number, seq?: number|null}[]} own стек отмены, от старых к новым
+ * @param {{seq?: number, created_at?: string}[]} others чужие записи журнала
+ * @returns {{own?: number, other?: number}[]} индексы в исходных списках, новые сверху
+ */
+export function historyOrder(own = [], others = []) {
+  const timeOf = (t) => { const v = Date.parse((t && t.created_at) || ''); return Number.isFinite(v) ? v : 0; };
+  const num = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  const theirs = others.map((t, i) => ({ i, seq: num(t && t.seq), at: timeOf(t) }))
+    .sort((a, b) => (a.seq !== null && b.seq !== null ? b.seq - a.seq : b.at - a.at));
+  const out = [];
+  let k = 0;
+  for (let j = own.length - 1; j >= 0; j--) {
+    const tx = own[j] || {};
+    const seq = num(tx.seq);
+    const at = Number(tx.at) || 0;
+    // чужая выше своей, если она новее: по номерам, когда они есть у обеих; своя без номера — в пути
+    const newer = (o) => (seq !== null && o.seq !== null ? o.seq > seq : seq === null && tx.pending ? false : o.at >= at);
+    while (k < theirs.length && newer(theirs[k])) out.push({ other: theirs[k++].i });
+    out.push({ own: j });
+  }
+  while (k < theirs.length) out.push({ other: theirs[k++].i });
+  return out;
 }
 
 /** «52 008» — тысячи через неразрывный пробел. */

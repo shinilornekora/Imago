@@ -305,7 +305,9 @@ export function createDslrClient({
   }
 
   /** Ответ, который не 200 и не 404/410, — сбой чтения. */
-  const failed = (what, r) => new OrchError(502, 'document_failed', `Document service ответил на ${what} ${r.status}`);
+  // круг 45 (code-r44): слова для человека — без имени сервиса и кода статуса; код — в detail (наружу
+  // его safeDetail не пропускает, он для трасс и логов)
+  const failed = (what, r) => new OrchError(502, 'document_failed', `Сервер документов прислал непонятный ответ на ${what} — команда не выполнена. Повторите через несколько секунд.`, { detail: { cause: 'document', status: r.status } });
 
   /**
    * GET с ожиданием по Retry-After при 503 (семафор тяжёлых чтений сервиса, §9.8) и, круг 39,

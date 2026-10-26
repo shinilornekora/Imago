@@ -53,11 +53,12 @@ test('r43 (UX Д8): правки после неудачной попытки �
   const catchUp = app.slice(app.indexOf('async function rescueCatchUp'), app.indexOf('const RESCUE_KEY'));
   assert.match(catchUp, /SHELL\.splitOpsForServer\(SHELL\.replaceDocOps\(doc, viewNow\)\)/);
   // после перезагрузки: тело первой попытки — в sessionStorage, тот же ключ с тем же телом
-  assert.match(app, /if \(text\.length <= RESCUE_BODY_KEEP\) body = text;/);
+  // круг 45: что хранится — SHELL.rescueMemo (поведение — test/shell-r45.test.mjs)
+  assert.match(app, /SHELL\.rescueMemo\(job, \{ from: server\.project\.id, sig: rescueSig\(job\.plan\) \}\)/);
   assert.match(app, /plan: oldPlan, project: null, createId, bodySig: saved\.body_sig[^\n]*catchUp: true/);
 });
 
-test('r43: сирота первой попытки — словами и пометой в «Проектах» (удалять оболочке нечем)', () => {
+test('r43: сирота первой попытки — словами и пометой в «Проектах»', () => {
   const sure = SHELL.rescueOrphanWords({ name: 'Спасение', certain: true });
   assert.match(sure, /^Первая попытка тоже сохранилась — отдельным проектом «Спасение» без последних правок/);
   assert.match(sure, /помечен «первая попытка»/);
@@ -70,7 +71,7 @@ test('r43: сирота первой попытки — словами и пом
   assert.equal(SHELL.isRescueOrphan({ id: 'p_x', name: 'Спасение', head_seq: 3, created_at: iso(t0 + 1000) }, hints), false, 'с правками — не пустая копия');
   assert.equal(SHELL.isRescueOrphan({ id: 'p_y', name: 'Другой', head_seq: 0, created_at: iso(t0 + 1000) }, hints), false);
   assert.equal(SHELL.isRescueOrphan({ id: 'p_z', name: 'Спасение', head_seq: 0, created_at: iso(t0 - 3600 * 1000) }, hints), false, 'старый одноимённый — не сирота');
-  assert.match(app, /SHELL\.isRescueOrphan\(p, orphanHints\(\)\) \? 'первая попытка сохранения, без последних правок'/);
+  assert.match(app, /const hint = SHELL\.rescueOrphanHint\(p, orphanHints\(\)\);\s*const orphan = hint \? 'первая попытка сохранения, без последних правок'/);
   assert.match(app, /if \(job\.orphan\) rememberOrphan\(/);
 });
 

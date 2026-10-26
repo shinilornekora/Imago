@@ -19,6 +19,8 @@
  *     `internal: true` — чтение секвенсора, мимо предела)
  *   recentTxMeta(projectId, {limit?, beforeSeq?}) → [{seq, tx_id, author, author_kind, title, created_at, client,
  *     command_id, command_author, undo_of, redo_of, undo_part, ops_count, dropped_count}]   (круг 29, J2: от новых к старым, seq < beforeSeq; без чтения ops)
+ *   deleteEmptyProject(id, createId) → {status: 'deleted'|'not_found'|'create_id'|'not_empty'}   (круг 45: пустая сирота
+ *     спасения — только свой create_id, вид design и журнал без записей)
  *   ping({timeoutMs = 1000}?) → boolean   (круг 29, J1: SELECT 1, ответ помнится 1 с; не бросает)
  *   schemaState → null | {reason, since, phase, error?, migration?}   (круг 31: схема отстала от кода — база
  *     восстановлена из копии до миграций; идёт сверка — /api/health 503 `storage:'schema'`)
@@ -1483,6 +1485,24 @@ export function createPgStorage(opts = {}) {
       const rows = more ? res.rows.slice(0, limit) : res.rows;
       const last = rows[rows.length - 1];
       return { projects: rows.map(projectOf), more, next: more && last ? { at: last.cursor_at, id: last.id } : null };
+    },
+
+    /**
+     * Удалить ПУСТОЙ проект своего создания (круг 45, сирота спасения §9.19): только вид design, тот
+     * же create_id и ни одной записи журнала. Одно утверждение: условие head_seq = 0 и отсутствие
+     * записей проверяются под блокировкой строки — запись другого экземпляра, вставшая раньше,
+     * удаление отменяет. → {status: 'deleted'|'not_found'|'create_id'|'not_empty'}.
+     */
+    async deleteEmptyProject(id, createId) {
+      if (!okId(id)) return { status: 'not_found' };
+      if (!hasCreateId || typeof createId !== 'string' || !createId) return { status: 'create_id' };
+      const res = await pool.query(
+        `DELETE FROM projects p WHERE p.id = $1 AND p.create_id = $2 AND p.kind = 'design' AND p.head_seq = 0
+            AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.project_id = p.id) RETURNING id`, [id, createId]);
+      if (res.rowCount) return { status: 'deleted' };
+      const row = (await pool.query('SELECT create_id FROM projects WHERE id = $1', [id])).rows[0];
+      if (!row) return { status: 'not_found' };
+      return { status: row.create_id === createId ? 'not_empty' : 'create_id' };
     },
 
     async getProject(id) {

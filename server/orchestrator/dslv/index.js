@@ -530,7 +530,8 @@ export function createDslv(o = {}) {
           job.announced = true;
           waiting.splice(i, 1);
           stats.queueExpired++;
-          finish(job, null, new OrchError(503, 'busy', `Агент перегружен: команда ждала расчёта дольше ${Math.round(queueWaitMs / 1000)} с и не выполнена. Повторите чуть позже.`, { retryAfter: 10 }));
+          // круг 45 (arch-r44): причина в detail — как у очереди чтений (`cause:'agent'`)
+          finish(job, null, new OrchError(503, 'busy', `Агент перегружен: команда ждала расчёта дольше ${Math.round(queueWaitMs / 1000)} с и не выполнена. Повторите чуть позже.`, { retryAfter: 10, detail: { cause: 'agent', queue: 'workers' } }));
           pump();
         }, queueWaitMs);
         if (job.queueTimer.unref) job.queueTimer.unref();

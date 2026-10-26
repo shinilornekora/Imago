@@ -21,8 +21,9 @@ const { ENGINE_VERSION, ENGINE_MIN_READ, FORMAT_SIGNATURE, formatSignature, crea
  */
 const FORMAT_HISTORY = {
   1: null,
+  // круг 45: в отпечаток добавлен поведенческий корпус (behavior.*) — формат тот же, состав отпечатка шире
   2: {
-    hash: 'dc721f14a5316a5a-2ck',
+    hash: '8ab525b4a23517e2-e6',
     sections: {
       enums: '3d5f4badd56fba2b-fk',
       fields: 'c19ec158ee571d7a-br',
@@ -32,7 +33,13 @@ const FORMAT_HISTORY = {
       ops: 'ed069dfdf38ec707-17',
       paths: 'b234b2d53b1b8147-3p',
       refs: 'eec439faf7e0f954-9k',
-      tokens: '64506054ac161ae6-4h'
+      tokens: '64506054ac161ae6-4h',
+      'behavior.fields': 'fc6945c9141748bf-5b5s',
+      'behavior.nested': '29864d5b2b6e5521-11nt',
+      'behavior.nodes': 'f67d12ae3ab43950-1i',
+      'behavior.ops': 'e1c9ace6fa780e50-2zg',
+      'behavior.svg': '3d023ee1e6c9c4bb-2z',
+      'behavior.tokens': 'f5d12d2afeca880c-1ztc'
     }
   }
 };
@@ -40,7 +47,7 @@ const FORMAT_HISTORY = {
 test('круг43: формат документа привязан к ENGINE_VERSION — отпечаток совпадает с таблицей версий', () => {
   const now = FORMAT_SIGNATURE;
   const want = FORMAT_HISTORY[ENGINE_VERSION];
-  const show = JSON.stringify(now, null, 2);
+  const show = JSON.stringify({ hash: now.hash, sections: now.sections }, null, 2);
   assert.ok(want !== undefined,
     `ENGINE_VERSION = ${ENGINE_VERSION}: в FORMAT_HISTORY (test/core-r43.test.mjs) нет строки этой версии — добавьте её:\n  ${ENGINE_VERSION}: ${show}`);
   assert.ok(want, `ENGINE_VERSION = ${ENGINE_VERSION}: отпечаток не записан`);
@@ -67,6 +74,14 @@ test('круг43: отпечаток — простые данные из таб
   assert.deepEqual(a, b);
   assert.deepEqual(JSON.parse(JSON.stringify(a)), a, 'без функций и undefined');
   assert.ok(Object.isFrozen(FORMAT_SIGNATURE));
+  assert.ok(Object.isFrozen(FORMAT_SIGNATURE.sections));
+  // поведенческий корпус: детерминирован, без исключений, и в нём есть и приёмы, и отказы
+  const beh = core.formatBehavior();
+  for (const [k, bits] of Object.entries(beh)) {
+    assert.match(bits, /^[01]+$/, `behavior.${k}: проба бросила исключение`);
+    assert.ok(bits.includes('0') && bits.includes('1'), `behavior.${k}: вырожденный корпус`);
+    assert.equal(FORMAT_SIGNATURE.sections['behavior.' + k] !== undefined, true);
+  }
   // разделы на месте и содержательны
   for (const k of ['nodes', 'fields', 'enums', 'keys', 'refs', 'tokens', 'ops', 'paths', 'limits']) assert.ok(a[k], k);
   assert.ok(a.nodes.types.includes('vector'));

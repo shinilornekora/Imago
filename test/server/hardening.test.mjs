@@ -167,7 +167,8 @@ for (const backend of list) {
       const { id, board } = await fresh();
       isErrorBody((await http.get('/api/nope')).body, 'not_found');
       isErrorBody((await http.get('/api/projects/00000000-0000-4000-8000-000000000000')).body, 'not_found');
-      const del = await http.raw('DELETE', '/api/projects/' + id);
+      // круг 45: DELETE у проекта есть (пустая сирота спасения) — неизвестный метод проверяем PUT
+      const del = await http.raw('PUT', '/api/projects/' + id, {});
       assert.equal(del.status, 405);
       isErrorBody(del.body, 'method_not_allowed');
       isErrorBody((await http.post(`/api/projects/${id}/tx`, { foo: 1 })).body, 'bad_request');
@@ -201,7 +202,7 @@ for (const backend of list) {
       }
       const head = await http.get(`/api/projects/${id}?head=1`);
       assert.equal(head.status, 200);
-      assert.deepEqual(Object.keys(head.body).sort(), ['epoch', 'head_seq', 'id', 'kind', 'name', 'tip', 'updated_at']);
+      assert.deepEqual(Object.keys(head.body).sort(), ['created_at', 'epoch', 'head_seq', 'id', 'kind', 'name', 'tip', 'updated_at']);
       assert.equal(head.body.head_seq, 3);
       assert.equal(head.body.tip, prev);
       assert.equal(head.body.epoch, epoch);

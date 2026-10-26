@@ -51,6 +51,10 @@ test('круг 43: safeDetail — белый список полей и безо
   assert.equal(safeDetail({ cause: 'Document service ответил 503: база недоступна', status: 503 }), undefined, 'сырые причины сети — нет');
   assert.equal(safeDetail({ engine: '2', limit: 'Expand nodes!' }), undefined);
   assert.equal(safeDetail(null), undefined);
+  // круг 45 (мутант O05): только неотрицательные целые
+  assert.equal(safeDetail({ engine: -1 }), undefined);
+  assert.equal(safeDetail({ found: 1.5, max: -3 }), undefined);
+  assert.deepEqual(safeDetail({ engine: 0, found: -1 }), { engine: 0 });
 });
 
 test('круг 43: отказ своей очереди чтений после открытия потока — в событии error есть detail {cause:"agent", queue}', async (t) => {

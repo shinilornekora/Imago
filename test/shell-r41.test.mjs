@@ -110,13 +110,14 @@ test('r41 (арх. Н2): «Сохранить как новый» — тот ж�
   assert.equal(SHELL.rescueFailWords({ status: 500, message: 'TypeError: x is undefined' }), 'сервер не ответил как надо');
   const app = read('app.js');
   // отпечаток тела рядом с create_id в sessionStorage
-  assert.match(app, /create_id: job\.createId \|\| '', body_sig: job\.bodySig \|\| ''/);
+  // (круг 45: запись — SHELL.rescueMemo, поведение — test/shell-r45.test.mjs)
+  assert.match(read('src/shell.js'), /create_id: \(job && job\.createId\) \|\| '', body_sig: \(job && job\.bodySig\) \|\| ''/);
   // после перезагрузки: другое тело — новый ключ
   // (круг 43: тот же ключ — с тем же телом, иначе тело первой попытки из sessionStorage или новый ключ)
   assert.match(app, /if \(same\) \{\s*const job = \{ from: sync, plan, project: null, createId, bodySig/);
-  assert.match(app, /createId: newCreateId\(\), bodySig, seq: 0[^\n]*\n\s*orphan: \{ name, since: startedAt, certain: false \}/);
+  assert.match(app, /createId: newCreateId\(\), bodySig, seq: 0[^\n]*\n\s*orphan: \{ name, since: startedAt, certain: false[,}]/);
   // 409 — новый ключ один раз, а не тот же повтор
-  assert.match(app, /if \(!\(e && e\.status === 409\)\) throw e;[\s\S]{0,250}job\.createId = newCreateId\(\);/);
+  assert.match(app, /if \(!\(e && e\.status === 409\)\) throw e;[\s\S]{0,400}job\.createId = newCreateId\(\);/);
   // в тостах спасения — слова оболочки
   const save = app.slice(app.indexOf('async function saveAsNewProject'), app.indexOf('const RESCUE_KEY'));
   assert.doesNotMatch(save, /afterColon\(humanError\(e\)\)/);

@@ -107,7 +107,8 @@ for (const backend of list) {
       assert.equal(listed.status, 200);
       const mine = listed.body.projects.find((p) => p.id === created.body.id);
       assert.ok(mine);
-      assert.deepEqual(Object.keys(mine).sort(), ['head_seq', 'id', 'kind', 'name', 'updated_at']);
+      // круг 45: created_at — оболочка по нему помечает сироту спасения
+      assert.deepEqual(Object.keys(mine).sort(), ['created_at', 'head_seq', 'id', 'kind', 'name', 'updated_at']);
     });
 
     it('создать с переданным документом: он и есть снимок; негодный doc и kind → 400', async () => {
