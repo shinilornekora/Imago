@@ -4230,6 +4230,48 @@ export function artSummary(direction, critique, opts = {}) {
 }
 
 /**
+ * Круг 59 (SPEC §21.6): несколько картинок разом — мудборд: одна доска-образец, картинки рядами по
+ * MOODBOARD.cell px шириной (до MOODBOARD.perRow в ряд), высота по пропорции. Доска из одних картинок —
+ * образец по §21: арт-директор видит цвета всех (до четырёх, §20). Больше MOODBOARD.max — лишние
+ * отбрасываются (их число — в `dropped`).
+ * @param {object} doc
+ * @param {{images: {src: string, width: number, height: number, fileName?: string}[], at: {x: number, y: number},
+ *   ids: {board: string, images: string[]}, boards?: number}} o
+ * @returns {{ops: object[], select: string[], dropped: number}|{error: string}}
+ */
+export const MOODBOARD = { cell: 240, perRow: 2, gap: 12, pad: 12, max: 4 };
+export function moodboardOps(doc, o) {
+  const list = o && Array.isArray(o.images) ? o.images : [];
+  if (!list.length) return { error: 'картинок нет' };
+  const taken = list.slice(0, MOODBOARD.max);
+  const made = [];
+  for (let i = 0; i < taken.length; i++) {
+    const one = imageInsertOps(doc, { ...taken[i], selection: [], at: o.at, ids: { board: o.ids.board, image: o.ids.images[i] } });
+    if (one.error) return { error: `${taken[i].fileName || `картинка ${i + 1}`}: ${one.error}` };
+    const img = one.ops[1].node;
+    const w = Math.min(MOODBOARD.cell, img.size.w.value);
+    made.push({ ...img, size: { w: { mode: 'fixed', value: w }, h: { mode: 'fixed', value: Math.max(1, Math.round((w * img.size.h.value) / img.size.w.value)) } } });
+  }
+  if (made.length === 1) {
+    const one = imageInsertOps(doc, { ...taken[0], selection: [], at: o.at, ids: { board: o.ids.board, image: o.ids.images[0] }, boards: o.boards });
+    return { ...one, dropped: 0 };
+  }
+  const cols = Math.min(MOODBOARD.perRow, made.length);
+  const width = cols * MOODBOARD.cell + (cols - 1) * MOODBOARD.gap + 2 * MOODBOARD.pad;
+  const p = MOODBOARD.pad;
+  const board = {
+    id: o.ids.board, type: 'frame', name: 'Образец', parent: doc.root, children: [],
+    pos: { x: Math.round(Number(o.at && o.at.x) || 0), y: Math.round(Number(o.at && o.at.y) || 0) },
+    size: { w: { mode: 'fixed', value: width }, h: { mode: 'hug' } },
+    layout: { mode: 'row', gap: MOODBOARD.gap, padding: { t: p, r: p, b: p, l: p }, align: 'start', justify: 'start', wrap: true },
+  };
+  return {
+    ops: [{ op: 'create', node: board }, ...made.map((n) => ({ op: 'create', node: { ...n, parent: board.id } }))],
+    select: [board.id], into: null, dropped: list.length - taken.length,
+  };
+}
+
+/**
  * Круг 58 (SPEC §21.5): картинка, вставленная в строку команды, — образец для этой команды. Она ложится
  * на макет отдельной доской (её цвета видит арт-директор, модели со зрением — её саму), а в строке
  * появляются слова об образце, если их там ещё нет: команда без них образца не берёт (§21).
@@ -4239,15 +4281,18 @@ export function artSummary(direction, critique, opts = {}) {
  * @returns {{value: string, caret: number, caretEnd?: number}}
  */
 export const REFERENCE_WORDS = 'в цветах этой картинки';
-export function referenceCommandText(value) {
+/** Круг 59: образец из нескольких картинок (мудборд). */
+export const REFERENCE_WORDS_MANY = 'в цветах этих картинок';
+export function referenceCommandText(value, { many = false } = {}) {
   const text = String(value == null ? '' : value);
   if (RE_IMAGE_REF.test(text) || text.trim().startsWith('/')) return { value: text, caret: text.length };
   const head = text.replace(/[\s,.;:—–-]+$/u, '');
+  const words = many ? REFERENCE_WORDS_MANY : REFERENCE_WORDS;
   if (!head.trim()) {
-    const v = `собери экран ${REFERENCE_WORDS}`;
+    const v = `собери экран ${words}`;
     return { value: v, caret: 7, caretEnd: 12 };
   }
-  const value2 = `${head} ${REFERENCE_WORDS}`;
+  const value2 = `${head} ${words}`;
   return { value: value2, caret: value2.length };
 }
 

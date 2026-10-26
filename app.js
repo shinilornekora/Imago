@@ -13018,6 +13018,16 @@ function nextArtboardPos(list) {
 /* -------------------------- круг 55: картинка в макет --------------------------- */
 
 /** Файл-картинка из буфера или перетаскивания; не картинка — null. */
+/** Круг 59: все подходящие картинки по порядку (для мудборда). */
+function imageFilesOf(list) {
+  const out = [];
+  for (const it of list ? Array.from(list) : []) {
+    const f = typeof it.getAsFile === 'function' ? (it.kind === 'file' ? it.getAsFile() : null) : it;
+    if (f && /^image\/(png|jpeg|gif|webp)$/i.test(f.type || '')) out.push(f);
+  }
+  return out;
+}
+
 function imageFileOf(list) {
   for (const it of list ? Array.from(list) : []) {
     const f = typeof it.getAsFile === 'function' ? (it.kind === 'file' ? it.getAsFile() : null) : it;
@@ -13048,7 +13058,7 @@ function onImagePaste(e) {
     // вместе с картинкой браузер кладёт имя файла или адрес — это не текст человека
     if (text && !SHELL.clipboardTextIsLabel(text)) return;
     e.preventDefault();
-    referenceFromFile(file);
+    referenceFromFiles(imageFilesOf(items));
     return;
   }
   if (editableTarget(e.target)) return;   // в инспекторе вставка — его дело
@@ -13082,22 +13092,71 @@ function onCommandDrop(e) {
     showMsg('error', 'Этот файл образцом не станет', { note: 'Подойдут картинки PNG, JPEG, GIF и WebP.', ms: 7000 });
     return;
   }
-  referenceFromFile(file, files.length > 1);
+  referenceFromFiles(imageFilesOf(files), files.length);
 }
 
 /* Круг 58 (SPEC §21.5): образец, положенный из строки команды, — команда его помнит: если до отправки
    выделение ушло (щелчок по холсту, Esc), образец выделяется снова, раз о нём говорят слова. */
 let pendingReference = null;
 
-/** Образец из строки команды. Пока агент работает — нет: правка документа под ним сорвала бы его итог. */
-function referenceFromFile(file, more = false) {
+/**
+ * Образец из строки команды. Пока агент работает — нет: правка документа под ним сорвала бы его итог.
+ * Круг 59 (SPEC §21.6): картинок несколько — одна доска-мудборд (до SHELL.MOODBOARD.max).
+ */
+function referenceFromFiles(files, total = files.length) {
+  if (!files.length) return;
   if (state.running) {
     showMsg('plain', 'Агент ещё работает — образец положу после', {
       note: 'Вставьте картинку снова, когда он закончит: правка документа сейчас сорвала бы его итог.', ms: 7000,
     });
     return;
   }
-  insertImageFile(file, null, { reference: true, more });
+  if (files.length === 1) { insertImageFile(files[0], null, { reference: true, more: total > 1 }); return; }
+  insertMoodboard(files, total);
+}
+
+/** Круг 59: несколько картинок — одной доской-образцом рядом с остальными, выделена целиком. */
+async function insertMoodboard(files, total) {
+  if (!state.doc) return;
+  const taken = files.slice(0, SHELL.MOODBOARD.max);
+  const ready = (await Promise.all(taken.map((f) => prepareImage(f)))).map((r, i) => (r ? { ...r, fileName: taken[i].name || '' } : null));
+  const ok = ready.filter(Boolean);
+  if (!ok.length) {
+    showMsg('error', 'Картинки не удалось открыть', { note: 'Подойдут PNG, JPEG, GIF и WebP.', ms: 7000 });
+    return;
+  }
+  const stamp = Date.now().toString(36);
+  const r = SHELL.moodboardOps(state.doc, {
+    images: ok, at: nextArtboardPos(artboards(state.doc)), boards: artboards(state.doc).length,
+    ids: { board: `ab_${stamp}`, images: ok.map((_, i) => `img_${stamp}_${i}`) },
+  });
+  if (r.error) { showMsg('error', `Образец не положил: ${r.error}`, { ms: 7000 }); return; }
+  const res = commit(r.ops, 'Образец');
+  if (!res || !res.ok) return;
+  setSelection(r.select);
+  fitAfterLayout(r.select);
+  const left = (total - ok.length) + (ready.length - ok.length);
+  offerReferenceWords(ok.length > 1, r.select[0] || null,
+    `${ok.length} ${plural(ok.length, 'картинка', 'картинки', 'картинок')} легли одной доской и выделены: команда возьмёт их цвета, а новый экран встанет рядом.`,
+    left > 0 ? ` ${left} не вошли: в образец идёт до ${SHELL.MOODBOARD.max} картинок.` : '');
+}
+
+/** Слова об образце в строке команды, фокус, сообщение (круги 58–59). */
+function offerReferenceWords(many, refId, lead, tail = '') {
+  pendingReference = refId;
+  const before = dom.command.value;
+  const next = SHELL.referenceCommandText(before, { many });
+  if (next.value !== before) {
+    dom.command.value = next.value;
+    dom.command.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  dom.command.focus();
+  try { dom.command.setSelectionRange(next.caret, next.caretEnd != null ? next.caretEnd : next.caret); } catch { /* поле без выделения */ }
+  const typed = before.trim() && !before.trim().startsWith('/');
+  showMsg('result', 'Образец на макете', {
+    note: `${lead} ${typed ? 'Команда готова — отправьте или поправьте.' : 'Впишите, что собрать, вместо «экран».'}${tail}`,
+    ms: 9000,
+  });
 }
 
 /** Перед отправкой команды: слова об образце есть, а выделение ушло — вернуть его на образец. */
@@ -13214,20 +13273,9 @@ async function insertImageFile(file, client, { reference = false, more = false }
   setSelection(r.select);
   if (!r.into) fitAfterLayout(r.select);
   if (reference) {
-    pendingReference = r.select[0] || null;
-    const before = dom.command.value;
-    const next = SHELL.referenceCommandText(before);
-    if (next.value !== before) {
-      dom.command.value = next.value;
-      dom.command.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    dom.command.focus();
-    try { dom.command.setSelectionRange(next.caret, next.caretEnd != null ? next.caretEnd : next.caret); } catch { /* поле без выделения */ }
-    const typed = before.trim() && !before.trim().startsWith('/');
-    showMsg('result', 'Образец на макете', {
-      note: `Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом. ${typed ? 'Команда готова — отправьте или поправьте.' : 'Впишите, что собрать, вместо «экран».'}${more ? ' Взял первую картинку из брошенных.' : ''}`,
-      ms: 9000,
-    });
+    offerReferenceWords(false, r.select[0] || null,
+      'Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом.',
+      more ? ' Остальные брошенные файлы — не картинки.' : '');
     return;
   }
   showMsg('result', 'Картинка на макете', { note: 'Можно сказать: «собери экран в цветах этой картинки».', ms: 8000 });
