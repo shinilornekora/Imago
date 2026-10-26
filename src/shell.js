@@ -3960,5 +3960,7 @@ export function artSummary(direction, critique, opts = {}) {
   if (!concept && !swatches.length && !fonts && !verdict) return null;
   const line = [concept ? `Образ: ${concept}` : '', fonts, verdict].filter(Boolean).join(' · ');
   // семейства отдельно: оболочка набирает их название ими же («Аа Prata»)
-  return { concept, swatches, fonts, families: [str(f.display, 40), str(f.text, 40)].filter((x, i, a) => x && a.indexOf(x) === i), verdict, line };
+  // короткий образ — до двоеточия или тире («Ночная беговая дорожка»): узкому экрану
+  const conceptShort = concept ? concept.split(/\s*[:—–]\s*/)[0].trim() : '';
+  return { concept, conceptShort, swatches, fonts, families: [str(f.display, 40), str(f.text, 40)].filter((x, i, a) => x && a.indexOf(x) === i), verdict, line };
 }

@@ -10574,7 +10574,17 @@ function showMsg(kind, text, opts = {}) {
     if (opts.art.concept) {
       const words = document.createElement('div');
       words.className = 'msg-art-words';
-      words.textContent = human(opts.art.concept);
+      const full = document.createElement('span');
+      full.className = 'msg-art-full';
+      full.textContent = human(opts.art.concept);
+      words.appendChild(full);
+      if (opts.art.conceptShort && opts.art.conceptShort !== opts.art.concept) {
+        const short = document.createElement('span');
+        short.className = 'msg-art-short';
+        short.textContent = human(opts.art.conceptShort);
+        short.setAttribute('aria-hidden', 'true');
+        words.appendChild(short);
+      }
       box.appendChild(words);
     }
     if (opts.art.verdict) {

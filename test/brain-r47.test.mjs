@@ -264,7 +264,13 @@ test('круг 47: «собери экран» — образ до раскла�
   assert.equal(shots[0].doc.nodes[board.id].name, 'Кофейня', 'снимок — черновик этой правки');
   // решение — полем самой доски: роли палитры живут вместе с правкой (§14.1)
   assert.deepEqual(after.nodes[board.id].direction, { concept: DIRECTION.concept, palette: res.direction.palette, fonts: res.direction.fonts });
-  assert.ok(res.ops.some((o) => o.op === 'set' && o.path === 'direction' && o.id === board.id));
+  assert.ok(res.ops.some((o) => o.op === 'create' && o.node.id === board.id && o.node.direction), 'в самом create доски');
+  assert.ok(!res.ops.some((o) => o.op === 'set' && o.path === 'direction'), 'отдельной служебной правки нет');
+  assert.doesNotMatch(res.changeSummary || '', /direction/, 'в итоге нет служебного слова');
+  // применённые операции дают тот же документ, что превью (журнал = экран)
+  const applied = core.applyOps(doc, res.ops);
+  assert.equal(applied.error, undefined);
+  assert.deepEqual(applied.doc.nodes[board.id].direction, after.nodes[board.id].direction);
   assert.equal(core.checkImportDoc(after), null, 'документ с полем direction проходит строгую проверку');
   const crit = provider.calls[3].messages[1].content;
   assert.ok(Array.isArray(crit), 'реплика критика — с картинкой');
@@ -633,4 +639,5 @@ test('круг 47: подпись стадии — шрифты первыми, 
   assert.doesNotMatch(all, /ВСЕ доски/);
   assert.match(all, /поменялись все доски на цветах документа/);
   assert.match(all, /его не перекрасят/);
+  assert.ok(res.warnings.findIndex((w) => /собственной палитре/.test(w)) < res.warnings.findIndex((w) => /Оформление документа общее/.test(w)), 'пометка о своей палитре — раньше общей');
 });

@@ -1376,11 +1376,15 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .msg-art-verdict { color: var(--muted); }
+.msg-art-short { display: none; }
 @media (pointer: coarse) { .msg-art-swatch { width: 24px; height: 24px; } }
 /* узкий экран: под итогом с образом шаги плана уступают место — их видно в «Истории» */
 @media (max-width: 480px) {
   .dockmsg-body:has(.msg-art) .msg-steps { display: none; }
   .msg-art-words { -webkit-line-clamp: 1; }
+  /* образ — до двоеточия: «Ночная беговая дорожка», а не «Ночная беговая дорожка:…» */
+  .msg-art-words:has(.msg-art-short) .msg-art-full { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .msg-art-short { display: inline; }
 }
 
 /* Нативных чекбоксов в приложении больше нет: выбор везде живёт в пилюлях и сегментах

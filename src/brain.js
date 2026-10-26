@@ -10847,6 +10847,8 @@ const WARN_RANKS = [
     'нет типографического токена', 'не одно из', 'ничего не мен',
     // круг 16, п.3: цвета в документе не те, что вернула модель — это про результат, а не придирка
     'в палитре от модели',
+    // круг 47: тема документа не перекрасит экран в своей палитре — раньше общей фразы о досках
+    'в собственной палитре',
   ].join('|'), 'iu')],
   [1, new RegExp([
     'найден\\p{L}* вне', 'правка ушла', 'источник взят', 'подходит (?:слоёв|узлов)', 'правлю все',
@@ -12912,15 +12914,15 @@ async function runCommandCore(options = {}) {
     if (direction && !attempt.fatal && attempt.preview && attempt.preview.doc && (newBoard || attempt.movedToBoard)) {
       const after = attempt.preview.doc;
       const boardId = builtBoard(attempt.ops, after);
-      if (boardId && after.nodes[boardId] && after.nodes[boardId].parent === after.root) {
-        const op = mkOp(engine, 'set', { id: boardId, path: 'direction', value: boardDirection(direction) });
-        try {
-          const r = engine.applyOps(after, [op]);
-          if (r && !r.error && r.doc) {
-            attempt.ops = attempt.ops.concat([op]);
-            attempt.preview = { ...attempt.preview, doc: r.doc };
-          }
-        } catch { /* без пометки на доске правка та же */ }
+      // прямо в create доски, а не отдельной правкой: служебная запись не должна звучать в итоге
+      // («direction в «Карточка оплаты»») и в «Истории»
+      const at = boardId ? attempt.ops.findIndex((o) => o && o.op === 'create' && o.node && o.node.id === boardId) : -1;
+      if (at >= 0 && after.nodes[boardId] && after.nodes[boardId].parent === after.root) {
+        const value = boardDirection(direction);
+        const ops = attempt.ops.slice();
+        ops[at] = { ...ops[at], node: { ...ops[at].node, direction: value } };
+        attempt.ops = ops;
+        attempt.preview = { ...attempt.preview, doc: { ...after, nodes: { ...after.nodes, [boardId]: { ...after.nodes[boardId], direction: value } } } };
       }
     }
 
