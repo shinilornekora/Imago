@@ -219,6 +219,12 @@ test('r45 (UX r45c): одна подсказка сироты помечает �
   const both = SHELL.rescueOrphanMatches([theirs, mine], [h, h2]);
   assert.equal(both.get('p_mine').createId, 'k1');
   assert.equal(both.get('p_theirs').createId, 'k2');
+  // назначение оптимальное, а не жадное: h1 = t0, h2 = t0+10 с; строки t0+6 с и t0+30 с — по порядку
+  const g1 = { ...h, since: t0, createId: 'g1' };
+  const g2 = { ...h, since: t0 + 10000, createId: 'g2' };
+  const opt = SHELL.rescueOrphanMatches([row('A', t0 + 6000), row('B', t0 + 30000)], [g2, g1]);
+  assert.equal(opt.get('A').createId, 'g1');
+  assert.equal(opt.get('B').createId, 'g2');
   // оболочка помечает по всему списку и запоминает отказ 409 create_id
   assert.match(app, /const orphans = SHELL\.rescueOrphanMatches\(items, orphanHints\(\)\);/);
   assert.match(app, /else if \(e && e\.status === 409\) notOrphan\(hint\.createId, p\.id\);/);

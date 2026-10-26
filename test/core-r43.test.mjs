@@ -26,7 +26,7 @@ const FORMAT_HISTORY = {
   // проход 3–4 — операции отмены (behavior.exact: все пробы set и операций ещё раз с exact);
   // формат тот же, состав отпечатка шире
   2: {
-    hash: '2a8b20c1e7761543-hl',
+    hash: '21a2397860acaec2-hl',
     sections: {
       enums: '3d5f4badd56fba2b-fk',
       fields: 'c19ec158ee571d7a-br',
@@ -38,12 +38,12 @@ const FORMAT_HISTORY = {
       refs: 'eec439faf7e0f954-9k',
       tokens: '64506054ac161ae6-4h',
       'behavior.dressed': 'c6092bb5cc3d0433-5o',
-      'behavior.exact': 'f4b8e7e582a82bfb-3ju',
+      'behavior.exact': '92db587a5e7adbfc-3k6',
       'behavior.fields': 'b776fa05a7074603-5r28',
       'behavior.nested': '8d622e246577c17e-14s9',
       'behavior.nodes': 'f67d12ae3ab43950-1i',
       'behavior.ops': '6eeb8110c37a3706-364',
-      'behavior.results': '94d78a5a6ff61864-b6u',
+      'behavior.results': '14913d2fb2001589-b8c',
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
       'behavior.tokens': 'cd226f5ed7cee580-25s0'
     }

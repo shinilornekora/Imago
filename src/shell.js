@@ -713,23 +713,50 @@ export function rescueOrphanHint(p, hints = []) {
  * не её. → Map id → подсказка.
  */
 export function rescueOrphanMatches(list = [], hints = []) {
-  const pairs = [];
-  for (const h of Array.isArray(hints) ? hints : []) {
-    if (!h) continue;
-    const not = Array.isArray(h.not) ? h.not : [];
-    for (const p of Array.isArray(list) ? list : []) {
-      if (!p || not.includes(p.id) || rescueOrphanHint(p, [h]) !== h) continue;
-      const at = Date.parse(p.created_at || p.updated_at || '');
-      pairs.push({ p, h, d: Math.abs(at - (Number(h.since) || 0)) });
-    }
-  }
-  pairs.sort((a, b) => a.d - b.d);
+  /* Назначение по каждому имени — оптимальное, а не жадное (критик кода r45d): подсказки по началу
+     спасения и строки по времени создания идут в одном порядке, поэтому лучшее назначение сохраняет
+     порядок; динамика — сначала больше пар, затем меньше сумма расстояний. Жадное «ближайшая пара
+     первой» при h1 = t0, h2 = t0+10 с и строках t0+6 с, t0+30 с отдавало обе строки чужим ключам. */
+  const timeOf = (p) => Date.parse((p && (p.created_at || p.updated_at)) || '');
   const out = new Map();
-  const used = new Set();
-  for (const { p, h, d: _ } of pairs) {
-    if (out.has(p.id) || used.has(h)) continue;
-    out.set(p.id, h);
-    used.add(h);
+  const groups = new Map();
+  for (const h of Array.isArray(hints) ? hints : []) {
+    if (!h || typeof h.name !== 'string') continue;
+    const k = cleanText(h.name);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(h);
+  }
+  for (const [name, hs] of groups) {
+    hs.sort((a, b) => (Number(a.since) || 0) - (Number(b.since) || 0));
+    const rows = (Array.isArray(list) ? list : []).filter((p) => p && cleanText(p.name) === name && hs.some((h) => rescueOrphanHint(p, [h]) === h))
+      .sort((a, b) => timeOf(a) - timeOf(b));
+    const fits = (h, p) => !(Array.isArray(h.not) && h.not.includes(p.id)) && rescueOrphanHint(p, [h]) === h;
+    const H = hs.length;
+    const R = rows.length;
+    // dp[i][j] = [пар, сумма] для первых i подсказок и j строк; лучше — больше пар, при равенстве меньше сумма
+    const better = (a, b) => (a[0] !== b[0] ? a[0] > b[0] : a[1] < b[1]);
+    const dp = Array.from({ length: H + 1 }, () => Array.from({ length: R + 1 }, () => [0, 0]));
+    const how = Array.from({ length: H + 1 }, () => new Array(R + 1).fill(0));
+    for (let i = 0; i <= H; i++) {
+      for (let j = 0; j <= R; j++) {
+        if (!i && !j) continue;
+        let best = null;
+        let via = 0;
+        if (i > 0) { best = dp[i - 1][j]; via = 1; }
+        if (j > 0 && (!best || better(dp[i][j - 1], best))) { best = dp[i][j - 1]; via = 2; }
+        if (i > 0 && j > 0 && fits(hs[i - 1], rows[j - 1])) {
+          const prev = dp[i - 1][j - 1];
+          const cand = [prev[0] + 1, prev[1] + Math.abs(timeOf(rows[j - 1]) - (Number(hs[i - 1].since) || 0))];
+          if (better(cand, best)) { best = cand; via = 3; }
+        }
+        dp[i][j] = best;
+        how[i][j] = via;
+      }
+    }
+    for (let i = H, j = R; i > 0 || j > 0;) {
+      const v = how[i][j];
+      if (v === 3) { out.set(rows[j - 1].id, hs[i - 1]); i--; j--; } else if (v === 1) i--; else j--;
+    }
   }
   return out;
 }
