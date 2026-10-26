@@ -494,7 +494,13 @@ export function createPipeline(deps) {
         library: lib.docs && lib.docs.length ? lib.docs : null,
         n: verdict.kind === 'variants' ? verdict.n : undefined,
         // круг 47 (SPEC §14): арт-направление и критик; видит ли модель картинки (узнаётся по отказу)
-        art: { ...art, vision: llm.provider ? llm.provider.vision : false },
+        // круг 50: выключить у команды можно, включить выключенное у сервиса — нет
+        art: {
+          ...art, vision: llm.provider ? llm.provider.vision : false,
+          ...(cmd.art && cmd.art.direction === false ? { direction: false } : {}),
+          ...(cmd.art && cmd.art.critic === false ? { critic: false } : {}),
+          ...(cmd.art && cmd.art.webFonts === false ? { webFonts: false } : {}),
+        },
         ...(cmd.test ? { test: cmd.test } : {}),
       };
       step('llm');

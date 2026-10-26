@@ -141,6 +141,15 @@ export function parseCommand(body, { testHooks = false } = {}) {
   if (body.n !== undefined && body.n !== null && (!Number.isInteger(body.n) || body.n < 1 || body.n > MAX_VARIANTS)) {
     throw badRequest(`n: целое от 1 до ${MAX_VARIANTS}`);
   }
+  // круг 50 (SPEC §17.2): человек выключил образ, самопроверку или шрифты из сети — только «выключить»
+  const art = {};
+  if (body.art !== undefined && body.art !== null) {
+    if (typeof body.art !== 'object' || Array.isArray(body.art)) throw badRequest('art: объект {direction?, critic?, webFonts?: boolean}');
+    for (const k of Object.keys(body.art)) {
+      if (!['direction', 'critic', 'webFonts'].includes(k) || typeof body.art[k] !== 'boolean') throw badRequest('art: только direction, critic, webFonts — true или false');
+      if (body.art[k] === false) art[k] = false;
+    }
+  }
   let history = [];
   if (body.history !== undefined && body.history !== null) {
     if (!Array.isArray(body.history)) throw badRequest('history: массив {utterance, summary}');
@@ -162,6 +171,7 @@ export function parseCommand(body, { testHooks = false } = {}) {
     mode,
     n: body.n == null ? null : body.n,
     history,
+    art,
     ...(testHooks && (body.__test === 'oom' || body.__test === 'spin' || body.__test === 'env' || body.__test === 'throw') ? { test: body.__test } : {}),
   };
 }
