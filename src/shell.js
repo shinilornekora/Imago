@@ -21,7 +21,7 @@ import {
 } from './core.js';
 // круг 25: cutText/cleanText появляются в core параллельно — берём оттуда, если уже есть
 import * as CORE_NS from './core.js';
-import { recognizeAction } from './brain.js';
+import { recognizeAction, RE_IMAGE_REF } from './brain.js';
 // круг 41: причины отброшенного — одна истина со словами реплики (§9.10)
 import { DROP_WORDS } from './sync.js';
 
@@ -4243,6 +4243,24 @@ export function artSummary(direction, critique, opts = {}) {
  *   innerWidth?: (id: string) => number|null, origin?: (id: string) => {x: number, y: number}|null}} o
  * @returns {{ops: object[], select: string[], into: string|null}|{error: string}}
  */
+/**
+ * Круг 58 (SPEC §21.5): картинка, вставленная в строку команды, — образец для этой команды. Она ложится
+ * на макет отдельной доской (её цвета видит арт-директор, модели со зрением — её саму), а в строке
+ * появляются слова об образце, если их там ещё нет: команда без них образца не берёт (§21).
+ * Пустая строка — слова с курсором в начале: человек дописывает, что собрать.
+ * @param {string} value текст строки команды
+ * @returns {{value: string, caret: number}}
+ */
+export const REFERENCE_WORDS = 'в цветах этой картинки';
+export function referenceCommandText(value) {
+  const text = String(value == null ? '' : value);
+  if (RE_IMAGE_REF.test(text)) return { value: text, caret: text.length };
+  const head = text.replace(/[\s,.;:—–-]+$/u, '');
+  if (!head.trim()) return { value: ` ${REFERENCE_WORDS}`, caret: 0 };
+  const value2 = `${head} ${REFERENCE_WORDS}`;
+  return { value: value2, caret: value2.length };
+}
+
 /* хранится вдвое крупнее показа (960 при показе до 480) и до 600 КБ: предел документа на сервере — 24 МБ,
    и каждая картинка — ещё и в истории отмены */
 export const IMAGE_INSERT = { maxW: 480, maxSide: 960, maxBytes: 600 * 1024, minInto: 160 };
