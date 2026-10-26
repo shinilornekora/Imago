@@ -3991,9 +3991,14 @@ function geometryNeutral(opsList, doc) {
   return true;
 }
 
-/** Геометрия после правки: прежняя, если правка её не меняет, иначе — решатель. */
+/**
+ * Геометрия после правки: прежняя, если правка её не меняет, иначе — решатель.
+ * Круг 51 (SPEC §18): раскладка по месту правки (CORE.solveAfter) — что изменилось, она узнаёт
+ * по самим документам, поэтому годится и для чужой транзакции; нельзя — сама сделает полную.
+ */
 function geoAfter(opsList, prevDoc, nextDoc, prevGeo) {
   if (prevGeo && prevGeo.rects && geometryNeutral(opsList, prevDoc)) return prevGeo;
+  if (typeof CORE.solveAfter === 'function') return CORE.solveAfter(prevGeo, prevDoc, nextDoc, opsList);
   return solve(nextDoc);
 }
 

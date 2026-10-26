@@ -6977,13 +6977,14 @@ function solveWith(doc, opts, seed) {
  * бюджет кадра (16 мс) лишь до ~750 слоёв: 93–97 % времени — раскладка. Здесь пересчитывается
  * только изменённое: узлы правки и их предки (в прежнем и новом документе) теряют записи кешей
  * мер и потоков; остальное меряется из кеша, а чистое поддерево того же размера переносится из
- * прежней геометрии со сдвигом. Результат — тот же, что у solve(nextDoc) (проверяется тестами
- * на случайных правках). Когда так нельзя — честно полная раскладка:
+ * прежней геометрии со сдвигом. Что изменилось — по самим документам (dirtyAfter), операции —
+ * только для вызывающего. Результат — тот же, что у solve(nextDoc) (тесты на случайных правках).
+ * Когда так нельзя — честно полная раскладка:
  *   • prevGeo не от solve этого же prevDoc (или уже использована) или другой измеритель/эпоха шрифтов;
- *   • правка токенов, темы доски, перенос между досками, операции не set/create/remove/move;
- *   • в документе есть экземпляры компонентов (раскрытие — отдельная история, открыто).
+ *   • изменились токены, тема доски, узел перешёл на другую доску;
+ *   • в прежнем документе были экземпляры компонентов (раскрытие — отдельная история, открыто).
  * prevGeo после этого — использованная: её кеши перешли новой геометрии.
- * @param {object} prevGeo @param {object} prevDoc @param {object} nextDoc @param {object[]} opsList
+ * @param {object} prevGeo @param {object} prevDoc @param {object} nextDoc @param {object[]} [opsList]
  * @param {{measureText?:Function}} [opts]
  * @returns {object} geo
  */
@@ -6991,28 +6992,26 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   const options = opts || {};
   const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
   const dirty = memo && memo.doc === prevDoc && memo.fn === (options.measureText || null) && memo.epoch === measureEpochValue
-    ? dirtyAfter(prevDoc, nextDoc, opsList) : null;
+    ? dirtyAfter(prevDoc, nextDoc) : null;
   if (!dirty) return solve(nextDoc, opts);
   SOLVE_MEMO.delete(prevGeo);
   for (const id of dirty) { memo.meas.delete(id); memo.flow.delete(id); }
   return solveWith(nextDoc, { ...options, __inSelfTest: true }, { meas: memo.meas, flow: memo.flow, geo: prevGeo, span: memo.span, dirty });
 }
 
-/** Узлы, чья раскладка могла измениться: узлы правки и все их предки — до и после. null — только полная. */
-function dirtyAfter(prevDoc, nextDoc, opsList) {
-  if (!prevDoc || !nextDoc || !prevDoc.nodes || !nextDoc.nodes || !Array.isArray(opsList) || !opsList.length) return null;
+/**
+ * Узлы, чья раскладка могла измениться, — по самим документам, а не по операциям: applyOps делит
+ * неизменённые узлы между версиями, поэтому изменённый узел — тот, чей объект другой (или его нет
+ * в одной из версий). Так верно и для чужой транзакции поверх своих неподтверждённых правок, и
+ * для починки при применении. Плюс все предки — до и после. null — только полная раскладка.
+ */
+function dirtyAfter(prevDoc, nextDoc) {
+  if (!prevDoc || !nextDoc || !isObj(prevDoc.nodes) || !isObj(nextDoc.nodes)) return null;
   if (prevDoc.tokens !== nextDoc.tokens || prevDoc.root !== nextDoc.root) return null;
-  const dirty = new Set();
-  const up = (nodes, id) => {
-    let cur = id;
-    for (let guard = 0; typeof cur === 'string' && guard <= MAX_DEPTH + 2; guard++) {
-      dirty.add(cur);
-      const n = ownNode(nodes, cur);
-      if (!n) return;
-      cur = n.parent;
-    }
-  };
-  const boardIn = (nodes, root, id) => {
+  const P = prevDoc.nodes;
+  const N = nextDoc.nodes;
+  const root = nextDoc.root;
+  const boardOfIn = (nodes, id) => {
     let cur = id;
     for (let guard = 0; typeof cur === 'string' && guard <= MAX_DEPTH + 2; guard++) {
       const n = ownNode(nodes, cur);
@@ -7022,30 +7021,31 @@ function dirtyAfter(prevDoc, nextDoc, opsList) {
     }
     return null;
   };
-  for (const op of opsList) {
-    if (!op || typeof op !== 'object') return null;
-    const ids = [];
-    if (op.op === 'set') {
-      const path = typeof op.path === 'string' ? op.path : '';
-      // тема доски меняет меры всех её текстов; компонент/экземпляр — раскрытие (открыто)
-      if (path === 'theme' || path.indexOf('theme.') === 0 || path === 'component' || path.indexOf('instance') === 0) return null;
-      if (path === 'name' || path === 'direction') continue;   // на раскладку не влияют
-      ids.push(op.id);
-    } else if (op.op === 'create') {
-      if (!isObj(op.node)) return null;
-      ids.push(op.node.id, op.node.parent);
-    } else if (op.op === 'remove') {
-      ids.push(op.id);
-    } else if (op.op === 'move') {
-      // перенос между досками: поддерево меряется другой темой — только полная
-      if (boardIn(prevDoc.nodes, prevDoc.root, op.id) !== boardIn(nextDoc.nodes, nextDoc.root, op.id)) return null;
-      ids.push(op.id, op.parent);
-    } else return null;
-    for (const id of ids) {
-      if (typeof id !== 'string') continue;
-      up(prevDoc.nodes, id);
-      up(nextDoc.nodes, id);
+  const changed = [];
+  for (const id of Object.keys(N)) if (ownNode(P, id) !== N[id]) changed.push(id);
+  for (const id of Object.keys(P)) if (!hasOwnProp.call(N, id)) changed.push(id);
+  const dirty = new Set();
+  const up = (nodes, id) => {
+    let cur = id;
+    for (let guard = 0; typeof cur === 'string' && guard <= MAX_DEPTH + 2; guard++) {
+      if (dirty.has(cur) && nodes === N) return;   // предки уже отмечены этим же проходом
+      dirty.add(cur);
+      const n = ownNode(nodes, cur);
+      if (!n) return;
+      cur = n.parent;
     }
+  };
+  for (const id of changed) {
+    const a = ownNode(P, id);
+    const b = ownNode(N, id);
+    if (a && b) {
+      // тема доски меняет меры всех её текстов — только полная
+      if (b.parent === root && JSON.stringify(a.theme) !== JSON.stringify(b.theme)) return null;
+      // перенос между досками: поддерево меряется другой темой — только полная
+      if (a.parent !== b.parent && boardOfIn(P, id) !== boardOfIn(N, id)) return null;
+    }
+    up(P, id);
+    up(N, id);
   }
   return dirty;
 }
