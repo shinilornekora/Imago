@@ -23,10 +23,10 @@ const FORMAT_HISTORY = {
   1: null,
   // круг 45: в отпечаток добавлен поведенческий корпус (behavior.*, results — что получилось), пределы тени и
   // имени контура — таблицами (limits.shadow, vector.maxPathName); проход 2 — «одетые» поля (behavior.dressed),
-  // проход 3 — операции отмены (behavior.exact);
+  // проход 3–4 — операции отмены (behavior.exact: все пробы set и операций ещё раз с exact);
   // формат тот же, состав отпечатка шире
   2: {
-    hash: '52685b5a4a8d9a1c-hk',
+    hash: '2a8b20c1e7761543-hl',
     sections: {
       enums: '3d5f4badd56fba2b-fk',
       fields: 'c19ec158ee571d7a-br',
@@ -38,12 +38,12 @@ const FORMAT_HISTORY = {
       refs: 'eec439faf7e0f954-9k',
       tokens: '64506054ac161ae6-4h',
       'behavior.dressed': 'c6092bb5cc3d0433-5o',
-      'behavior.exact': '0349a62a4df9ae3c-cc',
+      'behavior.exact': 'f4b8e7e582a82bfb-3ju',
       'behavior.fields': 'b776fa05a7074603-5r28',
       'behavior.nested': '8d622e246577c17e-14s9',
       'behavior.nodes': 'f67d12ae3ab43950-1i',
       'behavior.ops': '6eeb8110c37a3706-364',
-      'behavior.results': 'b3fcc256cb474570-6p0',
+      'behavior.results': '94d78a5a6ff61864-b6u',
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
       'behavior.tokens': 'cd226f5ed7cee580-25s0'
     }

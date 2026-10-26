@@ -90,14 +90,19 @@ test('круг45: мутанты keepFieldForm и ветвей отмены (exa
     'exact всё равно сохраняет форму': ['const value = !op.exact ? keepFieldForm(node, path, op.value, draft) : op.value;', 'const value = keepFieldForm(node, path, op.value, draft);'],
     'create с exact проверяет ссылки шкал': ['      if (!op.exact) {', '      if (true) {'],
     'set с exact проверяет ссылки шкал': ["if (!op.exact && (parts[0] === 'layout'", "if ((parts[0] === 'layout'"],
-    'checkNode всегда строгий': ['checkNode(node, draft, !!op.exact)', 'checkNode(node, draft, false)']
+    'checkNode в create всегда строгий': ['checkNode(node, draft, !!op.exact)', 'checkNode(node, draft, false)'],
+    // проход 4 (arch-r45d Д1‴): мягкая проверка узла в set и ветвь «причина была и до правки»
+    'checkNode в set строгий': ['let err = checkNode(next, draft, !!op.exact);', 'let err = checkNode(next, draft, false);'],
+    'проба без негодных полей строгая': ['checkNode(probe, draft, !!op.exact)', 'checkNode(probe, draft, false)'],
+    'прежняя причина строгая': ['checkNode(withoutBadFields(node, parts[0]), draft, !!op.exact)', 'checkNode(withoutBadFields(node, parts[0]), draft, false)'],
+    'без «причина была и до правки»': ['if (err && !fieldProblem(next, parts[0])) {', 'if (false) {']
   };
   const dir = mkdtempSync(join(tmpdir(), 'imago-mut-'));
   try {
     for (const [name, [from, to]] of Object.entries(mutants)) {
-      assert.ok(src.split(from).length >= 2, `${name}: строка мутации есть в ядре`);
+      assert.equal(src.split(from).length, 2, `${name}: строка мутации есть в ядре ровно один раз`);
       const file = join(dir, name.replace(/\W+/g, '_') + '.mjs');
-      writeFileSync(file, src.split(from).join(to));
+      writeFileSync(file, src.replace(from, to));
       const m = await import(pathToFileURL(file).href);
       assert.notEqual(m.FORMAT_SIGNATURE.hash, core.FORMAT_SIGNATURE.hash, `${name}: отпечаток должен измениться`);
     }

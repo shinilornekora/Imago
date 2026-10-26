@@ -13084,7 +13084,8 @@ function otherEditItem(t) {
   /* круг 45 (UX r45b М3): у правки руками подпись транзакции — те же слова, что у автора в его «Истории»
      («Открепил «Шапка»»), и те же, что увидит соавтор после перезагрузки; описание по операциям
      («Замок да → не задан…») — только запас. «Обернул» — по тому, что легло (круг 43). */
-  const authored = !agent && title && !/^Обернул /.test(title);
+  // подпись старого клиента, переписанная LEGACY_TITLES («Правка» → «Изменил макет»), — не авторская: точнее по операциям
+  const authored = !agent && title && title === cleanText(t.title) && !/^Обернул /.test(title);
   const base = emptyTx(t) ? (title ? human(title) : 'Правка') : human((rewind || authored ? title : described) || title || (t.ops_count
     ? `${t.ops_count} ${plural(t.ops_count, 'изменение', 'изменения', 'изменений')}`
     : 'Правка без изменений'));
