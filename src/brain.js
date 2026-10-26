@@ -12623,12 +12623,14 @@ function builtBoard(ops, after) {
  * true`); снимка нет или модель его не приняла — решают приметы (от SIGNALS_REVISE — доработка).
  * @returns {Promise<object|null>} нормализованный вердикт с полем seen: 'image' | 'signals'
  */
-async function critiqueBoard({ engine, attempt, direction, utterance, plan, render, signal, provider, ask, emit, serviceNote }) {
+async function critiqueBoard({ engine, attempt, direction, utterance, plan, render, signal, provider, ask, emit, serviceNote, again = false }) {
   const after = attempt.preview.doc;
   const geo = attempt.preview.geo || safeSolve(engine, after);
   const boardId = builtBoard(attempt.ops, after);
   if (!boardId || !nodeOf(after, boardId)) return null;
-  emit('critic', 'Проверяю, не вышло ли шаблонно');
+  // круг 52: второй взгляд — на доработку, только снимком (по приметам доработку уже сверили)
+  if (again && (typeof render !== 'function' || provider.vision !== true)) return null;
+  emit('critic', again ? 'Смотрю на доработку' : 'Проверяю, не вышло ли шаблонно');
   const signals = templateSignals(engine, after, boardId, { dir: direction });
   let image = null;
   if (typeof render === 'function' && provider.vision === true) {
@@ -12644,6 +12646,7 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
   }
   /* Без снимка модель-критика не зовём: по описанию слоёв она судит о виде почти наугад, а вызов
    * стоит как вся раскладка. Решают приметы шаблона: от двух — доработка по ним. */
+  if (!image && again) return null;
   if (!image) {
     const crit = {
       score: null, generic: signals.length >= SIGNALS_REVISE, verdict: signals.length >= SIGNALS_REVISE ? 'revise' : 'ok',
@@ -12678,16 +12681,33 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
     return null;
   });
   if (raw === null) {
+    if (again) return null;
     return critiqueBoard({ engine, attempt, direction, utterance, plan, render: null, signal, provider, ask, emit, serviceNote });
   }
   const crit = normalizeCritique(raw);
-  if (!crit) { serviceNote('Критик ответил без оценки — оставил собранное'); return null; }
+  if (!crit) { serviceNote(again ? 'Критик не оценил доработку' : 'Критик ответил без оценки — оставил собранное'); return null; }
   crit.seen = 'image';
   crit.signals = signals;
+  if (again) {
+    emit('critic', `Доработка: ${crit.score}/10`, { title: 'Взгляд на доработку', critique: { ...crit } });
+    return crit;
+  }
   emit('critic', `${crit.score}/10${crit.generic ? ' · шаблонно' : ''}${crit.verdict === 'ok' ? ' · оставляю' : ''}`, {
     title: crit.verdict === 'ok' ? 'Выглядит живо' : 'Выглядит шаблонно', critique: { ...crit },
   });
   return crit;
+}
+
+/**
+ * Круг 52 (SPEC §19): берём ли доработку по второму взгляду критика. Лучше — выше оценка или
+ * критик ею доволен; второго взгляда нет (снимок, сеть, ответ без оценки) — как в круге 47:
+ * доработка, собравшаяся не хуже, остаётся, но в итоге честно «не перепроверено».
+ * @returns {'better'|'worse'|'unchecked'}
+ */
+export function recheckVerdict(first, second) {
+  if (!second || typeof second.score !== 'number') return 'unchecked';
+  if (!first || typeof first.score !== 'number') return second.verdict === 'ok' ? 'better' : 'unchecked';
+  return second.score > first.score || (second.verdict === 'ok' && second.score >= first.score) ? 'better' : 'worse';
 }
 
 export async function runCommand(options = {}) {
@@ -13366,9 +13386,29 @@ async function runCommandCore(options = {}) {
               && templateSignals(engine, next.preview.doc, nextBoard, { dir: direction }).length < critique.signals.length);
             if (!next.fatal && !next.nothingChanged && next.blocking.length <= attempt.blocking.length
               && keepsContent(attempt.ops, next.ops) && fewer) {
-              data = fixed;
-              attempt = next;
-              critique.revised = true;
+              // круг 52: доработку, сделанную по снимку, критик смотрит ещё раз — один раз, без второй доработки
+              let second = null;
+              if (critique.seen === 'image') {
+                try {
+                  second = await critiqueBoard({
+                    engine, attempt: next, direction, utterance, plan, render, signal, provider, ask, emit, serviceNote, again: true,
+                  });
+                } catch (e) {
+                  if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+                  serviceNote(`Критик не посмотрел на доработку: ${factOnly(e && e.message ? e.message : e)}`);
+                }
+              }
+              const recheck = critique.seen === 'image' ? recheckVerdict(critique, second) : 'signals';
+              if (second) critique.after = { score: second.score, verdict: second.verdict, issues: second.issues.slice(0, 2) };
+              if (recheck === 'worse') {
+                critique.recheck = 'worse';
+                serviceNote(`Доработка не стала лучше (${critique.score} → ${second.score} из 10) — оставил первую сборку`);
+              } else {
+                if (recheck !== 'signals') critique.recheck = recheck;
+                data = fixed;
+                attempt = next;
+                critique.revised = true;
+              }
             } else {
               serviceNote('Доработка по критику собралась хуже — оставил первый вариант');
             }

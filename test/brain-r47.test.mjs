@@ -320,10 +320,11 @@ test('круг 47: «собери экран» — образ до раскла�
 
 test('круг 47: критик недоволен — один круг доработки, принимается доработанное', async () => {
   const doc = empty();
-  const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, TREE_BETTER], critique: [CRIT_BAD] }, { vision: true });
+  const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, TREE_BETTER], critique: [CRIT_BAD, CRIT_OK] }, { vision: true });
   const res = await runCommand({ doc, selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render: async () => PNG });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
-  assert.deepEqual(provider.calls.map((c) => c.schema), ['plan', 'direction', 'tree', 'critique', 'tree'], 'критик — один раз, доработка — один раз');
+  // круг 52: доработку критик смотрит ещё раз; доработка по-прежнему одна
+  assert.deepEqual(provider.calls.map((c) => c.schema), ['plan', 'direction', 'tree', 'critique', 'tree', 'critique'], 'доработка — один раз');
   const revise = provider.calls[4].messages;
   assert.equal(revise[revise.length - 2].role, 'assistant', 'модель видит своё прежнее дерево');
   assert.match(revise[revise.length - 1].content, /4\/10, выглядит шаблонно/);
@@ -332,7 +333,7 @@ test('круг 47: критик недоволен — один круг дор�
   assert.ok(byName(res.preview.doc, 'Штамп'), 'доработка на макете');
   assert.equal(byName(res.preview.doc, 'Штамп').rotate, -12);
   assert.equal(res.critique.revised, true);
-  assert.equal(artSummary(res.direction, res.critique).verdict, 'Первая сборка — 4 из 10 → доработал: шапка — просто текст по левому краю, без образа');
+  assert.equal(artSummary(res.direction, res.critique).verdict, 'Первая сборка — 4 из 10 → после доработки 8,5 из 10');
 });
 
 test('круг 47: доработка собралась хуже (отказ, пустое дерево) — остаётся собранное', async () => {
