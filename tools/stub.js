@@ -201,6 +201,42 @@
     answer() {
       return { answer: 'Это тестовая заглушка: настоящая модель тут не вызывается.', followups: [] };
     },
+    /* Круг 47 (SPEC §14.1): арт-директор — образ по слову в команде: кофе, спорт, ночь; иначе — сад. */
+    direction(u) {
+      const low = String(u || '').toLowerCase();
+      if (/коф|чай|пекар|завтрак/.test(low)) {
+        return {
+          concept: 'Утренняя кофейня: крафтовый пакет, эмалированная кружка, мел на доске',
+          mood: ['тепло', 'ремесленно'],
+          materials: [{ name: 'крафт', hex: '#c9a77c' }, { name: 'эспрессо', hex: '#3b2418' }, { name: 'пенка', hex: '#f4ead8' }, { name: 'эмаль', hex: '#2f6f62' }],
+          palette: { bg: '#f4ead8', surface: '#fffaf1', text: '#2b1a12', muted: '#6e5646', accent: '#2f6f62', accent2: '#c9a77c' },
+          fonts: { display: 'Prata', text: 'Golos Text' },
+          motifs: ['круглый штамп', 'крупные цены'], composition: 'асимметрия, заголовок слева', avoid: ['белые карточки в ряд'],
+        };
+      }
+      if (/спорт|фитнес|бег|трениров/.test(low)) {
+        return {
+          concept: 'Ночная беговая дорожка: светоотражатель, мокрый асфальт, табло секундомера',
+          mood: ['драйв', 'ночь'],
+          materials: [{ name: 'асфальт', hex: '#15171c' }, { name: 'неон', hex: '#c6ff3d' }, { name: 'светоотражатель', hex: '#e9edf2' }],
+          palette: { bg: '#15171c', surface: '#20242c', text: '#f2f4f7', muted: '#9aa3b2', accent: '#c6ff3d', accent2: '#ff4f6d' },
+          fonts: { display: 'Russo One', text: 'Exo 2' },
+          motifs: ['крупные цифры темпа', 'полосы разметки'], composition: 'крупный первый экран', avoid: ['пастель'],
+        };
+      }
+      return {
+        concept: 'Утренний сад: мокрая листва, глиняные горшки, лён',
+        mood: ['свежо', 'спокойно'],
+        materials: [{ name: 'лён', hex: '#efe9dd' }, { name: 'листва', hex: '#2e6b4a' }, { name: 'терракота', hex: '#c8643b' }],
+        palette: { bg: '#efe9dd', surface: '#fbf8f2', text: '#1f2a22', muted: '#5f6b61', accent: '#2e6b4a', accent2: '#c8643b' },
+        fonts: { display: 'Lora', text: 'Onest' },
+        motifs: ['круги-пятна', 'лист иллюстрацией'], composition: 'лента с выносом', avoid: ['синий акцент'],
+      };
+    },
+    /** Круг 47 (SPEC §14.3): критик заглушки доволен — доработки не будет. */
+    critique() {
+      return { score: 8, generic: false, verdict: 'ok', issues: [], fixes: [], praise: 'Образ читается' };
+    },
     unknown() { return {}; },
   };
 

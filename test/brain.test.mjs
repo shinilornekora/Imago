@@ -271,7 +271,8 @@ test('создание: дерево превращается в операци�
   assert.deepEqual(res.preview.doc.nodes[root.id].children, [title.id, res.ops[2].node.id]);
   assert.equal(JSON.stringify(doc), before, 'входной документ не мутирован');
   const order = seen.filter((s, i) => s !== seen[i - 1]);   // partial-обновления идут той же стадией
-  assert.deepEqual(order, ['classify', 'plan', 'generate', 'materialize', 'validate', 'done']);
+  // круг 47 (SPEC §14): арт-направление до раскладки и критик после неё — свои стадии
+  assert.deepEqual(order, ['classify', 'plan', 'direct', 'generate', 'materialize', 'critic', 'validate', 'done']);
   assert.equal(res.plan.title, PLAN_CREATE.title);
   assert.ok(res.usage.calls >= 2);
 });

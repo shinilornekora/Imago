@@ -1357,6 +1357,18 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   color: var(--agent); border: 1px solid color-mix(in srgb, var(--agent) 45%, transparent);
   border-radius: 999px;
 }
+/* Круг 47 (SPEC §14.5): решение арт-директора под итогом команды — образцы, образ, шрифты, критик. */
+.msg-art {
+  margin: 6px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
+  font-size: var(--t-xs); color: var(--muted); min-width: 0;
+}
+.msg-art-swatches { display: inline-flex; gap: 3px; flex: none; }
+.msg-art-swatch {
+  width: 14px; height: 14px; border-radius: 999px; flex: none;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 22%, transparent);
+}
+.msg-art-words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.msg-art-verdict { font-family: var(--mono); color: var(--agent); white-space: nowrap; }
 /* Нативных чекбоксов в приложении больше нет: выбор везде живёт в пилюлях и сегментах
    (круг 11, п.16). Остаётся только приглушение недоступного переключателя. */
 .row[data-off="on"] { opacity: .55; }

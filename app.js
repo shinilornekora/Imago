@@ -36,6 +36,7 @@ import {
   agentHealthNotice, AGENT_DOWN_WORDS, detachedLostWords, droppedWords, presenceAgentWords, cutText, cleanText,
 } from './src/shell.js';
 import * as SHELL from './src/shell.js';
+import { fontsInDoc, fontStylesheetUrl, catalogFont } from './src/fonts.js';
 
 /* --------------------------------- состояние --------------------------------- */
 
@@ -157,6 +158,43 @@ function stageErrorNote(e) {
  * весь документ раскладывается заново («Fonts changed»). На большом макете это лишние
  * треть секунды на первом выделении. Просим их сразу, пока холст пуст.
  */
+/**
+ * Круг 47 (SPEC §14.2): гарнитуры документа — на страницу. Холст рисует SVG прямо в странице, и
+ * семейство, которого у страницы нет (Prata из решения арт-директора), выходило запасным
+ * шрифтом, а ширины текста — мерились им же. Подключаем стили Google Fonts по семейству (только
+ * из подобранного набора — чужое имя дало бы 400 всему запросу); когда файлы придут, ядро само
+ * сбросит замеры (loadingdone) и холст переложится. Один и тот же документ дважды не обходим.
+ */
+const docFontsSeen = new Set();
+let docFontsDoc = null;
+function ensureDocFonts(doc) {
+  if (!doc || doc === docFontsDoc || typeof document === 'undefined' || !document.head) return;
+  docFontsDoc = doc;
+  try {
+    for (const family of fontsInDoc(doc)) {
+      const f = catalogFont(family);
+      if (!f || docFontsSeen.has(f.family)) continue;
+      docFontsSeen.add(f.family);
+      const href = fontStylesheetUrl([f.family]);
+      if (!href) continue;
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = href;
+      link.dataset.font = f.family;
+      document.head.appendChild(link);
+    }
+  } catch { /* без шрифтов холст нарисует запасным */ }
+}
+
+/**
+ * Круг 47 (SPEC §14.4): снимок черновика доски для критика агента в браузере — PNG той же
+ * отрисовкой, что холст, с гарнитурами внутри. Не вышло — null, и критик смотрит выжимку.
+ */
+function renderForCritic({ doc, geo, artboardId, maxSide }) {
+  ensureDocFonts(doc);
+  return CORE.boardPNG(doc, artboardId, { geo, maxSide });
+}
+
 function warmFonts() {
   try {
     if (!document.fonts || typeof document.fonts.load !== 'function') return;
@@ -3153,9 +3191,10 @@ function presentServerResult(raw, utterance, { variant = null } = {}) {
   const partly = typeof res.cannot === 'string' ? res.cannot.trim() : '';
   const followups = Array.isArray(res.followups) ? res.followups.slice(0, 3).map(String) : [];
   const label = variant ? `${utterance} · ${variant.label || 'вариант'}` : utterance;
+  const art = SHELL.artSummary(res.direction, res.critique);
   rememberPair(utterance, headline);
   if (!variant) addChat('you', utterance);
-  addChat('agent', headline, followups, aside);
+  addChat('agent', headline, followups, [aside, art && art.line].filter(Boolean).join(' · '));
   state.awaitingClarify = null;
   // часть просьбы невыполнима — говорим вместе с тем, что сделано (как у brain, п.19)
   if (partly) addChat('agent', partly);
@@ -3165,6 +3204,7 @@ function presentServerResult(raw, utterance, { variant = null } = {}) {
   if (issue) addChat('agent', issue);
   showMsg(issue ? 'warn' : 'result', headline, {
     issue,
+    art,
     note: [partly, aside, dropped, warnLine(r.warnings, { skipLayout: true })].filter(Boolean).join(' · '),
     details: techDetails(r.warnings),
     chips: followups.map((f) => ({ text: f, onClick: () => { dom.command.value = f; dom.command.focus(); } })),
@@ -5904,6 +5944,7 @@ function renderAll(opts = {}) {
      а плашка сверху уверяет «Вариант 1 — предпросмотр», и «Взять этот» упирается
      в «документ изменился» (круг 11, п.4). */
   unpeekVariant();
+  ensureDocFonts(state.doc);
   stage.render(state.doc, state.geo, {
     selection: state.selection,
     diff: opts.diff || null,
@@ -9402,6 +9443,8 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
       onStage: (rec) => onAgentStage(rec, 0, runId),
       history: state.pairs.slice(), geo: state.geo, activeArtboardId: activeArtboardId(),
       selectionBy: state.selectionBy,
+      // круг 47 (SPEC §14.4): снимок черновика доски для визуального критика
+      render: renderForCritic,
     });
     hideStage();
 
@@ -9503,9 +9546,11 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
       ? [r.tx.human, summary && summary !== conceptual ? summary : ''].filter(Boolean).join(' · ')
       : (summary && summary !== headline ? summary : '');
     // в память разговора кладём факт, а не намерение: иначе «верни как было» не на что опереть (п.12)
+    // круг 47 (SPEC §14.5): образ, палитра, шрифты и вердикт критика — под итогом
+    const art = SHELL.artSummary(res.direction, res.critique);
     rememberPair(utterance, headline);
     addChat('you', utterance);
-    addChat('agent', headline, followups, aside);
+    addChat('agent', headline, followups, [aside, art && art.line].filter(Boolean).join(' · '));
     state.awaitingClarify = null;
 
     // часть просьбы невыполнима — об этом говорим вместе с тем, что всё-таки сделано (п.19)
@@ -9521,6 +9566,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
     showMsg(issue ? 'warn' : 'result', headline, {
       issue,
       note,
+      art,
       steps: planSteps(res.plan),
       details: techDetails(res.warnings, null, res.serviceNotes),
       chips: followups.map((f) => ({ text: String(f), onClick: () => { dom.command.value = String(f); dom.command.focus(); } })),
@@ -10451,6 +10497,44 @@ function showMsg(kind, text, opts = {}) {
     bodyBox.insertBefore(ol, dom['dockmsg-chips']);
   }
 
+  /* Круг 47 (SPEC §14.5): решение арт-директора — образ, образцы палитры, пара шрифтов — и
+     оценка критика. Человек видит, ЧТО агент придумал, и может сослаться: «теплее», «другой шрифт». */
+  const oldArt = bodyBox.querySelector('.msg-art');
+  if (oldArt) oldArt.remove();
+  if (opts.art) {
+    const box = document.createElement('div');
+    box.className = 'msg-art';
+    box.setAttribute('role', 'group');
+    box.setAttribute('aria-label', 'Решение арт-директора');
+    if (opts.art.swatches.length) {
+      const row = document.createElement('span');
+      row.className = 'msg-art-swatches';
+      for (const sw of opts.art.swatches) {
+        const dot = document.createElement('span');
+        dot.className = 'msg-art-swatch';
+        dot.style.background = sw.hex;
+        dot.title = `${sw.label} ${sw.hex}`;
+        row.appendChild(dot);
+      }
+      // образцы цвета — для глаза; диктору — словами
+      row.setAttribute('aria-label', `Палитра: ${opts.art.swatches.map((x) => `${x.label} ${x.hex}`).join(', ')}`);
+      row.setAttribute('role', 'img');
+      box.appendChild(row);
+    }
+    const words = document.createElement('span');
+    words.className = 'msg-art-words';
+    words.textContent = human([opts.art.concept, opts.art.fonts].filter(Boolean).join(' · '));
+    words.title = words.textContent;
+    if (words.textContent) box.appendChild(words);
+    if (opts.art.verdict) {
+      const v = document.createElement('span');
+      v.className = 'msg-art-verdict';
+      v.textContent = human(opts.art.verdict);
+      box.appendChild(v);
+    }
+    bodyBox.insertBefore(box, dom['dockmsg-chips']);
+  }
+
   // коды, сырой ответ модели и пометки о починке — под «Подробности», а не в тексте (п.7)
   const oldDetails = bodyBox.querySelector('.dockmsg-details');
   if (oldDetails) oldDetails.remove();
@@ -10663,6 +10747,9 @@ function showVariants(list, utterance, baseStamp) {
     thumb.className = 'thumb';
     try {
       const target = variantArtboard(v);
+      // круг 47: у варианта может быть своё арт-направление — его гарнитуры тоже на страницу
+      docFontsDoc = null;
+      ensureDocFonts(v.preview.doc);
       const svg = target ? stage.toSVG(target, v.preview.doc, v.preview.geo) : '';
       const crop = target ? variantCrop(v, target, maxTall, target === firstAb ? sharedBox : null) : null;
       if (svg) {
@@ -10982,6 +11069,7 @@ function peekVariant(v, i) {
   if (!pv || !pv.doc || !pv.geo || !pv.geo.rects) return;
   if (peekIndex === i) return;
   peekIndex = i;
+  ensureDocFonts(pv.doc);
   try { stage.render(pv.doc, pv.geo, { selection: [] }); }
   catch { peekIndex = -1; return; }
   dom.app.dataset.peek = 'on';

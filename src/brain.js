@@ -66,6 +66,8 @@
  *                       назначенная человеком, и «правка ушла туда» о нём не говорится.
  */
 
+import { DEFAULT_FONT, catalogFont, fontMenu, nearestWeight, FONT_PAIRS } from './fonts.js';
+
 /* ────────────────────────────────────────────────────────────────────────────
  * 0. Движок
  * ──────────────────────────────────────────────────────────────────────────── */
@@ -1293,6 +1295,93 @@ export const SCHEMAS = {
   cannot?: string }                     // только если нарисовать просимое нельзя — объясни по-русски`,
     example: ART_EXAMPLE,
   },
+
+  /**
+   * Круг 47 (SPEC §14.1): арт-направление — решается ДО раскладки. Образ одной фразой, материалы
+   * предмета и палитра из них, пара шрифтов из подобранного набора (src/fonts.js), мотивы и приём
+   * композиции. Схема плоская: локальной модели проще заполнить шесть строк палитры, чем массив.
+   */
+  direction: {
+    name: 'direction',
+    schema: {
+      type: 'object',
+      properties: {
+        concept: { type: 'string' },
+        mood: { type: 'array', items: { type: 'string' }, maxItems: 4 },
+        materials: {
+          type: 'array', maxItems: 4,
+          items: { type: 'object', properties: { name: { type: 'string' }, hex: { type: 'string' } }, required: ['name', 'hex'] },
+        },
+        palette: {
+          type: 'object',
+          properties: {
+            bg: { type: 'string' }, surface: { type: 'string' }, text: { type: 'string' },
+            muted: { type: 'string' }, accent: { type: 'string' }, accent2: { type: 'string' },
+          },
+          required: ['bg', 'text', 'accent'],
+        },
+        fonts: {
+          type: 'object',
+          properties: { display: { type: 'string' }, text: { type: 'string' } },
+          required: ['display', 'text'],
+        },
+        motifs: { type: 'array', items: { type: 'string' }, maxItems: 4 },
+        composition: { type: 'string' },
+        avoid: { type: 'array', items: { type: 'string' }, maxItems: 4 },
+      },
+      required: ['concept', 'palette', 'fonts'],
+    },
+    hint: `{ concept: string (образ одной фразой — не «современный минимализм», а картинка: «утренняя кофейня, крафт и эмаль»),
+  mood: string[] (2-4 слова настроения),
+  materials: [{name: string (материал или вещь предмета: «обжаренное зерно»), hex: "#rrggbb" (его цвет)}] (2-4),
+  palette: {bg, surface, text, muted, accent, accent2: "#rrggbb"} (из материалов; text на bg читается),
+  fonts: {display: string, text: string} (семейства ТОЛЬКО из списка ниже),
+  motifs: string[] (1-4 графических мотива: «зерно бумаги», «круглые штампы», «крупные цифры»),
+  composition: string (приём раскладки одной фразой),
+  avoid: string[] (чего не делать в ЭТОМ макете) }`,
+    example: {
+      concept: 'Утренняя кофейня: крафтовый пакет, эмалированная кружка, мел на доске',
+      mood: ['тепло', 'неторопливо', 'ремесленно'],
+      materials: [{ name: 'крафт-бумага', hex: '#c9a77c' }, { name: 'эспрессо', hex: '#3b2418' }, { name: 'молочная пенка', hex: '#f4ead8' }, { name: 'эмаль', hex: '#2f6f62' }],
+      palette: { bg: '#f4ead8', surface: '#fffaf1', text: '#2b1a12', muted: '#6e5646', accent: '#2f6f62', accent2: '#c9a77c' },
+      fonts: { display: 'Prata', text: 'Golos Text' },
+      motifs: ['круглый штамп с надписью', 'крупные цифры цены', 'зерно кофе иллюстрацией'],
+      composition: 'асимметрия: крупный заголовок слева, меню колонкой справа, цены выносом',
+      avoid: ['белые карточки в ряд', 'синий акцент'],
+    },
+  },
+
+  /**
+   * Круг 47 (SPEC §14.3): визуальный критик — смотрит на снимок доски (или её выжимку, если
+   * модель картинок не видит) и решает, шаблонно ли вышло. Один круг доработки по его замечаниям.
+   */
+  critique: {
+    name: 'critique',
+    schema: {
+      type: 'object',
+      properties: {
+        score: { type: 'number' },
+        generic: { type: 'boolean' },
+        verdict: { type: 'string', enum: ['ok', 'revise'] },
+        issues: { type: 'array', items: { type: 'string' }, maxItems: 5 },
+        fixes: { type: 'array', items: { type: 'string' }, maxItems: 5 },
+        praise: { type: 'string' },
+      },
+      required: ['score', 'generic', 'verdict', 'issues', 'fixes'],
+    },
+    hint: `{ score: number (0-10: 0 — безликий шаблон, 10 — авторская работа с характером),
+  generic: boolean (true — выглядит как типовой шаблон),
+  verdict: "ok"|"revise" (revise — если доработка заметно улучшит),
+  issues: string[] (до 5 конкретных проблем: какой слой и что с ним не так),
+  fixes: string[] (до 5 конкретных правок: какой слой, что поставить),
+  praise?: string (что получилось — одной фразой) }`,
+    example: {
+      score: 5, generic: true, verdict: 'revise',
+      issues: ['Шапка — белая плашка с заголовком по центру, как в любом шаблоне', 'Три одинаковые карточки без акцента'],
+      fixes: ['Заголовок «Утро в Зерне» — крупнее (display), влево, на фон акцента', 'Первую карточку выделить заливкой accent2 и крупной ценой'],
+      praise: 'Палитра крафта читается',
+    },
+  },
 };
 
 function normalizeSchemaEntry(schema) {
@@ -1412,6 +1501,8 @@ function makeClaudeProvider(cfg) {
   return {
     name: cfg.name || 'Claude',
     kind: 'claude',
+    // круг 47: способность sample артефакта картинок не принимает; Messages API (orchestrator) — да
+    vision: !!cfg.vision,
 
     async ready() {
       return !!(await getSample());
@@ -1444,7 +1535,7 @@ function makeClaudeProvider(cfg) {
         if (opts.onUsage) {
           opts.onUsage({
             calls: 1, ms: now() - t0,
-            promptChars: turns.reduce((s, t) => s + t.content.length, 0),
+            promptChars: turns.reduce((s, t) => s + partsChars(t.content), 0),
             completionChars: JSON.stringify(data).length,
           });
         }
@@ -1491,6 +1582,37 @@ export function raceAbort(promise, signal, ms, timeoutMessage) {
  * ведущим user-турном; список обязан начинаться и заканчиваться на user. Схема уходит
  * словами — sample.json схему не принимает.
  */
+/**
+ * Круг 47 (SPEC §14.3): реплика из частей — {type:'text', text} и {type:'image', mime, data}
+ * (data — base64 без префикса). Каждый провайдер переводит части в свой формат.
+ */
+function partsChars(content) {
+  if (typeof content === 'string') return content.length;
+  if (!Array.isArray(content)) return 0;
+  return content.reduce((s, p) => s + (p && typeof p.text === 'string' ? p.text.length : 0), 0);
+}
+const IMAGE_MIME = /^image\/(png|jpeg|webp|gif)$/;
+function openAiParts(parts) {
+  const out = [];
+  for (const p of parts) {
+    if (!p || typeof p !== 'object') continue;
+    if (p.type === 'image' && typeof p.data === 'string' && p.data && IMAGE_MIME.test(strOf(p.mime))) {
+      out.push({ type: 'image_url', image_url: { url: `data:${p.mime};base64,${p.data}` } });
+    } else if (typeof p.text === 'string' && p.text) out.push({ type: 'text', text: p.text });
+  }
+  return out;
+}
+function anthropicParts(parts) {
+  const out = [];
+  for (const p of parts) {
+    if (!p || typeof p !== 'object') continue;
+    if (p.type === 'image' && typeof p.data === 'string' && p.data && IMAGE_MIME.test(strOf(p.mime))) {
+      out.push({ type: 'image', source: { type: 'base64', media_type: p.mime, data: p.data } });
+    } else if (typeof p.text === 'string' && p.text) out.push({ type: 'text', text: p.text });
+  }
+  return out;
+}
+
 function messagesToTurns(messages, entry) {
   const list = Array.isArray(messages) ? messages : [];
   const sys = list.filter((m) => m && m.role === 'system').map((m) => String(m.content || '')).filter(Boolean);
@@ -1499,6 +1621,12 @@ function messagesToTurns(messages, entry) {
   if (sys.length) turns.push({ role: 'user', content: sys.join('\n\n') });
   for (const m of list) {
     if (!m || m.role === 'system') continue;
+    // круг 47: реплика с картинкой — части в формате Anthropic Messages (image с base64)
+    if (Array.isArray(m.content)) {
+      const parts = anthropicParts(m.content);
+      if (parts.length) turns.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: parts });
+      continue;
+    }
     const content = String(m.content == null ? '' : m.content);
     if (!content.trim()) continue;
     turns.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content });
@@ -1520,15 +1648,18 @@ export function formatSchemaInstruction(entry) {
 
 /** 64 KiB — жёсткий предел sample; режем самый длинный турн по середине. */
 function clampTurns(turns, maxChars = 60000) {
-  let total = turns.reduce((s, t) => s + t.content.length, 0);
+  // круг 47: реплика с картинкой не режется (картинку пополам не разрезать) и в предел знаков не идёт
+  const len = (t) => (typeof t.content === 'string' ? t.content.length : 0);
+  let total = turns.reduce((s, t) => s + len(t), 0);
   while (total > maxChars) {
     let idx = 0;
-    for (let i = 1; i < turns.length; i++) if (turns[i].content.length > turns[idx].content.length) idx = i;
+    for (let i = 1; i < turns.length; i++) if (len(turns[i]) > len(turns[idx])) idx = i;
+    if (typeof turns[idx].content !== 'string') break;
     const c = turns[idx].content;
     const keep = Math.max(500, Math.floor(c.length - (total - maxChars) - 40));
     if (keep >= c.length) break;
     turns[idx] = { ...turns[idx], content: cutText(c, Math.floor(keep * 0.7)) + '\n…[вырезано]…\n' + cutTail(c, Math.floor(keep * 0.3)) };
-    const next = turns.reduce((s, t) => s + t.content.length, 0);
+    const next = turns.reduce((s, t) => s + len(t), 0);
     if (next >= total) break;
     total = next;
   }
@@ -1579,7 +1710,8 @@ function makeOpenAiProvider(cfg) {
     const entry = normalizeSchemaEntry(schema);
     let convo = (Array.isArray(messages) ? messages : []).map((m) => ({
       role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user',
-      content: String(m.content == null ? '' : m.content),
+      // круг 47: реплика с картинкой — части в формате OpenAI (image_url с data:)
+      content: Array.isArray(m.content) ? openAiParts(m.content) : String(m.content == null ? '' : m.content),
     }));
     if (entry && entry.hint) {
       convo = convo.concat([]); // не трогаем массив вызывающего
@@ -1622,11 +1754,11 @@ function makeOpenAiProvider(cfg) {
           calls: 1, ms: raw.ms,
           promptTokens: raw.usage.prompt_tokens || 0,
           completionTokens: raw.usage.completion_tokens || 0,
-          promptChars: convo.reduce((s, m) => s + m.content.length, 0),
+          promptChars: convo.reduce((s, m) => s + partsChars(m.content), 0),
           completionChars: (raw.text || '').length,
         });
       } else if (opts.onUsage) {
-        opts.onUsage({ calls: 1, ms: raw.ms, promptChars: convo.reduce((s, m) => s + m.content.length, 0), completionChars: (raw.text || '').length });
+        opts.onUsage({ calls: 1, ms: raw.ms, promptChars: convo.reduce((s, m) => s + partsChars(m.content), 0), completionChars: (raw.text || '').length });
       }
 
       let data;
@@ -1714,6 +1846,8 @@ function makeOpenAiProvider(cfg) {
   return {
     name: cfg.name || 'LM Studio',
     kind: 'lmstudio',
+    // круг 47: видит ли модель картинки — неизвестно, пока не попробовали (критик помечает false)
+    vision: cfg.vision === undefined ? undefined : !!cfg.vision,
     get model() { return model; },
     set model(v) { model = v; },
     ready,
@@ -1975,6 +2109,8 @@ export const PROMPTS = {
       `${motionRules('tree')}\n`,
       ctx.personaHint ? `ХАРАКТЕР — ТВОЙ И ТОЛЬКО ТВОЙ\n${ctx.personaHint}\n` : '',
       ctx.variantHint ? `${ctx.variantHint}\n` : '',
+      // круг 47 (SPEC §14.1): образ решён до раскладки — генератор его воплощает, а не выдумывает свой
+      ctx.directionHint ? `${ctx.directionHint}\n` : '',
       `КУДА ВСТАВЛЯЕМ\n${ctx.placement}`,
       ctx.artHint ? `\n${ctx.artHint}\n` : '',
       'Выжимка выше — весь документ. Держи единый язык с уже существующими экранами: те же токены,'
@@ -2156,6 +2292,94 @@ export const PROMPTS = {
         ? 'Иллюстрацию можно чинить частично: верни в parts ТОЛЬКО исправленные детали с теми же name — остальные останутся'
           + ' как были. Если замечание про прямоугольники — перерисуй целиком.'
         : '',
+      entry && entry.hint ? `Схема "${entry.name}":\n${entry.hint}` : '',
+      JSON_RULE,
+    ].filter(Boolean).join('\n');
+  },
+
+  /**
+   * Круг 47 (SPEC §14.1): арт-директор. Решает образ ДО раскладки: без этого шага генератор
+   * собирает «средний» экран — белые карточки, шрифт по умолчанию, один акцент документа.
+   * Выжимки документа ему не нужно: только что строим, чем уже оформлены соседние доски
+   * (чтобы «в том же стиле» осталось тем же) и характер варианта.
+   */
+  direction(ctx) {
+    return [
+      'Ты — арт-директор Imago Studio. Перед тем как раскладывать макет, реши, КАК он будет выглядеть:',
+      'образ, палитру, шрифты, графические мотивы и приём композиции. Раскладку сделает другой — по твоему решению.',
+      '',
+      `ЧТО СТРОИМ\n${ctx.subject}`,
+      ctx.neighbours ? `\nУЖЕ ЕСТЬ В ДОКУМЕНТЕ (оформление соседних досок)\n${ctx.neighbours}` : '',
+      ctx.personaHint ? `\nХАРАКТЕР ЭТОГО ВАРИАНТА\n${ctx.personaHint}` : '',
+      ctx.variantHint ? `\n${ctx.variantHint}` : '',
+      '',
+      `КАК РЕШАТЬ
+- Образ — конкретная картинка из мира предмета, а не стиль-ярлык. Не «современный минимализм», а «ночной
+  велопрокат: светоотражатели, мокрый асфальт, неон вывески». Из образа следует всё остальное.
+- Материалы — 2-4 настоящих вещи или вещества этого мира (крафт-бумага, эмаль, хвоя, латунь, мокрый асфальт)
+  и их цвет. ПАЛИТРУ БЕРИ ИЗ НИХ: фон — самый спокойный материал, акцент — самый яркий; не бери «синий
+  #3b82f6 на белом» и не повторяй палитру документа, если её не просили.
+- Палитра: bg — фон доски, surface — плашки и карточки, text — основной текст (на bg и surface читается: контраст
+  не меньше 4.5:1), muted — подписи (не меньше 3:1), accent — главный акцент, accent2 — второй, для ритма.
+  Тёмный фон — можно и нужно, если так велит образ.
+- Шрифты — пара из списка ниже (или два семейства из него): display — заголовки и крупные цифры, text — всё
+  остальное. Выбирай по образу, а не по привычке; шрифт по умолчанию (${DEFAULT_FONT}) — только если образ
+  правда инженерный. Других семейств нет: у них может не быть кириллицы.
+- Мотивы — 1-4 графических приёма, которые делают экран узнаваемым: крупные цифры, повёрнутая плашка-штамп,
+  градиент-свечение, круги-пятна, иллюстрация предмета, рамка-билет, полосы. Их воплотят слоями макета.
+- Композиция — одна фраза о приёме: асимметрия, крупный первый экран, сетка с выносом, лента, коллаж.
+- avoid — 2-4 конкретных шаблонных хода, которых в ЭТОМ макете быть не должно.
+- Если соседние доски уже оформлены и просят «в том же стиле» / «ещё один экран этого приложения» — держи их
+  палитру и шрифты, меняй только мотивы и композицию.`,
+      '',
+      fontMenu(),
+      '',
+      JSON_RULE,
+    ].filter((x) => x != null && x !== '').join('\n');
+  },
+
+  /**
+   * Круг 47 (SPEC §14.3): визуальный критик. Видит снимок доски (или её выжимку), решение
+   * арт-директора и посчитанные приложением приметы шаблона. Отвечает оценкой и правками.
+   */
+  critic(ctx) {
+    return [
+      'Ты — строгий арт-критик Imago Studio. Перед тобой только что собранный макет'
+        + (ctx.seen === 'image' ? ' — его снимок приложен картинкой.' : ' — его выжимка ниже (картинки нет: суди по структуре и оформлению).'),
+      'Реши одно: выглядит ли он как типовой шаблон («ещё одна белая карточка с синей кнопкой») или как работа',
+      'с характером, где видно образ. Хвалить за аккуратность не нужно — аккуратность приложение проверяет само.',
+      '',
+      `ЧТО ПРОСИЛИ\n${ctx.subject}`,
+      ctx.brief ? `\nРЕШЕНИЕ АРТ-ДИРЕКТОРА\n${ctx.brief}` : '',
+      ctx.signals ? `\nПРИМЕТЫ ШАБЛОНА (посчитало приложение — это факты)\n${ctx.signals}` : '',
+      ctx.digest ? `\nМАКЕТ (выжимка: слои, размеры, цвета, стили)\n${ctx.digest}` : '',
+      '',
+      `КАК СУДИТЬ
+- Шаблонно: всё по центру; одинаковые белые карточки; шрифт по умолчанию; один акцент документа; нет ни одного
+  мотива; заголовок не крупнее остального; палитра не из образа; кнопка во всю ширину как единственный акцент.
+- Живо: виден образ; иерархия с одним сильным акцентом; ритм (крупное — мелкое, плотное — воздух); мотивы
+  образа присутствуют слоями; палитра и шрифты из решения арт-директора.
+- score 0-10. verdict "revise" — если score ниже 7 или есть шаблонный ход, который легко убрать; иначе "ok".
+- issues и fixes — КОНКРЕТНО, по именам слоёв: «Шапка: заголовок по центру → влево, display, на фон accent».
+  Предлагай только то, что умеет макет: цвета, шрифт (стиль), размеры, отступы, порядок, выравнивание, поворот,
+  градиент, тень, скругление, новые слои (плашка, круг, иллюстрация предмета). Не предлагай фото, видео, размытие.
+- Читаемость и контраст не трогай, если они в порядке; не ломай то, что работает (praise).`,
+      '',
+      JSON_RULE,
+    ].filter((x) => x != null && x !== '').join('\n');
+  },
+
+  /** Круг 47 (SPEC §14.3): один круг доработки по замечаниям критика — всё дерево заново. */
+  revise(crit, entry) {
+    return [
+      `Арт-критик посмотрел на собранный макет: ${crit.score}/10${crit.generic ? ', выглядит шаблонно' : ''}.`,
+      crit.issues.length ? `Замечания:\n${crit.issues.map((x, i) => `${i + 1}. ${x}`).join('\n')}` : '',
+      crit.fixes.length ? `Что сделать:\n${crit.fixes.map((x, i) => `${i + 1}. ${x}`).join('\n')}` : '',
+      crit.praise ? `Это получилось — сохрани: ${crit.praise}` : '',
+      '',
+      'Доработай макет по этим замечаниям и верни ВСЁ дерево целиком по той же схеме. Тексты, которые дал',
+      'пользователь, и смысловые разделы сохрани; держи арт-направление (палитру и шрифты) — меняй оформление,',
+      'иерархию и мотивы, а не содержание.',
       entry && entry.hint ? `Схема "${entry.name}":\n${entry.hint}` : '',
       JSON_RULE,
     ].filter(Boolean).join('\n');
@@ -10595,6 +10819,10 @@ const STAGE_LABELS = {
   // круг 9, п.4: не авария, а ответ: просимого в модели документа нет
   cannot: 'Так в этом редакторе нельзя',
   variant: 'Готовлю вариант',
+  // круг 47 (SPEC §14): арт-направление, критик и доработка
+  direct: 'Ищу образ',
+  critic: 'Смотрю на результат',
+  revise: 'Дорабатываю',
   done: 'Готово',
   error: 'Не вышло',
 };
@@ -11314,6 +11542,456 @@ async function withExternalLibrary(options, run, finish) {
  * на который правка сослалась, переносится в библиотеку документа теми же операциями
  * (`libraryAdded: [{name, source}]` — что перенесено).
  */
+/* ────────────────────────────────────────────────────────────────────────────
+ * 13. Круг 47 (SPEC §14): живой дизайн — арт-направление, шрифты, визуальный критик
+ *
+ * Жалоба: агент собирал «средний» экран — белые карточки в колонку, шрифт по умолчанию,
+ * оранжевый акцент документа, всё по центру. Модель раскладки решала разом, ЧТО положить и
+ * КАК это выглядит, и на втором вопросе съезжала в шаблон. Теперь образ решается отдельным
+ * шагом ДО раскладки (арт-директор), шрифты берутся из подобранного набора (src/fonts.js) и
+ * ставятся приложением, а после сборки критик смотрит на снимок доски и даёт один круг
+ * доработки. Формат документа не меняется: цвета — #rrggbb в узлах, шрифт — style.font.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const HEX6 = /^#[0-9a-f]{6}$/;
+/** Роли палитры решения (SPEC §14.1). */
+export const DIRECTION_ROLES = Object.freeze(['bg', 'surface', 'text', 'muted', 'accent', 'accent2', 'onAccent']);
+/** Подписи — не тусклее 3:1 (как в правилах темы). */
+const MUTED_NORM = 3;
+/** Ниже этой оценки критика макет дорабатывается (SPEC §14.3). */
+export const CRITIC_PASS = 7;
+/** Сколько ждать снимок доски для критика, мс: дольше — критик судит по выжимке. */
+export const CRITIC_RENDER_MS = 20000;
+/** Сторона снимка для критика, px: больше — дорого модели, меньше — не разглядеть. */
+export const CRITIC_SHOT_SIDE = 1024;
+
+const lumOf = (hex) => {
+  const c = hexRgb(hex);
+  return c ? 0.2126 * channelLum(c[0]) + 0.7152 * channelLum(c[1]) + 0.0722 * channelLum(c[2]) : 0;
+};
+const satOf = (hex) => {
+  const c = hexRgb(hex);
+  if (!c) return 0;
+  const mx = Math.max(...c);
+  const mn = Math.min(...c);
+  return mx ? (mx - mn) / mx : 0;
+};
+/** Смесь двух цветов: k = 0 — a, 1 — b. */
+function mixHex(a, b, k) {
+  const ca = hexRgb(a);
+  const cb = hexRgb(b);
+  if (!ca || !cb) return a;
+  return '#' + ca.map((c, i) => clamp255(c + (cb[i] - c) * k).toString(16).padStart(2, '0')).join('');
+}
+/** Цвет, читаемый на всех фонах с нормой norm: двигаем светлоту в сторону, где контраст растёт. */
+function liftContrast(base, backgrounds, norm) {
+  const worst = (hex) => backgrounds.reduce((m, bg) => Math.min(m, contrastOf(hex, bg)), 21);
+  if (worst(base) >= norm) return base;
+  let best = base;
+  for (let i = 1; i <= 20; i++) {
+    for (const k of [i / 20, -i / 20]) {
+      const cand = shadeHex(base, k);
+      if (worst(cand) >= norm) return cand;
+      if (worst(cand) > worst(best)) best = cand;
+    }
+  }
+  return best;
+}
+const listOf = (v, n, len = 80) => (Array.isArray(v) ? v : typeof v === 'string' ? [v] : [])
+  .map((x) => cutText(strOf(x).replace(/\s+/g, ' ').trim(), len)).filter(Boolean).slice(0, n);
+/** Детерминированный выбор из списка по строке (одинаковый образ — одинаковая пара). */
+const pickBy = (list, key) => {
+  let h = 0;
+  for (const ch of String(key || '')) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return list[h % list.length];
+};
+/** Гарнитура для набора текста: рукописные и одноначертательные акцидентные — нет. */
+const TEXT_KINDS = new Set(['sans', 'serif', 'slab', 'mono']);
+
+/**
+ * Ответ арт-директора → решение, которое можно воплощать (SPEC §14.1). Всё, что модель могла
+ * выдумать или сделать нечитаемым, чинится здесь же, и каждая починка — строкой в notes:
+ * цвет не #rrggbb — из материалов или из документа; текст на фоне — до 4.5:1, подписи — до 3:1;
+ * шрифт не из набора — пара к названному или пара по образу; рукописный шрифт текста — наборный
+ * из пары. null — в ответе нет ни образа, ни палитры, ни шрифтов.
+ * @param {any} raw @param {{doc?:object}} [opts]
+ */
+export function normalizeDirection(raw, opts = {}) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const notes = [];
+  const concept = cutText(strOf(raw.concept).replace(/\s+/g, ' ').trim(), 200);
+  const materials = (Array.isArray(raw.materials) ? raw.materials : [])
+    .map((m) => (m && typeof m === 'object' ? { name: cutText(strOf(m.name).trim(), 40), hex: hexNorm(strOf(m.hex)) } : null))
+    .filter((m) => m && m.name && HEX6.test(m.hex)).slice(0, 4);
+  const p = raw.palette && typeof raw.palette === 'object' && !Array.isArray(raw.palette) ? raw.palette : {};
+  const given = (k) => { const h = hexNorm(strOf(p[k])); return HEX6.test(h) ? h : null; };
+  const f = raw.fonts && typeof raw.fonts === 'object' && !Array.isArray(raw.fonts) ? raw.fonts : {};
+  const gotAny = concept || DIRECTION_ROLES.some((k) => given(k)) || catalogFont(strOf(f.display)) || catalogFont(strOf(f.text));
+  if (!gotAny) return null;
+
+  const docColors = (opts.doc && opts.doc.tokens && opts.doc.tokens.colors) || {};
+  const docHex = (k, dflt) => { const h = hexNorm(strOf(docColors[k])); return HEX6.test(h) ? h : dflt; };
+  const byLum = materials.slice().sort((a, b) => lumOf(b.hex) - lumOf(a.hex));
+  const bySat = materials.slice().sort((a, b) => satOf(b.hex) - satOf(a.hex));
+  const fill = (k, v, why) => { notes.push(`${k}: ${why}`); return v; };
+
+  const bg = given('bg') || (byLum.length ? fill('bg', byLum[0].hex, 'взят светлейший материал') : fill('bg', docHex('canvas', '#f7f6f3'), 'взят фон документа'));
+  const light = lumOf(bg) > 0.4;
+  const surface = given('surface') || fill('surface', shadeHex(bg, light ? 0.55 : 0.1), 'подобран из фона');
+  let text = given('text') || fill('text', light ? '#1c1a17' : '#f4f1ea', 'подобран под фон');
+  const fixedText = liftContrast(text, [bg, surface], CONTRAST_NORM);
+  if (fixedText !== text) { notes.push(`text: ${text} → ${fixedText} — не читался на фоне`); text = fixedText; }
+  let muted = given('muted') || fill('muted', mixHex(text, bg, 0.38), 'смесь текста и фона');
+  const fixedMuted = liftContrast(muted, [bg, surface], MUTED_NORM);
+  if (fixedMuted !== muted) { notes.push(`muted: ${muted} → ${fixedMuted} — подписи не читались`); muted = fixedMuted; }
+  const accent = given('accent') || (bySat.length ? fill('accent', bySat[0].hex, 'самый яркий материал') : fill('accent', docHex('accent', '#ff6b3d'), 'акцент документа'));
+  const accent2 = given('accent2') || (bySat[1] ? fill('accent2', bySat[1].hex, 'второй яркий материал') : fill('accent2', mixHex(accent, bg, 0.55), 'смесь акцента и фона'));
+  // текст на акценте: лучший из белого, текста и фона; не дотянул — подтягиваем светлоту
+  let onAccent = ['#ffffff', text, bg, '#111111'].reduce((b, c) => (contrastOf(c, accent) > contrastOf(b, accent) ? c : b));
+  onAccent = liftContrast(onAccent, [accent], CONTRAST_NORM);
+  const palette = { bg, surface, text, muted, accent, accent2, onAccent };
+
+  // шрифты: только набор; одно названо — пара к нему; ничего — пара по образу
+  let display = catalogFont(strOf(f.display));
+  let body = catalogFont(strOf(f.text));
+  if (strOf(f.display).trim() && !display) notes.push(`шрифт заголовков «${cutText(strOf(f.display).trim(), 40)}» не из набора`);
+  if (strOf(f.text).trim() && !body) notes.push(`шрифт текста «${cutText(strOf(f.text).trim(), 40)}» не из набора`);
+  if (!display || !body) {
+    const pair = (display && FONT_PAIRS.find((x) => x.display === display.family))
+      || (body && FONT_PAIRS.find((x) => x.text === body.family))
+      || pickBy(FONT_PAIRS, concept || JSON.stringify(palette));
+    if (!display) display = catalogFont(pair.display);
+    if (!body) body = catalogFont(pair.text);
+    notes.push(`шрифты: взята пара ${pair.display} + ${pair.text}`);
+  }
+  if (!TEXT_KINDS.has(body.kind) || body.weights.length < 2) {
+    const pair = FONT_PAIRS.find((x) => x.display === display.family && x.display !== body.family)
+      || FONT_PAIRS.find((x) => x.display === body.family) || pickBy(FONT_PAIRS, concept);
+    const next = catalogFont(pair.text);
+    notes.push(`шрифт текста ${body.family} не для набора — взят ${next.family}`);
+    body = next;
+  }
+
+  return {
+    concept: concept || 'Без образа — по палитре и шрифтам',
+    mood: listOf(raw.mood, 4, 30),
+    materials,
+    palette,
+    fonts: { display: display.family, text: body.family },
+    motifs: listOf(raw.motifs, 4, 80),
+    composition: cutText(strOf(raw.composition).replace(/\s+/g, ' ').trim(), 200),
+    avoid: listOf(raw.avoid, 4, 80),
+    notes,
+  };
+}
+
+/** Решение словами — блок промпта генератора (SPEC §14.1). */
+export function directionBrief(dir) {
+  if (!dir) return '';
+  const P = dir.palette;
+  return [
+    'АРТ-НАПРАВЛЕНИЕ (решено арт-директором до тебя — воплоти именно его, а не средний вариант)',
+    `Образ: ${dir.concept}`,
+    dir.mood.length ? `Настроение: ${dir.mood.join(', ')}` : '',
+    dir.materials.length ? `Материалы: ${dir.materials.map((m) => `${m.name} ${m.hex}`).join(', ')}` : '',
+    `Палитра — пиши эти #rrggbb прямо в fill, color и stroke (токены цвета документа к этому макету не подходят):`
+      + ` фон доски ${P.bg}, плашки и карточки ${P.surface}, текст ${P.text}, подписи ${P.muted},`
+      + ` акцент ${P.accent}, второй акцент ${P.accent2}, текст на акценте ${P.onAccent}.`,
+    `Шрифты: заголовки и крупные цифры — ${dir.fonts.display}, текст — ${dir.fonts.text}. Ставит их приложение:`
+      + ' в style пиши токен как обычно (display, title, heading — заголовочные; body, caption — текстовые).',
+    dir.motifs.length ? `Мотивы — воплоти каждый слоями: ${dir.motifs.join('; ')}.` : '',
+    'Средства для мотивов: плашка с rotate (штамп, наклейка, ярлык), ellipse — пятна и круги, градиент в fill'
+      + ` ("linear-gradient(135deg, ${P.accent}, ${P.accent2})"), крупные цифры стилем display, обводка stroke,`
+      + ' иллюстрация предмета {type:"illustration", name, size:{w,h}, draw:"…"}, тень shadow.',
+    dir.composition ? `Композиция: ${dir.composition}` : '',
+    `Не делай: ${[...dir.avoid, 'всё по центру', 'одинаковые белые карточки подряд', 'кнопку во всю ширину как единственный акцент'].join('; ')}.`,
+  ].filter(Boolean).join('\n');
+}
+
+/** Решение для оболочки и трасс — без служебных notes. */
+export function slimDirection(dir) {
+  if (!dir) return null;
+  const { notes: _n, ...rest } = dir;
+  return rest;
+}
+
+/** Заголовочный ли токен типографики (крупный или по имени). */
+function displayToken(doc, token) {
+  const name = strOf(token);
+  if (/mono/i.test(name)) return null;
+  const e = doc && doc.tokens && doc.tokens.type && Object.prototype.hasOwnProperty.call(doc.tokens.type, name) ? doc.tokens.type[name] : null;
+  const size = e && typeof e.fontSize === 'number' ? e.fontSize : 0;
+  return size >= 20 || /display|title|head|hero|^h[1-3]$/i.test(name);
+}
+
+/**
+ * Воплотить шрифты и базовые цвета решения в дереве модели (до материализации, на копии):
+ * заголовочным стилям — display, прочим — text (с ближайшим своим начертанием); тексту без
+ * цвета — цвет текста палитры (иначе тёмный токен документа на тёмном фоне образа); корню
+ * новой доски без фона — фон палитры. Шрифт, который модель уже поставила из набора, не трогаем.
+ * @returns {{tree:any, fonts:number}}
+ */
+export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
+  if (!dir || !tree || typeof tree !== 'object' || Array.isArray(tree)) return { tree, fonts: 0 };
+  const out = JSON.parse(JSON.stringify(tree));
+  const types = (doc && doc.tokens && doc.tokens.type) || {};
+  let fonts = 0;
+  let guard = 0;
+  const walk = (n, depth) => {
+    if (!n || typeof n !== 'object' || Array.isArray(n) || depth > MAX_TREE_DEPTH + 2 || guard++ > MAX_TREE_NODES) return;
+    const type = strOf(n.type).trim().toLowerCase();
+    if (type === 'illustration' || type === 'vector') return;      // рисунок красит иллюстратор
+    if (type === 'text') {
+      const st = n.style;
+      const token = typeof st === 'string' ? st.trim() : st && typeof st === 'object' ? strOf(st.token).trim() : '';
+      const own = st && typeof st === 'object' && catalogFont(strOf(st.font));
+      const isDisplay = displayToken(doc, token);
+      if (!own && isDisplay !== null) {
+        const family = isDisplay ? dir.fonts.display : dir.fonts.text;
+        const base = Object.prototype.hasOwnProperty.call(types, token) ? types[token] : null;
+        const wantW = st && typeof st === 'object' && typeof st.fontWeight === 'number' ? st.fontWeight
+          : base && typeof base.fontWeight === 'number' ? base.fontWeight : 400;
+        const w = nearestWeight(family, wantW);
+        const next = { ...(st && typeof st === 'object' ? st : {}), ...(token ? { token } : {}), font: family };
+        if (w !== wantW) next.fontWeight = w;
+        n.style = next;
+        fonts++;
+      }
+      if (n.color == null || n.color === '') n.color = dir.palette.text;
+    }
+    if (Array.isArray(n.children)) for (const c of n.children) walk(c, depth + 1);
+  };
+  walk(out, 0);
+  if (asArtboard && strOf(out.type).trim().toLowerCase() === 'frame'
+    && (out.fill == null || out.fill === '' || out.fill === 'canvas' || out.fill === 'surface')) {
+    out.fill = dir.palette.bg;
+  }
+  return { tree: out, fonts };
+}
+
+/** Оформление соседних досок одной строкой на доску — арт-директору (§14.1). */
+function neighboursLine(engine, doc, geo, skip = null) {
+  const boards = kidsOf(nodeOf(doc, doc.root)).filter((id) => {
+    const n = nodeOf(doc, id);
+    return n && n.type === 'frame' && n.role !== 'library' && id !== skip;
+  }).slice(0, 4);
+  const lines = [];
+  for (const id of boards) {
+    const look = boardLook(engine, doc, id);
+    const b = nodeOf(doc, id);
+    lines.push(`- «${cutText(strOf(b.name) || 'Доска', 40)}»: фон ${look.bg || '—'}; шрифты ${look.fonts.slice(0, 2).join(' / ') || DEFAULT_FONT}`
+      + (look.accents.length ? `; акценты ${look.accents.slice(0, 2).join(', ')}` : ''));
+  }
+  return lines.join('\n');
+}
+
+/** Что на доске: фон, гарнитуры по частоте, яркие заливки по частоте. */
+function boardLook(engine, doc, boardId) {
+  const ids = collectSubtree(doc, [boardId]);
+  const fonts = new Map();
+  const fills = new Map();
+  const color = (v) => {
+    try { const h = hexNorm(strOf(engine && engine.resolveColor ? engine.resolveColor(doc, v) : hexOf(doc, v))); return HEX6.test(h) ? h : null; } catch { return null; }
+  };
+  for (const id of ids) {
+    const n = nodeOf(doc, id);
+    if (!n) continue;
+    if (n.type === 'text' && engine && engine.resolveTextStyle) {
+      try { const st = engine.resolveTextStyle(doc, n); fonts.set(st.font, (fonts.get(st.font) || 0) + 1); } catch { /* мусор прежней версии */ }
+    } else if (n.fill != null) {
+      const h = color(n.fill);
+      if (h && satOf(h) > 0.35) fills.set(h, (fills.get(h) || 0) + 1);
+    }
+  }
+  const top = (m) => [...m.entries()].sort((a, b) => b[1] - a[1]).map((x) => x[0]);
+  const b = nodeOf(doc, boardId);
+  return { bg: b ? color(b.fill) : null, fonts: top(fonts), accents: top(fills) };
+}
+
+/**
+ * Приметы шаблона на доске — факты для критика (§14.3), посчитанные без модели: шрифт по
+ * умолчанию на всех текстах, нет крупного акцента, всё по центру, ни одного мотива, палитра
+ * решения не использована, одинаковые белые карточки подряд. Пустой список — примет нет.
+ * @returns {string[]}
+ */
+export function templateSignals(engine, doc, boardId, { dir = null } = {}) {
+  const out = [];
+  const ids = collectSubtree(doc, [boardId]).filter((id) => nodeOf(doc, id));
+  const texts = ids.map((id) => nodeOf(doc, id)).filter((n) => n.type === 'text' && strOf(n.characters).trim());
+  // моноширинные (цифры, код) — не голос макета: по ним шаблонность не судим
+  const styles = texts.map((n) => { try { return engine.resolveTextStyle(doc, n); } catch { return null; } }).filter((x) => x && !x.mono);
+  const color = (v) => {
+    try { const h = hexNorm(strOf(engine.resolveColor(doc, v))); return HEX6.test(h) ? h : null; } catch { return null; }
+  };
+  if (styles.length && styles.every((s) => s.font === DEFAULT_FONT)) {
+    out.push(`Все тексты набраны шрифтом по умолчанию (${DEFAULT_FONT})`);
+  } else if (dir && styles.length && !styles.some((s) => s.font === dir.fonts.display)) {
+    out.push(`Шрифт заголовков из решения (${dir.fonts.display}) не стоит ни на одном тексте`);
+  }
+  if (styles.length >= 3) {
+    const sizes = styles.map((s) => s.fontSize).sort((a, b) => a - b);
+    const median = sizes[Math.floor(sizes.length / 2)];
+    const max = sizes[sizes.length - 1];
+    if (max < median * 1.6) out.push(`Нет крупного акцента: самый крупный текст ${max} px при основном ${median} px`);
+  }
+  if (texts.length >= 4) {
+    const centered = texts.filter((n) => n.align === 'center').length;
+    if (centered / texts.length >= 0.75) out.push(`Почти весь текст выровнен по центру (${centered} из ${texts.length})`);
+  }
+  let motifs = 0;
+  for (const id of ids) {
+    const n = nodeOf(doc, id);
+    if (n.type === 'ellipse' || n.type === 'vector' || n.role === 'illustration' || (typeof n.rotate === 'number' && n.rotate)) motifs++;
+    else if (typeof n.fill === 'string' && /gradient\(/i.test(n.fill)) motifs++;
+    else if (n.fill && typeof n.fill === 'object' && /gradient/i.test(strOf(n.fill.kind) + strOf(n.fill.type))) motifs++;
+  }
+  if (!motifs && ids.length >= 4) out.push('Ни одного графического мотива: нет иллюстраций, фигур, градиентов и поворотов');
+  if (dir) {
+    const pal = DIRECTION_ROLES.map((k) => dir.palette[k]);
+    const near = (h) => pal.some((x) => { const a = hexRgb(x); const b = hexRgb(h); return a && b && Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) <= 24; });
+    const used = [];
+    for (const id of ids) {
+      const n = nodeOf(doc, id);
+      for (const v of [n.fill, n.color]) { const h = v != null ? color(v) : null; if (h) used.push(h); }
+    }
+    if (used.length >= 3 && used.filter(near).length / used.length < 0.4) out.push('Цвета решения арт-директора почти не использованы');
+  }
+  // одинаковые белые карточки подряд: ≥ 3 соседа-рамки с одной заливкой-светлой и одинаковым числом детей
+  for (const id of ids) {
+    const n = nodeOf(doc, id);
+    if (!n || n.type !== 'frame') continue;
+    const kids = kidsOf(n).map((k) => nodeOf(doc, k)).filter((k) => k && k.type === 'frame');
+    if (kids.length < 3) continue;
+    const sig = (k) => `${color(k.fill) || '-'}|${kidsOf(k).length}`;
+    const first = sig(kids[0]);
+    const fillHex = color(kids[0].fill);
+    if (fillHex && lumOf(fillHex) > 0.85 && kids.every((k) => sig(k) === first)) {
+      out.push(`${kids.length} одинаковых светлых карточек подряд в «${cutText(strOf(n.name) || 'рамке', 40)}»`);
+      break;
+    }
+  }
+  return out.slice(0, 6);
+}
+
+/** Ответ критика → оценка, вердикт и списки (§14.3). null — ответ негодный. */
+export function normalizeCritique(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const n = typeof raw.score === 'number' ? raw.score : Number(raw.score);
+  if (!Number.isFinite(n)) return null;
+  const score = Math.round(Math.max(0, Math.min(10, n)) * 10) / 10;
+  const issues = listOf(raw.issues, 5, 240);
+  const fixes = listOf(raw.fixes, 5, 240);
+  const generic = raw.generic === true || raw.generic === 'true';
+  let verdict = raw.verdict === 'ok' || raw.verdict === 'revise' ? raw.verdict : (score < CRITIC_PASS || generic ? 'revise' : 'ok');
+  // дорабатывать нечем — нет ни замечаний, ни правок
+  if (verdict === 'revise' && !issues.length && !fixes.length) verdict = 'ok';
+  return { score, generic, verdict, issues, fixes, praise: cutText(strOf(raw.praise).trim(), 200) };
+}
+
+/** Текст и картинка одной репликой: провайдеры переводят части в свой формат (§14.3). */
+export function imageTurn(text, image) {
+  if (!image || typeof image.data !== 'string' || !image.data) return text;
+  return [{ type: 'text', text }, { type: 'image', mime: strOf(image.mime) || 'image/png', data: image.data }];
+}
+
+/** Документ, урезанный до одной доски, — для выжимки критику без картинки. */
+function boardOnlyDoc(doc, boardId) {
+  const keep = new Set(collectSubtree(doc, [boardId]));
+  const nodes = {};
+  for (const id of keep) nodes[id] = doc.nodes[id];
+  const root = nodeOf(doc, doc.root);
+  if (root) nodes[doc.root] = { ...root, children: [boardId] };
+  // мастера экземпляров нужны раскрытию — библиотеку берём целиком
+  for (const id of kidsOf(root)) {
+    const n = nodeOf(doc, id);
+    if (n && n.role === 'library') { for (const x of collectSubtree(doc, [id])) nodes[x] = doc.nodes[x]; nodes[doc.root].children.push(id); }
+  }
+  return { ...doc, nodes };
+}
+
+/**
+ * Доработка не теряет содержимого: текстов в ней не меньше 80% от первого варианта. Модель на
+ * «сделай живее» иногда возвращает пустую рамку или половину экрана — это хуже, чем шаблон.
+ */
+function keepsContent(prevOps, nextOps) {
+  const texts = (ops) => asArray(ops).filter((o) => o && o.op === 'create' && o.node && o.node.type === 'text'
+    && strOf(o.node.characters).trim()).length;
+  const before = texts(prevOps);
+  return texts(nextOps) >= Math.ceil(before * 0.8);
+}
+
+/** Доска, которую построила правка: корень созданного поддерева или его доска. */
+function builtBoard(ops, after) {
+  const born = new Set();
+  for (const o of asArray(ops)) if (o && o.op === 'create' && o.node && typeof o.node.id === 'string') born.add(o.node.id);
+  for (const o of asArray(ops)) {
+    const n = o && o.op === 'create' && o.node;
+    if (!n || typeof n.id !== 'string' || born.has(n.parent)) continue;
+    if (n.parent === after.root) return n.id;
+    return artboardOf(after, n.id);
+  }
+  return null;
+}
+
+/**
+ * Круг 47 (SPEC §14.3): критик над собранной доской. Снимок — от render (браузер или сервер),
+ * если модель видит картинки (`provider.vision !== false`); модель отказала в картинке — повтор
+ * по выжимке, и провайдер помечается «без зрения» до конца жизни (следующие команды картинку не
+ * шлют). Без render — сразу по выжимке.
+ * @returns {Promise<object|null>} нормализованный вердикт с полем seen: 'image' | 'text'
+ */
+async function critiqueBoard({ engine, attempt, direction, utterance, plan, render, signal, provider, ask, emit, serviceNote }) {
+  const after = attempt.preview.doc;
+  const geo = attempt.preview.geo || safeSolve(engine, after);
+  const boardId = builtBoard(attempt.ops, after);
+  if (!boardId || !nodeOf(after, boardId)) return null;
+  emit('critic', 'Смотрю, не вышло ли шаблонно');
+  const signals = templateSignals(engine, after, boardId, { dir: direction });
+  let image = null;
+  if (typeof render === 'function' && provider.vision !== false) {
+    try {
+      image = await raceAbort(Promise.resolve(render({ doc: after, geo, artboardId: boardId, maxSide: CRITIC_SHOT_SIDE, signal })),
+        signal, CRITIC_RENDER_MS, 'Снимок доски не успел');
+    } catch (e) {
+      if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+      serviceNote(`Снимок доски для критика не получился: ${factOnly(e && e.message ? e.message : e)}`);
+      image = null;
+    }
+    if (image && (typeof image.data !== 'string' || !image.data)) image = null;
+  }
+  const base = {
+    subject: `${String(utterance).trim()}${plan && plan.summary ? ` (${plan.summary})` : ''}`,
+    brief: direction ? directionBrief(direction) : '',
+    signals: signals.length ? signals.map((x) => `- ${x}`).join('\n') : '- примет не найдено',
+  };
+  const digestOf = () => cutText(describeDoc(boardOnlyDoc(after, boardId), [boardId], { engine, geo, limit: 8000, scopeKind: 'selection' }), 8000);
+  const once = (seen) => ask(SCHEMAS.critique, [
+    { role: 'system', content: PROMPTS.critic({ ...base, seen, digest: seen === 'image' ? '' : digestOf() }) },
+    { role: 'user', content: imageTurn('Оцени этот макет по правилам выше.', seen === 'image' ? image : null) },
+  ], { stage: 'critic', temperature: 0 });
+  let raw = null;
+  let seen = image ? 'image' : 'text';
+  try {
+    raw = await once(seen);
+  } catch (e) {
+    if (seen !== 'image' || (e instanceof BrainError && e.kind === 'cancelled')) throw e;
+    // модель отказала в запросе с картинкой (4xx) — она картинок не видит: дальше без зрения;
+    // сеть и сроки — только эта команда по выжимке
+    if (e instanceof BrainError && e.kind === 'model') provider.vision = false;
+    serviceNote(`Модель не приняла снимок (${factOnly(e && e.message ? e.message : e)}) — критик смотрит выжимку`);
+    seen = 'text';
+    raw = await once(seen);
+  }
+  const crit = normalizeCritique(raw);
+  if (!crit) { serviceNote('Критик ответил без оценки — оставил собранное'); return null; }
+  crit.seen = seen;
+  crit.signals = signals;
+  emit('critic', `${crit.score}/10${crit.generic ? ' · шаблонно' : ''}${crit.verdict === 'ok' ? ' · оставляю' : ''}`, {
+    title: crit.verdict === 'ok' ? 'Выглядит живо' : 'Выглядит шаблонно', critique: { ...crit },
+  });
+  return crit;
+}
+
 export async function runCommand(options = {}) {
   // круг 25: строки результата — пригодные к записи (см. cleanResult)
   return cleanResult(await withExternalLibrary(options, runCommandCore, finishExternal));
@@ -11355,6 +12033,15 @@ async function runCommandCore(options = {}) {
     planOnly = false,
     /** Сколько вариантов пойдёт по этому плану: планировщику полезно знать (см. planner). */
     variantsAhead = 0,
+    /**
+     * Круг 47 (SPEC §14): арт-направление перед раскладкой (create) и визуальный критик после неё.
+     * false — выключить; иначе включены. render({doc, geo, artboardId, maxSide, signal}) →
+     * {mime, data(base64), width, height} | null — снимок доски для критика; без него (или без
+     * зрения у модели) критик судит по выжимке.
+     */
+    direction: directionOpt = true,
+    critic: criticOpt = true,
+    render = null,
   } = options;
 
   const stages = [];
@@ -11721,12 +12408,44 @@ async function runCommandCore(options = {}) {
     const ART_TOKENS = 8192;
     const schemaEntry = intent === 'create' ? SCHEMAS.tree : intent === 'theme' ? SCHEMAS.theme
       : intent === 'illustration' ? SCHEMAS.illustration : SCHEMAS.patch;
-    const system = intent === 'create' ? PROMPTS.tree(ctx) : intent === 'theme' ? PROMPTS.theme(ctx)
+    let system = intent === 'create' ? PROMPTS.tree(ctx) : intent === 'theme' ? PROMPTS.theme(ctx)
       : intent === 'illustration'
         ? PROMPTS.illustration(artCtx(`${String(utterance).trim()}${plan && plan.summary ? ` (${plan.summary})` : ''}`, placement.where))
         : PROMPTS.patch(ctx);
     const userTurn = buildUserTurn(utterance, plan, persona);
 
+    /* — 2c. Круг 47 (SPEC §14.1): образ до раскладки. Арт-директор — отдельный вызов со своей
+     * схемой; провал — не провал команды: собираем без образа, как раньше. */
+    let direction = null;
+    if (intent === 'create' && directionOpt !== false) {
+      emit('direct', 'Решаю образ, палитру и шрифты');
+      try {
+        const raw = await ask(SCHEMAS.direction, [
+          { role: 'system', content: PROMPTS.direction({
+            subject: `${String(utterance).trim()}${plan && plan.summary ? ` (${plan.summary})` : ''}`,
+            neighbours: neighboursLine(engine, doc, geoNow),
+            personaHint: persona ? `${persona.label}: ${persona.description}` : '',
+            variantHint,
+          }) },
+          { role: 'user', content: userTurn },
+        ], { stage: 'direct', temperature: temperature == null ? 0.8 : temperature });
+        direction = normalizeDirection(raw, { doc });
+        if (direction) {
+          for (const n of direction.notes) serviceNote(`Арт-направление: ${n}`);
+          emit('direct', `${direction.fonts.display} + ${direction.fonts.text}`, { title: direction.concept, direction: slimDirection(direction) });
+        } else {
+          serviceNote('Арт-директор не дал ни образа, ни палитры, ни шрифтов — собираю без арт-направления');
+        }
+      } catch (e) {
+        if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+        serviceNote(`Арт-направление не получилось: ${factOnly(e && e.message ? e.message : e)}`);
+      }
+    }
+    if (direction) ctx.directionHint = directionBrief(direction);
+    const dressed = (tree) => (direction && intent === 'create'
+      ? applyDirection(tree, direction, doc, { asArtboard: !!placement.asArtboard }).tree : tree);
+
+    if (direction) system = PROMPTS.tree(ctx);
     let messages = [
       { role: 'system', content: system },
       { role: 'user', content: userTurn },
@@ -11820,7 +12539,7 @@ async function runCommandCore(options = {}) {
       };
     }
 
-    data = await fillArt(data);
+    data = dressed(await fillArt(data));
     // Нарушения, которые уже были в документе (ручные правки пользователя), агенту не вменяем.
     const baseline = baselineViolations(baseList);
     emit('materialize', intent === 'theme' ? 'Меняю оформление документа' : intent === 'create' ? 'Ставлю новые слои на место'
@@ -11859,7 +12578,7 @@ async function runCommandCore(options = {}) {
         let fixed = await ask(schemaEntry, messages, { stage: 'repair', temperature: 0, ...(intent === 'illustration' ? { maxTokens: ART_TOKENS } : {}) });
         // круг 37: иллюстрацию чинят по деталям — исправленные встают на свои места
         if (intent === 'illustration') fixed = mergeIllustration(data, fixed);
-        else fixed = await fillArt(fixed);
+        else fixed = dressed(await fillArt(fixed));
         /* Круг 9, п.4: починка — законное место для отказа. «Поверни аватар» первым ответом даёт
          * выдуманное поле rotation, все правки отклоняются; вторая попытка обязана иметь право
          * сказать «поворота у узлов нет», а не выдумывать второе такое же поле. */
@@ -11887,6 +12606,49 @@ async function runCommandCore(options = {}) {
         if (e instanceof BrainError && e.kind === 'cancelled') throw e;
         // круг 16, п.6: в служебной записи — только факт, без совета человеку
         serviceNote(`Починка не удалась: ${factOnly(e && e.message ? e.message : e)}`);
+      }
+    }
+
+    /* — 5a. Круг 47 (SPEC §14.3): визуальный критик и один круг доработки. Снимок доски (или её
+     * выжимка) + приметы шаблона → оценка; ниже CRITIC_PASS — дерево заново по замечаниям.
+     * Доработка принимается, только если собралась не хуже; критик не вышел — правка как есть. */
+    let critique = null;
+    if (intent === 'create' && criticOpt !== false && !insideVariants && !attempt.fatal && !attempt.nothingChanged
+      && attempt.preview && attempt.preview.doc) {
+      try {
+        critique = await critiqueBoard({
+          engine, attempt, direction, utterance, plan, render, signal, provider, ask, emit, serviceNote,
+        });
+      } catch (e) {
+        if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+        serviceNote(`Критик не посмотрел: ${factOnly(e && e.message ? e.message : e)}`);
+      }
+      if (critique && critique.verdict === 'revise') {
+        emit('revise', critique.issues[0] || `Оценка критика ${critique.score}/10 — дорабатываю`, { detail: critique.fixes.slice(0, 3).join('; ') });
+        try {
+          const again = messages.concat([
+            { role: 'assistant', content: cutText(JSON.stringify(data), 8000) },
+            { role: 'user', content: PROMPTS.revise(critique, schemaEntry) },
+          ]);
+          const fixed = dressed(await fillArt(await ask(schemaEntry, again, { stage: 'revise' })));
+          if (cannotOf(fixed) && !hasEdits(fixed, intent)) {
+            serviceNote('Доработка по критику вернула отказ — оставил собранное');
+          } else {
+            emit('materialize', 'Прикладываю доработку');
+            const next = materialize({ engine, doc, data: fixed, intent, scope, placement, persona, baseline, geo: geoNow, group, said: utterance });
+            if (!next.fatal && !next.nothingChanged && next.blocking.length <= attempt.blocking.length
+              && keepsContent(attempt.ops, next.ops)) {
+              data = fixed;
+              attempt = next;
+              critique.revised = true;
+            } else {
+              serviceNote('Доработка по критику собралась хуже — оставил первый вариант');
+            }
+          }
+        } catch (e) {
+          if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+          serviceNote(`Доработка по критику не удалась: ${factOnly(e && e.message ? e.message : e)}`);
+        }
       }
     }
 
@@ -11981,6 +12743,9 @@ async function runCommandCore(options = {}) {
       ...(refusal ? { cannot: refusal } : {}),
       // круг 15, п.5: служебная бухгалтерия агента — отдельным полем, не в ленте человека
       ...(service.length ? { serviceNotes: service.slice() } : {}),
+      // круг 47 (SPEC §14): решение арт-директора и вердикт критика — оболочке и трассам
+      ...(direction ? { direction: slimDirection(direction) } : {}),
+      ...(critique ? { critique } : {}),
       warnings: sortWarnings(warnings), usage, stages,
     };
   } catch (e) {
@@ -14018,6 +14783,8 @@ async function runVariantsCore(options = {}) {
     plan: res.plan,
     // круг 27: что сделано — словами, для подписи записи в истории
     ...(res.changeSummary ? { changeSummary: res.changeSummary } : {}),
+    // круг 47 (SPEC §14): у каждого варианта своё арт-направление
+    ...(res.direction ? { direction: res.direction } : {}),
     answer: res.answer,
     clarify: res.clarify,
     // круг 18: готовые ответы доходят и до варианта — иначе переспрос там снова стал бы тупиком

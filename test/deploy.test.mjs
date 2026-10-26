@@ -283,6 +283,8 @@ test('compose: все пределы сервисов — из окружени�
     LLM_MAX_BODY_BYTES: (await import('../src/brain.js')).MODEL_BODY_MAX_BYTES,
     // круг 39 (N5а): семафор и бюджет байт полных чтений DSLR
     DSLR_FULL_CONCURRENCY: ol.DSLR_FULL_CONCURRENCY, DSLR_FULL_BYTES: ol.DSLR_FULL_BYTES,
+    // круг 47: зрение модели (пусто — узнать по отказу), арт-направление, критик, снимок доски
+    LLM_VISION: '', AGENT_DIRECTION: 1, AGENT_CRITIC: 1, AGENT_RENDER: 1,
   };
   // Orchestrator читает из окружения ровно эти (index.js) — compose передаёт каждый
   const orchSrc = read('server/orchestrator/index.js');

@@ -160,3 +160,11 @@ export const SHUTDOWN_HARD_MS = 8000;
 
 /** Пульс SSE, чтобы прокси не рвал простаивающий поток. */
 export const SSE_PING_MS = 15000;
+
+/**
+ * Круг 47 (SPEC §14.4): снимок доски для критика агента. Срок на один файл шрифта (стили и
+ * TTF с Google Fonts), сколько семейств держит кеш воркера, потолок файла шрифта.
+ */
+export const RENDER_FONT_TIMEOUT_MS = 8000;
+export const FONT_CACHE_FAMILIES = 12;
+export const RENDER_FONT_MAX_BYTES = 4 * 1024 * 1024;

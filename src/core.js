@@ -7984,8 +7984,87 @@ function rotateAttr(deg, rect, dx, dy) {
   return `rotate(${fmtNum(deg, 3)} ${fmtNum(rect.x + dx + rect.w / 2, 2)} ${fmtNum(rect.y + dy + rect.h / 2, 2)})`;
 }
 
+/* ------------------------------------------------------------------ *
+ * Круг 47 (SPEC §14.4): разметка SVG без браузера.
+ *
+ * Критику агента на сервере нужен снимок доски, а сцена строит SVG через DOM.
+ * Вместо второй, «серверной» отрисовки (которая разошлась бы с экраном на
+ * первой же правке) та же самая отрисовка Stage идёт в крошечный DOM в памяти:
+ * элементы с атрибутами, детьми, текстом и style — ровно то, что трогает путь
+ * toSVG. Подменяется только источник элементов (svgDom), и только на время
+ * одного синхронного вызова renderSVG.
+ * ------------------------------------------------------------------ */
+
+const escXml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+class MemText {
+  constructor(text) { this.nodeType = 3; this.data = String(text); this.parentNode = null; }
+  get outerHTML() { return escXml(this.data); }
+}
+
+class MemEl {
+  constructor(name) {
+    this.nodeType = 1;
+    this.tagName = name;
+    this.attrs = new Map();
+    this.childNodes = [];
+    this.parentNode = null;
+    const css = {};
+    this.style = css;
+  }
+  setAttribute(k, v) { this.attrs.set(String(k), String(v)); }
+  getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+  removeAttribute(k) { this.attrs.delete(k); }
+  hasAttribute(k) { return this.attrs.has(k); }
+  get firstChild() { return this.childNodes[0] || null; }
+  appendChild(c) {
+    if (c && c.isFragment) { for (const x of c.childNodes.splice(0)) this.appendChild(x); return c; }
+    if (c && c.parentNode) c.parentNode.removeChild(c);
+    if (c) { c.parentNode = this; this.childNodes.push(c); }
+    return c;
+  }
+  insertBefore(c, ref) {
+    if (!ref) return this.appendChild(c);
+    if (c && c.parentNode) c.parentNode.removeChild(c);
+    const i = this.childNodes.indexOf(ref);
+    c.parentNode = this;
+    this.childNodes.splice(i < 0 ? this.childNodes.length : i, 0, c);
+    return c;
+  }
+  removeChild(c) {
+    const i = this.childNodes.indexOf(c);
+    if (i >= 0) { this.childNodes.splice(i, 1); c.parentNode = null; }
+    return c;
+  }
+  set textContent(t) { this.childNodes = [new MemText(t)]; }
+  get textContent() { return this.childNodes.map((c) => (c.nodeType === 3 ? c.data : c.textContent)).join(''); }
+  get outerHTML() {
+    let a = '';
+    for (const [k, v] of this.attrs) a += ' ' + k + '="' + escXml(v) + '"';
+    const css = Object.keys(this.style).filter((k) => this.style[k] !== '' && this.style[k] != null)
+      .map((k) => k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase()) + ':' + this.style[k]).join(';');
+    if (css) a += ' style="' + escXml(css) + '"';
+    // <style> — текст как есть: в CSS нет ни «<», ни «&», которые надо прятать
+    const inner = this.tagName === 'style'
+      ? this.childNodes.map((c) => (c.nodeType === 3 ? c.data : c.outerHTML)).join('')
+      : this.childNodes.map((c) => c.outerHTML).join('');
+    return '<' + this.tagName + a + (inner ? '>' + inner + '</' + this.tagName + '>' : '/>');
+  }
+}
+
+const memDom = {
+  createElementNS: (_ns, name) => new MemEl(name),
+  createElement: (name) => new MemEl(name),
+  createTextNode: (t) => new MemText(t),
+  createDocumentFragment: () => Object.assign(new MemEl('#fragment'), { isFragment: true }),
+};
+
+/** Откуда берутся элементы разметки: страница или память (renderSVG). */
+let svgDom = null;
+const dom = () => svgDom || document;
+
 function svgEl(name, attrs) {
-  const el = document.createElementNS(SVG_NS, name);
+  const el = dom().createElementNS(SVG_NS, name);
   if (attrs) for (const k of Object.keys(attrs)) {
     const v = attrs[k];
     if (v !== undefined && v !== null && v !== false) el.setAttribute(k, String(v));
@@ -9288,7 +9367,7 @@ class Stage {
       });
       lines.forEach((line, i) => {
         const ts = svgEl('tspan', { x: tx, dy: i === 0 ? 0 : r2(style.lineHeight) });
-        ts.appendChild(document.createTextNode(line));
+        ts.appendChild(dom().createTextNode(line));
         t.appendChild(ts);
       });
       out.push(t);
@@ -9681,11 +9760,11 @@ class Stage {
       const css = this._exportStateCss(this._exportStates);
       if (css) {
         const st = svgEl('style', { type: 'text/css' });
-        st.appendChild(document.createTextNode(css));
+        st.appendChild(dom().createTextNode(css));
         defs.appendChild(st);
       }
       const head = '<?xml version="1.0" encoding="UTF-8"?>\n';
-      const body = typeof XMLSerializer !== 'undefined'
+      const body = typeof XMLSerializer !== 'undefined' && !svgDom
         ? new XMLSerializer().serializeToString(svg)
         : svg.outerHTML;
       return head + body;
@@ -9724,7 +9803,7 @@ class Stage {
     if (res.css) {
       try {
         el = svgEl('style', { type: 'text/css' });
-        el.appendChild(document.createTextNode(res.css));
+        el.appendChild(dom().createTextNode(res.css));
       } catch (e) {
         // без <style> экспорт всё равно должен собраться — просто чужим шрифтом
         logOnce('fonts:style', 'элемент <style> для экспорта не создался', e);
@@ -11861,8 +11940,98 @@ class Stage {
   }
 }
 
+/** Сцена без страницы: поля, которые читает путь toSVG, и ничего больше. */
+function headlessStage(doc, geo, id, embedFonts) {
+  const st = Object.create(Stage.prototype);
+  return Object.assign(st, {
+    opts: { embedFonts: !!embedFonts }, host: null, doc, geo, state: { selection: [] },
+    view: { zoom: 1, pan: { x: 0, y: 0 } }, activeArtboard: id,
+    _srcMap: null, _clipSeq: 0, _clipPrefix: newClipPrefix(), _drawSeen: new Set(),
+    _timers: new Set(), _dead: false, _nodeEls: new Map(),
+  });
+}
+
+/**
+ * Круг 47 (SPEC §14.4): SVG доски без страницы — та же отрисовка, что у `Stage.toSVG`,
+ * только элементы — в памяти (см. memDom). Синхронно и без сети. Гарнитуры по умолчанию
+ * не встраиваются (рендер PNG на сервере подаёт файлы шрифтов сам, их имена — в
+ * `families`); `fonts: true` встраивает то, что уже лежит в кеше экспорта.
+ * @param {object} doc
+ * @param {string} artboardId доска (или любой узел, у которого есть геометрия)
+ * @param {{geo?:object, measureText?:Function, fonts?:boolean}} [opts]
+ * @returns {{svg:string, width:number, height:number, families:string[]}|null} null — рисовать нечего
+ */
+function renderSVG(doc, artboardId, opts = {}) {
+  if (!doc || !doc.nodes || typeof artboardId !== 'string') return null;
+  const geo = opts.geo && opts.geo.rects ? opts.geo
+    : solve(doc, typeof opts.measureText === 'function' ? { measureText: opts.measureText } : undefined);
+  const rect = geo.rects[artboardId];
+  if (!rect) return null;
+  const st = headlessStage(doc, geo, artboardId, !!opts.fonts);
+  const prev = svgDom;
+  svgDom = memDom;
+  try {
+    const svg = st.toSVG(artboardId, doc, geo, { fonts: !!opts.fonts });
+    if (!svg) return null;
+    let families = [];
+    try { families = [...st._fontNeeds(artboardId).keys()]; } catch { families = []; }
+    return { svg, width: r2(rect.w), height: r2(rect.h), families };
+  } finally {
+    svgDom = prev;
+  }
+}
+
+/**
+ * Круг 47 (SPEC §14.4): PNG доски в браузере — для критика агента, которому нужен снимок
+ * ещё не применённой правки (черновика), а не того, что на холсте. Гарнитуры тянутся в кеш
+ * экспорта и встраиваются; сторона снимка — не больше maxSide.
+ * @param {object} doc @param {string} artboardId
+ * @param {{geo?:object, maxSide?:number, timeoutMs?:number}} [opts]
+ * @returns {Promise<{mime:string, data:string, width:number, height:number}|null>} data — base64 без префикса
+ */
+async function boardPNG(doc, artboardId, opts = {}) {
+  if (typeof document === 'undefined' || typeof Image === 'undefined') return null;
+  const geo = opts.geo && opts.geo.rects ? opts.geo : solve(doc);
+  const rect = geo.rects[artboardId];
+  if (!rect || !(rect.w > 0) || !(rect.h > 0)) return null;
+  try { await headlessStage(doc, geo, artboardId, true).prepareFonts(artboardId); } catch (e) { /* без гарнитур — системным */ }
+  const out = renderSVG(doc, artboardId, { geo, fonts: true });
+  if (!out) return null;
+  const side = isNum(opts.maxSide) && opts.maxSide > 0 ? opts.maxSide : 1024;
+  const k = Math.min(1, side / Math.max(rect.w, rect.h));
+  const W = Math.max(1, Math.round(rect.w * k));
+  const H = Math.max(1, Math.round(rect.h * k));
+  const url = URL.createObjectURL(new Blob([out.svg], { type: 'image/svg+xml;charset=utf-8' }));
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('снимок не загрузился')), isNum(opts.timeoutMs) ? opts.timeoutMs : 8000);
+      img.onload = () => { clearTimeout(t); resolve(); };
+      img.onerror = () => { clearTimeout(t); reject(new Error('снимок не разобрался')); };
+      img.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(img, 0, 0, W, H);
+    const dataUrl = canvas.toDataURL('image/png');
+    const comma = dataUrl.indexOf(',');
+    return comma > 0 ? { mime: 'image/png', data: dataUrl.slice(comma + 1), width: W, height: H } : null;
+  } catch (e) {
+    logOnce('boardPNG', 'снимок доски для критика не получился', e);
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
+  /* Круг 47 (SPEC §14.4): SVG доски без страницы — снимок для критика агента — */
+  renderSVG, boardPNG,
   /* Круг 31 (K1): большая отмена/правка — пачками в пределах транзакции — */
   splitOps, SPLIT_MAX_OPS, SPLIT_MAX_BYTES,
   /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */

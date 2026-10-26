@@ -35,9 +35,15 @@ export const RECOGNIZE_MAX = 2000;
 const TX_COMMAND_ID_MAX = 64;
 
 /** Стадии brain → ключи §10.3. Не названные — не показываются (их смысл несёт result). */
+/** Круг 47: есть ли в репликах картинка (запрос со снимком доски для критика). */
+const hasImage = (messages) => Array.isArray(messages)
+  && messages.some((m) => m && Array.isArray(m.content) && m.content.some((p) => p && p.type === 'image'));
+
 const BRAIN_STAGE = {
   plan: 'llm', generate: 'llm', retry: 'llm', variant: 'llm',
   materialize: 'validate', validate: 'validate', repair: 'repair',
+  // круг 47 (SPEC §14): образ — шаг модели, критик — проверка, доработка — починка
+  direct: 'llm', critic: 'validate', revise: 'repair',
 };
 
 const LABELS = {
@@ -201,6 +207,14 @@ export function createPipeline(deps) {
   const variantsTtl = deps.variantsTtlMs || VARIANTS_TTL_MS;
   const instance = deps.instance || '';
   const startedAt = deps.startedAt || new Date().toISOString();
+  // круг 47 (SPEC §14): арт-направление и визуальный критик (AGENT_DIRECTION, AGENT_CRITIC, AGENT_RENDER)
+  const art = {
+    direction: deps.art ? deps.art.direction !== false : true,
+    critic: deps.art ? deps.art.critic !== false : true,
+    render: deps.art ? deps.art.render !== false : true,
+    // проверка: готовый снимок вместо рендера (действует только у воркеров с testHooks)
+    ...(deps.art && typeof deps.art.fakeShot === 'string' ? { fakeShot: deps.art.fakeShot } : {}),
+  };
 
   /* Круг 26: совет администратору — в лог, а не человеку в браузер; одна строка на
      причину не чаще раза в минуту (модель лежит — каждая команда скажет то же). */
@@ -450,6 +464,8 @@ export function createPipeline(deps) {
           if (e && e.detail) {
             log.warn(`[orchestrator] команда ${cmd.command_id}: модель отвергла запрос${e.status ? ` (${e.status})` : ''}: ${llm.redact(String(e.detail))}`);
           }
+          // круг 47: модель отвергла запрос со снимком (4xx) — картинок она не видит, больше не шлём
+          if (e && e.kind === 'model' && hasImage(messages) && llm.provider) llm.provider.vision = false;
           // наружу из главного потока — только очищенный текст
           throw Object.assign(new Error(llm.redact(e && e.message ? e.message : 'Сбой модели')), { kind: (e && e.kind) || 'model', code: e && e.code });
         } finally {
@@ -472,6 +488,8 @@ export function createPipeline(deps) {
         // внешний словарь компонентов (DUIL, §10.6): brain дополняет им библиотеку документа
         library: lib.docs && lib.docs.length ? lib.docs : null,
         n: verdict.kind === 'variants' ? verdict.n : undefined,
+        // круг 47 (SPEC §14): арт-направление и критик; видит ли модель картинки (узнаётся по отказу)
+        art: { ...art, vision: llm.provider ? llm.provider.vision : false },
         ...(cmd.test ? { test: cmd.test } : {}),
       };
       step('llm');
@@ -734,7 +752,21 @@ export function createPipeline(deps) {
       // компоненты внешней библиотеки, перенесённые этой правкой в библиотеку документа (§10.6)
       ...(res && Array.isArray(res.libraryAdded) && res.libraryAdded.length ? { libraryAdded: res.libraryAdded } : {}),
       ...(select.length ? { select: select.slice(0, 50) } : {}),
+      // круг 47 (SPEC §14): решение арт-директора и вердикт критика — строки через redact
+      ...(res && res.direction ? { direction: artOut(res.direction) } : {}),
+      ...(res && res.critique ? { critique: artOut(res.critique) } : {}),
     };
+  }
+
+  /** Решение и вердикт наружу: строки — через redact и не длиннее 300 знаков, числа и булевы — как есть. */
+  function artOut(v, depth = 0) {
+    if (typeof v === 'string') return llm.redact(cutText(v, 300));
+    if (typeof v === 'number' || typeof v === 'boolean') return v;
+    if (depth > 3 || !v || typeof v !== 'object') return undefined;
+    if (Array.isArray(v)) return v.slice(0, 8).map((x) => artOut(x, depth + 1)).filter((x) => x !== undefined);
+    const out = {};
+    for (const k of Object.keys(v).slice(0, 16)) { const x = artOut(v[k], depth + 1); if (x !== undefined) out[k] = x; }
+    return out;
   }
 
   /* ── стоп и выбор варианта ──────────────────────────────────────────── */

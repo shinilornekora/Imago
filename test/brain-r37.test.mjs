@@ -18,6 +18,9 @@ const quiet = (fn) => { const w = console.warn; console.warn = () => {}; try { r
 /** Разбор пути ядром, если ядро его уже экспортирует, иначе — зеркалом мозга. */
 const corePath = (d) => (typeof core.parsePath === 'function' ? core.parsePath(d) : parseArtPath(d));
 
+/** Круг 47: вызовы модели без арт-директора и критика — их проверяет test/brain-r47. */
+const MAIN = (c) => c.schema !== 'direction' && c.schema !== 'critique';
+
 /** Поддельная модель: ответы по имени схемы, массив — по очереди. */
 function fake(script) {
   const calls = [];
@@ -26,7 +29,7 @@ function fake(script) {
     async ready() { return true; },
     async complete(messages, schema, opts = {}) {
       const name = schema && schema.name;
-      calls.push({ schema: name, messages, opts });
+      if (MAIN({ schema: name })) calls.push({ schema: name, messages, opts });
       let v = script[name];
       if (Array.isArray(v)) v = v.shift();
       if (typeof v === 'function') v = v(messages);

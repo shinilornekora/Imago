@@ -16,6 +16,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { getHeapStatistics } from 'node:v8';
 import * as core from '../../../src/core.js';
 import { runCommand, runVariants, BrainError, SCHEMAS, raceAbort, INTERNAL_MESSAGE, expandOverflow } from '../../../src/brain.js';
+import { createRenderer } from '../render.js';
 
 const testHooks = !!(workerData && workerData.testHooks);
 // проверка: медленный старт воркера (загрузка модулей под нагрузкой) — круг 29
@@ -26,10 +27,20 @@ if (testHooks && workerData.startDelayMs > 0) {
 const jobs = new Map();      // id → AbortController
 const calls = new Map();     // callId → {resolve, reject}
 let callSeq = 0;
+/** Круг 47 (SPEC §14.4): снимки досок для критика — один рендер (и кеш шрифтов) на воркер. */
+let renderer = null;
+const renderBoard = (args) => (renderer || (renderer = createRenderer()))(args);
 
-function proxyProvider(id) {
+/** Часть реплики для передачи в главный поток: текст или картинка (§14.3), ничего лишнего. */
+const partOf = (p) => (p && p.type === 'image'
+  ? { type: 'image', mime: String(p.mime || ''), data: String(p.data || '') }
+  : { type: 'text', text: String((p && p.text) || '') });
+
+function proxyProvider(id, vision) {
   return {
     name: 'orchestrator', kind: 'proxy',
+    // круг 47: видит ли модель картинки — как знает главный поток (brain помечает false сам)
+    vision,
     async ready() { return true; },
     complete(messages, schema, opts = {}) {
       const callId = `${id}:${++callSeq}`;
@@ -38,7 +49,10 @@ function proxyProvider(id) {
         calls.set(callId, { resolve, reject });
         parentPort.postMessage({
           type: 'llm', id, callId,
-          messages: (Array.isArray(messages) ? messages : []).map((m) => ({ role: m.role, content: String(m.content == null ? '' : m.content) })),
+          messages: (Array.isArray(messages) ? messages : []).map((m) => ({
+            role: m.role,
+            content: Array.isArray(m.content) ? m.content.map(partOf) : String(m.content == null ? '' : m.content),
+          })),
           schema: name ? { ref: name } : schema,
           opts: pick(opts, ['temperature', 'maxTokens', 'modelTier']),
         });
@@ -137,9 +151,16 @@ async function run(id, job) {
         rec: { stage: rec.stage, label: rec.label, ...(rec.detail ? { detail: core.cutText(rec.detail, 500) } : {}), ...(rec.variant != null ? { variant: rec.variant } : {}) },
       });
     };
+    // круг 47 (SPEC §14): арт-направление и критик — по настройке сервиса (job.art)
+    const art = job.art && typeof job.art === 'object' ? job.art : {};
     const common = {
       doc: job.doc, selection: job.selection || [], utterance: job.utterance,
-      provider: proxyProvider(id), signal: ctl.signal, engine: core, onStage,
+      provider: proxyProvider(id, art.vision), signal: ctl.signal, engine: core, onStage,
+      direction: art.direction !== false, critic: art.critic !== false,
+      render: art.critic === false ? null
+        // проверка: снимок без resvg и сети — готовый PNG (круг 47)
+        : testHooks && typeof art.fakeShot === 'string' ? async () => ({ mime: 'image/png', data: art.fakeShot, width: 8, height: 8 })
+          : art.render !== false ? renderBoard : null,
       activeArtboardId: job.activeArtboardId || null, history: job.history || null,
       library: job.library || null,
       selectionBy: job.selectionBy || 'human',

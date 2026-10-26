@@ -186,12 +186,16 @@ export function createLlm(cfg = {}) {
   if (configured && kind === 'anthropic') {
     provider = makeProvider({
       kind: 'claude', name: 'Anthropic', timeout: cfg.timeout,
+      // круг 47: Messages API принимает картинки (LLM_VISION=0 — не слать)
+      vision: cfg.vision !== false,
       sample: { json: (turns, o) => anthropicJson(turns, o) },
     });
   } else if (configured) {
     provider = makeProvider({
       kind: 'openai', name: 'OpenAI-совместимая модель', baseUrl: parsed.publicBase,
       model: model || undefined, fetch: providerFetch, timeout: cfg.timeout, maxBodyBytes,
+      // круг 47: видит ли модель картинки — из LLM_VISION; не задано — узнаётся по первому отказу
+      vision: cfg.vision,
     });
   }
 

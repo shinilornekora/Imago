@@ -97,6 +97,9 @@ export async function startOrch({ document, llm, ...rest } = {}) {
     log: quiet,
     testHooks: true,
     workers: 2,
+    // круг 47: прежние проверки считают вызовы модели «план → дерево»; арт-направление и критик
+    // включают свои проверки (round47) сами. Снимок доски тянул бы шрифты из сети — его нет нигде
+    art: { direction: false, critic: false, render: false },
     ...rest,
   });
 }

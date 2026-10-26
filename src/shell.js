@@ -3910,3 +3910,40 @@ export async function openSoloStore(env = {}) {
   try { channel = env.BroadcastChannel ? new env.BroadcastChannel(SOLO_CHANNEL) : null; } catch { channel = null; }
   return createSoloStore({ bodies, index, channel, ls, now: env.now });
 }
+
+/* ── Круг 47 (SPEC §14.5): живой дизайн в карточке итога ────────────────── */
+
+/** Роли палитры решения словами — подписи образцов цвета. */
+export const ART_ROLE_WORDS = Object.freeze({
+  bg: 'фон', surface: 'плашки', text: 'текст', muted: 'подписи', accent: 'акцент', accent2: 'второй акцент',
+});
+
+/**
+ * Решение арт-директора и вердикт критика → что показать под итогом команды: образ, образцы
+ * палитры, пару шрифтов и оценку критика одной строкой. Данные приходят с сервера: цвет — только
+ * #rrggbb, строки — обрезанные, чужое — мимо. null — показывать нечего.
+ * @param {object|null} direction @param {object|null} critique
+ * @returns {{concept: string, swatches: Array<{role: string, hex: string, label: string}>, fonts: string, verdict: string, line: string}|null}
+ */
+export function artSummary(direction, critique) {
+  const d = direction && typeof direction === 'object' ? direction : null;
+  const c = critique && typeof critique === 'object' ? critique : null;
+  const str = (v, n) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, n) : '');
+  const concept = d ? str(d.concept, 160) : '';
+  const pal = d && d.palette && typeof d.palette === 'object' ? d.palette : {};
+  const swatches = Object.keys(ART_ROLE_WORDS)
+    .map((role) => ({ role, hex: typeof pal[role] === 'string' && /^#[0-9a-f]{6}$/i.test(pal[role]) ? pal[role].toLowerCase() : '', label: ART_ROLE_WORDS[role] }))
+    .filter((x) => x.hex);
+  const f = d && d.fonts && typeof d.fonts === 'object' ? d.fonts : {};
+  const fonts = [str(f.display, 40), str(f.text, 40)].filter(Boolean).filter((x, i, a) => a.indexOf(x) === i).join(' + ');
+  let verdict = '';
+  if (c && Number.isFinite(Number(c.score))) {
+    const score = Math.round(Math.max(0, Math.min(10, Number(c.score))) * 10) / 10;
+    verdict = `критик ${String(score).replace('.', ',')}/10`
+      + (c.revised ? ' — доработал по замечаниям' : c.verdict === 'revise' ? ' — доработка не легла, оставил собранное' : '')
+      + (c.seen === 'text' ? ' (смотрел без снимка)' : '');
+  }
+  if (!concept && !swatches.length && !fonts && !verdict) return null;
+  const line = [concept ? `Образ: ${concept}` : '', fonts, verdict].filter(Boolean).join(' · ');
+  return { concept, swatches, fonts, verdict, line };
+}

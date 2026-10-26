@@ -21,6 +21,10 @@
  *   WORKER_JOBS       заданий на воркер одновременно, пока они ждут модель (4)
  *   POOL_QUEUE_MAX    ждущих свободного воркера заданий (32); больше — 429 busy
  *   POOL_QUEUE_WAIT_MS сколько задание ждёт воркер (30000); дольше — busy
+ *   LLM_VISION        видит ли модель картинки: 1 | 0; пусто — openai узнаёт по первому отказу, anthropic — да
+ *   AGENT_DIRECTION   0 — без шага арт-направления перед раскладкой (круг 47)
+ *   AGENT_CRITIC      0 — без визуального критика и доработки
+ *   AGENT_RENDER      0 — критик без снимка доски (по выжимке)
  *
  * Приём запроса (круг 33, не настраивается окружением — limits.js): тело не пришло за 30 с —
  * 408 timeout; заголовки — 20 с, запрос целиком — 35 с (таймауты http.Server).
@@ -49,6 +53,13 @@ import { createRequestHandler, applyServerTimeouts } from './http.js';
 import { SHUTDOWN_GRACE_MS, SHUTDOWN_FLUSH_MS, SHUTDOWN_HARD_MS, BODY_TIMEOUT_MS } from './limits.js';
 
 const num = (v) => (v === undefined || v === null || v === '' ? undefined : Number(v));
+/** Флаг окружения: 1/true/on/yes — да, 0/false/off/no — нет, иначе — не задан. */
+const flag = (v) => {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  if (['1', 'true', 'on', 'yes'].includes(s)) return true;
+  if (['0', 'false', 'off', 'no'].includes(s)) return false;
+  return undefined;
+};
 
 /**
  * @param {{
@@ -74,6 +85,8 @@ export async function start(opts = {}) {
     timeout: num(env.LLM_TIMEOUT_MS),
     // круг 31: потолок тела ответа модели, байт (умолчание — 8 МБ)
     maxBodyBytes: num(env.LLM_MAX_BODY_BYTES),
+    // круг 47: видит ли модель картинки (1/0; пусто — узнать по первому отказу)
+    vision: flag(env.LLM_VISION),
   };
 
   const llm = createLlm({ ...llmCfg, fetch: opts.fetch });
@@ -116,6 +129,12 @@ export async function start(opts = {}) {
     docHealthDetail: (o) => doc.healthDetail(o),
     maxQueue: opts.queueMax !== undefined ? opts.queueMax : num(env.QUEUE_MAX),
     variantsTtlMs: opts.variantsTtlMs,
+    // круг 47 (SPEC §14): арт-направление, критик и снимок доски для него (по умолчанию — всё включено)
+    art: opts.art || {
+      direction: flag(env.AGENT_DIRECTION) !== false,
+      critic: flag(env.AGENT_CRITIC) !== false,
+      render: flag(env.AGENT_RENDER) !== false,
+    },
   });
   // круг 33: свой таймер тела (408) и таймауты приёма запроса — как у Document service
   // (из окружения не читается: тело Orchestrator — до 1 МБ, 30 с хватает с запасом)
