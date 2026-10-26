@@ -2632,6 +2632,24 @@ const RE_ART_WIDGET = rx('(виджет|карточк|баннер|плашк|�
 /** «Ещё одного», «нового», «другого» — новая картинка рядом с уже нарисованной. */
 const RE_ART_ANOTHER = rx('(ещ[её]|нов(ый|ого|ую|ое|ая)|друг(ой|ого|ую|ое|ая)|втор(ой|ого|ую|ое|ая))', true);
 
+/**
+ * Круг 55 (SPEC §21): картинка как ОБРАЗЕЦ, а не предмет — «в цветах этой картинки», «в стиле фото»,
+ * «как на картинке», «по референсу». Такую картинку не рисуют, по ней решают вид.
+ */
+export const RE_IMAGE_REF = new RegExp([
+  // «в цветах (этой) картинки», «в стиле фото», «в палитре скриншота»
+  String.raw`(?:в|по)\s+(?:цвет\p{L}*|стил\p{L}*|дух\p{L}*|мотив\p{L}*|настроени\p{L}*|палитр\p{L}*|гамм\p{L}*|тон\p{L}*)\s+DEM PIC`,
+  // «как на (этой) картинке», «по (этой) картинке», «по референсу»
+  String.raw`(?:как\s+на|по)\s+DEM PIC`,
+  // «(возьми|используй) цвета (с|из|этой) картинки»
+  String.raw`цвет\p{L}*\s+(?:(?:с|из|со)\s+)?DEM PIC`,
+].join('|').replace(/DEM /g, String.raw`(?:(?:эт|т|мо|наш|вставленн|положенн|выделенн)\p{L}*\s+)?`)
+  .replace(/PIC/g, String.raw`(?:картин(?:к\p{L}*|ок)|фото(?:графи\p{L}*|чк\p{L}*|к\p{L}*)?(?![\p{L}-])|изображени\p{L}*|снимк\p{L}*|снимок|скрин\p{L}*|референс\p{L}*)`), 'iu');
+/** Реплика без слов о картинке-образце (для поиска предмета, который надо нарисовать). */
+export function withoutImageRef(utterance) {
+  return String(utterance == null ? '' : utterance).replace(new RegExp(RE_IMAGE_REF.source, 'giu'), ' ');
+}
+
 /** Есть ли в реплике предмет-картинка. */
 export function artSubjectIn(utterance) {
   const s = String(utterance == null ? '' : utterance);
@@ -3181,8 +3199,10 @@ export function classifyUtterance(utterance, { hasSelection = false, doc = null,
    *   2) картинка внутри интерфейса («виджет печеньки») — создание с картинкой (art:true);
    *   3) картинка сама по себе — illustration. «Нарисуй экран входа» сюда не попадает: там предмет —
    *      интерфейс, а не рисунок. */
-  const artVerb = RE_ART_VERB.test(s);
-  const artSubject = artSubjectIn(s);
+  // круг 55: «в цветах этой картинки» — картинка образец, рисовать её не просят
+  const sArt = withoutImageRef(s);
+  const artVerb = RE_ART_VERB.test(sArt);
+  const artSubject = artSubjectIn(sArt);
   const near = prefer instanceof Set ? prefer : null;
   // в области работы есть рисунок: «добавь рожки», «сделай хвост длиннее» — про его детали
   const artHere = !!(doc && near && [...near].some((id) => (nodeOf(doc, id) || {}).type === 'vector'));
@@ -14146,7 +14166,7 @@ function artPlaceholders(data, intent) {
  */
 function injectArtPlaceholder(tree, utterance) {
   if (!tree || typeof tree !== 'object' || !Array.isArray(tree.children)) return false;
-  const words = (String(utterance || '').toLowerCase().match(/[\p{L}]+/gu) || [])
+  const words = (withoutImageRef(utterance).toLowerCase().match(/[\p{L}]+/gu) || [])
     .filter((w) => w.length >= 4 && !RE_ART_WIDGET.test(w) && artSubjectIn(w)).map(stemRu);
   const fixedSide = (v) => (typeof v === 'number' && v > 0 ? v : null);
   let hit = null;
@@ -14177,6 +14197,19 @@ function artColorsLine(doc) {
     .map((k) => `${k} ${colors[k]}`).join(', '), 800);
 }
 
+/** Выделены только картинки или доски, в которых нет ничего, кроме картинок (вставленная картинка). */
+function picturesOnly(doc, ids) {
+  const list = Array.isArray(ids) ? ids : [];
+  if (!list.length) return false;
+  const pic = (id, depth) => {
+    const n = nodeOf(doc, id);
+    if (!n || depth > 8) return false;
+    if (n.type === 'image') return true;
+    return n.type === 'frame' && Array.isArray(n.children) && n.children.length > 0 && n.children.every((k) => pic(k, depth + 1));
+  };
+  return list.every((id) => pic(id, 0));
+}
+
 function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null) {
   const note = warn || (() => {});
   const spoken = String(utterance || '');
@@ -14193,7 +14226,13 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
   const saidWhole = RE_WHOLE_SCREEN.test(spoken);
   const planOnlyNew = !saidNew && !saidWhole && scope.kind !== 'selection'
     && (RE_NEW_ARTBOARD.test(planText) || RE_WHOLE_SCREEN.test(planText));
-  const explicit = saidNew;
+  /* Круг 55 (SPEC §21): выделена картинка (или доска из одних картинок) и о ней сказано как об образце
+   * («собери экран в цветах этой картинки») — выделение показывает образец, а не место: новая доска. */
+  /* Картинка на настоящем экране («добавь кнопку в цветах этой картинки») — место правки, а не образец:
+   * образец — это вставленная картинка на своей доске (доска из одних картинок) или когда просят экран. */
+  const pictureRef = scope.kind === 'selection' && RE_IMAGE_REF.test(spoken) && picturesOnly(doc, scope.ids)
+    && (saidWhole || scope.ids.every((id) => picturesOnly(doc, [artboardOf(doc, id) || id])));
+  const explicit = saidNew || pictureRef;
   // круг 27: выделение агента («вот что я сделал») просьбу собрать экран не перебивает
   const wholeScreen = saidWhole && (scope.kind !== 'selection' || scope.selectionBy === 'agent') && !RE_HERE_PLACE.test(spoken);
   const insert = explicit || wholeScreen ? null : findInsertTarget(doc, spoken, scope, engine, geo);
