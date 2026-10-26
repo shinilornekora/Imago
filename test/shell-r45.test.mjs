@@ -225,6 +225,12 @@ test('r45 (UX r45c): одна подсказка сироты помечает �
   const opt = SHELL.rescueOrphanMatches([row('A', t0 + 6000), row('B', t0 + 30000)], [g2, g1]);
   assert.equal(opt.get('A').createId, 'g1');
   assert.equal(opt.get('B').createId, 'g2');
+  // одна подсказка, две строки — ближняя (сумма расстояний идёт в выбор); две подсказки, одна строка —
+  // пару даёт ближняя подсказка, а не первая по порядку (подсказку можно пропустить)
+  const one = SHELL.rescueOrphanMatches([row('A', t0 - 50000), row('B', t0 + 1000)], [{ ...h, since: t0, createId: 'k1' }]);
+  assert.deepEqual([...one.keys()], ['B']);
+  const two = SHELL.rescueOrphanMatches([row('A', t0 + 5000)], [{ ...h, since: t0, createId: 'k1' }, { ...h, since: t0 + 100000, at: t0 + 200000, createId: 'k2' }]);
+  assert.equal(two.get('A') && two.get('A').createId, 'k1');
   // оболочка помечает по всему списку и запоминает отказ 409 create_id
   assert.match(app, /const orphans = SHELL\.rescueOrphanMatches\(items, orphanHints\(\)\);/);
   assert.match(app, /else if \(e && e\.status === 409\) notOrphan\(hint\.createId, p\.id\);/);
