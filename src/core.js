@@ -6982,7 +6982,8 @@ function solveWith(doc, opts, seed) {
  * прежней геометрии со сдвигом. Что изменилось — по самим документам (dirtyAfter), операции —
  * только для вызывающего. Результат — тот же, что у solve(nextDoc) (тесты на случайных правках).
  * Когда так нельзя — честно полная раскладка:
- *   • prevGeo не от solve этого же prevDoc (или уже использована) или другой измеритель/эпоха шрифтов;
+ *   • prevGeo без памяти (обычная solve) или уже использована, другой измеритель/эпоха шрифтов;
+ *     prevDoc — только для вызывающего: прежний документ берётся из памяти prevGeo (круг 57);
  *   • изменились токены, тема доски, узел перешёл на другую доску;
  *   • в прежнем документе были экземпляры компонентов (раскрытие — отдельная история, открыто).
  * prevGeo после этого — использованная: её кеши перешли новой геометрии.
@@ -6993,8 +6994,11 @@ function solveWith(doc, opts, seed) {
 function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   const options = opts || {};
   const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
-  const dirty = memo && memo.doc === prevDoc && memo.fn === (options.measureText || null) && memo.epoch === measureEpochValue
-    ? dirtyAfter(prevDoc, nextDoc) : null;
+  // круг 57: прежний документ — тот, от которого посчитана prevGeo (память), а не слова вызывающего:
+  // изменения ищутся по самим объектам узлов, поэтому так верно всегда, а цепочка не рвётся, когда
+  // документ состояния пересобран с теми же узлами или геометрия отстала на несколько версий
+  const dirty = memo && memo.fn === (options.measureText || null) && memo.epoch === measureEpochValue
+    ? dirtyAfter(memo.doc, nextDoc) : null;
   if (!dirty) return solve(nextDoc, { ...options, incremental: true });
   SOLVE_MEMO.delete(prevGeo);
   for (const id of dirty) { memo.meas.delete(id); memo.flow.delete(id); }
@@ -7012,7 +7016,7 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
 function solveNext(prevGeo, nextDoc, opts) {
   const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
   if (memo && memo.doc === nextDoc && memo.fn === ((opts && opts.measureText) || null) && memo.epoch === measureEpochValue) return prevGeo;
-  return solveAfter(prevGeo, memo ? memo.doc : null, nextDoc, null, opts);
+  return solveAfter(prevGeo, null, nextDoc, null, opts);
 }
 
 /**

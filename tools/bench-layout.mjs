@@ -72,7 +72,24 @@ for (const n of SIZES) {
     }
     cur = next;
   }
-  rows.push({ nodes: count, fullMs: +median(full).toFixed(2), incrementalMs: inc.length ? +median(inc).toFixed(2) : null, undoMs: undo.length ? +median(undo).toFixed(2) : null });
+  // круг 57: кадр догона — геометрия отстала на 5 правок в разных карточках
+  const catchup = [];
+  if (typeof core.solveNext === 'function') {
+    const cards = Math.max(1, Math.floor((n - 1) / 4));
+    for (let i = 0; i < RUNS; i++) {
+      let next = cur;
+      for (let k = 0; k < 5; k++) {
+        next = core.applyOps(next, [core.ops.set(`c${(i * 7 + k * Math.floor(cards / 5)) % cards}b`, 'characters', `Догон ${i}.${k}`)]).doc;
+      }
+      const t = performance.now();
+      const g = core.solveNext(geo, next, opts);
+      catchup.push(performance.now() - t);
+      if (core.hashGeometry(g) !== core.hashGeometry(core.solve(next, opts))) throw new Error(`n=${n}: догон по месту разошёлся с полной`);
+      geo = g; cur = next;
+    }
+  }
+  rows.push({ nodes: count, fullMs: +median(full).toFixed(2), incrementalMs: inc.length ? +median(inc).toFixed(2) : null,
+    undoMs: undo.length ? +median(undo).toFixed(2) : null, catchupMs: catchup.length ? +median(catchup).toFixed(2) : null });
 }
 if (JSON_OUT) console.log(JSON.stringify(rows));
-else for (const r of rows) console.log(`${r.nodes} слоёв: полная ${r.fullMs} мс${r.incrementalMs != null ? `, по месту правки ${r.incrementalMs} мс` : ''}${r.undoMs != null ? `, отмена ${r.undoMs} мс` : ''}`);
+else for (const r of rows) console.log(`${r.nodes} слоёв: полная ${r.fullMs} мс${r.incrementalMs != null ? `, по месту правки ${r.incrementalMs} мс` : ''}${r.undoMs != null ? `, отмена ${r.undoMs} мс` : ''}${r.catchupMs != null ? `, догон 5 правок ${r.catchupMs} мс` : ''}`);

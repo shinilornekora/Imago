@@ -436,7 +436,8 @@ function remeasure(opts = {}) {
   if (!opts.cacheCleared) resetTextMeasure();
   let was = '';
   try { was = hashGeometry(state.geo); } catch { was = ''; }
-  const geo = solve(state.doc);
+  // круг 57: с памятью — после смены шрифтов следующая правка снова по месту
+  const geo = solveKept(state.doc);
   state.geo = geo;
   // измерения не изменились — ни перерисовки, ни пересчёта вида: на старте таких
   // событий приходит несколько, и каждое стоило полного круга (п.21)
@@ -14256,7 +14257,7 @@ function adoptDoc(raw) {
   if (next.root !== raw.root || alien.length) throw new Error('не разобрался как документ Imago');
   const tree = treeProblem(next);
   if (tree) throw new Error(tree);
-  const geo = solve(next);
+  const geo = solveKept(next);
   if (!geo || !geo.rects) throw new Error('раскладка не считается');
   // createDoc чинит узлы не по схеме, но починка бывает и неполной: размер без числа
   // доходит до solve и возвращается как NaN. Такой документ до состояния не допускаем.

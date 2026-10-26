@@ -154,12 +154,54 @@ test('круг57: solveNext — тот же документ без пересч
 test('круг57: подтверждение «как предсказано» переносит память — следующая правка по месту', () => {
   const doc = randomDoc(rng(12));
   const geo = solve(doc, KEPT);
-  // сервер прислал тот же документ другими объектами (sameDoc по содержимому)
-  const server = { ...doc, nodes: { ...doc.nodes } };
+  // сервер прислал тот же документ другими объектами (sameDoc по содержимому): реплика
+  // переигрывает свои правки — узлы новые; токены — тот же объект (иначе честно полная)
+  const server = { ...JSON.parse(JSON.stringify(doc)), tokens: doc.tokens };
   assert.equal(solveCarry(geo, doc, server), geo);
   const text = Object.keys(doc.nodes).find((id) => doc.nodes[id].type === 'text');
   const next = applyOps(server, [ops.set(text, 'characters', 'После подтверждения')]).doc;
   const inc = solveNext(geo, next, OPTS);
   assert.equal(hashGeometry(inc), hashGeometry(solve(next, OPTS)));
-  assert.ok(Object.keys(inc.rects).some((id) => inc.rects[id] === geo.rects[id]), 'цепочка жива');
+  // узлы другие — перенести нечего, но память жива: ещё одна правка снова по месту
+  const more = applyOps(next, [ops.set(text, 'characters', 'И ещё раз')]).doc;
+  const inc2 = solveNext(inc, more, OPTS);
+  assert.equal(hashGeometry(inc2), hashGeometry(solve(more, OPTS)));
+  assert.ok(Object.keys(inc2.rects).some((id) => inc2.rects[id] === inc.rects[id]), 'цепочка жива');
+});
+
+test('круг57: геометрия отстала на несколько версий (кадр догона) или документ пересобран с теми же узлами — по месту и верно', () => {
+  let reused = 0;
+  let cases = 0;
+  for (let seed = 1; seed <= 8; seed++) {
+    const r = rng(seed * 101);
+    let doc = randomDoc(r);
+    let geo = solve(doc, KEPT);
+    for (let step = 0; step < 30; step++) {
+      const behind = 1 + Math.floor(r() * 4);
+      let next = doc;
+      for (let k = 0; k < behind; k++) {
+        const res = applyOps(next, randomOp(r, next, `${step}.${k}`));
+        if (!res.error) next = res.doc;
+      }
+      // документ состояния пересобран (новые сведения о документе), узлы те же
+      if (r() < 0.3) next = { ...next, meta: { step } };
+      const inc = solveNext(geo, next, OPTS);
+      assert.equal(hashGeometry(inc), hashGeometry(solve(next, OPTS)), `зерно ${seed}, шаг ${step}, отстала на ${behind}`);
+      cases++;
+      if (Object.keys(inc.rects).some((id) => inc.rects[id] === geo.rects[id])) reused++;
+      doc = next;
+      geo = inc;
+    }
+  }
+  assert.ok(reused > cases / 2, `по месту — ${reused} из ${cases}`);
+});
+
+test('круг57: короткий путь «тот же документ» не срабатывает с другим измерителем', () => {
+  const doc = randomDoc(rng(77));
+  const geo = solve(doc, KEPT);
+  const narrow = { measureText: (t) => String(t || '').length * 5 };
+  const other = solveNext(geo, doc, narrow);
+  assert.notEqual(other, geo);
+  assert.equal(hashGeometry(other), hashGeometry(solve(doc, narrow)));
+  // эпоха шрифтов проверяется тем же условием (memo.epoch); в node ширины не меняются — эпоха не растёт
 });
