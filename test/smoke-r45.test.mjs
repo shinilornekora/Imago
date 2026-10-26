@@ -87,6 +87,8 @@ test('r45: удаление сироты в «Проектах» — подтв�
     const free = await post(svc, '/api/projects', { name: 'Спасение пустое', doc: createDoc(), create_id: 'rescue_smoke_1' });
     const busy = await post(svc, '/api/projects', { name: 'Спасение занятое', doc: createDoc(), create_id: 'rescue_smoke_2' });
     assert.equal(free.status, 201);
+    // одноимённая пустая попытка соавтора: подсказка с чужим ключом
+    assert.equal((await post(svc, '/api/projects', { name: 'Спасение чужое', doc: createDoc(), create_id: 'rescue_smoke_3' })).status, 201);
     // открывается последний проект — у открытого кнопки «Удалить» нет; открытым будет обычный
     assert.equal((await post(svc, '/api/projects', { name: 'Рабочий', doc: createDoc('demo') })).status, 201);
     const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
@@ -95,7 +97,8 @@ test('r45: удаление сироты в «Проектах» — подтв�
     const now = Date.now();
     await page.addInitScript(([hints]) => { try { localStorage.setItem('imago.rescue.orphans.v1', hints); } catch {} }, [JSON.stringify([
       { name: 'Спасение пустое', since: now - 2000, keep: 'p_other', at: now + 60000, certain: true, createId: 'rescue_smoke_1' },
-      { name: 'Спасение занятое', since: now - 2000, keep: 'p_other', at: now + 60000, certain: true, createId: 'rescue_smoke_2' }
+      { name: 'Спасение занятое', since: now - 2000, keep: 'p_other', at: now + 60000, certain: true, createId: 'rescue_smoke_2' },
+      { name: 'Спасение чужое', since: now - 2000, keep: 'p_other', at: now + 60000, certain: false, createId: 'rescue_smoke_x' }
     ])]);
     await page.goto(svc.url + '/');
     await page.waitForSelector('#btn-projects', { state: 'visible', timeout: 30000 });
@@ -111,7 +114,14 @@ test('r45: удаление сироты в «Проектах» — подтв�
     assert.equal(await row('Спасение пустое').count(), 0, 'строки нет');
     assert.equal(await page.evaluate(() => !!document.activeElement && document.activeElement.matches('.pitem .pname')), true, 'фокус — на строке списка, не на «Создать проект»');
     const left = await page.evaluate(() => JSON.parse(localStorage.getItem('imago.rescue.orphans.v1') || '[]').map((x) => x.createId));
-    assert.deepEqual(left, ['rescue_smoke_2'], 'подсказка удалённой забыта');
+    assert.deepEqual(left, ['rescue_smoke_2', 'rescue_smoke_x'], 'подсказка удалённой забыта');
+    // чужая: сервер ответил «не этот create_id» — пометка с этой строки снята и после перерисовки
+    await row('Спасение чужое').getByRole('button', { name: 'Удалить' }).click();
+    await row('Спасение чужое').locator('.pconfirm').getByRole('button', { name: 'Удалить' }).click();
+    await page.locator('.toast', { hasText: 'не первая попытка из этой вкладки' }).waitFor({ timeout: 10000 });
+    await page.waitForTimeout(300);
+    assert.doesNotMatch(await row('Спасение чужое').innerText(), /первая попытка/);
+    assert.equal(await row('Спасение чужое').getByRole('button', { name: 'Удалить' }).count(), 0);
     // «занятое»: в проект легла правка — 409 not_empty, список перечитан, пометки нет
     const snap = await (await fetch(`${svc.url}/api/projects/${busy.body.id}`)).json();
     const root2 = snap.snapshot.doc.root;
@@ -161,6 +171,20 @@ test('r45: «История» соавтора — чужая правка ру�
     await theirs.waitFor({ timeout: 10000 });
     assert.ok(mine, 'у автора есть строка');
     assert.equal((await theirs.innerText()).trim(), mine, 'у соавтора — те же слова, что у автора');
+    /* третий автор (старый клиент, подпись «Свойство») правит позже: у Ани метка «ваши правки сейчас
+       здесь», а строка третьего — по операциям, не «Изменил свойство» (переписанная подпись не авторская) */
+    const { CODE_ENGINE } = await import('../server/document/engine.js');
+    const head = await (await fetch(`${svc.url}/api/projects/${id}`)).json();
+    const r = await post(svc, `/api/projects/${id}/tx`, { tx_id: 'tx_smoke_old', base_seq: head.head_seq, engine: CODE_ENGINE, author: 'Старый клиент', title: 'Свойство',
+      ops: [{ op: 'set', id: head.snapshot.doc.root, path: 'name', value: 'Страница Z' }] });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    await a.waitForTimeout(1500);
+    await a.click('#btn-history');
+    await a.waitForTimeout(300);
+    if (!(await a.locator('#sheet-body .hnow').count())) { await a.click('#btn-history'); await a.waitForTimeout(500); }
+    assert.equal((await a.locator('#sheet-body .hnow').first().innerText()).trim(), 'ваши правки сейчас здесь');
+    const old = (await a.locator('#sheet-body .hitem[data-who="other"] .what').first().innerText()).trim();
+    assert.ok(old && !/Изменил свойство/.test(old), 'подпись старого клиента — по операциям: ' + old);
     assert.deepEqual(errors, []);
   });
 });

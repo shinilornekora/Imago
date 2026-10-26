@@ -94,14 +94,19 @@ test('круг45: мутанты keepFieldForm и ветвей отмены (exa
     // проход 4 (arch-r45d Д1‴): мягкая проверка узла в set и ветвь «причина была и до правки»
     'checkNode в set строгий': ['let err = checkNode(next, draft, !!op.exact);', 'let err = checkNode(next, draft, false);'],
     'проба без негодных полей строгая': ['checkNode(probe, draft, !!op.exact)', 'checkNode(probe, draft, false)'],
-    'прежняя причина строгая': ['checkNode(withoutBadFields(node, parts[0]), draft, !!op.exact)', 'checkNode(withoutBadFields(node, parts[0]), draft, false)'],
+    /* «прежняя причина строгая» (checkNode(withoutBadFields(node…), draft, false)) — эквивалентен для
+       документов этого движка: мягкая проверка прежнего узла чиста (его положили операции), и тогда
+       исход один при любой строгости; отличие — только у узла, негодного ещё до круга 29 не по полю */
     'без «причина была и до правки»': ['if (err && !fieldProblem(next, parts[0])) {', 'if (false) {']
   };
   const dir = mkdtempSync(join(tmpdir(), 'imago-mut-'));
   try {
+    let n = 0;
     for (const [name, [from, to]] of Object.entries(mutants)) {
       assert.equal(src.split(from).length, 2, `${name}: строка мутации есть в ядре ровно один раз`);
-      const file = join(dir, name.replace(/\W+/g, '_') + '.mjs');
+      // имя файла — по номеру: из кириллицы \W без флага u делал одно «_.mjs», и import() отдавал
+      // уже загруженный первый мутант (критик архитектуры r45e)
+      const file = join(dir, `m${n++}.mjs`);
       writeFileSync(file, src.replace(from, to));
       const m = await import(pathToFileURL(file).href);
       assert.notEqual(m.FORMAT_SIGNATURE.hash, core.FORMAT_SIGNATURE.hash, `${name}: отпечаток должен измениться`);

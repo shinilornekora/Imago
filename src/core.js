@@ -5281,6 +5281,19 @@ function formatBehavior() {
         ex += tryOps([{ op: 'set', id, path, value, exact: true }], legacyDoc);
       }
     }
+    /* Проход 5 (arch-r45e): оба условия разом — мастер с целью пропса вне себя (строгая проверка его
+       отвергает) и с полем прежней формы. Ветвь «проба без негодных полей» и «прежняя причина» мягкие
+       только при exact — правка с exact и без. */
+    const rb = applyOps(doc, deepClone(broken));
+    if (!rb.error) {
+      const comboDoc = deepClone(rb.doc);
+      Object.assign(comboDoc.nodes.nm, { clip: 1, opacity: 7 });
+      for (const [path, value] of [['name', 'M4'], ['clip', true], ['opacity', 0.5], ['opacity', 3], ['visible', false],
+        ['component', { name: 'M', props: [{ name: 'title', kind: 'text', target: 'nmt', path: 'characters' }] }]]) {
+        ex += tryOps([{ op: 'set', id: 'nm', path, value }], comboDoc);
+        ex += tryOps([{ op: 'set', id: 'nm', path, value, exact: true }], comboDoc);
+      }
+    } else ex += 'x';
     out.exact = ex;
     out.results = res;
     probeCache = out;
