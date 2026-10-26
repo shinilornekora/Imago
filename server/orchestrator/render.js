@@ -83,7 +83,7 @@ export function createRenderer(opts = {}) {
   const now = opts.now || (() => Date.now());
   /** семейство → Promise<Buffer[]> */
   const fonts = new Map();
-  /** семейство → до какого мига не пробовать снова (сеть закрыта — не ждём срок на каждой команде) */
+  /** «семейство:вес» → до какого мига не пробовать снова (сеть закрыта — не ждём срок на каждой команде) */
   const failed = new Map();
   let warnedAt = -Infinity;
 
@@ -105,18 +105,20 @@ export function createRenderer(opts = {}) {
    * Файлы семейства в нужных начертаниях (только существующих у семейства). Кеш — по начертанию
    * («Manrope:700»): разные наборы весов не скачиваются дважды. Загрузка общая: ждущие команды
    * делят промис; общий срок снимка её не обрывает — она доходит в фоне и кладёт файлы в кеш
-   * (или неудачу семейства — на failTtl).
+   * (или неудачу начертания — на failTtl).
    */
   function family(name, want) {
     const f = catalogFont(name);
     if (!f) return Promise.resolve([]);
-    if ((failed.get(f.family) || 0) > now()) return Promise.resolve([]);
     const ws = [...new Set((want && want.length ? want : [400]).map((w) => nearestWeight(f.family, w)))].sort((a, b) => a - b);
-    return Promise.all(ws.map((w) => face(f, w))).then((lists) => lists.flat());
+    // одно начертание не пришло — семейство неполное: снимок нарисовал бы его чужим шрифтом
+    return Promise.all(ws.map((w) => face(f, w))).then((lists) => (lists.some((l) => !l.length) ? [] : lists.flat()));
   }
 
   function face(f, w) {
     const key = `${f.family}:${w}`;
+    // неудача помнится по начертанию: уже скачанные начертания того же семейства остаются в деле
+    if ((failed.get(key) || 0) > now()) return Promise.resolve([]);
     let p = fonts.get(key);
     if (p) { fonts.delete(key); fonts.set(key, p); return p; }   // свежесть для вытеснения
     p = (async () => {
@@ -134,7 +136,7 @@ export function createRenderer(opts = {}) {
         return out;
       } catch (e) {
         fonts.delete(key);
-        failed.set(f.family, now() + failTtl);
+        failed.set(key, now() + failTtl);
         // одна строка на причину не чаще раза в минуту (как советы администратору, круг 26)
         if (now() - warnedAt > 60000) {
           warnedAt = now();

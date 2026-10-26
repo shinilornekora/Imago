@@ -1377,6 +1377,11 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 }
 .msg-art-verdict { color: var(--muted); }
 @media (pointer: coarse) { .msg-art-swatch { width: 24px; height: 24px; } }
+/* узкий экран: под итогом с образом шаги плана уступают место — их видно в «Истории» */
+@media (max-width: 480px) {
+  .dockmsg-body:has(.msg-art) .msg-steps { display: none; }
+  .msg-art-words { -webkit-line-clamp: 1; }
+}
 
 /* Нативных чекбоксов в приложении больше нет: выбор везде живёт в пилюлях и сегментах
    (круг 11, п.16). Остаётся только приглушение недоступного переключателя. */

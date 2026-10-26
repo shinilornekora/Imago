@@ -889,9 +889,6 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
       radius: scaleValueSchema(),
       text: { type: 'string' },
       style: { type: 'string' },
-      // круг 47: кегль крупного акцента — отдельным числом (объект внутри anyOf на шести уровнях
-      // раздувал бы грамматику llama.cpp); берётся только при арт-направлении, 12…96
-      fontSize: { type: 'number' },
       align: { type: 'string', enum: ['left', 'center', 'right'] },
       src: { type: 'string' },
       // круг 36 (SPEC §11): тень, прозрачность, состояния и движение
@@ -949,7 +946,6 @@ const TREE_HINT = `{
   stroke?: string, color?: string, radius?: "radii.<шаг>" | number,   // скругление — ссылкой на шаг шкалы скруглений
   text?: string,                       // только для type:"text"
   style?: string,                      // имя типографического токена, только для type:"text"
-  fontSize?: number,                   // ТОЛЬКО при АРТ-НАПРАВЛЕНИИ и только 1-2 крупным акцентам: кегль до 96
   align?: "left"|"center"|"right",   // выключка текста
   src?: string,                        // только для type:"image"
   shadow?: "shadow.sm"|"shadow.md"|"shadow.lg"|"none", opacity?: number,   // тень и прозрачность в покое
@@ -1390,6 +1386,25 @@ export const SCHEMAS = {
     },
   },
 };
+
+/**
+ * Круг 47 (SPEC §14.1): дерево при арт-направлении — у каждого уровня ещё поле fontSize (кегль
+ * крупного акцента, число: объект внутри anyOf раздувал бы грамматику llama.cpp). Имя схемы то же.
+ */
+const TREE_DIRECTED = (() => {
+  const add = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (node.properties && node.properties.style) node.properties.fontSize = { type: 'number' };
+    const kids = node.properties && node.properties.children;
+    if (kids && kids.items) add(kids.items);
+  };
+  const schema = JSON.parse(JSON.stringify(SCHEMAS.tree.schema));
+  add(schema);
+  return {
+    ...SCHEMAS.tree, schema,
+    hint: SCHEMAS.tree.hint.replace('  style?: string,', '  fontSize?: number,                   // кегль крупного акцента (1-2 текстам, до 96), рядом со style:"display"\n  style?: string,'),
+  };
+})();
 
 function normalizeSchemaEntry(schema) {
   if (!schema) return null;
@@ -10755,9 +10770,23 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
   const boards = kidsOf(nodeOf(doc, doc.root)).filter((id) => nodeOf(doc, id));
   // круг 47: доски в собственной палитре (фон — #rrggbb) цвета темы не перекрасят — их не перечисляем
   const ownPalette = (id) => { const b = nodeOf(doc, id); return !!b && typeof b.fill === 'string' && HEX_RE.test(b.fill.trim()); };
+  /* Круг 47 (SPEC §14.5): доски, собранные по арт-направлению, держат цвета образа в самих слоях
+   * (#rrggbb, не токенами) — цвета темы документа их не перекрасят. Говорим об этом, а не молчим. */
+  if (touched.has('colors')) {
+    const own = kidsOf(nodeOf(doc, doc.root)).map((id) => nodeOf(doc, id))
+      .filter((b) => b && b.type === 'frame' && b.role !== 'library' && typeof b.fill === 'string' && HEX_RE.test(b.fill.trim()));
+    if (own.length) {
+      const names = own.slice(0, 3).map((b) => `«${cutText(strOf(b.name) || 'Доска', 40)}»`).join(', ');
+      note(own.length === 1
+        ? `Экран ${names} собран в собственной палитре — цвета темы документа его не перекрасят. Чтобы перекрасить его, скажите «перекрась экран ${names.slice(1, -1)} в тёмное»`
+        : `Экраны ${names}${own.length > 3 ? ' и другие' : ''} собраны в собственной палитре — цвета темы документа их не перекрасят. Чтобы перекрасить такой экран, скажите «перекрась экран … в тёмное»`);
+    }
+  }
   if (boards.length > 1) {
     const here = scope ? artboardOf(doc, (scope.ids && scope.ids[0]) || scope.containerId) : null;
-    const others = boards.filter((id) => id !== here && !(touched.has('colors') && touched.size === 1 && ownPalette(id))).map((id) => nameOrId(doc, id));
+    const colorsOnly = touched.has('colors') && touched.size === 1;
+    const skipped = colorsOnly ? boards.filter(ownPalette).length : 0;
+    const others = boards.filter((id) => id !== here && !(colorsOnly && ownPalette(id))).map((id) => nameOrId(doc, id));
     const list = others.slice(0, 3).join(', ') + (others.length > 3 ? ` и ещё ${others.length - 3}` : '');
     const WHAT = { colors: 'цвета', type: 'шрифты и кегли', spacing: 'шкала отступов', radii: 'шкала скруглений', motion: 'скорость анимаций', shadow: 'тени', other: 'оформление' };
     const what = [...touched].map((k) => WHAT[k] || WHAT.other);
@@ -10775,20 +10804,8 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
     /* Порядок слов такой, чтобы фраза была согласована при ЛЮБОМ наборе видов: «цвета»,
      * «шрифты и кегли» и «шкала отступов» стоят в скобках, а не подлежащим. */
     note('Оформление документа общее: поменялось то, что принадлежит документу, а не экрану'
-      + ` (${what.join(', ')}), — значит, поменялись ВСЕ доски${list ? `, в том числе ${list}` : ''}.`
+      + ` (${what.join(', ')}), — значит, ${skipped ? 'поменялись все доски на цветах документа' : 'поменялись ВСЕ доски'}${list ? `, в том числе ${list}` : ''}.`
       + ` ${HOW[lead]}`);
-  }
-  /* Круг 47 (SPEC §14.5): доски, собранные по арт-направлению, держат цвета образа в самих слоях
-   * (#rrggbb, не токенами) — цвета темы документа их не перекрасят. Говорим об этом, а не молчим. */
-  if (touched.has('colors')) {
-    const own = kidsOf(nodeOf(doc, doc.root)).map((id) => nodeOf(doc, id))
-      .filter((b) => b && b.type === 'frame' && b.role !== 'library' && typeof b.fill === 'string' && HEX_RE.test(b.fill.trim()));
-    if (own.length) {
-      const names = own.slice(0, 3).map((b) => `«${cutText(strOf(b.name) || 'Доска', 40)}»`).join(', ');
-      note(own.length === 1
-        ? `Экран ${names} собран в собственной палитре — цвета темы документа его не перекрасят. Чтобы перекрасить его, скажите «перекрась экран ${names.slice(1, -1)} в тёмное»`
-        : `Экраны ${names}${own.length > 3 ? ' и другие' : ''} собраны в собственной палитре — цвета темы документа их не перекрасят. Чтобы перекрасить такой экран, скажите «перекрась экран … в тёмное»`);
-    }
   }
   return ops;
 }
@@ -11789,6 +11806,21 @@ export function directionBrief(dir, { forCritic = false } = {}) {
   ].join('\n');
 }
 
+/** Решение одной строкой для стадии: шрифты первыми (их и не видно, если строку обрезают), образ — по слову. */
+function directionLine(dir) {
+  const head = `${dir.fonts.display} + ${dir.fonts.text}`;
+  const words = dir.concept.split(/\s+/);
+  let concept = '';
+  for (const w of words) { if ((concept + ' ' + w).trim().length > 60) { concept += '…'; break; } concept = (concept + ' ' + w).trim(); }
+  return `${head} · ${concept}`;
+}
+
+/** Решение, которое кладётся на саму доску (§14.1): образ, роли палитры, шрифты — без служебного. */
+export function boardDirection(dir) {
+  if (!dir) return null;
+  return { concept: dir.concept, palette: { ...dir.palette }, fonts: { ...dir.fonts } };
+}
+
 /** Решение для оболочки и трасс — без служебных notes. */
 export function slimDirection(dir) {
   if (!dir) return null;
@@ -12616,7 +12648,7 @@ async function runCommandCore(options = {}) {
       personaHint: persona ? `${persona.label}: ${persona.description}` : '',
     });
     const ART_TOKENS = 8192;
-    const schemaEntry = intent === 'create' ? SCHEMAS.tree : intent === 'theme' ? SCHEMAS.theme
+    let schemaEntry = intent === 'create' ? SCHEMAS.tree : intent === 'theme' ? SCHEMAS.theme
       : intent === 'illustration' ? SCHEMAS.illustration : SCHEMAS.patch;
     let system = intent === 'create' ? PROMPTS.tree(ctx) : intent === 'theme' ? PROMPTS.theme(ctx)
       : intent === 'illustration'
@@ -12645,7 +12677,7 @@ async function runCommandCore(options = {}) {
         direction = normalizeDirection(raw, { doc });
         if (direction) {
           for (const n of direction.notes) serviceNote(`Арт-направление: ${n}`);
-          emit('direct', `${cutText(direction.concept, 90)} · ${direction.fonts.display} + ${direction.fonts.text}`, { direction: slimDirection(direction) });
+          emit('direct', directionLine(direction), { direction: slimDirection(direction) });
         } else {
           serviceNote('Арт-директор не дал ни образа, ни палитры, ни шрифтов — собираю без арт-направления');
         }
@@ -12658,13 +12690,14 @@ async function runCommandCore(options = {}) {
     const dressed = (tree) => (direction && intent === 'create'
       ? applyDirection(tree, direction, doc, { asArtboard: !!placement.asArtboard }).tree : tree);
 
-    if (direction) system = PROMPTS.tree(ctx);
+    // круг 47: при арт-направлении — схема дерева с полем кегля акцента (без образа модель его не видит)
+    if (direction) { system = PROMPTS.tree(ctx); schemaEntry = TREE_DIRECTED; }
     let messages = [
       { role: 'system', content: system },
       { role: 'user', content: userTurn },
     ];
 
-    emit('generate', intent === 'create' ? (direction ? `${cutText(direction.concept, 70)} · ${direction.fonts.display} + ${direction.fonts.text}` : 'Строю дерево макета') : intent === 'theme' ? 'Подбираю токены'
+    emit('generate', intent === 'create' ? (direction ? directionLine(direction) : 'Строю дерево макета') : intent === 'theme' ? 'Подбираю токены'
       : intent === 'illustration' ? 'Рисую иллюстрацию' : 'Собираю правки');
     let data = await ask(schemaEntry, messages, { stage: 'generate', ...(intent === 'illustration' ? { maxTokens: ART_TOKENS } : {}) });
 
@@ -12869,6 +12902,25 @@ async function runCommandCore(options = {}) {
           if (e instanceof BrainError && e.kind === 'cancelled') throw e;
           serviceNote(`Доработка по критику не удалась: ${factOnly(e && e.message ? e.message : e)}`);
         }
+      }
+    }
+
+    /* — 5b. Круг 47 (SPEC §14.1): решение арт-директора — полем самой доски (`direction`: образ,
+     * роли палитры → #rrggbb, шрифты). Это простые данные, формат их принимает (ENGINE_VERSION не
+     * меняется); роль цвета живёт вместе с правкой — в журнале, у соавторов, в соло-хранилище, и
+     * тема на доску (круг 48) возьмёт роли отсюда, а не угадает по hex. */
+    if (direction && !attempt.fatal && attempt.preview && attempt.preview.doc && (newBoard || attempt.movedToBoard)) {
+      const after = attempt.preview.doc;
+      const boardId = builtBoard(attempt.ops, after);
+      if (boardId && after.nodes[boardId] && after.nodes[boardId].parent === after.root) {
+        const op = mkOp(engine, 'set', { id: boardId, path: 'direction', value: boardDirection(direction) });
+        try {
+          const r = engine.applyOps(after, [op]);
+          if (r && !r.error && r.doc) {
+            attempt.ops = attempt.ops.concat([op]);
+            attempt.preview = { ...attempt.preview, doc: r.doc };
+          }
+        } catch { /* без пометки на доске правка та же */ }
       }
     }
 

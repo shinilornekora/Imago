@@ -26,7 +26,7 @@ function fake(script, extra = {}) {
     async ready() { return true; },
     async complete(messages, schema, opts = {}) {
       const name = schema && schema.name;
-      calls.push({ schema: name, messages, opts });
+      calls.push({ schema: name, messages, opts, entry: schema });
       let v = script[name];
       if (Array.isArray(v)) v = v.shift();
       if (typeof v === 'function') v = v(messages, calls);
@@ -261,7 +261,11 @@ test('круг 47: «собери экран» — образ до раскла�
   // критик видел снимок именно новой доски
   assert.equal(shots.length, 1);
   assert.equal(shots[0].artboardId, board.id);
-  assert.equal(shots[0].doc, after);
+  assert.equal(shots[0].doc.nodes[board.id].name, 'Кофейня', 'снимок — черновик этой правки');
+  // решение — полем самой доски: роли палитры живут вместе с правкой (§14.1)
+  assert.deepEqual(after.nodes[board.id].direction, { concept: DIRECTION.concept, palette: res.direction.palette, fonts: res.direction.fonts });
+  assert.ok(res.ops.some((o) => o.op === 'set' && o.path === 'direction' && o.id === board.id));
+  assert.equal(core.checkImportDoc(after), null, 'документ с полем direction проходит строгую проверку');
   const crit = provider.calls[3].messages[1].content;
   assert.ok(Array.isArray(crit), 'реплика критика — с картинкой');
   assert.deepEqual(crit[1], { type: 'image', mime: 'image/png', data: PNG.data });
@@ -574,8 +578,12 @@ test('круг 47: при арт-направлении правила 4 и 5 п
   const p2 = fake({ plan: PLAN, tree: TREE });
   await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider: p2, engine: core, direction: false, critic: false });
   assert.match(p2.calls.find((c) => c.schema === 'tree').messages[0].content, /Предпочитай токены/);
-  // схема дерева принимает style объектом — грамматика локальной модели его не запрещает
-  assert.ok(JSON.stringify(SCHEMAS.tree.schema).includes('"fontSize"'));
+  // при образе схема дерева — с полем кегля акцента; без образа модель его не видит вовсе
+  const withDir = provider.calls.find((c) => c.schema === 'tree').entry;
+  assert.ok(JSON.stringify(withDir.schema).includes('"fontSize"'));
+  assert.match(withDir.hint, /fontSize\?: number/);
+  assert.ok(!JSON.stringify(p2.calls.find((c) => c.schema === 'tree').entry.schema).includes('"fontSize"'));
+  assert.doesNotMatch(SCHEMAS.tree.hint, /fontSize\?/);
 });
 
 test('круг 47: кегль акцента — отдельным полем fontSize (12…96) только при образе; мусорные числа стиля не роняют команду', async () => {
@@ -607,4 +615,22 @@ test('круг 47: кегль акцента — отдельным полем f
   const r2 = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider: p2, engine: core, direction: false, critic: false });
   assert.equal(r2.error, undefined);
   assert.equal(core.resolveTextStyle(r2.preview.doc, byName(r2.preview.doc, 'Заголовок')).fontSize, 34);
+});
+
+test('круг 47: подпись стадии — шрифты первыми, образ режется по слову; тема при своей палитре — без «ВСЕ доски»', async () => {
+  const stages = [];
+  const provider = fake({ plan: PLAN, direction: { ...DIRECTION, concept: 'Очень длинный образ ночной беговой дорожки со светоотражателями и табло секундомера на мокром асфальте' }, tree: TREE });
+  await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, onStage: (s) => stages.push(s), critic: false });
+  const gen = stages.find((s) => s.stage === 'generate');
+  assert.match(gen.detail, /^Prata \+ Golos Text · /);
+  assert.match(gen.detail, /[а-яё]…$/, 'обрезано по слову и с многоточием');
+  const doc = empty();
+  const boards = Object.values(doc.nodes).filter((n) => n.parent === doc.root && n.type === 'frame' && n.role !== 'library');
+  const d2 = core.applyOps(doc, [core.ops.set(boards[0].id, 'fill', '#15171c')]).doc;
+  const p2 = fake({ plan: { intent: 'theme', title: 'Тёмная', summary: 'Тёмная', steps: ['Цвета'] }, theme: { summary: 'Тёмная', colors: [{ name: 'text', value: '#f2f4f8' }] } });
+  const res = await runCommand({ doc: d2, selection: [], utterance: 'сделай тёмную тему', provider: p2, engine: core });
+  const all = res.warnings.join(' | ');
+  assert.doesNotMatch(all, /ВСЕ доски/);
+  assert.match(all, /поменялись все доски на цветах документа/);
+  assert.match(all, /его не перекрасят/);
 });
