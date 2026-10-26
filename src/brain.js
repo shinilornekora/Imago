@@ -11907,6 +11907,8 @@ export const CRITIC_PASS = 7;
 export const SIGNALS_REVISE = 2;
 /** Сколько ждать снимок доски для критика, мс: дольше — критик судит по выжимке. */
 export const CRITIC_RENDER_MS = 20000;
+/** Круг 52 (SPEC §19): срок второго взгляда критика — снимок и вызов модели вместе. */
+export const RECHECK_MS = 45000;
 /** Сторона снимка для критика, px: больше — дорого модели, меньше — не разглядеть. */
 export const CRITIC_SHOT_SIDE = 1024;
 
@@ -12646,7 +12648,7 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
   }
   /* Без снимка модель-критика не зовём: по описанию слоёв она судит о виде почти наугад, а вызов
    * стоит как вся раскладка. Решают приметы шаблона: от двух — доработка по ним. */
-  if (!image && again) return null;
+  if (!image && again) { serviceNote('Снимка доработки нет — критик её не перепроверил'); return null; }
   if (!image) {
     const crit = {
       score: null, generic: signals.length >= SIGNALS_REVISE, verdict: signals.length >= SIGNALS_REVISE ? 'revise' : 'ok',
@@ -12676,6 +12678,7 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
     { role: 'user', content: imageTurn('Оцени этот макет по правилам выше.', image) },
   ], { stage: 'critic', temperature: 0 }).catch((e) => {
     if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+    if (again) { serviceNote(`Критик не посмотрел на доработку: ${factOnly(e && e.message ? e.message : e)}`); return null; }
     // зрение у модели заявлено настройкой — отказ снимает снимок только у этой команды
     serviceNote(`Модель не приняла снимок (${factOnly(e && e.message ? e.message : e)}) — самопроверка по приметам`);
     return null;
@@ -12699,15 +12702,21 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
 }
 
 /**
- * Круг 52 (SPEC §19): берём ли доработку по второму взгляду критика. Лучше — выше оценка или
- * критик ею доволен; второго взгляда нет (снимок, сеть, ответ без оценки) — как в круге 47:
- * доработка, собравшаяся не хуже, остаётся, но в итоге честно «не перепроверено».
- * @returns {'better'|'worse'|'unchecked'}
+ * Круг 52 (SPEC §19): берём ли доработку по второму взгляду критика. Две оценки одной модели —
+ * независимые вызовы с шумом около балла, поэтому разница меньше RECHECK_STEP — «то же»:
+ * доработка по названным замечаниям остаётся. Хуже — оценка упала на шаг и больше и критик не
+ * доволен; лучше — выросла на шаг или критик доволен. Второго взгляда нет (снимок, сеть, ответ
+ * без оценки) — как в круге 47: доработка остаётся, в итоге честно «не перепроверено».
+ * @returns {'better'|'same'|'worse'|'unchecked'}
  */
+export const RECHECK_STEP = 1;
 export function recheckVerdict(first, second) {
   if (!second || typeof second.score !== 'number') return 'unchecked';
   if (!first || typeof first.score !== 'number') return second.verdict === 'ok' ? 'better' : 'unchecked';
-  return second.score > first.score || (second.verdict === 'ok' && second.score >= first.score) ? 'better' : 'worse';
+  const d = second.score - first.score;
+  if (second.verdict === 'ok' && d > -RECHECK_STEP) return 'better';
+  if (d >= RECHECK_STEP) return 'better';
+  return d <= -RECHECK_STEP ? 'worse' : 'same';
 }
 
 export async function runCommand(options = {}) {
@@ -13389,13 +13398,21 @@ async function runCommandCore(options = {}) {
               // круг 52: доработку, сделанную по снимку, критик смотрит ещё раз — один раз, без второй доработки
               let second = null;
               if (critique.seen === 'image') {
+                // опоздавший второй взгляд (после срока) молчит: команда уже пошла дальше
+                let live = true;
                 try {
-                  second = await critiqueBoard({
-                    engine, attempt: next, direction, utterance, plan, render, signal, provider, ask, emit, serviceNote, again: true,
+                  // второй взгляд — со своим сроком: команда не ждёт ещё один полный таймаут модели
+                  const look = critiqueBoard({
+                    engine, attempt: next, direction, utterance, plan, render, signal, provider, ask, again: true,
+                    emit: (...a) => { if (live) emit(...a); }, serviceNote: (n) => { if (live) serviceNote(n); },
                   });
+                  look.catch(() => {});   // брошенный по сроку или отмене взгляд не роняет процесс отказом без обработчика
+                  second = await raceAbort(look, signal, RECHECK_MS, `Критик не успел посмотреть доработку за ${fmtDuration(RECHECK_MS)}`);
                 } catch (e) {
                   if (e instanceof BrainError && e.kind === 'cancelled') throw e;
                   serviceNote(`Критик не посмотрел на доработку: ${factOnly(e && e.message ? e.message : e)}`);
+                } finally {
+                  live = false;
                 }
               }
               const recheck = critique.seen === 'image' ? recheckVerdict(critique, second) : 'signals';
@@ -13403,7 +13420,10 @@ async function runCommandCore(options = {}) {
               if (recheck === 'worse') {
                 critique.recheck = 'worse';
                 serviceNote(`Доработка не стала лучше (${critique.score} → ${second.score} из 10) — оставил первую сборку`);
+                emit('critic', `Доработка не лучше: ${critique.score} → ${second.score}/10 · оставляю первую сборку`);
               } else {
+                if (recheck === 'unchecked') emit('critic', 'Доработку не перепроверил · оставляю её');
+                else if (recheck !== 'signals') emit('critic', `${critique.score} → ${second.score}/10 · оставляю доработку`);
                 if (recheck !== 'signals') critique.recheck = recheck;
                 data = fixed;
                 attempt = next;

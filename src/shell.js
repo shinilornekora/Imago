@@ -4204,9 +4204,10 @@ export function artSummary(direction, critique, opts = {}) {
     const a = c.after && typeof c.after === 'object' ? c.after : null;
     const later = a && Number.isFinite(Number(a.score)) && (typeof a.score === 'number' || (typeof a.score === 'string' && a.score.trim()))
       ? String(Math.round(Math.max(0, Math.min(10, Number(a.score))) * 10) / 10).replace('.', ',') : null;
-    verdict = c.revised && later !== null ? `Первая сборка — ${s10} из 10 → после доработки ${later} из 10`
+    verdict = c.revised && later !== null && later !== s10 ? `Первая сборка — ${s10} из 10 → после доработки ${later} из 10`
+      : c.revised && later !== null ? `Первая сборка — ${s10} из 10 → доработал${a.verdict === 'ok' ? ', критик доволен' : ', оценка та же'}${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}`
       : c.revised ? `Первая сборка — ${s10} из 10 → доработал${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}${c.recheck === 'unchecked' ? ' (доработку не перепроверил)' : ''}`
-        : c.recheck === 'worse' && later !== null ? `Взгляд со стороны: ${s10} из 10, доработка вышла не лучше (${later}) — оставил первую сборку`
+        : c.recheck === 'worse' && later !== null ? `Взгляд со стороны: ${s10} из 10, доработка вышла не лучше (${later} из 10) — оставил первую сборку`
           : c.verdict === 'revise' ? `Взгляд со стороны: ${s10} из 10, доработка не легла — оставил собранное`
             : `Взгляд со стороны: ${s10} из 10`;
   }

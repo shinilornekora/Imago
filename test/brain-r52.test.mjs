@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../src/core.js';
-import { runCommand, recheckVerdict, BrainError } from '../src/brain.js';
+import { runCommand, recheckVerdict, BrainError, RECHECK_STEP } from '../src/brain.js';
 import { artSummary } from '../src/shell.js';
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
@@ -67,25 +67,32 @@ function empty() {
 const byName = (doc, name) => Object.values(doc.nodes).find((n) => n && n.name === name);
 const run = (provider, extra = {}) => runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render: async () => PNG, ...extra });
 
-test('круг52: recheckVerdict — лучше, хуже, не перепроверено', () => {
-  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 6 }), 'better');
+test('круг52: recheckVerdict — лучше, то же (в пределах шума), хуже, не перепроверено', () => {
+  assert.equal(RECHECK_STEP, 1);
+  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 5 }), 'better');
   assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 4, verdict: 'ok' }), 'better', 'та же оценка, но критик доволен');
-  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 4 }), 'worse', 'та же оценка и снова «доработать» — не лучше');
-  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 3, verdict: 'ok' }), 'worse');
+  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 4 }), 'same', 'та же оценка — шум, доработка остаётся');
+  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 4.5 }), 'same');
+  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 3.5 }), 'same', 'падение меньше шага — не повод откатывать');
+  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 3.5, verdict: 'ok' }), 'better');
+  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 3 }), 'worse');
+  assert.equal(recheckVerdict(CRIT_BAD, { ...CRIT_BAD, score: 3, verdict: 'ok' }), 'worse', 'на шаг ниже — хуже, даже если доволен');
   assert.equal(recheckVerdict(CRIT_BAD, null), 'unchecked');
   assert.equal(recheckVerdict(CRIT_BAD, { score: null }), 'unchecked');
 });
 
 test('круг52: доработка вышла хуже — остаётся первая сборка, итог называет обе оценки', async () => {
   const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, TREE_BETTER], critique: [CRIT_BAD, { ...CRIT_BAD, score: 3 }] }, { vision: true });
-  const res = await run(provider);
+  const stages = [];
+  const res = await run(provider, { onStage: (x) => stages.push(x) });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.equal(byName(res.preview.doc, 'Штамп'), undefined, 'первая сборка, без доработки');
   assert.notEqual(res.critique.revised, true);
   assert.equal(res.critique.recheck, 'worse');
   assert.equal(res.critique.after.score, 3);
   assert.ok(res.serviceNotes.some((n) => /не стала лучше \(4 → 3 из 10\)/.test(n)));
-  assert.equal(artSummary(res.direction, res.critique).verdict, 'Взгляд со стороны: 4 из 10, доработка вышла не лучше (3) — оставил первую сборку');
+  assert.equal(artSummary(res.direction, res.critique).verdict, 'Взгляд со стороны: 4 из 10, доработка вышла не лучше (3 из 10) — оставил первую сборку');
+  assert.ok(stages.some((x) => x.stage === 'critic' && /оставляю первую сборку/.test(x.detail || '')), 'ход команды говорит, чем кончилось');
   // второй взгляд — со снимком доработки, тем же промптом
   const second = provider.calls.filter((c) => c.schema === 'critique')[1];
   assert.ok(Array.isArray(second.messages[1].content));
@@ -94,15 +101,21 @@ test('круг52: доработка вышла хуже — остаётся п
 
 test('круг52: второго взгляда нет (сеть, снимок, без оценки) — доработка остаётся, «не перепроверил»', async () => {
   const cases = [
-    { critique: [CRIT_BAD, new BrainError('network', 'Нет связи')] },
-    { critique: [CRIT_BAD, { score: 'нет' }] },
-    { critique: [CRIT_BAD], shots: [PNG, null] },
+    { critique: [CRIT_BAD, new BrainError('network', 'Нет связи')], note: /^Критик не посмотрел на доработку: Нет связи/ },
+    { critique: [CRIT_BAD, { score: 'нет' }], note: /^Критик не оценил доработку$/ },
+    { critique: [CRIT_BAD], shots: [PNG, null], note: /^Снимка доработки нет/ },
+    { critique: [CRIT_BAD], shots: [PNG, new Error('canvas')], note: /^Снимок доски для самопроверки не получился: canvas/ },
   ];
   for (const c of cases) {
     const shots = c.shots ? c.shots.slice() : null;
     const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, TREE_BETTER], critique: c.critique }, { vision: true });
-    const res = await run(provider, shots ? { render: async () => shots.shift() } : {});
+    const stages = [];
+    const render = shots ? async () => { const v = shots.shift(); if (v instanceof Error) throw v; return v; } : undefined;
+    const res = await run(provider, { onStage: (x) => stages.push(x), ...(render ? { render } : {}) });
     assert.equal(res.error, undefined, JSON.stringify(res.error));
+    assert.ok(res.serviceNotes.some((n) => c.note.test(n)), res.serviceNotes.join(' | '));
+    assert.ok(!res.serviceNotes.some((n) => /самопроверка по приметам/.test(n)), 'приметами второй взгляд не подменяется');
+    assert.ok(stages.some((x) => x.stage === 'critic' && /не перепроверил/.test(x.detail || '')));
     assert.ok(byName(res.preview.doc, 'Штамп'), 'доработка на макете');
     assert.equal(res.critique.revised, true);
     assert.equal(res.critique.recheck, 'unchecked');
@@ -128,4 +141,26 @@ test('круг52: доработка по приметам (без зрения)
 test('круг52: старый сервер (без after/recheck) — итог как в круге 47', () => {
   assert.equal(artSummary(null, { ...CRIT_BAD, seen: 'image', revised: true }).verdict, 'Первая сборка — 4 из 10 → доработал: шапка — просто текст по левому краю, без образа');
   assert.equal(artSummary(null, { ...CRIT_BAD, seen: 'image', recheck: 'worse', after: { score: 'x' } }).verdict, 'Взгляд со стороны: 4 из 10, доработка не легла — оставил собранное');
+});
+
+test('круг52: та же оценка — доработка остаётся; критик доволен — так и сказано', async () => {
+  for (const [second, want] of [[{ ...CRIT_BAD }, /^Первая сборка — 4 из 10 → доработал, оценка та же: шапка/],
+    [{ ...CRIT_OK, score: 4 }, /^Первая сборка — 4 из 10 → доработал, критик доволен: шапка/]]) {
+    const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, TREE_BETTER], critique: [CRIT_BAD, second] }, { vision: true });
+    const res = await run(provider);
+    assert.ok(byName(res.preview.doc, 'Штамп'));
+    assert.equal(res.critique.revised, true);
+    assert.match(artSummary(res.direction, res.critique).verdict, want);
+  }
+});
+
+test('круг52: отмена во время второго взгляда — команда отменена, без лишних вызовов', async () => {
+  const ctrl = new AbortController();
+  let shots = 0;
+  const render = async () => { shots++; if (shots === 2) { ctrl.abort(); await new Promise((r) => setTimeout(r, 5)); } return PNG; };
+  const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, TREE_BETTER], critique: [CRIT_BAD, CRIT_OK] }, { vision: true });
+  const res = await run(provider, { render, signal: ctrl.signal }).catch((e) => ({ thrown: e }));
+  const kind = res.thrown ? res.thrown.kind : res.error && res.error.kind;
+  assert.equal(kind, 'cancelled', JSON.stringify(res.error || res.thrown));
+  assert.equal(provider.calls.filter((c) => c.schema === 'critique').length, 1, 'второй вызов критика не ушёл');
 });
