@@ -1385,6 +1385,11 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
   /* образ — до двоеточия: «Ночная беговая дорожка», а не «Ночная беговая дорожка:…» */
   .msg-art-words:has(.msg-art-short) .msg-art-full { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   .msg-art-short { display: inline; }
+  .msg-art-words:has(.msg-art-short) { cursor: pointer; }
+  .msg-art-words:has(.msg-art-short) .msg-art-short::after { content: ' ▸'; color: var(--muted); }
+  .msg-art-words[data-open="on"] { -webkit-line-clamp: 4; }
+  .msg-art-words[data-open="on"] .msg-art-full { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
+  .msg-art-words[data-open="on"] .msg-art-short { display: none; }
 }
 
 /* Нативных чекбоксов в приложении больше нет: выбор везде живёт в пилюлях и сегментах

@@ -10584,6 +10584,18 @@ function showMsg(kind, text, opts = {}) {
         short.textContent = human(opts.art.conceptShort);
         short.setAttribute('aria-hidden', 'true');
         words.appendChild(short);
+        // узкий экран: нажатие раскрывает образ целиком (материалы), повторное — сворачивает
+        words.tabIndex = 0;
+        words.setAttribute('role', 'button');
+        words.setAttribute('aria-expanded', 'false');
+        words.setAttribute('aria-label', `Образ: ${human(opts.art.concept)}`);
+        const toggle = () => {
+          const open = words.dataset.open !== 'on';
+          words.dataset.open = open ? 'on' : '';
+          words.setAttribute('aria-expanded', open ? 'true' : 'false');
+        };
+        words.addEventListener('click', toggle);
+        words.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
       }
       box.appendChild(words);
     }
