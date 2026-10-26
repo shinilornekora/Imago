@@ -9,7 +9,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { uid, createDoc } from '../../src/core.js';
 import { CODE_ENGINE } from '../../server/document/engine.js';
-import { backends, startFor, api } from './helpers.mjs';
+import { backends, startFor, api, connect, wsUrl } from './helpers.mjs';
 
 const tx = (base_seq, list) => ({ tx_id: uid('tx'), base_seq, ops: list, engine: CODE_ENGINE });
 const cidOf = () => 'rescue_' + uid('c').replace(/[^A-Za-z0-9_-]/g, '');
@@ -49,10 +49,19 @@ describe('круг 45: сирота спасения — created_at в спис�
         const other = await del(h, empty, { create_id: cidOf() });
         assert.equal(other.status, 409, other.text);
         assert.equal(other.body.detail.cause, 'create_id');
+        assert.equal(other.body.retryable, false);
         assert.equal((await h.get(`/api/projects/${empty}`)).status, 200, 'проект на месте');
         // свой — 204, проекта больше нет ни в чтении, ни в списке
+        // голова поднята (чтение) и открыт сокет проекта — после удаления голова снята, сокет закрыт 4404 сразу
+        assert.equal((await h.get(`/api/projects/${empty}`)).status, 200);
+        await svc.dslts.headOf(empty);
+        const ws = connect(wsUrl(svc, empty, { since: 0, client: 'A' }));
+        await ws.opened;
         const ok = await del(h, empty, { create_id: cid });
         assert.equal(ok.status, 204, ok.text);
+        assert.equal(svc.dslts.isLoaded(empty), false, 'голова снята');
+        const closed = await Promise.race([ws.closed, new Promise((r) => setTimeout(() => r({ code: 'не закрыт за 2 с' }), 2000))]);
+        assert.equal(closed.code, 4404, 'сокет закрыт сразу, без записи');
         assert.equal((await h.get(`/api/projects/${empty}`)).status, 404);
         assert.ok(!(await h.get('/api/projects')).body.projects.some((p) => p.id === empty));
         assert.equal((await del(h, empty, { create_id: cid })).status, 404, 'второй раз — нет такого');
@@ -76,7 +85,10 @@ describe('круг 45: сирота спасения — created_at в спис�
         assert.equal((await del(h, plain, { create_id: cidOf() })).status, 409);
         const cid3 = cidOf();
         const lib = (await h.post('/api/projects', { name: 'библиотека', kind: 'library', create_id: cid3 })).body.id;
-        assert.equal((await del(h, lib, { create_id: cid3 })).status, 409);
+        const libDel = await del(h, lib, { create_id: cid3 });
+        assert.equal(libDel.status, 409);
+        assert.equal(libDel.body.detail.cause, 'create_id', 'библиотека — не сирота, а не «есть правки»');
+        assert.equal(libDel.body.retryable, false);
         assert.equal((await h.get(`/api/projects/${lib}`)).status, 200);
         // не-uuid — 404, а не ошибка базы
         assert.equal((await del(h, 'нет-такого', { create_id: cid3 })).status, 404);
@@ -102,7 +114,7 @@ describe('круг 45: сирота спасения — created_at в спис�
           const after = await h.get(`/api/projects/${made.id}`);
           if (d.status === 204) {
             assert.equal(after.status, 404);
-            assert.notEqual(w.status, 201, 'запись не могла лечь в удалённый проект');
+            assert.equal(w.status, 404, 'запись в удалённый проект — 404 (не 201 и не 503 «нет снимка»): ' + w.text);
           } else {
             assert.equal(d.status, 409, d.text);
             assert.equal(w.status, 201, w.text);

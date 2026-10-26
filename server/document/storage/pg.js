@@ -1500,9 +1500,10 @@ export function createPgStorage(opts = {}) {
         `DELETE FROM projects p WHERE p.id = $1 AND p.create_id = $2 AND p.kind = 'design' AND p.head_seq = 0
             AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.project_id = p.id) RETURNING id`, [id, createId]);
       if (res.rowCount) return { status: 'deleted' };
-      const row = (await pool.query('SELECT create_id FROM projects WHERE id = $1', [id])).rows[0];
+      const row = (await pool.query('SELECT create_id, kind FROM projects WHERE id = $1', [id])).rows[0];
       if (!row) return { status: 'not_found' };
-      return { status: row.create_id === createId ? 'not_empty' : 'create_id' };
+      // библиотека — не сирота спасения: «не тот проект», а не «есть правки»
+      return { status: row.create_id === createId && row.kind === 'design' ? 'not_empty' : 'create_id' };
     },
 
     async getProject(id) {

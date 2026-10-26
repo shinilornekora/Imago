@@ -1065,6 +1065,8 @@ const MOTION_REF_RE = /^motion\.(fast|base|slow)$/;
 const SHADOW_REF_RE = /^shadow\.(sm|md|lg)$/;
 /** Длина описания тени: длиннее — не тень, а мусор. */
 const SHADOW_DESC_MAX = 120;
+/** Круг 45 (code-r45 Д3): пределы тени — таблицей, чтобы граница попадала в корпус проб отпечатка. */
+const SHADOW_LIMITS = Object.freeze({ maxOffset: 200, maxBlur: 200, maxDesc: SHADOW_DESC_MAX });
 const SHADOW_LEN_RE = /^-?(\d+(\.\d+)?|\.\d+)(px)?$/;
 const SHADOW_COLOR_RE = /^(#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*(0|1|0?\.\d+|1\.0+)\s*)?\))$/;
 
@@ -1084,7 +1086,7 @@ function parseShadow(v) {
   const lens = [m[1], m[2], m[3]];
   if (!lens.every((x) => SHADOW_LEN_RE.test(x))) return null;
   const [dx, dy, blur] = lens.map((x) => parseFloat(x));
-  if (Math.abs(dx) > 200 || Math.abs(dy) > 200 || blur < 0 || blur > 200) return null;
+  if (Math.abs(dx) > SHADOW_LIMITS.maxOffset || Math.abs(dy) > SHADOW_LIMITS.maxOffset || blur < 0 || blur > SHADOW_LIMITS.maxBlur) return null;
   const color = m[4].trim();
   if (!SHADOW_COLOR_RE.test(color)) return null;
   return { dx, dy, blur, color };
@@ -1188,7 +1190,8 @@ const VECTOR_LIMITS = Object.freeze({
   maxStrokeWidth: 64,       // толщина обводки контура, ед. viewBox
   maxStops: 16,             // стопов градиента
   heavyCommands: 5000,      // больше команд на узел — path-heavy (info)
-  maxCoord: 1e6             // |число| в пути
+  maxCoord: 1e6,            // |число| в пути
+  maxPathName: 200          // символов в имени контура (круг 45: таблицей — для корпуса проб)
 });
 const GRADIENT_KINDS = Object.freeze(['linear', 'radial']);
 const GRADIENT_KIND_SET = new Set(GRADIENT_KINDS);
@@ -1421,7 +1424,7 @@ function vpathProblem(p, what) {
   if (typeof p.d !== 'string') return `${what}.d: нужен путь SVG строкой`;
   const pc = pathCheck(p.d, p);
   if (pc.err) return `${what}.d: ${pc.err} (символ ${pc.at})`;
-  if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 200)) return `${what}.name: строка до 200 символов`;
+  if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > VECTOR_LIMITS.maxPathName)) return `${what}.name: строка до ${VECTOR_LIMITS.maxPathName} символов`;
   for (const k of ['fill', 'stroke']) {
     if (p[k] === undefined) continue;
     const err = paintProblem(p[k], `${what}.${k}`);
@@ -4850,7 +4853,7 @@ function formatSignature() {
     tokens: { groups: sortedList(Object.keys(TOKEN_RULES)), scales: sortedList(Object.keys(SCALE_NAMES)), motionSteps: MOTION_STEPS.slice(), shadowSteps: SHADOW_STEPS.slice() },
     ops: sortedList(OP_NAMES),
     paths: { commands: { ...PATH_ARGS }, number: PATH_NUM_RE.source },
-    limits: { maxSize: MAX_SIZE, maxDepth: MAX_DEPTH, plainDepth: PLAIN_DEPTH, rotate: ROTATE_LIMIT, instanceDepth: MAX_INSTANCE_DEPTH, vector, state: STATE_LIMITS }
+    limits: { maxSize: MAX_SIZE, maxDepth: MAX_DEPTH, plainDepth: PLAIN_DEPTH, rotate: ROTATE_LIMIT, instanceDepth: MAX_INSTANCE_DEPTH, vector, state: STATE_LIMITS, shadow: SHADOW_LIMITS }
   };
 }
 
@@ -4881,7 +4884,7 @@ function probeNumbers() {
     else if (Array.isArray(v)) v.forEach(walk);
     else if (isObj(v)) Object.keys(v).sort().forEach((k) => walk(v[k]));
   };
-  walk([MAX_SIZE, MAX_DEPTH, PLAIN_DEPTH, ROTATE_LIMIT, MAX_INSTANCE_DEPTH, STATE_LIMITS, TEXT_STYLE_FIELDS, STROKE_FIELDS]);
+  walk([MAX_SIZE, MAX_DEPTH, PLAIN_DEPTH, ROTATE_LIMIT, MAX_INSTANCE_DEPTH, STATE_LIMITS, TEXT_STYLE_FIELDS, STROKE_FIELDS, SHADOW_LIMITS]);
   const vec = { ...VECTOR_LIMITS };
   delete vec.heavyCommands;
   walk(vec);
@@ -4899,6 +4902,14 @@ function probeStrings() {
   for (const it of [NODE_TYPES, LAYOUT_MODES, ALIGNS, JUSTIFIES, SIZE_MODES, TEXT_ALIGNS, PROP_KINDS, FILL_RULES, LINE_CAPS, LINE_JOINS,
     GRADIENT_KINDS, Object.keys(EASINGS), MOTION_FOLLOW, STATE_NAMES, STATE_KEYS, MOTION_STEPS, SHADOW_STEPS, Object.keys(TOKEN_RULES)]) {
     for (const v of it) set.add(String(v));
+  }
+  /* Круг 45 (code-r45 Д3): строки на краях пределов длины и тени на краях пределов смещения и
+     размытия — из таблиц (литерал внутри проверки граница не получает; поэтому он в таблице). */
+  for (const n of [VECTOR_LIMITS.maxPathName, SHADOW_LIMITS.maxDesc]) for (const d of [-1, 0, 1]) set.add('x'.repeat(n + d));
+  const { maxOffset: o, maxBlur: b } = SHADOW_LIMITS;
+  for (const [dx, dy, bl] of [[o, 0, 0], [o + 1, 0, 0], [-o, 0, 0], [-o - 1, 0, 0], [0, o, 0], [0, o + 1, 0], [0, -o - 1, 0], [0, 0, b], [0, 0, b + 1], [0, 0, -1]]) {
+    set.add(`${dx}px ${dy}px ${bl}px #000000`);
+    set.add(`${dx} ${dy} ${bl} rgba(0,0,0,0.5)`);
   }
   return [...set].sort();
 }
@@ -4946,7 +4957,15 @@ function probeDoc() {
     { op: 'create', node: { type: 'vector', id: 'pv', parent: 'pb', pos: { x: 3, y: 3 }, size: sz, viewBox: { w: 10, h: 10 }, paths: [{ d: 'M0 0 L1 1' }, { d: 'M1 1 L2 2' }] } },
     { op: 'create', node: { type: 'frame', id: 'pm', parent: lib.id, name: 'K', children: [], layout: { mode: 'column' }, size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
     { op: 'create', node: { type: 'text', id: 'pmt', parent: 'pm', characters: 'k', size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
-    { op: 'set', id: 'pm', path: 'component', value: { name: 'K', props: [{ name: 'p', kind: 'text', target: 'pmt', path: 'characters' }] } },
+    { op: 'create', node: { type: 'rect', id: 'pmr', parent: 'pm', size: { w: { mode: 'fixed', value: 10 }, h: { mode: 'fixed', value: 10 } } } },
+    /* круг 45 (arch-r45 Д1): пропсы ВСЕХ видов — проверка значения пропса (propValue) в корпусе */
+    { op: 'set', id: 'pm', path: 'component', value: { name: 'K', props: [
+      { name: 'p', kind: 'text', target: 'pmt', path: 'characters' },
+      { name: 'e', kind: 'enum', target: 'pmr', path: 'fill', values: ['accent', 'surface'] },
+      { name: 'c', kind: 'color', target: 'pmr', path: 'fill' },
+      { name: 'n', kind: 'number', target: 'pmr', path: 'opacity' },
+      { name: 'b', kind: 'bool', target: 'pmr', path: 'visible' }
+    ] } },
     { op: 'create', node: { type: 'instance', id: 'pi', parent: 'pb', of: 'pm', pos: { x: 4, y: 4 } } }
   ], { checkExpand: false });
   if (r.error) throw new Error('probeDoc: ' + r.error.message);
@@ -5095,7 +5114,20 @@ function formatBehavior() {
     // 6. настоящие операции (applyOps): пути set, операции, создание, перемещение
     const doc = probeDoc();
     let op = '';
-    const tryOps = (list) => bit(() => !applyOps(doc, deepClone(list)).error);
+    /* Круг 45 (arch-r45 Д1): кроме «принял/отказал» — и ЧТО получилось: отпечаток документа после
+       каждой принятой пробы (семейство `results`). Иначе изменение семантики применения (индекс
+       `create` через floor вместо round, иное приведение значения), принимаемое обоими, проходило
+       мимо отпечатка, и экземпляры одной версии строили из одного журнала разные документы. */
+    let res = '';
+    const rootId = doc.root;
+    const libId = libraryNode(doc).id;
+    const tryOps = (list) => bit(() => {
+      const r = applyOps(doc, deepClone(list));
+      if (r.error) return false;
+      // id корня и библиотеки у документа-пробы случайны (createDoc) — в отпечаток идут именами
+      res += fnv64(stableJSON({ nodes: r.doc.nodes, tokens: r.doc.tokens }).split(rootId).join('ROOT').split(libId).join('LIB')).slice(0, 6);
+      return true;
+    });
     const pathCands = sortedList(new Set([...PROTECTED_PATHS, ...UNSAFE_KEYS, ...PROTO_KEYS, 'name', 'a.b', 'a..b', '.a', 'a.', '',
       'layout.__proto__', 'layout.prototype', 'layout.constructor', 'props.toString', 'props.p', 'props.zz', 'paths.0.d', 'paths.1', 'paths.2',
       'paths.5', 'paths.-1', 'paths.01', 'paths.length', 'paths.0.fill', 'size.w.value', 'pos.x', 'pos.z', 'states.hover.opacity',
@@ -5139,8 +5171,20 @@ function formatBehavior() {
     for (const name of sortedList(new Set([...OP_NAMES, 'copy', '', 'SET', 'delete', 'toString']))) {
       opProbes.push([{ op: name, id: 'pt', path: 'name', value: 'x', parent: 'pb', index: 0, node: { type: 'rect', id: 'n2', parent: 'pb', size: sz } }]);
     }
+    // круг 45 (code-r45 Д3): путь пропса компонента — те же кандидаты, что у set (ключи прототипа в середине, пустые сегменты)
+    for (const path of pathCands.concat(['a.__proto__.b', 'a.prototype', 'a..b', 'fill.', '.fill', 'style.constructor.x'])) {
+      opProbes.push([{ op: 'set', id: 'pm', path: 'component', value: { name: 'K', props: [{ name: 'q', kind: 'text', target: 'pmt', path }] } }]);
+    }
+    // круг 45: значения пропсов экземпляра по видам; дробные и крайние индексы create/move
+    const propVals = short.concat(['a', 'accent', 'surface', 'bogus', '#ff0000', { token: 'accent' }, { color: '#000000' }, false, 'true', '1']);
+    for (const name of ['p', 'e', 'c', 'n', 'b', 'zz']) for (const v of propVals) opProbes.push([{ op: 'set', id: 'pi', path: 'props.' + name, value: v }]);
+    for (const index of [0.4, 0.5, 0.6, 1.5, -0.5, 2.5, 3, 4, -2, 1e9, NaN, '1']) {
+      opProbes.push([{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pb', size: sz }, index }]);
+      opProbes.push([{ op: 'move', id: 'pr', parent: 'pb', index }]);
+    }
     for (const list of opProbes) op += tryOps(list);
     out.ops = op;
+    out.results = res;
     probeCache = out;
     return out;
   } finally {

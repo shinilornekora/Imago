@@ -110,8 +110,9 @@ export function decideAgentMode({ inProject = false, health = null, hasProvider 
 export function agentBadge(mode, health) {
   const h = health && health.ok === true ? health : null;
   if (mode === 'server') {
-    if (h && h.document !== 'up') return { dot: 'off', words: 'агент: сервер без документа' };
-    if (h && h.llm !== 'up') return { dot: 'off', words: 'агент: сервер без модели' };
+    // прежний оркестратор полей document/llm не отдаёт — молчание не считаем поломкой (критик r45 S9)
+    if (h && h.document !== undefined && h.document !== 'up') return { dot: 'off', words: 'агент: сервер без документа' };
+    if (h && h.llm !== undefined && h.llm !== 'up') return { dot: 'off', words: 'агент: сервер без модели' };
     return { dot: 'on', words: AGENT_MODE_WORDS.server };
   }
   if (mode === 'browser') return { dot: 'off', words: AGENT_MODE_WORDS.browser };
@@ -122,8 +123,8 @@ export function agentBadge(mode, health) {
 export function agentModeTitle(mode, health, providerWords = '') {
   const h = health && health.ok === true ? health : null;
   if (mode === 'server') {
-    if (h && h.document !== 'up' && storageReason(h)) return 'Команды агента выполняет сервер, но база данных сервера сейчас недоступна — команды не выполняются, правки руками ждут в очереди';
-    if (h && h.document !== 'up') return 'Команды агента выполняет сервер, но сейчас он не видит документ — правки руками сохраняются';
+    if (h && h.document !== undefined && h.document !== 'up' && storageReason(h)) return 'Команды агента выполняет сервер, но база данных сервера сейчас недоступна — команды не выполняются, правки руками ждут в очереди';
+    if (h && h.document !== undefined && h.document !== 'up') return 'Команды агента выполняет сервер, но сейчас он не видит документ — правки руками сохраняются';
     if (h && h.llm === 'unconfigured') return 'Команды агента выполняет сервер, но модель на нём не настроена — это забота администратора';
     if (h && h.llm !== 'up') return 'Команды агента выполняет сервер, но модель на нём сейчас не отвечает — попробуйте позже';
     return 'Команды агента выполняет сервер';
@@ -690,8 +691,18 @@ export function rescueOrphanHint(p, hints = []) {
   if (!p || typeof p !== 'object' || Number(p.head_seq || 0) !== 0) return null;
   const at = Date.parse(p.created_at || p.updated_at || '');
   if (!Number.isFinite(at)) return null;
-  return (Array.isArray(hints) ? hints : []).find((h) => h && p.id !== h.keep && cleanText(p.name) === cleanText(h.name)
-    && at >= (Number(h.since) || 0) - 60 * 1000 && at <= (Number(h.at) || Date.now()) + 1000) || null;
+  const fits = (Array.isArray(hints) ? hints : []).filter((h) => h && p.id !== h.keep && cleanText(p.name) === cleanText(h.name)
+    && at >= (Number(h.since) || 0) - 60 * 1000 && at <= (Number(h.at) || Date.now()) + 1000);
+  // две попытки с одним именем: окна могут перекрыться — берём ту, что началась позже всех до создания
+  // проекта (ближайшую), иначе сирота второй попытки получила бы ключ первой и DELETE ответил бы 409
+  let best = null;
+  for (const h of fits) {
+    const since = Number(h.since) || 0;
+    if (!best) { best = h; continue; }
+    const b = Number(best.since) || 0;
+    if ((since <= at && (b > at || since > b)) || (since > at && b > at && since < b)) best = h;
+  }
+  return best;
 }
 
 /** Тело первой попытки спасения хранится до стольких символов JSON: больше — sessionStorage может не принять. */
@@ -783,6 +794,27 @@ export function historyOrder(own = [], others = []) {
   }
   while (k < theirs.length) out.push({ other: theirs[k++].i });
   return out;
+}
+
+/**
+ * Круг 45 (критик кода r45 Д1/Д2): ключи своих записей для `historyOrder`. Правка из нескольких частей
+ * встаёт по НОВЕЙШЕЙ части: соавтор видит её строку журнала с номером последней части, и порядок
+ * у обоих должен совпасть. Номер берётся из журнала по всем частям (`id`, `parts`, `lastParts`),
+ * без журнала — из `seq` самой записи.
+ * @param {{id?: string, at?: number, seq?: number, pending?: boolean, parts?: string[], lastParts?: string[]}[]} history
+ * @param {{tx_id?: string, seq?: number}[]} journal
+ * @returns {{at: number, seq: number|null, pending: boolean}[]}
+ */
+export function ownHistoryKeys(history = [], journal = []) {
+  const seqOf = new Map();
+  for (const t of journal || []) if (t && t.tx_id && Number.isFinite(t.seq)) seqOf.set(t.tx_id, t.seq);
+  return (history || []).map((tx) => {
+    const ids = [tx && tx.id, ...((tx && tx.parts) || []), ...((tx && tx.lastParts) || [])].filter(Boolean);
+    let seq = null;
+    for (const id of ids) { const v = seqOf.get(id); if (Number.isFinite(v) && (seq === null || v > seq)) seq = v; }
+    if (seq === null && Number.isFinite(tx && tx.seq)) seq = tx.seq;
+    return { at: Number(tx && tx.at) || 0, seq, pending: !!(tx && tx.pending) };
+  });
 }
 
 /** «52 008» — тысячи через неразрывный пробел. */

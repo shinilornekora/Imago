@@ -72,7 +72,8 @@ test('r45 (Д9): сирота помечается по настоящему о�
   // кнопка удаления — только у сироты с ключом и не у открытого проекта; ключ уходит в тело DELETE
   assert.match(app, /if \(hint && hint\.createId && p\.id !== current\)/);
   assert.match(app, /method: 'DELETE', body: \{ create_id: hint\.createId \}/);
-  assert.match(app, /drop\.textContent = 'Точно удалить\?'/, 'не молча: второе нажатие');
+  assert.match(app, /q\.textContent = `Удалить пустую первую попытку «\$\{clip\(p\.name \|\| 'Без названия', 40\)\}»\? Правок в ней нет\.`/, 'не молча: подтверждение в строке с именем');
+  assert.match(app, /role: 'rescue-orphan'/, 'карточку о сироте снимаем после удаления');
 });
 
 test('r45: итог удаления сироты — словами, без кодов', () => {
@@ -123,4 +124,67 @@ test('r45: знак агента в тон тосту — сервер без д
   assert.match(app, /dot\.dataset\.state = badge\.dot;/);
   // «Сервер документа снова на связи» ждёт, пока и строка состояния это видит
   assert.match(app, /prev\.document !== 'up' && !syncHealthy\(\)\) \{ serverAgent\.backLater = words; return; \}/);
+});
+
+/* ------------------------------ критики круга 45: границы и части ------------------------------ */
+
+test('r45 (код Д1/Д2): ключи своих записей — правка из частей встаёт по новейшей части, у Ани и Бориса порядок один', () => {
+  /* Аня послала большую правку тремя частями: легли seq 10, 12, 13; между ними — правка Бориса seq 11.
+     У Бориса строка Ани в журнале — с номером новейшей части (13), значит выше его правки. */
+  const journal = [
+    { tx_id: 'a1', seq: 10 }, { tx_id: 'b1', seq: 11 }, { tx_id: 'a2', seq: 12 }, { tx_id: 'a3', seq: 13 },
+  ];
+  const aniaHistory = [{ id: 'a1', parts: ['a1', 'a2', 'a3'], at: 1 }];
+  const keys = SHELL.ownHistoryKeys(aniaHistory, journal);
+  assert.deepEqual(keys, [{ at: 1, seq: 13, pending: false }]);
+  const ania = SHELL.historyOrder(keys, [{ seq: 11 }]);
+  assert.deepEqual(ania, [{ own: 0 }, { other: 0 }], 'у Ани: своя выше правки Бориса');
+  const boris = SHELL.historyOrder(SHELL.ownHistoryKeys([{ id: 'b1', at: 2 }], journal), [{ seq: 13 }]);
+  assert.deepEqual(boris, [{ other: 0 }, { own: 0 }], 'у Бориса: правка Ани выше его');
+  // отмена из частей (lastParts) — тоже по новейшей
+  assert.equal(SHELL.ownHistoryKeys([{ id: 'x', lastParts: ['u1', 'u2'] }], [{ tx_id: 'u1', seq: 20 }, { tx_id: 'u2', seq: 21 }])[0].seq, 21);
+  // журнала нет — номер самой записи; нет и его — null; в пути — pending
+  assert.equal(SHELL.ownHistoryKeys([{ id: 'z', seq: 7 }], [])[0].seq, 7);
+  assert.deepEqual(SHELL.ownHistoryKeys([{ id: 'z', at: 3, pending: true }], []), [{ at: 3, seq: null, pending: true }]);
+  // оболочка строит ключи именно так; номер записи из частей не откатывается назад
+  assert.match(app, /const ownKeys = SHELL\.ownHistoryKeys\(state\.history, journalList\(\)\);/);
+  assert.match(app, /entry\.seq = Math\.max\(c\.seq, Number\(entry\.seq\) \|\| 0\)/);
+});
+
+test('r45 (S6): без номеров чужая с тем же временем — выше своей', () => {
+  assert.deepEqual(SHELL.historyOrder([{ at: 100 }], [{ created_at: new Date(100).toISOString() }]), [{ other: 0 }, { own: 0 }]);
+  assert.deepEqual(SHELL.historyOrder([{ at: 101 }], [{ created_at: new Date(100).toISOString() }]), [{ own: 0 }, { other: 0 }]);
+});
+
+test('r45 (S1): rescueMemo — тело ровно на пределе хранится, на символ больше — нет', () => {
+  const body = { name: 'x' };
+  const n = JSON.stringify(body).length;
+  const job = { project: null, plan: { whole: true, body } };
+  assert.equal(SHELL.rescueMemo(job, { keep: n }).body, JSON.stringify(body));
+  assert.equal(SHELL.rescueMemo(job, { keep: n - 1 }).body, '');
+});
+
+test('r45 (S2–S4): окно сироты — ровно на краях; created_at главнее updated_at; две попытки с одним именем', () => {
+  const t0 = Date.parse('2026-10-26T07:00:00Z');
+  const iso = (ms) => new Date(ms).toISOString();
+  const h = { name: 'Спасение', since: t0, keep: 'p_new', at: t0 + 60000, createId: 'k1' };
+  const row = (ms, extra = {}) => ({ id: 'p', name: 'Спасение', head_seq: 0, created_at: iso(ms), ...extra });
+  assert.ok(SHELL.rescueOrphanHint(row(t0 - 60000), [h]), 'минута до начала — ещё наша');
+  assert.equal(SHELL.rescueOrphanHint(row(t0 - 60001), [h]), null);
+  assert.ok(SHELL.rescueOrphanHint(row(t0 + 61000), [h]), 'секунда после — ещё наша');
+  assert.equal(SHELL.rescueOrphanHint(row(t0 + 61001), [h]), null);
+  // created_at вне окна, updated_at внутри — решает created_at
+  assert.equal(SHELL.rescueOrphanHint(row(t0 - 3600000, { updated_at: iso(t0 + 1000) }), [h]), null);
+  // две попытки «Спасение» подряд: окна перекрываются, каждая сирота берёт ключ своей попытки
+  const h1 = { name: 'Спасение', since: t0, at: t0 + 120000, createId: 'k1' };
+  const h2 = { name: 'Спасение', since: t0 + 30000, at: t0 + 150000, createId: 'k2' };
+  assert.equal(SHELL.rescueOrphanHint(row(t0 + 1000), [h1, h2]).createId, 'k1');
+  assert.equal(SHELL.rescueOrphanHint(row(t0 + 31000), [h1, h2]).createId, 'k2');
+  assert.equal(SHELL.rescueOrphanHint(row(t0 + 31000), [h2, h1]).createId, 'k2', 'от порядка подсказок не зависит');
+});
+
+test('r45 (S9): прежний оркестратор без полей document/llm — знак зелёный', () => {
+  assert.deepEqual(SHELL.agentBadge('server', { ok: true }), { dot: 'on', words: 'агент: сервер' });
+  assert.equal(SHELL.agentBadge('server', { ok: true, llm: 'up' }).dot, 'on');
+  assert.doesNotMatch(SHELL.agentModeTitle('server', { ok: true }), /не видит документ|база данных/);
 });

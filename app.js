@@ -1481,7 +1481,7 @@ async function saveAsNewProject() {
     const saved = `Сохранил работу новым проектом «${clip(got.name || name, 60)}».`;
     if (job.orphan) {
       const w = SHELL.rescueOrphanWords(job.orphan);
-      showMsg('plain', saved, { note: w, ms: 15000, actions: [{ label: 'Проекты', onClick: () => openProjects() }] });
+      showMsg('plain', saved, { note: w, ms: 15000, role: 'rescue-orphan', actions: [{ label: 'Проекты', onClick: () => openProjects() }] });
     } else toast(saved, 'plain', 8000);
   } catch (e) {
     job.running = false;
@@ -1960,7 +1960,7 @@ function settleHistory(info) {
     const entry = state.history[k];
     if (entry.partsLeft && entry.parts.includes(c.tx_id)) {
       entry.partsLeft.delete(c.tx_id);
-      if (!entry.partsLeft.size) { entry.partsLeft = null; entry.pending = false; if (Number.isInteger(c.seq)) entry.seq = c.seq; }
+      if (!entry.partsLeft.size) { entry.partsLeft = null; entry.pending = false; if (Number.isInteger(c.seq)) entry.seq = Math.max(c.seq, Number(entry.seq) || 0); }
     } else {
       entry.lastLeft.delete(c.tx_id);
       if (!entry.lastLeft.size) { entry.lastLeft = null; entry.pending = false; }
@@ -3593,6 +3593,36 @@ function goneProjectItem() {
 }
 
 /** Перерисовать шторку проектов по уже загруженному списку (без запроса). */
+/**
+ * Круг 45: удалить пустую сироту спасения (DELETE с ключом первой попытки). Итог — словами; «уже
+ * удалён» — не ошибка; «есть правки» — список перечитывается (строка «без правок» устарела).
+ * Карточка «Первая попытка тоже сохранилась…» после удаления — неправда: снимается. Фокус —
+ * на «Создать проект» (шторка перерисована, прежней кнопки нет).
+ */
+async function deleteOrphan(p, hint, btn) {
+  if (btn) btn.disabled = true;
+  let reload = false;
+  try {
+    await apiJson(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'DELETE', body: { create_id: hint.createId } });
+    forgetOrphan(hint.createId);
+    if (Array.isArray(server.list)) server.list = server.list.filter((x) => x.id !== p.id);
+    if (dom.dockmsg && !dom.dockmsg.hidden && dom.dockmsg.dataset.role === 'rescue-orphan') hideMsg();
+    toast(SHELL.orphanDeleteWords(p.name), 'plain', 6000);
+  } catch (e) {
+    const gone = e && e.status === 404;
+    const used = e && e.status === 409 && e.detail && e.detail.cause === 'not_empty';
+    if (gone || used) forgetOrphan(hint.createId);
+    if (gone && Array.isArray(server.list)) server.list = server.list.filter((x) => x.id !== p.id);
+    if (gone && dom.dockmsg && !dom.dockmsg.hidden && dom.dockmsg.dataset.role === 'rescue-orphan') hideMsg();
+    reload = used;
+    toast(SHELL.orphanDeleteWords(p.name, e), gone ? 'plain' : 'error', 8000);
+  }
+  if (reload) await loadProjectsSheet();
+  else redrawProjects();
+  const add = dom['sheet-body'] && dom['sheet-body'].querySelector('button');
+  if (add && state.sheetOpen === 'projects') add.focus();
+}
+
 function redrawProjects() {
   if (!server || state.sheetOpen !== 'projects') return;
   openSheet('Проекты', (body) => fillProjects(body, server.list, { loading: false }), { size: 'auto', key: 'projects' });
@@ -3758,39 +3788,45 @@ function fillProjects(body, list, { loading } = {}) {
     const head = document.createElement('div');
     head.className = 'phead';
     head.append(open, rename);
-    /* Круг 45 (§9.19): пустую сироту спасения своего ключа можно удалить — не молча: первое
-       нажатие спрашивает в строке, второе удаляет; сервис сам откажет, если в ней есть правки. */
+    /* Круг 45 (§9.19): пустую сироту спасения своего ключа можно удалить — не молча: подтверждение
+       в строке, как у проектов в браузере (круг 46), с именем; сервис сам откажет, если в ней есть
+       правки. Кнопки — своей строкой под временем, чтобы имя не обрезалось. */
+    let acts = null;
     if (hint && hint.createId && p.id !== current) {
+      acts = document.createElement('div');
+      acts.className = 'pacts';
       const drop = document.createElement('button');
       drop.type = 'button';
       drop.className = 'btn ghost small';
       drop.dataset.role = 'orphan-delete';
       drop.textContent = 'Удалить';
       drop.title = 'Удалить пустую первую попытку';
-      let armed = null;
-      drop.addEventListener('click', async () => {
-        if (!armed) {
-          drop.textContent = 'Точно удалить?';
-          armed = setTimeout(() => { armed = null; drop.textContent = 'Удалить'; }, 5000);
-          return;
-        }
-        clearTimeout(armed);
-        drop.disabled = true;
-        try {
-          await apiJson(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'DELETE', body: { create_id: hint.createId } });
-          forgetOrphan(hint.createId);
-          if (Array.isArray(server.list)) server.list = server.list.filter((x) => x.id !== p.id);
-          toast(SHELL.orphanDeleteWords(p.name), 'plain', 6000);
-        } catch (e) {
-          if (e && (e.status === 404 || (e.status === 409 && e.detail && e.detail.cause === 'not_empty'))) forgetOrphan(hint.createId);
-          if (e && e.status === 404 && Array.isArray(server.list)) server.list = server.list.filter((x) => x.id !== p.id);
-          toast(SHELL.orphanDeleteWords(p.name, e), 'error', 8000);
-        }
-        redrawProjects();
+      drop.addEventListener('click', () => {
+        const ask = document.createElement('div');
+        ask.className = 'pconfirm';
+        ask.setAttribute('role', 'group');
+        ask.setAttribute('aria-label', 'Подтверждение удаления');
+        const q = document.createElement('span');
+        q.textContent = `Удалить пустую первую попытку «${clip(p.name || 'Без названия', 40)}»? Правок в ней нет.`;
+        const yes = document.createElement('button');
+        yes.type = 'button';
+        yes.className = 'btn danger small';
+        yes.textContent = 'Удалить';
+        const no = document.createElement('button');
+        no.type = 'button';
+        no.className = 'btn ghost small';
+        no.textContent = 'Оставить';
+        no.addEventListener('click', () => { ask.remove(); acts.hidden = false; drop.focus(); });
+        yes.addEventListener('click', () => deleteOrphan(p, hint, yes));
+        ask.append(q, yes, no);
+        acts.hidden = true;
+        item.appendChild(ask);
+        no.focus();
       });
-      head.append(drop);
+      acts.append(drop);
     }
     item.append(head, meta);
+    if (acts) item.append(acts);
     body.appendChild(item);
   }
   // круг 26: проектов больше страницы — догружаем по кнопке (сервис прежней версии отдаёт всё)
@@ -3879,6 +3915,16 @@ function updateAgentDot() {
     ready: `Агент подключён: ${kind}`,
     busy: `Агент работает: ${kind}`,
   }[st];
+  /* Круг 45 (UX r45): сервер агента без документа или модели — знак у слова «Imago» говорит то же,
+     что знак агента в строке состояния (SHELL.agentBadge), а не «Агент подключён». */
+  const badge = onServer && st !== 'off' ? SHELL.agentBadge('server', serverAgent.health) : null;
+  if (badge && badge.dot !== 'on') {
+    const why = agentModeTitle('server', serverAgent.health);
+    dot.dataset.state = 'off';
+    dot.title = why;
+    dot.setAttribute('aria-label', why);
+    return;
+  }
   dot.dataset.state = st;
   dot.title = words;
   dot.setAttribute('aria-label', words);
@@ -13099,12 +13145,11 @@ function fillEdits(body) {
   /* Свои и чужие — одной лентой по времени, новые сверху. Свои — со своими кнопками
      (вернуться, вернуть), чужие — только кто, что и когда. */
   /* Круг 45: порядок — по seq подтверждения (SHELL.historyOrder), одинаковый у всех соавторов;
-     своя запись встаёт по номеру своей транзакции в журнале. */
-  const seqOf = new Map();
-  for (const t of journalList()) if (t && t.tx_id && Number.isFinite(t.seq)) seqOf.set(t.tx_id, t.seq);
-  const ownKeys = state.history.map((tx) => ({ at: Number(tx.at) || 0, seq: seqOf.get(tx.id) ?? null, pending: !!tx.pending }));
+     своя запись встаёт по номеру новейшей своей части в журнале (SHELL.ownHistoryKeys). */
+  const ownKeys = SHELL.ownHistoryKeys(state.history, journalList());
+  let above = 0;   // чужих записей выше по ленте (сделаны позже): метка «ваши правки сейчас здесь»
   for (const step of SHELL.historyOrder(ownKeys, others)) {
-    if (step.other !== undefined) { body.appendChild(otherEditItem(others[step.other])); continue; }
+    if (step.other !== undefined) { body.appendChild(otherEditItem(others[step.other])); above++; continue; }
     const i = step.own;
     const tx = state.history[i];
     const undone = i >= state.cursor;
@@ -13158,7 +13203,7 @@ function fillEdits(body) {
       now.className = 'hnow';
       /* Круг 33, п.7: выше по ленте — правки других, сделанные позже: они в документе остаются,
          и «документ сейчас здесь» под ними было бы неправдой. Тогда метка — про свои правки. */
-      const later = k > 0;
+      const later = above > 0;
       now.textContent = later ? 'ваши правки сейчас здесь' : 'документ сейчас здесь';
       now.title = later
         ? 'Правки других участников выше по ленте сделаны позже и остаются в документе — ваша отмена их не трогает'

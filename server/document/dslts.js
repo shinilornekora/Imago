@@ -803,7 +803,11 @@ export function createSequencer({
         throw notFound();
       }
       const latest = await viaStorage(storage.latestSnapshot(projectId));
-      if (!latest) throw noSnapshot(storage);
+      if (!latest) {
+        // arch-r45 Д2: между чтением проекта и снимка проект удалили (DELETE пустой сироты) — это 404, а не порча
+        if (!(await viaStorage(storage.getProject(projectId)))) { emit({ kind: 'missing', projectId }); throw notFound(); }
+        throw noSnapshot(storage);
+      }
       // круг 39: снимок движка, которого этот экземпляр не читает, — не «предупреждение», а отказ
       // проекту (снимок прежней версии, которую движок читает, — как раньше: формат совместим)
       if (engineUnreadable(latest.engine, engine)) throw goOutdated(projectId, latest.engine, `снимок seq ${latest.seq}`);
@@ -978,6 +982,9 @@ export function createSequencer({
       if (heads.has(msg.p)) scheduleSync(msg.p);
     } else if (msg.k === 'epoch') {
       onEpochNotice(msg.p, msg.e);
+    } else if (msg.k === 'missing') {
+      // круг 45: пустую сироту удалили на другом экземпляре — голову снять, сокеты закрыть
+      lost(msg.p);
     } else if (msg.k === 'project') {
       // I4: проект переименовали на другом экземпляре — сокетам здесь
       const project = projectOfBus(msg);
@@ -1444,7 +1451,13 @@ export function createSequencer({
     async deleteEmpty(projectId, createId) {
       return withLock(projectId, async () => {
         const r = await storage.deleteEmptyProject(projectId, createId);
-        if (r.status === 'deleted') dropHead(projectId);
+        if (r.status === 'deleted') {
+          // arch-r45 Д2: сокеты проекта закрываются сразу (4404) — здесь и, по шине, на других экземплярах
+          lost(projectId);
+          if (typeof storage.publish === 'function') {
+            try { storage.publish({ k: 'missing', p: projectId, i: instanceId }); } catch (e) { log.warn('[document/dslts] шина: удаление проекта не разослано:', e && e.message); }
+          }
+        }
         return r;
       });
     },

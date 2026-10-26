@@ -151,9 +151,9 @@ export function createMemoryStorage() {
     async deleteEmptyProject(id, createId) {
       const p = projects.get(String(id));
       if (!p) return { status: 'not_found' };
-      if (typeof createId !== 'string' || !createId || byCreateId.get(createId) !== p.id) return { status: 'create_id' };
+      if (typeof createId !== 'string' || !createId || byCreateId.get(createId) !== p.id || p.kind !== 'design') return { status: 'create_id' };
       const j = journals.get(p.id);
-      if (p.kind !== 'design' || p.head_seq !== 0 || (j && j.bySeq.length)) return { status: 'not_empty' };
+      if (p.head_seq !== 0 || (j && j.bySeq.length)) return { status: 'not_empty' };
       projects.delete(p.id);
       byCreateId.delete(createId);
       createHashes.delete(p.id);
