@@ -10584,6 +10584,7 @@ function showMsg(kind, text, opts = {}) {
         short.textContent = human(opts.art.conceptShort);
         short.setAttribute('aria-hidden', 'true');
         words.appendChild(short);
+        words.classList.add('has-short');   // без :has (Firefox до 121) вёрстка та же
         // узкий экран: нажатие раскрывает образ целиком (материалы), повторное — сворачивает
         words.tabIndex = 0;
         words.setAttribute('role', 'button');

@@ -3961,6 +3961,14 @@ export function artSummary(direction, critique, opts = {}) {
   const line = [concept ? `Образ: ${concept}` : '', fonts, verdict].filter(Boolean).join(' · ');
   // семейства отдельно: оболочка набирает их название ими же («Аа Prata»)
   // короткий образ — до двоеточия или тире («Ночная беговая дорожка»): узкому экрану
-  const conceptShort = concept ? concept.split(/\s*[:—–]\s*/)[0].trim() : '';
+  // режем только по «: » или « — » (не внутри «12:30» и кавычек) и только если до него от двух слов
+  let conceptShort = concept;
+  const sep = /:\s| [—–] /g;
+  for (let m; concept && (m = sep.exec(concept));) {
+    const head = concept.slice(0, m.index).trim();
+    if ((head.match(/«/g) || []).length !== (head.match(/»/g) || []).length) continue;   // внутри кавычек
+    if (head.split(/\s+/).length >= 2) conceptShort = head;
+    break;
+  }
   return { concept, conceptShort, swatches, fonts, families: [str(f.display, 40), str(f.text, 40)].filter((x, i, a) => x && a.indexOf(x) === i), verdict, line };
 }
