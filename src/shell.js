@@ -1694,11 +1694,15 @@ export function nameMatches(name, phrase) {
 const wantStems = (phrase) => saidWords(phrase).map(stemWord).filter((w) => w.length >= 3);
 const STEMS_CACHE = new Map();
 const STEMS_CACHE_MAX = 60000;
+let stemsComputed = 0;   // сколько основ посчитано заново (не из кеша) — тестам: тёплый поиск не считает ни одной
+/** Круг 45: счётчик основ имён, посчитанных мимо кеша (для теста скорости «/выделить …» без часов). */
+export function nameStemsComputed() { return stemsComputed; }
 function nameStems(name) {
   const key = String(name || '');
   let got = STEMS_CACHE.get(key);
   if (got) return got;
   // слова уже в нижнем регистре и без знаков (saidWords) — основа сразу, без второй чистки
+  stemsComputed++;
   got = [];
   for (const w of saidWords(key, false)) if (w) got.push(w.length > 4 ? w.slice(0, w.length - 2) : w);
   if (STEMS_CACHE.size >= STEMS_CACHE_MAX) STEMS_CACHE.clear();
