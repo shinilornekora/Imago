@@ -262,3 +262,86 @@ test('круг54: заглушка сверх предела берёт разм
   assert.ok(Object.keys(a.expanded).some((id) => a.expanded[id].stub), 'есть заглушки');
   assert.equal(hashGeometry(a), hashGeometry(fresh));
 });
+
+test('круг54: коллизия раскрытого id с узлом документа — нет образцов, solveAfter раскладывает полностью', () => {
+  const master = (lib) => [
+    { op: 'create', node: { type: 'frame', id: 'M', parent: lib, children: [], layout: { mode: 'row' }, size: hug } },
+    { op: 'create', node: { type: 'rect', id: 'x', parent: 'M', size: fx(10, 10) } },
+    { op: 'set', id: 'M', path: 'component', value: { name: 'M' } },
+  ];
+  // прямоугольник «a/x» раньше экземпляра «a»; «c» той же формы
+  const doc = libDoc((board, lib) => master(lib).concat([
+    { op: 'create', node: { type: 'frame', id: 'G', parent: board, children: [], layout: { mode: 'row', gap: 5 }, size: hug } },
+    { op: 'create', node: { type: 'rect', id: 'a/x', parent: 'G', size: fx(70, 70) } },
+    { op: 'create', node: { type: 'instance', id: 'a', parent: 'G', of: 'M' } },
+    { op: 'create', node: { type: 'instance', id: 'c', parent: 'G', of: 'M' } },
+  ]));
+  assert.ok(expandDoc(doc).collide);
+  const geo = solve(doc, KEPT);
+  assert.equal(hashGeometry(geo), hashGeometry(solve(doc, PLAIN)));
+  assert.ok(geo.rects['c/x'], 'у копии не потерян потомок');
+  // по месту правки и без образцов: «a» чист, но его прежний отрезок — без «a/x»
+  const op = [{ op: 'remove', id: 'a/x' }];
+  const next = applyOps(doc, op).doc;
+  const plainGeo = solve(doc, { ...PLAIN, incremental: true });
+  assert.equal(hashGeometry(solveAfter(plainGeo, doc, next, op, PLAIN)), hashGeometry(solve(next, PLAIN)));
+  const inc = solveAfter(geo, doc, next, op, OPTS);
+  assert.equal(hashGeometry(inc), hashGeometry(solve(next, PLAIN)));
+  assert.deepEqual(inc.rects['a/x'], solve(next, PLAIN).rects['a/x']);
+  // и обратно — к документу с коллизией
+  assert.equal(hashGeometry(solveAfter(inc, next, doc, [], OPTS)), hashGeometry(solve(doc, PLAIN)));
+});
+
+test('круг54: вложенный экземпляр под чужим id («I/mb/bt» настоящий) — в любом порядке создания', () => {
+  for (const order of ['коллизия первой', 'коллизия последней']) {
+    const doc = libDoc((board, lib) => {
+      const L = [
+        { op: 'create', node: { type: 'frame', id: 'B', parent: lib, children: [], layout: { mode: 'row', gap: 2 }, size: hug } },
+        { op: 'create', node: { type: 'text', id: 'bt', parent: 'B', characters: 'бэйдж', size: hug } },
+        { op: 'create', node: { type: 'rect', id: 'br', parent: 'B', size: fx(7, 7) } },
+        { op: 'set', id: 'B', path: 'component', value: { name: 'B', props: [{ name: 'label', kind: 'text', target: 'bt', path: 'characters' }] } },
+        { op: 'create', node: { type: 'frame', id: 'M', parent: lib, children: [], layout: { mode: 'column', gap: 3 }, size: hug } },
+        { op: 'create', node: { type: 'text', id: 'mt', parent: 'M', characters: 'заголовок', size: hug } },
+        { op: 'create', node: { type: 'instance', id: 'mb', parent: 'M', of: 'B', props: { label: 'внутр' } } },
+        { op: 'set', id: 'M', path: 'component', value: { name: 'M' } },
+        { op: 'create', node: { type: 'frame', id: 'G', parent: board, children: [], layout: { mode: 'row', gap: 5 }, size: hug } },
+      ];
+      const I = [{ op: 'create', node: { type: 'instance', id: 'I', parent: 'G', of: 'M' } }, { op: 'create', node: { type: 'instance', id: 'I2', parent: 'G', of: 'M' } }];
+      const C = [{ op: 'create', node: { type: 'instance', id: 'I/mb/bt', parent: 'G', of: 'B' } }];
+      return L.concat(order === 'коллизия первой' ? C.concat(I) : I.concat(C));
+    });
+    const geo = solve(doc, KEPT);
+    assert.equal(hashGeometry(geo), hashGeometry(solve(doc, PLAIN)), order);
+    const op = [{ op: 'remove', id: 'I/mb/bt' }];
+    const next = applyOps(doc, op).doc;
+    const inc = solveAfter(geo, doc, next, op, OPTS);
+    assert.equal(hashGeometry(inc), hashGeometry(solve(next, PLAIN)), `${order}: удаление`);
+    assert.equal(hashGeometry(solveAfter(inc, next, doc, [], OPTS)), hashGeometry(solve(doc, PLAIN)), `${order}: возврат`);
+  }
+});
+
+test('круг54: предел глубины — по глубине экземпляра в документе, а не по стеку меры (мера при размещении)', () => {
+  for (const depth of [235, 245]) {
+    const doc = libDoc((board, lib) => {
+      const L = [{ op: 'create', node: { type: 'frame', id: 'M', parent: lib, children: [], layout: { mode: 'row', padding: 1 }, size: hug } }];
+      let p = 'M';
+      for (let i = 0; i < 20; i++) { L.push({ op: 'create', node: { type: 'frame', id: 'm' + i, parent: p, children: [], layout: { mode: 'row', padding: 1 }, size: hug } }); p = 'm' + i; }
+      L.push({ op: 'create', node: { type: 'rect', id: 'leaf', parent: p, size: fx(10, 10) } }, { op: 'set', id: 'M', path: 'component', value: { name: 'M' } });
+      // «G (row 400) > P (row, w fill) > [rect 5×80, экземпляр с h fill]»: экземпляр перемеряется при размещении
+      const group = (parent, tag) => L.push(
+        { op: 'create', node: { type: 'frame', id: 'G' + tag, parent, children: [], layout: { mode: 'row' }, size: { w: { mode: 'fixed', value: 400 }, h: { mode: 'hug' } } } },
+        { op: 'create', node: { type: 'frame', id: 'P' + tag, parent: 'G' + tag, children: [], layout: { mode: 'row' }, size: { w: { mode: 'fill' }, h: { mode: 'hug' } } } },
+        { op: 'create', node: { type: 'rect', id: 'R' + tag, parent: 'P' + tag, size: fx(5, 80) } },
+        { op: 'create', node: { type: 'instance', id: tag, parent: 'P' + tag, of: 'M', size: { w: { mode: 'hug' }, h: { mode: 'fill' } } } });
+      group(board, 'A');
+      p = board;
+      for (let i = 0; i < depth; i++) { L.push({ op: 'create', node: { type: 'frame', id: 'f' + i, parent: p, children: [], layout: { mode: 'row' }, size: hug } }); p = 'f' + i; }
+      group(p, 'B');
+      return L;
+    });
+    const geo = quiet(() => solve(doc, OPTS));
+    const plain = quiet(() => solve(doc, PLAIN));
+    assert.equal(hashGeometry(geo), hashGeometry(plain), `глубина ${depth}`);
+    assert.deepEqual(geo.rects.B, plain.rects.B);
+  }
+});
