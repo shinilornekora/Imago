@@ -23,7 +23,7 @@ import {
 import * as CORE from './src/core.js';
 import { makeProvider, runCommand, runVariants } from './src/brain.js';
 /* Круг 53 (SPEC §20): цвета картинок документа для арт-директора — пиксели считает страница. */
-import { paletteFromPixels, SWATCH_LIMITS } from './src/swatches.js';
+import { paletteFromPixels, srcKey, SWATCH_LIMITS } from './src/swatches.js';
 /* Круг 22 (SPEC §9.5): клиент-реплика. Документ в серверном режиме живёт в ней, а не в
    localStorage/db; оболочка получает view и шлёт транзакции. */
 import { createSync, idbStorage, memoryStorage, droppedLine, statusLine, engineWords, LIMITS } from './src/sync.js';
@@ -197,22 +197,26 @@ function ensureDocFonts(doc) {
  */
 /**
  * Круг 53 (SPEC §20): цвета картинок документа для арт-директора. Картинка рисуется в квадрат
- * SWATCH_LIMITS.side на canvas; чужая картинка без CORS (холст «испорчен») и битая — без цветов.
- * Кеш по адресу картинки — на сеанс, не больше 64 картинок.
+ * SWATCH_LIMITS.side на canvas; чужая картинка без CORS, битая, встроенная больше SWATCH_LIMITS.maxSrc
+ * и не загрузившаяся за IMAGE_LOAD_MS — без цветов. Кеш — промисы по ключу адреса (длина и хэш, не
+ * сами мегабайтные строки) на сеанс, не больше 64: параллельные варианты делят одну загрузку.
  */
 const imageColorCache = new Map();
+const IMAGE_LOAD_MS = 3000;
 async function imageColorsInPage(sources, { signal } = {}) {
   const out = [];
   for (const s of Array.isArray(sources) ? sources : []) {
     if (signal && signal.aborted) break;
-    if (!s || typeof s.src !== 'string') continue;
-    let colors = imageColorCache.get(s.src);
+    if (!s || typeof s.src !== 'string' || (s.src.startsWith('data:') && s.src.length > SWATCH_LIMITS.maxSrc)) continue;
+    const key = srcKey(s.src);
+    let colors = imageColorCache.get(key);
     if (!colors) {
-      colors = await pixelColors(s.src);
-      imageColorCache.set(s.src, colors);
+      colors = pixelColors(s.src);
+      imageColorCache.set(key, colors);
       while (imageColorCache.size > 64) imageColorCache.delete(imageColorCache.keys().next().value);
     }
-    if (colors.length) out.push({ id: s.id, colors: colors.map((c) => ({ ...c })) });
+    const got = await colors;
+    if (got.length) out.push({ id: s.id, colors: got.map((c) => ({ ...c })) });
   }
   return out;
 }
@@ -220,6 +224,8 @@ async function imageColorsInPage(sources, { signal } = {}) {
 function pixelColors(src) {
   return new Promise((resolve) => {
     const img = new Image();
+    const timer = setTimeout(() => { img.onload = img.onerror = null; img.src = ''; resolve([]); }, IMAGE_LOAD_MS);
+    const done = (v) => { clearTimeout(timer); resolve(v); };
     img.crossOrigin = 'anonymous';
     img.decoding = 'async';
     img.onload = () => {
@@ -229,10 +235,10 @@ function pixelColors(src) {
         c.width = side; c.height = side;
         const g = c.getContext('2d', { willReadFrequently: true });
         g.drawImage(img, 0, 0, side, side);
-        resolve(paletteFromPixels(g.getImageData(0, 0, side, side).data, side, side));
-      } catch { resolve([]); }
+        done(paletteFromPixels(g.getImageData(0, 0, side, side).data, side, side));
+      } catch { done([]); }
     };
-    img.onerror = () => resolve([]);
+    img.onerror = () => done([]);
     img.src = src;
   });
 }

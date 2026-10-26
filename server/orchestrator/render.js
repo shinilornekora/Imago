@@ -230,7 +230,8 @@ export function createRenderer(opts = {}) {
 /**
  * Круг 53 (SPEC §20): цвета картинок документа для арт-директора — пиксели через resvg (картинка
  * вписывается в квадрат SWATCH_LIMITS.side без сохранения пропорций: важна доля цвета, не форма).
- * Только картинки, встроенные в документ (`data:` png/jpeg/gif/webp, до SWATCH_LIMITS.maxSrc знаков,
+ * Только картинки, встроенные в документ (`data:` png/jpeg/gif, до SWATCH_LIMITS.maxSrc знаков; WebP resvg
+ * не декодирует — без цветов на сервере, в браузере есть;
  * площадь по заголовку файла — не больше SWATCH_MAX_PIXELS: распаковку бомбы не начинаем):
  * за картинками по адресу сервер в сеть не ходит. resvg нет или картинка не декодировалась — без неё.
  * Кеш — по содержимому (sha1 адреса), не больше IMAGE_COLORS_CACHE картинок (старые вытесняются).
@@ -247,8 +248,8 @@ export function createImageColors(opts = {}) {
     for (const s of Array.isArray(sources) ? sources : []) {
       if (o.signal && o.signal.aborted) break;
       const src = s && typeof s.src === 'string' ? s.src : '';
-      if (!/^data:image\/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(src) || src.length > SWATCH_LIMITS.maxSrc) continue;
-      const key = createHash('sha1').update(src).digest('hex');
+      if (!/^data:image\/(png|jpeg|jpg|gif);base64,[A-Za-z0-9+/=\s]+$/i.test(src) || src.length > SWATCH_LIMITS.maxSrc) continue;
+      const key = createHash('sha1').update(src).digest('hex');   // ключ — хэш: мегабайтные адреса не держим
       let colors = cache.get(key);
       if (colors) { cache.delete(key); cache.set(key, colors); } else {
         try {

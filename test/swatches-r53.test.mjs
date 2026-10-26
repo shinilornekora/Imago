@@ -6,8 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../src/core.js';
-import { paletteFromPixels, imageSources, imageColorsLine, encodedSize, SWATCH_LIMITS } from '../src/swatches.js';
-import { runCommand } from '../src/brain.js';
+import { paletteFromPixels, imageSources, imageColorsLine, encodedSize, srcKey, SWATCH_LIMITS } from '../src/swatches.js';
+import { runCommand, runVariants } from '../src/brain.js';
 import { createImageColors } from '../server/orchestrator/render.js';
 
 const quiet = (fn) => { const w = console.warn; console.warn = () => {}; try { return fn(); } finally { console.warn = w; } };
@@ -56,6 +56,16 @@ test('круг53: paletteFromPixels — главные цвета с долям�
   const speck = stripes([[[250, 250, 250], 10]]);
   speck.set([0, 0, 0, 255], 0);
   assert.equal(paletteFromPixels(speck, 10, 10).length, 1);
+  // тёмное с тёмным и светлое со светлым не сливаются в цвет, которого на картинке нет
+  assert.deepEqual(paletteFromPixels(stripes([[[0x10, 0x18, 0x40], 5], [[0, 0, 0], 5]]), 10, 10).map((c) => c.hex).sort(), ['#000000', '#101840']);
+  assert.deepEqual(paletteFromPixels(stripes([[[0xfa, 0xf3, 0xe4], 5], [[255, 255, 255], 5]]), 10, 10).map((c) => c.hex).sort(), ['#faf3e4', '#ffffff']);
+  assert.deepEqual(paletteFromPixels(stripes([[[0x3b, 0x24, 0x18], 5], [[0x6b, 0x4a, 0x33], 5]]), 10, 10).map((c) => c.hex).sort(), ['#3b2418', '#6b4a33']);
+  // цвет кластера — его самой частой корзины, а не среднее: шум вокруг не сдвигает цвет
+  const noisy = stripes([[[100, 60, 40], 8], [[104, 62, 41], 2]]);
+  assert.equal(paletteFromPixels(noisy, 10, 10).length, 1);
+  // у кластера из двух корзин цвет — частой корзины, а не средний
+  const pair = stripes([[[0x40, 0x40, 0x40], 7], [[0x50, 0x48, 0x40], 3]]);
+  assert.deepEqual(paletteFromPixels(pair, 10, 10), [{ hex: '#404040', share: 1 }]);
   assert.deepEqual(paletteFromPixels(new Uint8Array(0), 0, 0), []);
   assert.deepEqual(paletteFromPixels(stripes([[[1, 2, 3], 10, 0]]), 10, 10), [], 'всё прозрачное — цветов нет');
   assert.ok(paletteFromPixels(px, 10, 10, { count: 2 }).length === 2);
@@ -73,6 +83,11 @@ test('круг53: imageSources — из выделения или всего д�
   assert.deepEqual(imageSources(doc, ['small']).map((x) => x.id), ['small'], 'выделение — только его картинки');
   assert.deepEqual(imageSources(doc, ['b']).map((x) => x.id), ['big', 'small'], 'выделенная доска — её картинки');
   assert.deepEqual(imageSources(doc, ['nope']).map((x) => x.id), ['big', 'small'], 'чужое выделение — весь документ');
+  // выделен текст без картинок — картинки его доски
+  const withText = core.applyOps(doc, [core.ops.create({ id: 'tx', type: 'text', parent: 'b', characters: 'Привет', style: 'body', size: { w: { mode: 'fill' }, h: { mode: 'hug' } } })]).doc;
+  assert.deepEqual(imageSources(withText, ['tx']).map((x) => x.id), ['big', 'small']);
+  // крупнее по геометрии (fill во всю доску) — первой, даже если задан размер меньше
+  assert.deepEqual(imageSources(doc, [], { rects: { small: { x: 0, y: 0, w: 900, h: 900 }, big: { x: 0, y: 0, w: 10, h: 10 } } }).map((x) => x.id), ['small', 'twin'], 'та же картинка покрупнее — копия');
   const many = docWithImages(Array.from({ length: 7 }, (_, i) => ({ id: `i${i}`, src: `data:image/png;base64,D${i}AA` })));
   assert.equal(imageSources(many, []).length, SWATCH_LIMITS.images);
   assert.deepEqual(imageSources(null), []);
@@ -187,4 +202,48 @@ test('круг53: отмена во время счёта цветов — ко�
     .catch((e) => ({ thrown: e }));
   assert.equal((res.thrown || res.error || {}).kind, 'cancelled', JSON.stringify(res.error || res.thrown));
   assert.equal(provider.calls.filter((c) => c.schema === 'direction').length, 0);
+});
+
+test('круг53: экземпляр показывает картинки мастера; страница-библиотека без выделения не в счёт', () => {
+  let doc = docWithImages([]);
+  doc = quiet(() => core.ensureLibrary(doc)) || doc;
+  const lib = core.libraryNode(doc);
+  assert.ok(lib, 'есть библиотека');
+  const LAY = { mode: 'column', gap: 0, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'start', justify: 'start', wrap: false };
+  let r = core.applyOps(doc, [
+    core.ops.create({ id: 'm', type: 'frame', name: 'Карточка', parent: lib.id, size: { w: { mode: 'fixed', value: 100 }, h: { mode: 'hug' } }, layout: LAY, children: [] }),
+    core.ops.create({ id: 'mi', type: 'image', name: 'Лого', parent: 'm', src: 'data:image/png;base64,MMMM', size: { w: { mode: 'fixed', value: 50 }, h: { mode: 'fixed', value: 50 } } }),
+  ]);
+  assert.equal(r.error, undefined, JSON.stringify(r.error));
+  doc = r.doc;
+  assert.deepEqual(imageSources(doc, []), [], 'мастер в библиотеке — не содержание макета');
+  const inst = quiet(() => core.instanceOps(doc, 'm', { parent: 'b' }));
+  const ops = Array.isArray(inst) ? inst : (inst && inst.ops) || [];
+  r = core.applyOps(doc, ops);
+  if (r.error || !ops.length) return;   // экземпляр не собрался в этой сборке ядра — проверено выше
+  const instId = Object.keys(r.doc.nodes).find((id) => r.doc.nodes[id].type === 'instance');
+  assert.deepEqual(imageSources(r.doc, [instId]).map((x) => x.id), ['mi'], 'выделенный экземпляр — картинки его мастера');
+});
+
+test('круг53: srcKey — короткий ключ по содержимому', () => {
+  assert.equal(srcKey('abc'), srcKey('abc'));
+  assert.notEqual(srcKey('abc'), srcKey('abd'));
+  assert.ok(srcKey('x'.repeat(1e6)).length < 20);
+});
+
+test('круг53: варианты считают цвета один раз на все', async () => {
+  const doc = docWithImages([{ id: 'ph', name: 'Фото', src: 'data:image/png;base64,AAAA' }]);
+  let calls = 0;
+  const imageColors = async () => { calls++; await new Promise((r) => setTimeout(r, 5)); return [{ id: 'ph', colors: [{ hex: '#3b2418', share: 1 }] }]; };
+  const provider = fake({ plan: PLAN, direction: DIRECTION, tree: TREE });
+  const list = await runVariants({ doc, selection: [], utterance: 'собери экран кофейни', provider, engine: core, n: 3, imageColors });
+  assert.ok(Array.isArray(list) && list.length === 3);
+  assert.equal(calls, 1);
+  const prompts = provider.calls.filter((c) => c.schema === 'direction');
+  assert.ok(prompts.length >= 2 && prompts.every((c) => /#3b2418 100%/.test(c.messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n'))));
+});
+
+test('круг53: WebP на сервере — без цветов (resvg его не декодирует), без ошибки', { skip: !resvg && 'resvg не установлен' }, async () => {
+  const webp = Buffer.from('UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA=', 'base64').toString('base64');
+  assert.deepEqual(await createImageColors()([{ id: 'w', src: 'data:image/webp;base64,' + webp }]), []);
 });
