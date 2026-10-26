@@ -1,6 +1,6 @@
 /**
  * Круг 51 (SPEC §18): замер раскладки после одной правки — полная (solve) и по месту правки
- * (solveAfter). Документ: одна доска, карточки по 4 слоя (рамка, заголовок, текст, плашка),
+ * (solveAfter), круг 57 — и отмена той же правки (solveNext). Документ: одна доска, карточки по 4 слоя (рамка, заголовок, текст, плашка),
  * сеткой с переносом; правка — текст карточки в середине. Медиана из --runs прогонов.
  *   node tools/bench-layout.mjs [--nodes 1000,5000] [--runs 30] [--json]
  */
@@ -47,6 +47,7 @@ for (const n of SIZES) {
   let geo = core.solve(cur, { ...opts, incremental: true });
   const full = [];
   const inc = [];
+  const undo = [];
   for (let i = 0; i < RUNS; i++) {
     const op = [core.ops.set(mid, 'characters', `Правка ${i}: текст стал ${i % 2 ? 'короче' : 'заметно длиннее и займёт больше строк, чем раньше'}`)];
     const next = core.applyOps(cur, op).doc;
@@ -60,9 +61,18 @@ for (const n of SIZES) {
       if (core.hashGeometry(g1) !== core.hashGeometry(g2)) throw new Error(`n=${n}: геометрия по месту правки разошлась с полной`);
       geo = g2;
     } else geo = g1;
+    // круг 57: отмена той же правки — от памяти раскладки (solveNext), без прежнего документа
+    if (typeof core.solveNext === 'function') {
+      const back = core.applyOps(next, core.invertOps(cur, op)).doc;
+      t = performance.now();
+      const g3 = core.solveNext(geo, back, opts);
+      undo.push(performance.now() - t);
+      if (core.hashGeometry(g3) !== core.hashGeometry(core.solve(back, opts))) throw new Error(`n=${n}: отмена по месту разошлась с полной`);
+      geo = core.solveNext(g3, next, opts);
+    }
     cur = next;
   }
-  rows.push({ nodes: count, fullMs: +median(full).toFixed(2), incrementalMs: inc.length ? +median(inc).toFixed(2) : null });
+  rows.push({ nodes: count, fullMs: +median(full).toFixed(2), incrementalMs: inc.length ? +median(inc).toFixed(2) : null, undoMs: undo.length ? +median(undo).toFixed(2) : null });
 }
 if (JSON_OUT) console.log(JSON.stringify(rows));
-else for (const r of rows) console.log(`${r.nodes} слоёв: полная ${r.fullMs} мс${r.incrementalMs != null ? `, по месту правки ${r.incrementalMs} мс` : ''}`);
+else for (const r of rows) console.log(`${r.nodes} слоёв: полная ${r.fullMs} мс${r.incrementalMs != null ? `, по месту правки ${r.incrementalMs} мс` : ''}${r.undoMs != null ? `, отмена ${r.undoMs} мс` : ''}`);

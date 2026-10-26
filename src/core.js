@@ -7002,6 +7002,20 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
 }
 
 /**
+ * Круг 57 (SPEC §18.5): следующая раскладка от той, что уже есть, когда вызывающий не держит
+ * прежний документ: отмена и повтор, подтверждение сервера, отложенный кадр догона. Прежний
+ * документ — тот, от которого geo посчитана (память раскладки); нет памяти — полная раскладка.
+ * Результат тот же, что у solve(nextDoc).
+ * @param {object} prevGeo @param {object} nextDoc @param {{measureText?:Function}} [opts]
+ * @returns {object} geo
+ */
+function solveNext(prevGeo, nextDoc, opts) {
+  const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
+  if (memo && memo.doc === nextDoc && memo.fn === ((opts && opts.measureText) || null) && memo.epoch === measureEpochValue) return prevGeo;
+  return solveAfter(prevGeo, memo ? memo.doc : null, nextDoc, null, opts);
+}
+
+/**
  * Круг 51: правка не тронула геометрию (имя, замок…) — та же geo годится и для nextDoc; память
  * раскладки переходит к nextDoc, чтобы следующая правка снова шла по месту, а не полностью.
  * @returns {object} geo
@@ -13080,7 +13094,7 @@ async function boardPNG(doc, artboardId, opts = {}) {
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
   /* Круг 47 (SPEC §14.4): SVG доски без страницы — снимок для критика агента — */
-  renderSVG, boardPNG, solveAfter, solveCarry,
+  renderSVG, boardPNG, solveAfter, solveCarry, solveNext,
   /* Круг 31 (K1): большая отмена/правка — пачками в пределах транзакции — */
   splitOps, SPLIT_MAX_OPS, SPLIT_MAX_BYTES,
   /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */
