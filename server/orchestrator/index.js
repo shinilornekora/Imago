@@ -85,7 +85,7 @@ export async function start(opts = {}) {
     timeout: num(env.LLM_TIMEOUT_MS),
     // круг 31: потолок тела ответа модели, байт (умолчание — 8 МБ)
     maxBodyBytes: num(env.LLM_MAX_BODY_BYTES),
-    // круг 47: видит ли модель картинки (1/0; пусто — узнать по первому отказу)
+    // круг 47: видит ли модель картинки (1/0; пусто — у openai нет, у anthropic да)
     vision: flag(env.LLM_VISION),
   };
 

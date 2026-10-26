@@ -9382,6 +9382,8 @@ class Stage {
       let src = safeImageSrc(node.src);
       // на время снимка внешние адреса подменены на data: — см. screenshot()
       if (src && this._srcMap && this._srcMap.has(src)) src = this._srcMap.get(src);
+      // круг 47: снимок без сети (сервер) — внешняя картинка плашкой, а не прозрачной дырой
+      if (src && this._noExternal && isExternalSrc(src)) { src = null; this._placeholders = (this._placeholders || 0) + 1; }
       if (fill || !src) {
         out.push(svgEl('rect', { x, y, width: r2(rect.w), height: r2(rect.h), rx: radius, fill: fill || '#E2DED6' }));
       }
@@ -11969,8 +11971,9 @@ function headlessStage(doc, geo, id, embedFonts) {
  * `families`); `fonts: true` встраивает то, что уже лежит в кеше экспорта.
  * @param {object} doc
  * @param {string} artboardId доска (или любой узел, у которого есть геометрия)
- * @param {{geo?:object, measureText?:Function, fonts?:boolean}} [opts]
- * @returns {{svg:string, width:number, height:number, families:string[]}|null} null — рисовать нечего
+ * @param {{geo?:object, measureText?:Function, fonts?:boolean, srcMap?:Map, maxHeight?:number, externalImages?:'placeholder'}} [opts]
+ *   maxHeight — верх доски (`cropped`); externalImages 'placeholder' — внешние картинки плашкой (`placeholders`)
+ * @returns {{svg:string, width:number, height:number, fullHeight:number, cropped:boolean, families:string[], weights:object, placeholders:number}|null} null — рисовать нечего
  */
 function renderSVG(doc, artboardId, opts = {}) {
   if (!doc || !doc.nodes || typeof artboardId !== 'string') return null;
@@ -11979,6 +11982,7 @@ function renderSVG(doc, artboardId, opts = {}) {
   const rect = geo.rects[artboardId];
   if (!rect) return null;
   const st = headlessStage(doc, geo, artboardId, !!opts.fonts);
+  if (opts.externalImages === 'placeholder') st._noExternal = true;
   const prev = svgDom;
   svgDom = memDom;
   try {
@@ -12000,7 +12004,7 @@ function renderSVG(doc, artboardId, opts = {}) {
       const W = r2(rect.w);
       svg = svg.replace(/<svg ([^>]*?)height="[^"]*"([^>]*?)viewBox="0 0 [^ "]+ [^"]+"/, `<svg $1height="${height}"$2viewBox="0 0 ${W} ${height}"`);
     }
-    return { svg, width: r2(rect.w), height, fullHeight: r2(rect.h), cropped, families, weights };
+    return { svg, width: r2(rect.w), height, fullHeight: r2(rect.h), cropped, families, weights, placeholders: st._placeholders || 0 };
   } finally {
     svgDom = prev;
   }
@@ -12049,7 +12053,7 @@ async function boardPNG(doc, artboardId, opts = {}) {
     ctx.drawImage(img, 0, 0, W, H);
     const dataUrl = canvas.toDataURL('image/png');
     const comma = dataUrl.indexOf(',');
-    return comma > 0 ? { mime: 'image/png', data: dataUrl.slice(comma + 1), width: W, height: H, cropped: out.cropped, fullHeight: out.fullHeight } : null;
+    return comma > 0 ? { mime: 'image/png', data: dataUrl.slice(comma + 1), width: W, height: H, cropped: out.cropped, shownHeight: out.height, fullHeight: out.fullHeight } : null;
   } catch (e) {
     logOnce('boardPNG', 'снимок доски для критика не получился', e);
     return null;

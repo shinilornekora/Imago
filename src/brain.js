@@ -888,7 +888,8 @@ function treeNodeSchema(depth = MAX_TREE_DEPTH, maxChildren = MAX_CHILDREN) {
       color: colorSchema(),
       radius: scaleValueSchema(),
       text: { type: 'string' },
-      style: { type: 'string' },
+      // круг 47: стиль — токен строкой либо {token, fontSize} (крупный акцент при арт-направлении)
+      style: { anyOf: [{ type: 'string' }, { type: 'object', properties: { token: { type: 'string' }, fontSize: { type: 'number' } }, required: ['token'] }] },
       align: { type: 'string', enum: ['left', 'center', 'right'] },
       src: { type: 'string' },
       // круг 36 (SPEC §11): тень, прозрачность, состояния и движение
@@ -945,7 +946,7 @@ const TREE_HINT = `{
   fill?: string,                       // имя токена цвета или #rrggbb
   stroke?: string, color?: string, radius?: "radii.<шаг>" | number,   // скругление — ссылкой на шаг шкалы скруглений
   text?: string,                       // только для type:"text"
-  style?: string,                      // имя типографического токена, только для type:"text"
+  style?: string | {token: string, fontSize: number},  // имя типографического токена, только для type:"text"; объект — только при АРТ-НАПРАВЛЕНИИ, 1-2 крупным акцентам
   align?: "left"|"center"|"right",   // выключка текста
   src?: string,                        // только для type:"image"
   shadow?: "shadow.sm"|"shadow.md"|"shadow.lg"|"none", opacity?: number,   // тень и прозрачность в покое
@@ -1340,13 +1341,13 @@ export const SCHEMAS = {
   composition: string (приём раскладки одной фразой),
   avoid: string[] (чего не делать в ЭТОМ макете) }`,
     example: {
-      concept: 'Утренняя кофейня: крафтовый пакет, эмалированная кружка, мел на доске',
-      mood: ['тепло', 'неторопливо', 'ремесленно'],
-      materials: [{ name: 'крафт-бумага', hex: '#c9a77c' }, { name: 'эспрессо', hex: '#3b2418' }, { name: 'молочная пенка', hex: '#f4ead8' }, { name: 'эмаль', hex: '#2f6f62' }],
-      palette: { bg: '#f4ead8', surface: '#fffaf1', text: '#2b1a12', muted: '#6e5646', accent: '#2f6f62', accent2: '#c9a77c' },
-      fonts: { display: 'Prata', text: 'Golos Text' },
-      motifs: ['круглый штамп с надписью', 'крупные цифры цены', 'зерно кофе иллюстрацией'],
-      composition: 'асимметрия: крупный заголовок слева, меню колонкой справа, цены выносом',
+      concept: 'Мастерская переплётчика: кожаный корешок, льняная нить, бумага верже, латунное тиснение',
+      mood: ['тихо', 'вручную', 'основательно'],
+      materials: [{ name: 'бумага верже', hex: '#efe6d2' }, { name: 'кожа корешка', hex: '#5a2e1f' }, { name: 'латунь', hex: '#b08d3c' }, { name: 'льняная нить', hex: '#d8ccb4' }],
+      palette: { bg: '#efe6d2', surface: '#f8f2e4', text: '#2a1a12', muted: '#6b5644', accent: '#5a2e1f', accent2: '#b08d3c' },
+      fonts: { display: 'Old Standard TT', text: 'PT Serif' },
+      motifs: ['нить-разделитель пунктиром', 'тиснёная плашка с номером тома', 'поля как на развороте'],
+      composition: 'разворот: узкая колонка заголовка слева, текст с широкими полями справа',
       avoid: ['белые карточки в ряд', 'синий акцент'],
     },
     // круг 47: образец — про ФОРМУ ответа; слабая модель иначе переносит крафт и Prata в любой экран
@@ -1979,6 +1980,17 @@ const DSL_RULES = `ПРАВИЛА МОДЕЛИ ДОКУМЕНТА (DSL)
     size:{w:160, h:160}, draw:"печенька с шоколадной крошкой, вид сверху"} — её нарисует иллюстратор
     кривыми, с тенями и бликами. Остальное (текст, кнопки, карточка вокруг) собирай как обычно.`;
 
+/**
+ * Круг 47 (SPEC §14.1): правила 4 и 5 при арт-направлении — цвета из палитры образа, у 1–2
+ * акцентов свой кегль. Иначе модель видит два противоречащих правила и правило дальше по тексту.
+ */
+function directedRules() {
+  return DSL_RULES
+    .replace(/^4\. Цвета .*$/m, '4. Цвета (fill, stroke, color) — #rrggbb из палитры АРТ-НАПРАВЛЕНИЯ ниже. Токены цвета документа в этом макете не пиши.')
+    .replace(/^5\. Типографика .*$/m, '5. Типографика текста — style: имя типографического токена ИЗ СПИСКА ВЫШЕ; одному-двум главным акцентам —'
+      + ' style:{token:"display", fontSize:<до 96>}. Остальным fontSize числом не пиши.');
+}
+
 const CONTENT_RULES = `СОДЕРЖИМОЕ
 - Текст, числа, названия, которые дал пользователь, переноси ДОСЛОВНО. Ничего не выдумывай на месте заданного и не «улучшай» формулировки.
 - Там, где содержимое не задано, напиши осмысленный русский текст по теме запроса: настоящие заголовки, подписи, суммы, даты, имена разделов.
@@ -2103,7 +2115,7 @@ export const PROMPTS = {
     return [
       header(ctx, 'Твоя роль сейчас — генератор макета: вернуть дерево узлов.'),
       '',
-      DSL_RULES,
+      ctx.directionHint ? directedRules() : DSL_RULES,
       '',
       ctx.scales ? `${scaleRules(ctx.scales, 'tree')}\n` : '',
       ctx.comps && ctx.comps.length ? `${componentRules(ctx.comps, 'tree')}\n` : '',
@@ -2342,7 +2354,6 @@ export const PROMPTS = {
   палитру и шрифты, меняй только мотивы и композицию.`,
       '',
       fontMenu(),
-      'Пара, у которой тема в скобках совпадает с твоей, — самый очевидный ход: бери её, только если образ правда о том же.',
       '',
       JSON_RULE,
     ].filter((x) => x != null && x !== '').join('\n');
@@ -10725,9 +10736,11 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
   /* Круг 11, п.3: сказать вслух, что правка легла на ВЕСЬ документ. Говорим только когда
    * артбордов больше одного: на единственном экране это не новость, а шум. */
   const boards = kidsOf(nodeOf(doc, doc.root)).filter((id) => nodeOf(doc, id));
+  // круг 47: доски в собственной палитре (фон — #rrggbb) цвета темы не перекрасят — их не перечисляем
+  const ownPalette = (id) => { const b = nodeOf(doc, id); return !!b && typeof b.fill === 'string' && HEX_RE.test(b.fill.trim()); };
   if (boards.length > 1) {
     const here = scope ? artboardOf(doc, (scope.ids && scope.ids[0]) || scope.containerId) : null;
-    const others = boards.filter((id) => id !== here).map((id) => nameOrId(doc, id));
+    const others = boards.filter((id) => id !== here && !(touched.has('colors') && touched.size === 1 && ownPalette(id))).map((id) => nameOrId(doc, id));
     const list = others.slice(0, 3).join(', ') + (others.length > 3 ? ` и ещё ${others.length - 3}` : '');
     const WHAT = { colors: 'цвета', type: 'шрифты и кегли', spacing: 'шкала отступов', radii: 'шкала скруглений', motion: 'скорость анимаций', shadow: 'тени', other: 'оформление' };
     const what = [...touched].map((k) => WHAT[k] || WHAT.other);
@@ -11586,6 +11599,8 @@ export const DIRECTION_ROLES = Object.freeze(['bg', 'surface', 'text', 'muted', 
 const MUTED_NORM = 3;
 /** Ниже этой оценки критика макет дорабатывается (SPEC §14.3). */
 export const CRITIC_PASS = 7;
+/** Без модели-критика: столько примет шаблона и больше — доработка (SPEC §14.3). */
+export const SIGNALS_REVISE = 2;
 /** Сколько ждать снимок доски для критика, мс: дольше — критик судит по выжимке. */
 export const CRITIC_RENDER_MS = 20000;
 /** Сторона снимка для критика, px: больше — дорого модели, меньше — не разглядеть. */
@@ -11858,9 +11873,9 @@ export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
         fonts++;
       }
       if (n.color == null || n.color === '') {
-        // читаемый на своей заливке: на акценте — текст на акценте, иначе — текст палитры
+        // читаемый на своей заливке: текст палитры, если он читается; иначе — что контрастнее
         const bgHex = fillHex || P.bg;
-        n.color = contrastOf(P.text, bgHex) >= contrastOf(P.onAccent, bgHex) ? P.text : P.onAccent;
+        n.color = contrastOf(P.text, bgHex) >= CONTRAST_NORM || contrastOf(P.text, bgHex) >= contrastOf(P.onAccent, bgHex) ? P.text : P.onAccent;
         colors++;
       }
     }
@@ -12049,9 +12064,10 @@ function signalFixes(signals) {
 
 /** Дерево для «твоего прежнего ответа» в доработке: без нарисованных иллюстраций, без пробелов. */
 function treeForRevise(data, limit = 20000) {
+  // глубина — по узлам дерева, а не по массивам children (иначе рисунки глубже 4-го уровня оставались)
   const strip = (n, d) => {
-    if (!n || typeof n !== 'object' || d > MAX_TREE_DEPTH + 2) return n;
-    if (Array.isArray(n)) return n.map((x) => strip(x, d + 1));
+    if (!n || typeof n !== 'object' || d > MAX_TREE_DEPTH * 4) return n;
+    if (Array.isArray(n)) return n.map((x) => strip(x, d));
     const o = {};
     for (const k of Object.keys(n)) if (k !== 'art') o[k] = strip(n[k], d + 1);
     return o;
@@ -12074,11 +12090,10 @@ function builtBoard(ops, after) {
 }
 
 /**
- * Круг 47 (SPEC §14.3): критик над собранной доской. Снимок — от render (браузер или сервер),
- * если модель видит картинки (`provider.vision !== false`); модель отказала в картинке — повтор
- * по выжимке, и провайдер помечается «без зрения» до конца жизни (следующие команды картинку не
- * шлют). Без render — сразу по выжимке.
- * @returns {Promise<object|null>} нормализованный вердикт с полем seen: 'image' | 'text'
+ * Круг 47 (SPEC §14.3): самопроверка собранной доски. Приметы шаблона — всегда, без модели. Снимок
+ * (render — браузер или сервер) и модель-критик — только если зрение заявлено (`provider.vision ===
+ * true`); снимка нет или модель его не приняла — решают приметы (от SIGNALS_REVISE — доработка).
+ * @returns {Promise<object|null>} нормализованный вердикт с полем seen: 'image' | 'signals'
  */
 async function critiqueBoard({ engine, attempt, direction, utterance, plan, render, signal, provider, ask, emit, serviceNote }) {
   const after = attempt.preview.doc;
@@ -12103,7 +12118,7 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
    * стоит как вся раскладка. Решают приметы шаблона: от двух — доработка по ним. */
   if (!image) {
     const crit = {
-      score: null, generic: signals.length >= 2, verdict: signals.length >= 2 ? 'revise' : 'ok',
+      score: null, generic: signals.length >= SIGNALS_REVISE, verdict: signals.length >= SIGNALS_REVISE ? 'revise' : 'ok',
       issues: signals.slice(0, 5), fixes: signalFixes(signals), praise: '', seen: 'signals', signals,
     };
     if (crit.verdict === 'revise' && !crit.fixes.length) crit.verdict = 'ok';
@@ -12113,8 +12128,10 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
   }
   const layers = cutText(describeDoc(boardOnlyDoc(after, boardId), [boardId], { engine, geo, limit: 2000, scopeKind: 'selection' }), 2000);
   const notes = [
-    image.cropped ? `Снимок показывает верх доски: ${image.height} из ${Math.round(image.fullHeight || 0) || '?'} px по высоте снимка.` : '',
+    image.cropped && image.fullHeight > 0 && image.shownHeight > 0
+      ? `Снимок показывает верх доски — ${Math.round(image.shownHeight)} из ${Math.round(image.fullHeight)} px; о том, чего не видно, не суди.` : '',
     image.approxText ? 'Переносы строк на снимке приблизительные: о вылезающем за плашки тексте не суди.' : '',
+    image.placeholders ? 'Серые плашки на снимке — картинки, которые сервер не загружал: это не пустые места макета.' : '',
   ].filter(Boolean).join(' ');
   const raw = await ask(SCHEMAS.critique, [
     { role: 'system', content: PROMPTS.critic({
@@ -12573,7 +12590,7 @@ async function runCommandCore(options = {}) {
     // доски на IBM Plex — не образ, а разнобой)
     const newBoard = !!(placement.asArtboard || placement.screenInSelection);
     if (intent === 'create' && directionOpt !== false && newBoard) {
-      emit('direct', 'Решаю образ, палитру и шрифты');
+      emit('direct', '');
       try {
         const raw = await ask(SCHEMAS.direction, [
           { role: 'system', content: PROMPTS.direction({
@@ -12794,8 +12811,12 @@ async function runCommandCore(options = {}) {
           } else {
             emit('materialize', 'Прикладываю доработку');
             const next = materialize({ engine, doc, data: fixed, intent, scope, placement, persona, baseline, geo: geoNow, group, said: utterance });
+            // доработка по приметам — только если примет стало меньше (считаются без модели)
+            const nextBoard = next.preview && next.preview.doc ? builtBoard(next.ops, next.preview.doc) : null;
+            const fewer = critique.seen !== 'signals' || (nextBoard
+              && templateSignals(engine, next.preview.doc, nextBoard, { dir: direction }).length < critique.signals.length);
             if (!next.fatal && !next.nothingChanged && next.blocking.length <= attempt.blocking.length
-              && keepsContent(attempt.ops, next.ops)) {
+              && keepsContent(attempt.ops, next.ops) && fewer) {
               data = fixed;
               attempt = next;
               critique.revised = true;

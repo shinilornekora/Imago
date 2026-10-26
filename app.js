@@ -193,12 +193,16 @@ async function renderForCritic({ doc, geo, artboardId }) {
   try {
     if (document.fonts && typeof document.fonts.load === 'function') {
       const fams = fontsInDoc(doc).filter((f) => catalogFont(f));
-      await Promise.race([
-        Promise.all(fams.map((f) => document.fonts.load(`16px "${f}"`, 'Аа0').catch(() => null))),
-        new Promise((r) => setTimeout(r, 4000)),
-      ]);
-      await new Promise((r) => setTimeout(r, 0));
-      geo = CORE.solve(doc);
+      // уже на странице — раскладка черновика посчитана ими же, перемерять (весь документ) незачем
+      const missing = fams.filter((f) => { try { return !document.fonts.check(`16px "${f}"`, 'Аа0'); } catch { return true; } });
+      if (missing.length) {
+        await Promise.race([
+          Promise.all(missing.map((f) => document.fonts.load(`16px "${f}"`, 'Аа0').catch(() => null))),
+          new Promise((r) => setTimeout(r, 4000)),
+        ]);
+        await new Promise((r) => setTimeout(r, 0));
+        geo = CORE.solve(doc);
+      }
     }
   } catch { /* перемерить не вышло — снимок по прежней раскладке */ }
   return CORE.boardPNG(doc, artboardId, { geo });
@@ -9960,6 +9964,8 @@ function retryActions(err, utterance) {
    оформления легла на ВЕСЬ документ; шрифты в файл не встроились (круг 11, п.18). */
 const LEAD_WARN = [
   /^Оформление документа общее/i,
+  // круг 47: тема документа не перекрасит экраны в собственной палитре — это человек должен прочесть
+  /собран\S* в собственной палитре/i,
   /начертани\S*\s.*не встро/i,
   /в PNG не встроились/i,
 ];

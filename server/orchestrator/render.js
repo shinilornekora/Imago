@@ -20,8 +20,8 @@
  * семейству, не больше FONT_CACHE_FAMILIES семейств (старые вытесняются).
  */
 
-import { renderSVG } from '../../src/core.js';
-import { catalogFont, DEFAULT_FONT } from '../../src/fonts.js';
+import { renderSVG, solve } from '../../src/core.js';
+import { catalogFont, nearestWeight, DEFAULT_FONT } from '../../src/fonts.js';
 import { RENDER_FONT_TIMEOUT_MS, FONT_CACHE_FAMILIES, RENDER_FONT_MAX_BYTES, RENDER_DEADLINE_MS, RENDER_FONT_FAIL_TTL_MS } from './limits.js';
 
 const CSS_ORIGIN = 'https://fonts.googleapis.com/css2';
@@ -87,10 +87,9 @@ export function createRenderer(opts = {}) {
   const failed = new Map();
   let warnedAt = -Infinity;
 
-  async function get(url, read, signal) {
+  /** Один файл со своим сроком: загрузка общая для всех команд, отмена одной её не касается. */
+  async function get(url, read) {
     const ctl = new AbortController();
-    const onAbort = () => ctl.abort();
-    if (signal) { if (signal.aborted) ctl.abort(); else signal.addEventListener('abort', onAbort, { once: true }); }
     const t = setTimeout(() => ctl.abort(), timeoutMs);
     try {
       // без переходов: адрес проверен, а переадресация увела бы запрос куда угодно
@@ -99,60 +98,83 @@ export function createRenderer(opts = {}) {
       return await read(res);
     } finally {
       clearTimeout(t);
-      if (signal) signal.removeEventListener('abort', onAbort);
     }
   }
 
-  function family(name, signal) {
+  /**
+   * Файлы семейства в нужных начертаниях (только существующих у семейства). Загрузка общая:
+   * ждущие команды делят один промис; общий срок снимка её не обрывает — она доходит в фоне и
+   * кладёт файлы в кеш (или неудачу — на failTtl).
+   */
+  function family(name, want) {
     const f = catalogFont(name);
     if (!f) return Promise.resolve([]);
+    const ws = [...new Set((want && want.length ? want : f.weights).map((w) => nearestWeight(f.family, w)))].sort((a, b) => a - b);
+    const key = `${f.family}:${ws.join(',')}`;
     if ((failed.get(f.family) || 0) > now()) return Promise.resolve([]);
-    let p = fonts.get(f.family);
-    if (p) { fonts.delete(f.family); fonts.set(f.family, p); return p; }   // свежесть для вытеснения
+    let p = fonts.get(key);
+    if (p) { fonts.delete(key); fonts.set(key, p); return p; }   // свежесть для вытеснения
     p = (async () => {
       try {
-        const url = `${CSS_ORIGIN}?family=${encodeURIComponent(f.family).replace(/%20/g, '+')}:wght@${f.weights.join(';')}`;
-        const css = (await get(url, (r) => readCapped(r, 256 * 1024), signal)).toString('utf8');
+        const url = `${CSS_ORIGIN}?family=${encodeURIComponent(f.family).replace(/%20/g, '+')}:wght@${ws.join(';')}`;
+        const css = (await get(url, (r) => readCapped(r, 256 * 1024))).toString('utf8');
         const files = [...css.matchAll(/url\((https:\/\/fonts\.gstatic\.com\/[^)\s'"]+\.ttf)\)/g)].map((m) => m[1]);
         const out = [];
         for (const file of files) {
           if (!file.startsWith(FILE_ORIGIN)) continue;
-          const buf = await get(file, (r) => readCapped(r, RENDER_FONT_MAX_BYTES), signal);
+          const buf = await get(file, (r) => readCapped(r, RENDER_FONT_MAX_BYTES));
           if (buf.length) out.push(buf);
         }
         if (!out.length) throw new Error('в стилях нет файлов');
         return out;
       } catch (e) {
-        fonts.delete(f.family);
-        if (signal && signal.aborted) return [];          // отменили команду — сеть не виновата
+        fonts.delete(key);
         failed.set(f.family, now() + failTtl);
         // одна строка на причину не чаще раза в минуту (как советы администратору, круг 26)
         if (now() - warnedAt > 60000) {
           warnedAt = now();
-          log.warn(`[orchestrator/render] шрифт «${f.family}» не получен (${e && e.message ? e.message : e}) — критик посмотрит описание доски; снова попробую через ${Math.round(failTtl / 60000)} мин`);
+          log.warn(`[orchestrator/render] шрифт «${f.family}» не получен (${e && e.message ? e.message : e}) — самопроверка пойдёт по приметам; снова попробую через ${Math.round(failTtl / 60000)} мин`);
         }
         return [];
       }
     })();
-    fonts.set(f.family, p);
+    fonts.set(key, p);
     while (fonts.size > FONT_CACHE_FAMILIES) fonts.delete(fonts.keys().next().value);
     return p;
   }
 
-  async function shot({ doc, geo, artboardId, signal }) {
+  /** Подождать промис, но не дольше отмены команды: отмена — null, загрузка идёт дальше. */
+  function untilAbort(p, signal) {
+    if (!signal) return p;
+    if (signal.aborted) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const onAbort = () => resolve(null);
+      signal.addEventListener('abort', onAbort, { once: true });
+      p.then((v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+        () => { signal.removeEventListener('abort', onAbort); resolve(null); });
+    });
+  }
+
+  async function shot({ doc, geo: geoIn, artboardId, signal, drawing }) {
     const mod = opts.resvg !== undefined ? opts.resvg : await loadResvg();
     if (!mod || typeof mod.Resvg !== 'function') return null;
-    const rect = geo && geo.rects ? geo.rects[artboardId] : null;
-    const k = rect && rect.w > 0 ? Math.min(1, SHOT_W / rect.w) : 1;
-    const out = renderSVG(doc, artboardId, { geo, maxHeight: SHOT_H / k });
+    const geo = geoIn && geoIn.rects ? geoIn : solve(doc);
+    const rect = geo.rects[artboardId];
+    if (!rect) return null;
+    const k = rect.w > 0 ? Math.min(1, SHOT_W / rect.w) : 1;
+    // внешних картинок сервер не тянет — плашкой (критику об этом сказано)
+    const out = renderSVG(doc, artboardId, { geo, maxHeight: SHOT_H / k, externalImages: 'placeholder' });
     if (!out || !out.svg) return null;
-    const need = out.families;
-    const lists = await Promise.all([...new Set([...need, DEFAULT_FONT])].map((n) => family(n, signal)));
+    const need = [...new Set([...out.families, DEFAULT_FONT])];
+    const lists = await untilAbort(Promise.all(need.map((n) => family(n, out.weights[n]))), signal);
+    if (!lists) return null;
     // семейство доски не пришло — снимок нарисовал бы его чужим шрифтом и обманул критика
-    const byName = new Map([...new Set([...need, DEFAULT_FONT])].map((n, i) => [n, lists[i]]));
-    if (need.some((n) => catalogFont(n) && !byName.get(n).length)) return null;
-    if (need.length && !lists.flat().length) return null;
+    if (need.some((n, i) => out.families.includes(n) && catalogFont(n) && !lists[i].length)) return null;
+    if (out.families.length && !lists.flat().length) return null;
+    if (signal && signal.aborted) return null;
     const width = Math.max(1, Math.round(out.width * k));
+    // сеть кончилась — дальше счёт: воркер снова под сторожем WORKER_TIMEOUT_MS
+    if (typeof drawing === 'function') { try { drawing(); } catch { /* сторож — не наша забота */ } }
     try {
       const png = new mod.Resvg(out.svg.replace(EMOJI_RE, ''), {
         fitTo: { mode: 'width', value: width },
@@ -161,9 +183,12 @@ export function createRenderer(opts = {}) {
       }).render().asPng();
       return {
         mime: 'image/png', data: Buffer.from(png).toString('base64'),
-        width, height: Math.max(1, Math.round(out.height * k)), cropped: out.cropped, fullHeight: out.fullHeight,
+        width, height: Math.max(1, Math.round(out.height * k)), cropped: out.cropped,
+        // доля показанного — в пикселях доски, а не снимка
+        shownHeight: out.height, fullHeight: out.fullHeight,
         // ширины строк на сервере — приближённые (canvas нет): переносы могут не совпасть с экраном
         approxText: true,
+        ...(out.placeholders ? { placeholders: out.placeholders } : {}),
       };
     } catch (e) {
       log.warn(`[orchestrator/render] снимок не собрался: ${e && e.message ? e.message : e}`);

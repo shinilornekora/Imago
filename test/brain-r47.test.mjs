@@ -38,7 +38,16 @@ function fake(script, extra = {}) {
 }
 
 const PLAN = { intent: 'create', title: 'Экран кофейни', summary: 'Соберу экран меню кофейни', steps: ['Шапка', 'Меню'] };
-const DIRECTION = SCHEMAS.direction.example;
+const DIRECTION = {
+  concept: 'Утренняя кофейня: крафтовый пакет, эмалированная кружка, мел на доске',
+  mood: ['тепло', 'неторопливо', 'ремесленно'],
+  materials: [{ name: 'крафт-бумага', hex: '#c9a77c' }, { name: 'эспрессо', hex: '#3b2418' }, { name: 'молочная пенка', hex: '#f4ead8' }, { name: 'эмаль', hex: '#2f6f62' }],
+  palette: { bg: '#f4ead8', surface: '#fffaf1', text: '#2b1a12', muted: '#6e5646', accent: '#2f6f62', accent2: '#c9a77c' },
+  fonts: { display: 'Prata', text: 'Golos Text' },
+  motifs: ['круглый штамп с надписью', 'крупные цифры цены', 'зерно кофе иллюстрацией'],
+  composition: 'асимметрия: крупный заголовок слева, меню колонкой справа, цены выносом',
+  avoid: ['белые карточки в ряд', 'синий акцент'],
+};
 const TREE = {
   type: 'frame', name: 'Кофейня', size: { w: 390, h: 'hug' },
   layout: { mode: 'column', gap: 16, padding: 24 },
@@ -153,7 +162,8 @@ test('круг 47: схемы direction и critique понижаются для 
     assert.equal(flat.type, 'object');
     assert.ok(s.hint && s.example);
   }
-  assert.deepEqual(normalizeDirection(SCHEMAS.direction.example).fonts, { display: 'Prata', text: 'Golos Text' });
+  assert.deepEqual(normalizeDirection(SCHEMAS.direction.example).fonts, { display: 'Old Standard TT', text: 'PT Serif' });
+  assert.doesNotMatch(JSON.stringify(SCHEMAS.direction.example), /кофе/i, 'образец формы — не о самой частой теме');
   assert.equal(normalizeCritique(SCHEMAS.critique.example).verdict, 'revise');
 });
 
@@ -490,7 +500,11 @@ test('круг 47: карточка итога — образ, образцы п
   assert.equal(artSummary(null, { score: null, verdict: 'ok', seen: 'image' }), null, 'оценки нет — нечего показывать');
   // при нечитаемом тексте оценка вида не показывается
   assert.equal(artSummary(normalizeDirection(DIRECTION), { score: 9, verdict: 'ok', seen: 'image' }, { blocked: true }).verdict, '');
-  assert.equal(artSummary(null, { seen: 'signals', signals: [], verdict: 'ok' }).verdict, 'Самопроверка: примет шаблона нет');
+  assert.equal(artSummary(null, { seen: 'signals', signals: [], verdict: 'ok' }).verdict, 'Самопроверка: шаблонных ходов не нашёл');
+  assert.equal(artSummary(null, { seen: 'signals', signals: ['Почти весь текст по центру'], issues: ['Почти весь текст по центру'], verdict: 'ok' }).verdict,
+    'Самопроверка: почти без шаблона — почти весь текст по центру');
+  assert.match(artSummary(null, { seen: 'signals', signals: ['a', 'b'], verdict: 'revise' }).verdict, /доработка не легла/);
+  assert.deepEqual(artSummary({ fonts: { display: 'Prata', text: 'Prata' } }, null).families, ['Prata'], 'один шрифт — один образец');
 });
 
 test('круг 47: промпт критика — со снимком, слоями, замечаниями проверки и пометками о снимке', () => {
@@ -532,4 +546,32 @@ test('круг 47: тема документа при досках в своей
     theme: { summary: 'Тёмная', colors: [{ name: 'canvas', value: '#101418' }, { name: 'text', value: '#f2f4f8' }] } });
   const res = await runCommand({ doc: d2, selection: [], utterance: 'сделай тёмную тему', provider, engine: core });
   assert.ok(res.warnings.some((w) => /собран в собственной палитре/.test(w)), res.warnings.join(' | '));
+});
+
+test('круг 47: доработка по приметам принимается, только если примет стало меньше', async () => {
+  const plain = { type: 'frame', name: 'Плоско', children: [
+    { type: 'text', name: 'А', text: 'Один', style: 'body', align: 'center' }, { type: 'text', name: 'Б', text: 'Два', style: 'body', align: 'center' },
+    { type: 'text', name: 'В', text: 'Три', style: 'body', align: 'center' }, { type: 'text', name: 'Г', text: 'Четыре', style: 'body', align: 'center' },
+  ] };
+  const provider = fake({ plan: PLAN, tree: [plain, clone(plain)] });
+  const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, direction: false });
+  assert.equal(res.error, undefined);
+  assert.equal(provider.calls.filter((c) => c.schema === 'tree').length, 2, 'доработку попросили');
+  assert.notEqual(res.critique.revised, true, 'примет столько же — оставлен первый вариант');
+  assert.ok(res.serviceNotes.some((n) => /собралась хуже/.test(n)));
+});
+
+test('круг 47: при арт-направлении правила 4 и 5 переписаны — без противоречия «предпочитай токены»', async () => {
+  const provider = fake({ plan: PLAN, direction: DIRECTION, tree: TREE });
+  await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core });
+  const sys = provider.calls.find((c) => c.schema === 'tree').messages[0].content;
+  assert.match(sys, /4\. Цвета \(fill, stroke, color\) — #rrggbb из палитры АРТ-НАПРАВЛЕНИЯ/);
+  assert.doesNotMatch(sys, /Предпочитай токены/);
+  assert.match(sys, /fontSize:<до 96>/);
+  // без направления — как раньше
+  const p2 = fake({ plan: PLAN, tree: TREE });
+  await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider: p2, engine: core, direction: false, critic: false });
+  assert.match(p2.calls.find((c) => c.schema === 'tree').messages[0].content, /Предпочитай токены/);
+  // схема дерева принимает style объектом — грамматика локальной модели его не запрещает
+  assert.ok(JSON.stringify(SCHEMAS.tree.schema).includes('"fontSize"'));
 });

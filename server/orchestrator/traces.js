@@ -9,6 +9,21 @@
 import { TRACE_RING } from './limits.js';
 import { cutText, cleanText } from '../../src/core.js';
 
+/** Палитра и шрифты для трассы: только роли с #rrggbb и имена семейств. */
+function cleanArt(a, s) {
+  const palette = {};
+  const p = a.palette && typeof a.palette === 'object' ? a.palette : {};
+  for (const k of ['bg', 'surface', 'text', 'muted', 'accent', 'accent2', 'onAccent']) {
+    if (typeof p[k] === 'string' && /^#[0-9a-f]{6}$/i.test(p[k])) palette[k] = p[k].toLowerCase();
+  }
+  const f = a.fonts && typeof a.fonts === 'object' ? a.fonts : {};
+  return {
+    ...(typeof a.tx_id === 'string' ? { tx_id: s(a.tx_id, 128) } : {}),
+    palette,
+    fonts: { display: s(f.display || '', 60) || '', text: s(f.text || '', 60) || '' },
+  };
+}
+
 /**
  * @param {{doc: ReturnType<import('./docclient.js').createDocClient>, token?: string, path?: string, redact?: (s:string)=>string, log?: object}} o
  */
@@ -51,6 +66,13 @@ export function createTraces({ doc: net, token = '', path = '/api/internal/trace
       engine: t.engine,
       ...(t.model ? { model: s(t.model, 120) } : {}),
       ...(t.llm_kind ? { llm_kind: t.llm_kind } : {}),
+      // круг 47 (SPEC §14.5): палитра образа (роль → #rrggbb) и шрифты записанной правки; итог самопроверки
+      ...(t.art && typeof t.art === 'object' ? { art: cleanArt(t.art, s) } : {}),
+      ...(t.critique && typeof t.critique === 'object' ? { critique: {
+        seen: t.critique.seen === 'image' ? 'image' : 'signals',
+        score: Number.isFinite(t.critique.score) ? t.critique.score : null,
+        revised: !!t.critique.revised,
+      } } : {}),
     };
   }
 

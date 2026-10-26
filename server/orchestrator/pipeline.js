@@ -625,6 +625,10 @@ export function createPipeline(deps) {
     }, step);
     const result = resultOf(out, res, historyTitle(res, cmd.text));
     Object.assign(trace, { tx_id: out.tx_id, seq: out.seq, ops: result.applied, dropped: result.dropped.length });
+    /* Круг 47 (SPEC §14.5): решение арт-директора — в трассу при записи (роль → #rrggbb, шрифты): цвета
+       образа лежат в узлах без роли, и теме на доску (круг 48) понадобится, какой hex какой роли. */
+    if (result.direction) trace.art = { tx_id: out.tx_id, palette: result.direction.palette, fonts: result.direction.fonts };
+    if (result.critique) trace.critique = { seen: result.critique.seen, score: result.critique.score, revised: !!result.critique.revised };
     sink.send('result', result);
   }
 

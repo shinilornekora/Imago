@@ -175,7 +175,8 @@ export function fontsInDoc(doc) {
 
 /** Пары и семейства словами — блок промпта арт-директора. */
 export function fontMenu() {
-  const pairs = FONT_PAIRS.map((p) => `- ${p.display} + ${p.text} — ${p.mood} (${p.fits})`);
+  // только настроение: тема пары («кофейня») подсказывала самый очевидный ход вместо образа
+  const pairs = FONT_PAIRS.map((p) => `- ${p.display} + ${p.text} — ${p.mood}`);
   const kinds = { sans: 'гротески', serif: 'антиквы', slab: 'брусковые', display: 'акцидентные', script: 'рукописные', mono: 'моноширинные' };
   const groups = Object.keys(kinds).map((k) => `${kinds[k]}: ${FONT_CATALOG.filter((f) => f.kind === k).map((f) => f.family).join(', ')}`);
   return ['ПАРЫ ШРИФТОВ (заголовки + текст):', ...pairs, '', 'ВСЕ ДОСТУПНЫЕ СЕМЕЙСТВА (у всех есть кириллица):', ...groups].join('\n');

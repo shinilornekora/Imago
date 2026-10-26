@@ -3943,8 +3943,10 @@ export function artSummary(direction, critique, opts = {}) {
     && Number.isFinite(Number(c.score)) ? Math.round(Math.max(0, Math.min(10, Number(c.score))) * 10) / 10 : null;
   if (c && c.seen === 'signals') {
     const n = Array.isArray(c.signals) ? c.signals.length : 0;
-    verdict = c.revised ? `Самопроверка: ${n} ${plural(n, 'примета', 'приметы', 'примет')} шаблона → доработал${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}`
-      : n ? `Самопроверка: ${n} ${plural(n, 'примета', 'приметы', 'примет')} шаблона, правка не потребовалась` : 'Самопроверка: примет шаблона нет';
+    const low = (x) => (x ? `${x.charAt(0).toLowerCase()}${x.slice(1)}` : '');
+    verdict = c.revised ? `Самопроверка: ${n} ${plural(n, 'примета', 'приметы', 'примет')} шаблона → доработал${first ? `: ${low(first)}` : ''}`
+      : c.verdict === 'revise' ? `Самопроверка: ${n} ${plural(n, 'примета', 'приметы', 'примет')} шаблона, доработка не легла — оставил собранное`
+        : n ? `Самопроверка: почти без шаблона — ${low(first)}` : 'Самопроверка: шаблонных ходов не нашёл';
   } else if (c && score !== null) {
     const s10 = String(score).replace('.', ',');
     verdict = c.revised ? `Первая сборка — ${s10} из 10 → доработал${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}`
@@ -3956,5 +3958,5 @@ export function artSummary(direction, critique, opts = {}) {
   if (!concept && !swatches.length && !fonts && !verdict) return null;
   const line = [concept ? `Образ: ${concept}` : '', fonts, verdict].filter(Boolean).join(' · ');
   // семейства отдельно: оболочка набирает их название ими же («Аа Prata»)
-  return { concept, swatches, fonts, families: [str(f.display, 40), str(f.text, 40)].filter(Boolean), verdict, line };
+  return { concept, swatches, fonts, families: [str(f.display, 40), str(f.text, 40)].filter((x, i, a) => x && a.indexOf(x) === i), verdict, line };
 }

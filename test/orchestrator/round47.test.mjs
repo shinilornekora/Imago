@@ -16,7 +16,16 @@ import {
   startDocument, startFakeLlm, startOrch, command, createProject, cid, PLAN_CREATE, TREE_OK,
 } from './helpers.mjs';
 
-const DIRECTION = SCHEMAS.direction.example;
+const DIRECTION = {
+  concept: 'Утренняя кофейня: крафтовый пакет, эмалированная кружка, мел на доске',
+  mood: ['тепло', 'неторопливо', 'ремесленно'],
+  materials: [{ name: 'крафт-бумага', hex: '#c9a77c' }, { name: 'эспрессо', hex: '#3b2418' }, { name: 'молочная пенка', hex: '#f4ead8' }, { name: 'эмаль', hex: '#2f6f62' }],
+  palette: { bg: '#f4ead8', surface: '#fffaf1', text: '#2b1a12', muted: '#6e5646', accent: '#2f6f62', accent2: '#c9a77c' },
+  fonts: { display: 'Prata', text: 'Golos Text' },
+  motifs: ['круглый штамп с надписью', 'крупные цифры цены', 'зерно кофе иллюстрацией'],
+  composition: 'асимметрия: крупный заголовок слева, меню колонкой справа, цены выносом',
+  avoid: ['белые карточки в ряд', 'синий акцент'],
+};
 const CRIT_OK = { score: 8, generic: false, verdict: 'ok', issues: [], fixes: [], praise: 'Палитра держится' };
 const CRIT_BAD = { score: 4, generic: true, verdict: 'revise', issues: ['Всё по центру'], fixes: ['Заголовок влево, крупнее'] };
 const SHOT = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
@@ -146,4 +155,68 @@ test('круг 47: рендер — без resvg null; текст без шри�
   const odd = core.applyOps(boardDoc(true), [core.ops.set('t1', 'style', { token: 'body', font: 'Evil Font' })]).doc;
   await r2({ doc: odd, artboardId: 'b1' });
   assert.ok(asked.length && asked.every((u) => u.startsWith('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans')), asked.join(' '));
+});
+
+test('круг 47: шрифты — загрузка общая и не рвётся отменой одной команды; медленная сеть доходит в фоне', async () => {
+  let mod = null;
+  try { mod = await import('@resvg/resvg-js'); } catch { mod = null; }
+  if (!mod) return;
+  // настоящего TTF нет — проверяем на «семействе» без файлов: важны промисы и кеш, а не рисунок
+  let calls = 0;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const fetchImpl = async (url) => {
+    calls++;
+    await gate;
+    throw new Error('нет');
+  };
+  const r = createRenderer({ fetch: fetchImpl, deadlineMs: 2000, log: { warn() {} } });
+  const ctlA = new AbortController();
+  const a = r({ doc: boardDoc(true), artboardId: 'b1', signal: ctlA.signal });
+  const b = r({ doc: boardDoc(true), artboardId: 'b1' });
+  await new Promise((x) => setTimeout(x, 20));
+  ctlA.abort();
+  assert.equal(await a, null, 'отменённая — null сразу');
+  const before = calls;
+  release();
+  assert.equal(await b, null);
+  assert.equal(calls, before, 'вторая команда не начинала загрузку заново — ждала общую');
+  // срок вышел раньше сети: загрузка доходит в фоне, неудача запоминается, третья команда сеть не трогает
+  let slowCalls = 0;
+  const slow = createRenderer({ fetch: async () => { slowCalls++; await new Promise((x) => setTimeout(x, 120)); throw new Error('медленно'); },
+    deadlineMs: 30, timeoutMs: 1000, log: { warn() {} } });
+  assert.equal(await slow({ doc: boardDoc(true), artboardId: 'b1' }), null);
+  await new Promise((x) => setTimeout(x, 250));
+  const n = slowCalls;
+  assert.equal(await slow({ doc: boardDoc(true), artboardId: 'b1' }), null);
+  assert.equal(slowCalls, n, 'после фоновой неудачи — в сеть не идём');
+});
+
+test('круг 47: внешняя картинка на серверном снимке — плашкой, критику сказано', () => {
+  const doc = boardDoc(false);
+  const d2 = core.applyOps(doc, [core.ops.create({ id: 'im', type: 'image', name: 'Фото', parent: 'b1', src: 'https://example.com/a.jpg',
+    size: { w: { mode: 'fixed', value: 50 }, h: { mode: 'fixed', value: 30 } } })]).doc;
+  const out = core.renderSVG(d2, 'b1', { externalImages: 'placeholder' });
+  assert.equal(out.placeholders, 1);
+  assert.doesNotMatch(out.svg, /example\.com/);
+  assert.match(core.renderSVG(d2, 'b1').svg, /example\.com/, 'без опции — как прежде');
+});
+
+test('круг 47: в трассе записанной правки — палитра образа (роль → hex) и итог самопроверки', async (t) => {
+  const document = await startDocument();
+  const llm = await startFakeLlm({ plan: PLAN_CREATE, direction: DIRECTION, tree: TREE_OK });
+  const orch = await startOrch({ document, llm: { baseUrl: llm.base }, art: { render: false } });
+  t.after(async () => { await orch.close(); await document.close(); await llm.close(); });
+  const p = await createProject(document);
+  const res = resultOf(await command(orch.url, { command_id: cid('a'), project: p.id, text: 'собери экран тарифов', client: 'c1' }));
+  assert.ok(res && res.tx_id, 'правка записана');
+  let tr = null;
+  for (let i = 0; i < 50 && !tr; i++) {
+    tr = orch.traces.recent().find((x) => x.tx_id === res.tx_id) || null;
+    if (!tr) await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(tr, 'трасса записана');
+  assert.equal(tr.art.palette.bg, '#f4ead8');
+  assert.equal(tr.art.fonts.display, 'Prata');
+  assert.equal(tr.critique.seen, 'signals');
 });

@@ -32,10 +32,13 @@ let renderer = null;
 /** Снимок — ожидание сети, а не счёт: пул на это время часы задания не ведёт (круг 47). */
 const renderFor = (id) => async (args) => {
   parentPort.postMessage({ type: 'io', id, on: true });
+  let waiting = true;
+  // рисование resvg синхронно и тяжело — это уже счёт: часы задания снова идут до него
+  const drawing = () => { if (waiting) { waiting = false; parentPort.postMessage({ type: 'io', id, on: false }); } };
   try {
-    return await (renderer || (renderer = createRenderer()))(args);
+    return await (renderer || (renderer = createRenderer()))({ ...args, drawing });
   } finally {
-    parentPort.postMessage({ type: 'io', id, on: false });
+    drawing();
   }
 };
 
