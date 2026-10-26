@@ -156,14 +156,16 @@ test('круг48: «сделай только этот экран тёмным»
 
 test('круг48: выжимка печатает тему доски, тема документа говорит о досках в своей теме', async () => {
   const doc = core.applyOps(twoScreens(), [core.ops.set('pay', 'theme', { colors: { canvas: '#101418' }, type: { title: { font: 'Prata' } } })]).doc;
-  const provider = fake({ plan: { intent: 'theme', title: 'Шрифт', summary: 'Цвет', steps: ['Цвета'] }, theme: { colors: [{ name: 'text', value: '#222222' }] } });
+  const provider = fake({ plan: { intent: 'theme', title: 'Шрифт', summary: 'Цвет', steps: ['Цвета'] }, theme: { colors: [{ name: 'text', value: '#222222' }, { name: 'canvas', value: '#fafafa' }] } });
   const res = await runCommand({ doc, selection: [], utterance: 'сделай текст темнее', provider, engine: core });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   const sys = provider.calls[0].messages[0].content;
   assert.match(sys, /тема\{canvas=#101418 title=Prata\}/);
   assert.match(sys, /«тема\{…\}» у доски/);
   const all = res.warnings.join(' | ');
-  assert.match(all, /«Оплата» собран в собственной палитре/);
+  // тема «Оплаты» держит фон, текст поменялся — сказано, что именно (U4)
+  assert.match(all, /На экране «Оплата» своя тема: .+ там прежние — поменялось только: /);
+  assert.doesNotMatch(all, /«Оплата» собран в собственной палитре/);
   assert.match(all, /сделай только этот экран/);
   assert.ok(SCHEMAS.theme.schema.properties.board, 'в схеме тематизатора есть board');
   assert.match(PROMPTS.theme({ tokens: '', digest: '', scopeLabel: 'всё' }), /СВОЯ ТЕМА/);

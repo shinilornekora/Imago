@@ -48,29 +48,29 @@ const FORMAT_HISTORY = {
       'behavior.tokens': 'cd226f5ed7cee580-25s0'
     }
   },
-  // круг 48: поле theme доски (FIELD_RULES.theme, limits.theme) и разрешение токенов по теме (behavior.theme)
+  // круг 48–49: поле theme доски (FIELD_RULES.theme, limits.theme, behavior.theme) и фактура в заливке (enums.patternKinds, limits.pattern)
   3: {
-    hash: '2e13535d09280c37-in',
+    hash: '06534195ac3092b3-io',
     sections: {
-      enums: '3d5f4badd56fba2b-fk',
+      enums: 'a4ee2310d7cfdd06-ja',
       fields: '5e1b972410a4a2da-ci',
       keys: '9d176db7128ae455-ov',
-      limits: '8808877c24a40916-er',
+      limits: '387934fdb1c46dc7-h5',
       nodes: '7dc93e5430fcaa92-3o',
       ops: 'ed069dfdf38ec707-17',
       paths: 'b234b2d53b1b8147-3p',
       refs: 'eec439faf7e0f954-9k',
       tokens: '64506054ac161ae6-4h',
       'behavior.dressed': 'c6092bb5cc3d0433-5o',
-      'behavior.exact': '0349a62a4df9ae3c-cc',
-      'behavior.fields': '9145fe2b7ad8eb7d-5ygg',
-      'behavior.nested': '8d622e246577c17e-14s9',
+      'behavior.exact': 'ee3acbdf2386b26d-3m7',
+      'behavior.fields': 'bb9ce5d777789289-60ls',
+      'behavior.nested': 'dfe50ac232b8c270-156x',
       'behavior.nodes': 'f67d12ae3ab43950-1i',
       'behavior.ops': '19a88724b0f91cfe-38h',
-      'behavior.results': 'b99de9b918cf3b77-6q0',
+      'behavior.results': '2c5df26632225208-b8u',
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
-      'behavior.theme': 'd2cdef0fe4aa52b9-5s',
-      'behavior.tokens': 'cd226f5ed7cee580-25s0'
+      'behavior.theme': '3270e63f4d344859-78',
+      'behavior.tokens': '69c5ec17004eed79-26k0'
     }
   }
 };

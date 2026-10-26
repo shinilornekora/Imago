@@ -962,7 +962,9 @@ export function createSync(o) {
   /** Применённая транзакция сервера — к confirmed. Журнал хранит применённую форму, строгое применение обязано пройти. */
   function applyConfirmed(c) {
     const before = confirmed.doc;
-    const list = Array.isArray(c.ops) ? c.ops : [];
+    // круг 48: запись прежнего движка — через liftOps (как на сервере)
+    const raw = Array.isArray(c.ops) ? c.ops : [];
+    const list = typeof core.liftOps === 'function' ? core.liftOps(raw, c.engine) : raw;
     const run = applyRun(before, [list]);
     let next = run.doc;
     let removed = run.tombstones;

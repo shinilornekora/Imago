@@ -32,7 +32,7 @@
  */
 
 import * as core from '../../src/core.js';
-import { applyOps, applyBatches, rebase, collectTombstones } from '../../src/core.js';
+import { applyOps, applyBatches, rebase, collectTombstones, liftOps } from '../../src/core.js';
 import { DocError, badRequest, notFound, tooLarge, unavailable, viaStorage, noSnapshot } from './errors.js';
 import { chainNext, compactDropped, jsonBytes } from './storage/committed.js';
 import { CODE_ENGINE, OUTDATED_RECHECK_MS, engineUnreadable, engineError } from './engine.js';
@@ -629,7 +629,8 @@ export function createSequencer({
   function absorbPage(head, projectId, page) {
     if (!page.length) return;
     const before = head.doc;
-    const res = applyBatches(before, page.map((tx) => tx.ops));
+    // круг 48: записи прежнего движка — через liftOps (поле theme было у них простыми данными без действия)
+    const res = applyBatches(before, page.map((tx) => liftOps(tx.ops, tx.engine)));
     if (res.tombstones.length) {
       // seq удаления: applyBatches отдаёт надгробия всей страницы подряд — корень каждого
       // удаления (id операции remove) указывает на транзакцию, потомки идут за корнем

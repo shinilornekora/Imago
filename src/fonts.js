@@ -169,7 +169,8 @@ export function fontsInDoc(doc) {
       const st = n && n.style;
       if (st && typeof st === 'object' && typeof st.font === 'string' && st.font.trim()) out.add(st.font.trim());
       // круг 48 (SPEC §15): шрифты темы доски
-      const tt = n && n.type === 'frame' && n.theme && typeof n.theme === 'object' ? n.theme.type : null;
+      // только доска (кадр прямо под корнем): тема вложенного кадра не действует — её шрифты не грузим
+      const tt = n && n.type === 'frame' && n.parent === doc.root && n.theme && typeof n.theme === 'object' && !Array.isArray(n.theme) ? n.theme.type : null;
       if (tt && typeof tt === 'object' && !Array.isArray(tt)) {
         for (const k of Object.keys(tt)) {
           const e = tt[k];

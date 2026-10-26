@@ -1177,6 +1177,7 @@ export const SCHEMAS = {
         summary: { type: 'string' },
         /* Круг 48 (SPEC §15): оформление одной доски — её темой (цвета и шрифты стилей). */
         board: { type: 'boolean' },
+        boardName: { type: 'string' },
         reset: { type: 'boolean' },
         colors: {
           type: 'array',
@@ -1231,6 +1232,7 @@ export const SCHEMAS = {
     },
     hint: `{ summary?: string,
   board?: boolean,   // true — оформление ОДНОЙ доски из «РАБОТАЕМ С:» (её тема): только colors и font/fontWeight стилей
+  boardName?: string, // с board:true — имя экрана, если человек его назвал («экран Оплата»); иначе не пиши
   reset?: boolean,   // с board:true — снять тему доски целиком (вернуть ей оформление документа)
   colors?: [{name: string, value: "#rrggbb"}],
   type?: [{name: string, fontSize?: number, fontWeight?: number, lineHeight?: number, letterSpacing?: number, font?: string}],
@@ -2001,7 +2003,12 @@ const DSL_RULES = `ПРАВИЛА МОДЕЛИ ДОКУМЕНТА (DSL)
     ИЛЛЮСТРАЦИИ — векторные картинки из деталей. Картинку (персонажа, зверька, предмет, еду, иконку-рисунок)
     НЕ собирай из rect и ellipse в колонках: положи узел {type:"illustration", name:"Печенька",
     size:{w:160, h:160}, draw:"печенька с шоколадной крошкой, вид сверху"} — её нарисует иллюстратор
-    кривыми, с тенями и бликами. Остальное (текст, кнопки, карточка вокруг) собирай как обычно.`;
+    кривыми, с тенями и бликами. Остальное (текст, кнопки, карточка вокруг) собирай как обычно.
+14. ЧТО ЕСТЬ (круг 49): ФАКТУРА в заливке рамки или фигуры — повторяющийся узор:
+    fill: "pattern(dots, accent, 12, canvas)" — вид, цвет узора, шаг плитки в px (4-200), подложка
+    (необязательно). Виды: dots (горошек), lines (полосы; угол — "pattern(lines, muted, 8, surface, 45)"),
+    grid (сетка), checks (шахматка), waves (волны), grain (зерно). Фактура — фон крупной плашки, шапки
+    или карточки: текст на ней ставь на подложку контрастным цветом. Мелким кнопкам и тексту её не давай.`;
 
 /**
  * Круг 47 (SPEC §14.1): правила 4 и 5 при арт-направлении — цвета из палитры образа, у 1–2
@@ -2245,17 +2252,20 @@ export const PROMPTS = {
 
   theme(ctx) {
     return [
-      header(ctx, 'Твоя роль сейчас — тематизатор: поменять токены документа, не трогая структуру.'),
+      header(ctx, 'Твоя роль сейчас — тематизатор: поменять токены документа или тему одного экрана, не трогая структуру.'),
       '',
       `ПРАВИЛА ОФОРМЛЕНИЯ
 - ТОКЕНЫ ОБЩИЕ ДЛЯ ВСЕГО ДОКУМЕНТА: поменяв colors.canvas, ты перекрасишь ВСЕ экраны сразу, включая
   те, что в строке «РАБОТАЕМ С:» не названы.
-- У ДОСКИ БЫВАЕТ СВОЯ ТЕМА (в выжимке — «тема: …» у доски): свои значения цветов и шрифтов стилей
+- У ДОСКИ БЫВАЕТ СВОЯ ТЕМА (в выжимке — «тема{…}» у доски): свои значения цветов и шрифтов стилей
   поверх общих. «Сделай ТОЛЬКО этот экран тёмным», «у этого экрана шрифт с засечками», «перекрась
   экран X» — верни board:true: colors и font/fontWeight стилей лягут в тему доски из «РАБОТАЕМ С:»,
   остальные доски не изменятся. Имена — ТЕ ЖЕ токены документа (canvas, surface, text, accent…):
   слои доски на них уже ссылаются. Кегли, интерлиньяж, шкалы, движение и тени у доски свои не
   бывают — при board:true их не пиши. «Верни этому экрану общее оформление» — {board:true, reset:true}.
+  Назвал экран по имени — boardName: "<имя>". Тёмный (или иной) экран — ПОЛНАЯ палитра: canvas,
+  surface, surfaceAlt, text, muted, line, accentSoft, onAccent (те, что есть в документе), не один фон:
+  иначе карточки и подписи останутся светлыми и текст пропадёт.
 - «Перекрась вот эту карточку, остальное не трогай» (часть экрана, не доска целиком) — НЕ задача
   тематизатора. Верни {cannot: "<почему, по-русски>"} и предложи поменять fill и color её слоёв.
 - Меняй только токены. Структуру, тексты и размеры узлов не трогай.
@@ -2374,8 +2384,11 @@ export const PROMPTS = {
   фактура или знак именно этой вещи (кофейное зерно → овальные маркеры списка; разметка дорожки → полосы-
   разделители; билет → обводка с вырезом-кругом). Не бери готовый список приёмов — он и есть шаблон.
 - Композиция — одна фраза о приёме: асимметрия, крупный первый экран, сетка с выносом, лента.
-- ЧЕГО В МАКЕТЕ НЕТ: слоёв поверх друг друга (всё стоит в потоке рамок), фото, текстур и узоров-фонов,
-  размытия. Мотивы и композицию, которые на этом держатся (коллаж, пятна под текстом), не предлагай.
+- ФАКТУРЫ ЕСТЬ: повторяющийся узор в заливке рамки — горошек, полосы, сетка, шахматка, волны, зерно (цвет
+  узора и подложка — из палитры). Хороший мотив, если он из материала (сетка тетради, полосы разметки,
+  зерно крафта); одна-две фактуры на экран, не под мелким текстом.
+- ЧЕГО В МАКЕТЕ НЕТ: слоёв поверх друг друга (всё стоит в потоке рамок), фото, размытия. Мотивы и
+  композицию, которые на этом держатся (коллаж, пятна под текстом), не предлагай.
 - avoid — 2-4 конкретных шаблонных хода, которых в ЭТОМ макете быть не должно.
 - Если соседние доски уже оформлены и просят «в том же стиле» / «ещё один экран этого приложения» — держи их
   палитру и шрифты, меняй только мотивы и композицию.`,
@@ -2412,8 +2425,9 @@ export const PROMPTS = {
   (обычно score ниже 7); иначе "ok".
 - issues и fixes — КОНКРЕТНО, по именам слоёв из списка: «Шапка: заголовок по центру → влево, display».
   Предлагай только то, что умеет макет: цвета, шрифт (стиль, кегль у 1-2 акцентов), размеры, отступы, порядок,
-  выравнивание, поворот, градиент, тень, скругление, новые слои в потоке (плашка, круг, полоса, иллюстрация
-  предмета). Слоёв поверх друг друга, фото, видео, размытия и узоров-фонов нет — их не предлагай.
+  выравнивание, поворот, градиент, фактура в заливке (горошек, полосы, сетка, шахматка, волны, зерно), тень,
+  скругление, новые слои в потоке (плашка, круг, полоса, иллюстрация предмета). Слоёв поверх друг друга,
+  фото, видео и размытия нет — их не предлагай.
 - Нечитаемый текст из замечаний проверки — первое, что надо исправить; не ломай то, что работает (praise).`,
       '',
       JSON_RULE,
@@ -5450,6 +5464,59 @@ function artGradient(raw, ctx) {
   return { gradient: out };
 }
 
+/* Круг 49 (SPEC §16): фактура — «pattern(dots, accent, 12, canvas[, 45])» или объект {pattern:{…}}. */
+const PATTERN_WORDS = Object.freeze({
+  dots: 'dots', dot: 'dots', polka: 'dots', 'горошек': 'dots', 'точки': 'dots', 'точка': 'dots',
+  lines: 'lines', line: 'lines', stripes: 'lines', stripe: 'lines', 'полосы': 'lines', 'полоски': 'lines', 'линии': 'lines',
+  grid: 'grid', 'сетка': 'grid', 'клетка': 'grid', 'клетку': 'grid',
+  checks: 'checks', checker: 'checks', checkerboard: 'checks', 'шахматка': 'checks', 'шашки': 'checks',
+  waves: 'waves', wave: 'waves', 'волны': 'waves', 'волна': 'waves',
+  grain: 'grain', noise: 'grain', 'зерно': 'grain', 'шум': 'grain', 'крапинки': 'grain',
+});
+const looksPattern = (v) => (typeof v === 'string' && /^\s*pattern\(/i.test(v))
+  || (v && typeof v === 'object' && !Array.isArray(v) && v.pattern && typeof v.pattern === 'object');
+
+/**
+ * Фактура из ответа модели → {pattern:{kind, color, bg?, size?, angle?, weight?, opacity?}};
+ * undefined — не понята (вид неизвестен, цвета нет). Цвета — как любой цвет модели (токен или #hex).
+ */
+export function artPattern(raw, ctx = {}) {
+  let p = null;
+  if (typeof raw === 'string') {
+    const m = /^\s*pattern\(\s*([\s\S]*)\)\s*$/i.exec(raw);
+    if (!m) return undefined;
+    const parts = splitTop(m[1]);
+    p = { kind: parts[0], color: parts[1] };
+    const rest = parts.slice(2);
+    for (const x of rest) {
+      const kv = /^(\w+)\s*[=:]\s*(.+)$/.exec(x);
+      if (kv) { p[kv[1]] = kv[2].trim(); continue; }
+      const n = parsePx(x);
+      if (n && p.size == null) p.size = n.n;
+      else if (n && p.angle == null && p.bg != null) p.angle = n.n;
+      else if (!n && p.bg == null) p.bg = x;
+      else if (n && p.angle == null) p.angle = n.n;
+    }
+  } else if (raw && typeof raw === 'object') p = { ...raw.pattern };
+  if (!p) return undefined;
+  const kind = PATTERN_WORDS[String(p.kind || '').trim().toLowerCase()];
+  if (!kind) return undefined;
+  const color = artColor(p.color, ctx);
+  if (typeof color !== 'string') return undefined;
+  const out = { kind, color };
+  if (p.bg != null && p.bg !== '') { const bg = artColor(p.bg, ctx); if (typeof bg === 'string') out.bg = bg; }
+  const num = (v) => { const n = typeof v === 'number' ? v : parsePx(v) ? parsePx(v).n : NaN; return Number.isFinite(n) ? n : null; };
+  const size = num(p.size);
+  if (size != null) out.size = Math.round(Math.max(4, Math.min(200, size)));
+  const angle = num(p.angle);
+  if (angle != null) out.angle = Math.round((((angle % 360) + 360) % 360) * 10) / 10;
+  const weight = num(p.weight);
+  if (weight != null) out.weight = Math.max(0.5, Math.min(50, Math.round(weight * 10) / 10));
+  const op = p.opacity == null ? null : fracOf(p.opacity);
+  if (op != null && Number.isFinite(op) && op >= 0 && op < 1) out.opacity = op;
+  return { pattern: out };
+}
+
 const looksGradient = (v) => (typeof v === 'string' && /^\s*(linear|radial)-gradient\(/i.test(v))
   || (v && typeof v === 'object' && !Array.isArray(v) && (v.gradient || Array.isArray(v.stops) || Array.isArray(v.colors)));
 
@@ -5473,6 +5540,13 @@ function paintHexes(doc, paint) {
 function paintWord(paint) {
   if (paint == null) return 'none';
   if (typeof paint === 'string') return paint;
+  // круг 49: фактура — той же записью, какой её пишет модель
+  if (typeof paint === 'object' && paint.pattern && typeof paint.pattern === 'object') {
+    const p = paint.pattern;
+    const tail = [p.size != null ? p.size : '', p.bg || '', p.angle ? p.angle : ''];
+    while (tail.length && tail[tail.length - 1] === '') tail.pop();
+    return `pattern(${[p.kind, p.color, ...tail].filter((x, i) => x !== '' || i < 2).join(', ')})`;
+  }
   if (typeof paint === 'object' && paint.gradient && Array.isArray(paint.gradient.stops)) {
     const g = paint.gradient;
     return `${g.kind === 'radial' ? 'radial' : 'linear'}(${g.stops.map((s) => s.color || s.token).join('→')})`;
@@ -7789,7 +7863,10 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
   } else {
     // круг 37 (SPEC §12): заливка градиентом — краска-объект ядра
     let fill;
-    if (looksGradient(raw.fill)) {
+    if (looksPattern(raw.fill)) {
+      fill = artPattern(raw.fill, { doc });
+      if (fill === undefined) note(`Слой «${name || type}»: фактура не понята — нужны вид (dots, lines, grid, checks, waves, grain) и цвет; без заливки`);
+    } else if (looksGradient(raw.fill)) {
       fill = artGradient(raw.fill, { doc });
       if (fill === undefined) note(`Слой «${name || type}»: градиент не понят — без заливки`);
     } else fill = treeColor(raw.fill, `Слой «${name || type}»`);
@@ -7852,8 +7929,11 @@ export function normalizeTree(raw, { doc, warn, persona, depth = 1, budget, engi
   if (typeof raw.id === 'string' && raw.id.trim()) spec.$id = raw.id.trim();
   // круг 48 (SPEC §15): тему новой доски кладёт applyDirection (поле $theme — не от модели:
   // его снимает dressed со всех узлов, кроме корня новой доски); форма — по ядру
-  if (type === 'frame' && raw.$theme && typeof raw.$theme === 'object' && !(engine && engine.themeProblem && engine.themeProblem(raw.$theme))) {
-    spec.theme = JSON.parse(JSON.stringify(raw.$theme));
+  // принимается только тема, выданная applyDirection (реестр DIRECTION_THEMES), и только корню
+  if (type === 'frame' && depth === 1 && raw.$theme && typeof raw.$theme === 'object' && DIRECTION_THEMES.has(raw.$theme)) {
+    const bad = engine && engine.themeProblem ? engine.themeProblem(raw.$theme) : '';
+    if (bad) note(`Тема новой доски не прошла проверку (${bad}) — доска в оформлении документа`);
+    else spec.theme = JSON.parse(JSON.stringify(raw.$theme));
   }
 
   if (type === 'frame') {
@@ -9349,6 +9429,13 @@ export function coerceValue(raw, path, doc, warn, ctx = null) {
   }
   /* Круг 37 (SPEC §12): градиент в заливке и цвете текста — краска-объект ядра; у обводки узла
    * градиента нет (её цвет — один), там берём средний стоп словами. */
+  // круг 49 (SPEC §16): фактура — только в заливке
+  if ((p === 'fill' || p === 'color' || p === 'stroke') && looksPattern(v)) {
+    if (p !== 'fill') { note(`Правка «${ruPath(p)}»: фактура бывает только в заливке — правка пропущена`); return undefined; }
+    const pt = artPattern(v, { doc });
+    if (pt === undefined) note('Правка «заливка»: фактура не понята — нужны вид (горошек, полосы, сетка, шахматка, волны, зерно) и цвет; правка пропущена');
+    return pt;
+  }
   if ((p === 'fill' || p === 'color' || p === 'stroke') && looksGradient(v)) {
     const g = artGradient(v, { doc });
     if (g === undefined) { note(`Правка «${ruPath(p)}»: градиент не понят — нужны два цвета и больше; правка пропущена`); return undefined; }
@@ -10808,26 +10895,48 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
 
   /* Круг 11, п.3: сказать вслух, что правка легла на ВЕСЬ документ. Говорим только когда
    * артбордов больше одного: на единственном экране это не новость, а шум. */
-  const boards = kidsOf(nodeOf(doc, doc.root)).filter((id) => nodeOf(doc, id));
-  // круг 47: доски в собственной палитре (фон — #rrggbb) цвета темы не перекрасят — их не перечисляем
+  const boards = kidsOf(nodeOf(doc, doc.root)).filter((id) => { const n = nodeOf(doc, id); return n && n.role !== 'library'; });
+  // круг 48 (U4): что из поменянного перекрывает тема доски — по именам токенов
+  const changedOf = (head) => [...new Set(ops.map((o) => String(o.path || '')).filter((x) => x.startsWith(head + '.')).map((x) => x.split('.')[1]))];
+  const changedColors = changedOf('colors');
+  const changedFonts = [...new Set(ops.map((o) => String(o.path || '')).filter((x) => /^type\.[^.]+\.font(Weight)?$/.test(x)).map((x) => x.split('.')[1]))];
+  const themeOf = (b) => (engine && engine.boardTheme ? engine.boardTheme(b) : null) || {};
+  const coveredColors = (b) => changedColors.filter((k) => own(themeOf(b).colors, k));
+  const coveredFonts = (b) => changedFonts.filter((k) => own(themeOf(b).type, k));
+  const hexFill = (b) => typeof b.fill === 'string' && HEX_RE.test(b.fill.trim());
+  // круг 47: доски в собственной палитре (фон — #rrggbb или тема перекрыла всё поменянное) — не перечисляем
   const ownPalette = (id) => {
     const b = nodeOf(doc, id);
     if (!b) return false;
-    const t = engine && engine.boardTheme ? engine.boardTheme(b) : null;
-    return (typeof b.fill === 'string' && HEX_RE.test(b.fill.trim())) || !!(t && t.colors && Object.keys(t.colors).length);
+    return hexFill(b) || (changedColors.length > 0 && coveredColors(b).length === changedColors.length);
   };
+  const boardWord = (b) => `«${cutText(strOf(b.name) || 'Доска', 40)}»`;
+  const colorRu = (names) => names.slice(0, 3).map((k) => ruToken('colors', k)).join(', ') + (names.length > 3 ? ` и ещё ${names.length - 3}` : '');
   /* Круг 47 (SPEC §14.5): доски, собранные по арт-направлению, держат цвета образа в самих слоях
-   * (#rrggbb, не токенами) — цвета темы документа их не перекрасят. Говорим об этом, а не молчим. */
+   * (#rrggbb, не токенами) — цвета темы документа их не перекрасят. Говорим об этом, а не молчим.
+   * Круг 48: доска со своей темой — по тому, что именно тема перекрыла. */
+  const tops = kidsOf(nodeOf(doc, doc.root)).map((id) => nodeOf(doc, id)).filter((b) => b && b.type === 'frame' && b.role !== 'library');
   if (touched.has('colors')) {
-    // круг 48: доска со своей темой цветов — тоже «в собственной палитре»: её тема перекрывает документ
-    const themedColors = (b) => { const t = engine && engine.boardTheme ? engine.boardTheme(b) : null; return !!(t && t.colors && Object.keys(t.colors).length); };
-    const own = kidsOf(nodeOf(doc, doc.root)).map((id) => nodeOf(doc, id))
-      .filter((b) => b && b.type === 'frame' && b.role !== 'library' && ((typeof b.fill === 'string' && HEX_RE.test(b.fill.trim())) || themedColors(b)));
-    if (own.length) {
-      const names = own.slice(0, 3).map((b) => `«${cutText(strOf(b.name) || 'Доска', 40)}»`).join(', ');
-      note(own.length === 1
+    const own47 = tops.filter((b) => hexFill(b) && !Object.keys(themeOf(b).colors || {}).length);
+    if (own47.length) {
+      const names = own47.slice(0, 3).map(boardWord).join(', ');
+      note(own47.length === 1
         ? `Экран ${names} собран в собственной палитре — цвета темы документа его не перекрасят. Чтобы перекрасить его, скажите «перекрась экран ${names.slice(1, -1)} в тёмное»`
-        : `Экраны ${names}${own.length > 3 ? ' и другие' : ''} собраны в собственной палитре — цвета темы документа их не перекрасят. Чтобы перекрасить такой экран, скажите «перекрась экран … в тёмное»`);
+        : `Экраны ${names}${own47.length > 3 ? ' и другие' : ''} собраны в собственной палитре — цвета темы документа их не перекрасят. Чтобы перекрасить такой экран, скажите «перекрась экран … в тёмное»`);
+    }
+    for (const b of tops.filter((x) => coveredColors(x).length).slice(0, 3)) {
+      const cov = coveredColors(b);
+      const rest = changedColors.filter((k) => !cov.includes(k));
+      note(rest.length
+        ? `На экране ${boardWord(b)} своя тема: ${colorRu(cov)} там прежние — поменялось только: ${colorRu(rest)}`
+        : `Экран ${boardWord(b)} в своей теме — общие цвета его не задели. Чтобы он их принял, скажите «верни экрану ${cutText(strOf(b.name) || 'Доска', 40)} общее оформление»`);
+    }
+  }
+  if (changedFonts.length) {
+    for (const b of tops.filter((x) => coveredFonts(x).length).slice(0, 3)) {
+      const cov = coveredFonts(b);
+      const names = cov.slice(0, 3).map((k) => ruToken('type', k)).join(', ');
+      note(`На экране ${boardWord(b)} своя тема: шрифт стилей ${names} там прежний — общий его не поменял`);
     }
   }
   if (boards.length > 1) {
@@ -10872,10 +10981,25 @@ function boardIds(doc) {
  */
 function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const note = warn;
-  const here = scope ? artboardOf(doc, (scope.ids && scope.ids[0]) || scope.containerId) : null;
   const all = boardIds(doc);
-  const boardId = here && all.includes(here) ? here : all.length === 1 ? all[0] : null;
-  if (!boardId) throw ERR('schema', 'Тема одного экрана: непонятно, какого — выделите доску или слой на ней');
+  const label = (id) => cutText(strOf(nodeOf(doc, id) && nodeOf(doc, id).name) || 'Доска', 40);
+  let boardId = null;
+  const asked = typeof theme.boardName === 'string' ? theme.boardName.trim() : '';
+  if (asked) {
+    const low = asked.toLowerCase().replace(/^экран\s+/u, '').replace(/[«»"]/g, '').trim();
+    boardId = all.find((id) => strOf(nodeOf(doc, id).name).trim().toLowerCase() === low)
+      || all.find((id) => strOf(nodeOf(doc, id).name).trim().toLowerCase().includes(low)) || null;
+    if (!boardId) throw ERR('schema', `Экран «${cutText(asked, 40)}» не найден — назовите его, как на холсте, или выделите доску`);
+  } else {
+    const ids = scope ? [...(Array.isArray(scope.ids) ? scope.ids : []), ...(scope.containerId ? [scope.containerId] : [])] : [];
+    const spans = [...new Set(ids.map((id) => artboardOf(doc, id)).filter(Boolean))];
+    if (spans.length > 1) throw ERR('schema', 'Тема одного экрана: выделение на нескольких экранах — выделите одну доску или слой на ней');
+    const here = spans[0] || null;
+    const hereNode = here ? nodeOf(doc, here) : null;
+    if (hereNode && hereNode.role === 'library') throw ERR('schema', 'У библиотеки компонентов своей темы не бывает — выделите экран');
+    boardId = here && all.includes(here) ? here : all.length === 1 ? all[0] : null;
+    if (!boardId) throw ERR('schema', 'Тема одного экрана: непонятно, какого — выделите доску или слой на ней');
+  }
   const board = nodeOf(doc, boardId);
   if (theme.reset === true) {
     if (board.theme === undefined) throw ERR('schema', 'У этого экрана своей темы и так нет — он в оформлении документа');
@@ -10923,20 +11047,32 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
         touched = true;
       } else note(`Стиль «${ruToken('type', name)}», жирность: «${t.fontWeight}» — не число от 100 до 900, пропущено`);
     }
-    for (const k of ['fontSize', 'lineHeight', 'letterSpacing']) if (t[k] != null && t[k] !== '') skippedType.add(ruPath(k));
+    for (const k of ['fontSize', 'lineHeight', 'letterSpacing']) if (t[k] != null && t[k] !== '') skippedType.add(({ fontSize: 'кегль', lineHeight: 'интерлиньяж', letterSpacing: 'трекинг' })[k]);
     if (touched) { next.type[name] = entry; changed++; }
   }
   const other = ['spacing', 'radii', 'motion', 'shadow'].filter((k) => Array.isArray(theme[k]) && theme[k].length);
   if (skippedType.size || other.length) {
     const what = [...skippedType, ...other.map((k) => ({ spacing: 'шкала отступов', radii: 'шкала скруглений', motion: 'скорость анимаций', shadow: 'тени' })[k])];
-    note(`У одного экрана свои только цвета и шрифты: ${what.join(', ')} — общие для документа, пропущено.`
-      + ' Чтобы поменять их на этом экране, скажите, каким слоям');
+    const many = what.length > 1;
+    note(`У одного экрана свои только цвета и шрифты: ${what.join(', ')} — ${many ? 'общие' : 'общее'} для документа, ${many ? 'пропущены' : 'пропущено'}.`
+      + ` Чтобы поменять ${many ? 'их' : 'это'} на экране «${label(boardId)}», скажите, каким слоям`);
   }
   if (!changed) throw ERR('schema', 'Модель не предложила ни одного корректного изменения темы экрана');
   if (!Object.keys(next.colors).length) delete next.colors;
   if (!Object.keys(next.type).length) delete next.type;
   const bad = engine && engine.themeProblem ? engine.themeProblem(next) : null;
   if (bad) throw ERR('schema', `Тема экрана не сложилась: ${bad}`);
+  // круг 48: сменили фон, а текст остался документа — проверим, читается ли он
+  if (next.colors) {
+    const col = (k) => hexNorm(strOf((next.colors && next.colors[k]) || docColors[k]));
+    for (const [fg, bg, min, ru] of [['text', 'canvas', CONTRAST_NORM, 'текст на фоне'], ['text', 'surface', CONTRAST_NORM, 'текст на карточках'], ['muted', 'canvas', 3, 'подписи на фоне']]) {
+      if (!own(docColors, fg) || !own(docColors, bg) || !(own(next.colors, fg) || own(next.colors, bg))) continue;
+      const a = col(fg); const b = col(bg);
+      if (!HEX6.test(a) || !HEX6.test(b)) continue;
+      const r = contrastOf(a, b);
+      if (r < min) note(`На экране «${label(boardId)}» ${ru} читается плохо: контраст ${r.toFixed(1)}:1 (нужно от ${min}:1) — скажите, каким сделать ${fg === 'text' ? 'текст' : 'подписи'}`);
+    }
+  }
   return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: next })];
 }
 
@@ -11999,6 +12135,10 @@ const own = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
  * только самому крупному стилю (`biggest`). Узлы доски пишут те же токены, что и без образа.
  * @returns {{colors:object, type:object}}
  */
+/** Темы, выданные applyDirection: $theme дерева берётся только отсюда, не из ответа модели. */
+const DIRECTION_THEMES = new WeakSet();
+const THEME_NAME_OK = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+
 export function directionTheme(dir, doc, { biggest = 0 } = {}) {
   const P = dir.palette;
   const docColors = (doc && doc.tokens && doc.tokens.colors) || {};
@@ -12012,7 +12152,7 @@ export function directionTheme(dir, doc, { biggest = 0 } = {}) {
   const disp = catalogFont(dir.fonts.display);
   const fussy = disp && (disp.kind === 'script' || (disp.kind === 'display' && disp.weights.length < 2));
   const type = {};
-  for (const name of Object.keys(types).slice(0, 32)) {
+  for (const name of Object.keys(types).filter((k) => THEME_NAME_OK.test(k) && !PROTO_NAMES.has(k)).slice(0, 32)) {
     let role = textRole(doc, name, 0);
     if (!role) continue;
     if (role === 'display' && fussy && tokenSize(doc, name) < biggest) role = 'text';
@@ -12098,8 +12238,18 @@ export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
     if (depth > 0) delete n.$theme;   // тема — только корню новой доски
     const type = strOf(n.type).trim().toLowerCase();
     if (type === 'illustration' || type === 'vector') return;      // рисунок красит иллюстратор
+    // круг 49: фактура — цвета узора и подложки как любые цвета решения
+    if (typeof n.fill === 'string' && looksPattern(n.fill)) { const pt = artPattern(n.fill, { doc }); if (pt) n.fill = pt; }
+    const pat = n.fill && typeof n.fill === 'object' && n.fill.pattern && typeof n.fill.pattern === 'object' ? n.fill.pattern : null;
+    if (pat) {
+      for (const k of ['color', 'bg']) {
+        if (typeof pat[k] !== 'string') continue;
+        const next = recolor(pat[k]);
+        if (next !== undefined) { pat[k] = next; colors++; }
+      }
+    }
     for (const k of ['fill', 'color', 'stroke']) {
-      if (n[k] == null) continue;
+      if (n[k] == null || (k === 'fill' && pat)) continue;
       const inner = k === 'stroke' && typeof n[k] === 'object' && n[k].color !== undefined;
       const next = recolor(inner ? n[k].color : n[k]);
       if (next === undefined) continue;
@@ -12107,7 +12257,7 @@ export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
       else n[k] = next;
       colors++;
     }
-    const fillHex = n.fill != null ? (hexOf(n.fill) || under) : under;
+    const fillHex = pat ? (pat.bg ? hexOf(pat.bg) || under : under) : n.fill != null ? (hexOf(n.fill) || under) : under;
     if (type === 'text') {
       // кегль крупного акцента — отдельным полем дерева (§14.1): в стиль, 12…96
       if (typeof n.fontSize === 'number' && Number.isFinite(n.fontSize)) {
@@ -12151,7 +12301,7 @@ export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
     }
     if (Array.isArray(n.children)) for (const c of n.children) walk(c, depth + 1, fillHex);
   };
-  if (themed) out.$theme = theme;
+  if (themed) { out.$theme = theme; DIRECTION_THEMES.add(theme); }
   else delete out.$theme;
   if (asArtboard && strOf(out.type).trim().toLowerCase() === 'frame' && (out.fill == null || out.fill === '')) out.fill = theme ? 'canvas' : P.bg;
   walk(out, 0, asArtboard ? P.bg : null);
@@ -13267,6 +13417,8 @@ function hasEdits(data, intent) {
   if (intent === 'edit') return Array.isArray(data.edits) && data.edits.length > 0;
   if (intent === 'create') return typeof data.type === 'string' && data.type.trim() !== '';
   if (intent === 'theme') {
+    // круг 48: «верни экрану общее оформление» — правка без списков
+    if (data.board === true && data.reset === true) return true;
     return ['colors', 'type', 'spacing', 'radii'].some((k) => Array.isArray(data[k]) && data[k].length > 0);
   }
   if (intent === 'illustration') return [data.parts, data.details, data.shapes].some((v) => Array.isArray(v) && v.length > 0);
@@ -14754,6 +14906,12 @@ export function describeChange(ops, doc, after = null, engine = null) {
   // круг 36 (SPEC §11): состояния и движение — по слою одной фразой, «Наведение «X»: подъём 2 px, тень средняя, 120 мс»
   phrases.push(...motionChangePhrases(list.filter((o) => o.op === 'set' && o.id && !born.has(o.id)
     && /^(states|motion)(\.|$)/.test(String(o.path || ''))), doc, after, engine, born));
+  // круг 48 (SPEC §15): тема доски — «Своя тема экрана «Оплата»: фон #101418, текст #e8eaf0, заголовок — Prata»
+  for (const op of list) {
+    if (op.op !== 'set' || !op.id || born.has(op.id) || String(op.path || '') !== 'theme') continue;
+    artSkip.add(op);
+    phrases.push(boardThemePhrase(op, doc, born));
+  }
   // одинаковая правка у нескольких слоёв — одной строкой
   const groups = new Map();
   for (const op of list) {
@@ -14795,6 +14953,22 @@ export function describeChange(ops, doc, after = null, engine = null) {
     ? `${phrases.slice(0, 2).join('; ')} и ещё ${rest} ${plural(rest, 'правка', 'правки', 'правок')}`
     : phrases.join('; ');
   return cutText(text.charAt(0).toUpperCase() + text.slice(1), 200);
+}
+
+/** Правка `set theme` доски словами: что задала тема (до четырёх пунктов) или что тема снята. */
+function boardThemePhrase(op, doc, born) {
+  const who = changeName(doc, born, op.id).replace(/^слой /u, '');
+  const v = op.value;
+  if (!v || typeof v !== 'object') return `экран ${who} вернулся к оформлению документа`;
+  const items = [];
+  for (const [k, hex] of Object.entries(v.colors || {})) items.push(`${ruToken('colors', k)} ${hex}`);
+  for (const [k, t] of Object.entries(v.type || {})) {
+    if (!t || typeof t !== 'object') continue;
+    const bits = [t.font, typeof t.fontWeight === 'number' ? String(t.fontWeight) : ''].filter(Boolean).join(' ');
+    if (bits) items.push(`${ruToken('type', k)} — ${bits}`);
+  }
+  const shown = items.slice(0, 4).join(', ') + (items.length > 4 ? ` и ещё ${items.length - 4}` : '');
+  return `своя тема экрана ${who}${shown ? `: ${shown}` : ''}`;
 }
 
 /**
