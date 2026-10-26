@@ -2458,9 +2458,8 @@ const expandCache = new WeakMap();
  * поддеревом с точностью до id: те же объекты мастеров (зависимости раскрытия) и те же поля самого
  * экземпляра, кроме id, родителя, места и имени. По нему solve раскладывает поддерево один раз, а
  * остальные экземпляры той же формы и того же размера получают его копию со сдвигом (placeNode).
- * Ключ висит на объекте раскрытого корня: пока раскрытие берётся из expandCache, ключ тот же.
+ * Ключ хранится в записи expandCache, а годится ли он в этом документе — решает expandDoc (shapes).
  */
-const expandShape = new WeakMap();
 const shapeSerial = new WeakMap();
 let shapeSerialNext = 0;
 function shapeSig(deps, inst) {
@@ -2477,6 +2476,26 @@ function shapeSig(deps, inst) {
   const own = { ...inst };
   delete own.id; delete own.parent; delete own.pos; delete own.name;
   return s + '|' + JSON.stringify(own);
+}
+
+/**
+ * Круг 54: высота раскрытого поддерева по спискам детей (скрытые тоже — оценка сверху). Образец
+ * не переносится туда, где поддерево упёрлось бы в MAX_DEPTH: там полная раскладка его обрезает.
+ */
+function shapeHeight(nodes, rootId) {
+  let best = 0;
+  const stack = [rootId, 0];
+  const seen = new Set();
+  while (stack.length) {
+    const h = stack.pop();
+    const id = stack.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (h > best) best = h;
+    const n = hasOwnProp.call(nodes, id) ? nodes[id] : null;
+    if (n && Array.isArray(n.children)) for (const c of n.children) stack.push(c, h + 1);
+  }
+  return best;
 }
 
 /** Свежи ли зависимости записи кеша: те же объекты по тем же id. @returns {boolean} */
@@ -2928,9 +2947,10 @@ const stubCache = new WeakMap();
  * @returns {Record<string,object>}
  */
 function expandStub(doc, inst) {
-  const hit = stubCache.get(inst);
-  if (hit) return hit;
+  // круг 54: размер заглушки — от мастера, поэтому запись годна только при том же объекте мастера
   const master = ownNode(doc.nodes, inst.of);
+  const hit = stubCache.get(inst);
+  if (hit && hit.master === master) return hit.out;
   const tid = inst.id + '/~expand-limit';
   const frame = {
     type: 'frame', id: inst.id, parent: inst.parent, synthetic: true, instance: inst.id, stub: 'expand-limit',
@@ -2948,7 +2968,7 @@ function expandStub(doc, inst) {
     characters: EXPAND_STUB_TEXT, color: '#6B6457', size: { w: { mode: 'fill' }, h: { mode: 'hug' } }, align: 'center'
   };
   const out = { [frame.id]: frame, [tid]: text };
-  stubCache.set(inst, out);
+  stubCache.set(inst, { master, out });
   return out;
 }
 
@@ -2999,6 +3019,7 @@ function expandDoc(doc) {
   const degraded = total > MAX_EXPANDED_NODES;
   let used = 0;
   const skipped = [];
+  const owned = [];   // круг 54: [id, раскрытие, форма, …] — кандидаты в образцы
   const skip = (inst) => {
     skipped.push(inst.id);
     Object.assign(out, expandStub(doc, inst));
@@ -3012,6 +3033,7 @@ function expandDoc(doc) {
       if (used + hit.size > MAX_EXPANDED_NODES) { skip(inst); continue; }
       Object.assign(out, hit.nodes);
       used += hit.size;
+      if (hit.shape) owned.push(inst.id, hit.nodes, hit.shape);
       continue;
     }
     const local = {};
@@ -3020,9 +3042,10 @@ function expandDoc(doc) {
     try {
       expandOne(doc, inst, inst.id, inst.id, 1, [], local, deps, budget);
       const size = MAX_EXPANDED_NODES - used - budget.left;
-      expandCache.set(inst, { deps, nodes: local, size });
       const top = local[inst.id];
-      if (top && top.synthetic) expandShape.set(top, shapeSig(deps, inst));
+      const shape = top && top.synthetic ? { sig: shapeSig(deps, inst), height: shapeHeight(local, inst.id) } : null;
+      expandCache.set(inst, { deps, nodes: local, size, shape });
+      if (shape) owned.push(inst.id, local, shape);
     } catch (e) {
       if (e === EXPAND_OVER) {
         logOnce('expand:over:' + inst.id, `раскрытие «${inst.id}» упёрлось в предел ${MAX_EXPANDED_NODES} узлов — экземпляр не раскрыт`);
@@ -3034,12 +3057,22 @@ function expandDoc(doc) {
     Object.assign(out, local);
     used = MAX_EXPANDED_NODES - budget.left;
   }
+  /* Круг 54: форма — свойство раскрытия ЭТОГО документа, а не объекта в кеше. Экземпляр с id «a/x»
+     перетирает раскрытого потомка «a/x» экземпляра «a» (и наоборот): у такого экземпляра поддерево
+     в общей карте уже не его, образцом оно быть не может и копию по образцу не получает. */
+  const shapes = new Map();
+  for (let k = 0; k < owned.length; k += 3) {
+    const nodes = owned[k + 1];
+    let own = true;
+    for (const id in nodes) if (out[id] !== nodes[id]) { own = false; break; }
+    if (own) shapes.set(owned[k], owned[k + 2]);
+  }
   if (skipped.length) {
     logOnce('expand:limit', `раскрытие экземпляров дало бы ${bigCount(total)} узлов — больше предела ${MAX_EXPANDED_NODES}: `
       + `${skipped.length} экземпляров не раскрыты`);
-    return { nodes: out, count, skipped };
+    return { nodes: out, count, skipped, shapes };
   }
-  return { nodes: out, count };
+  return { nodes: out, count, shapes };
 }
 
 /**
@@ -6609,7 +6642,9 @@ function measureNode(ctx, node, availW, availH, stretch) {
   const hit = cacheGet(ctx.measCache, node.id, key);
   if (hit) return hit;
   // круг 54: экземпляр той же формы уже мерян с теми же ограничениями — его мера
-  const shape = node.synthetic && ctx.shapeMeas ? expandShape.get(node) : undefined;
+  // (только если поддерево целиком уместится в MAX_DEPTH отсюда — иначе полная раскладка его обрежет)
+  const form = node.synthetic && ctx.shapeMeas ? ctx.shapes.get(node.id) : undefined;
+  const shape = form && ctx.stack.size + form.height <= MAX_DEPTH ? form.sig : undefined;
   if (shape !== undefined) {
     const same = ctx.shapeMeas.get(shape + '|' + key);
     if (same) { cacheSet(ctx.measCache, node.id, key, same); return same; }
@@ -6885,7 +6920,8 @@ function placeNode(ctx, node, x, y, w, h, depth) {
     if (pr && sp && pr.w === r2(w) && pr.h === r2(h) && copyPlaced(ctx, sp, r2(x) - pr.x, r2(y) - pr.y)) return;
   }
   // круг 54: экземпляр той же формы и того же размера уже разложен в этой раскладке — копия со сдвигом
-  const shape = node.synthetic && ctx.shapePlaced ? expandShape.get(node) : undefined;
+  const form = node.synthetic && ctx.shapePlaced ? ctx.shapes.get(node.id) : undefined;
+  const shape = form && d + form.height <= MAX_DEPTH ? form.sig : undefined;
   const tkey = shape === undefined ? undefined : shape + '|' + r2(w) + '#' + r2(h);
   if (tkey !== undefined) {
     const t = ctx.shapePlaced.get(tkey);
@@ -7032,6 +7068,7 @@ function solveWith(doc, opts, seed, pre) {
     // (на одну доску). shapes:false — без образцов: эталон для тестов
     shapeMeas: options.shapes === false ? null : new Map(),
     shapePlaced: options.shapes === false ? null : new Map(),
+    shapes: null,           // круг 54: id экземпляра → {sig, height} из expandDoc этого документа
     dirty: seed ? seed.dirty : null,
   };
   const geo = { rects: ctx.rects, lines: ctx.lines, order: ctx.order, expanded: {} };
@@ -7050,6 +7087,7 @@ function solveWith(doc, opts, seed, pre) {
   geo.expanded = ex.nodes;
   if (ex.count) ctx.nodes = given && given.nodes ? given.nodes : { ...doc.nodes, ...ex.nodes };
   ctx.seq = ex.count ? [] : ctx.order;
+  ctx.shapes = ex.shapes || new Map();
   const root = doc.nodes[doc.root];
   ctx.rects[root.id] = { x: 0, y: 0, w: 0, h: 0 };
   for (const id of kidsOf(root)) {

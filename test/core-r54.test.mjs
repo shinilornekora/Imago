@@ -170,3 +170,95 @@ test('круг54: образцы не переходят между доскам
   assert.notEqual(geo.rects['K0/mb/bt'].w, geo.rects['I0/mb/bt'].w);
   assert.equal(geo.rects.D.w, 260);
 });
+
+/** Критик круга 54: две доски и библиотека; мастера по заданному списку операций. */
+function libDoc(build) {
+  const d = quiet(() => createDoc());
+  const res = quiet(() => applyOps(d, build(artboards(d)[0].id, libraryNode(d).id), { checkExpand: false }));
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  return res.doc;
+}
+const fx = (w, h) => ({ w: { mode: 'fixed', value: w }, h: { mode: 'fixed', value: h } });
+
+test('круг54: id со «/» — экземпляр «a/x» перетирает раскрытого потомка «a/x»: такой экземпляр не образец', () => {
+  for (const order of ['a/x между', 'a/x после']) {
+    const doc = libDoc((board, lib) => {
+      const list = [
+        { op: 'create', node: { type: 'frame', id: 'M', parent: lib, children: [], layout: { mode: 'row' }, size: hug } },
+        { op: 'create', node: { type: 'rect', id: 'x', parent: 'M', size: fx(10, 10) } },
+        { op: 'set', id: 'M', path: 'component', value: { name: 'M' } },
+        { op: 'create', node: { type: 'frame', id: 'K', parent: lib, children: [], layout: { mode: 'row' }, size: hug } },
+        { op: 'create', node: { type: 'rect', id: 'y', parent: 'K', size: fx(50, 50) } },
+        { op: 'set', id: 'K', path: 'component', value: { name: 'K' } },
+        { op: 'create', node: { type: 'frame', id: 'G', parent: board, children: [], layout: { mode: 'row', gap: 5 }, size: hug } },
+        { op: 'create', node: { type: 'instance', id: 'a', parent: 'G', of: 'M' } },
+      ];
+      const ax = { op: 'create', node: { type: 'instance', id: 'a/x', parent: 'G', of: 'K' } };
+      const c = { op: 'create', node: { type: 'instance', id: 'c', parent: 'G', of: 'M' } };
+      return list.concat(order === 'a/x между' ? [ax, c] : [c, ax]);
+    });
+    const geo = solve(doc, KEPT);
+    const plain = solve(doc, PLAIN);
+    assert.equal(hashGeometry(geo), hashGeometry(plain), order);
+    assert.deepEqual(geo.rects.c, plain.rects.c);
+    assert.equal(geo.rects['c/x/y'], undefined, `${order}: узел-призрак`);
+    const op = [{ op: 'set', id: 'G', path: 'layout', value: { mode: 'row', gap: 9 } }];
+    const next = applyOps(doc, op, { checkExpand: false }).doc;
+    assert.equal(hashGeometry(solveAfter(geo, doc, next, op, OPTS)), hashGeometry(solve(next, PLAIN)), order);
+  }
+});
+
+test('круг54: образец не переносится туда, где поддерево упрётся в предел глубины', () => {
+  for (const depth of [236, 245]) {
+    const doc = libDoc((board, lib) => {
+      const L = [{ op: 'create', node: { type: 'frame', id: 'M', parent: lib, children: [], layout: { mode: 'row', padding: 1 }, size: hug } }];
+      let p = 'M';
+      for (let i = 0; i < 20; i++) { L.push({ op: 'create', node: { type: 'frame', id: 'm' + i, parent: p, children: [], layout: { mode: 'row', padding: 1 }, size: hug } }); p = 'm' + i; }
+      L.push({ op: 'create', node: { type: 'rect', id: 'leaf', parent: p, size: fx(10, 10) } },
+        { op: 'set', id: 'M', path: 'component', value: { name: 'M' } },
+        { op: 'create', node: { type: 'frame', id: 'sh', parent: board, children: [], layout: { mode: 'row' }, size: { w: { mode: 'fixed', value: 350 }, h: { mode: 'hug' } } } },
+        { op: 'create', node: { type: 'instance', id: 'A', parent: 'sh', of: 'M' } });
+      p = board;
+      for (let i = 0; i < depth; i++) {
+        L.push({ op: 'create', node: { type: 'frame', id: 'f' + i, parent: p, children: [], layout: { mode: 'row' },
+          size: i === depth - 1 ? { w: { mode: 'fixed', value: 350 }, h: { mode: 'hug' } } : hug } });
+        p = 'f' + i;
+      }
+      L.push({ op: 'create', node: { type: 'instance', id: 'B', parent: p, of: 'M' } });
+      return L;
+    });
+    const geo = quiet(() => solve(doc, OPTS));
+    const plain = quiet(() => solve(doc, PLAIN));
+    assert.equal(hashGeometry(geo), hashGeometry(plain), `глубина ${depth}`);
+    assert.deepEqual(geo.rects.B, plain.rects.B);
+  }
+});
+
+test('круг54: копия образца несёт отрезки — после правки соседа она переносится тем же объектом', () => {
+  const doc = instanceDoc(30);
+  const geo = solve(doc, KEPT);
+  const op = [{ op: 'set', id: 'I3', path: 'props', value: { заголовок: 'Длинная подпись, которая переносится в узкой карточке на несколько строк' } }];
+  const next = applyOps(doc, op).doc;
+  const inc = solveAfter(geo, doc, next, op, OPTS);
+  assert.equal(hashGeometry(inc), hashGeometry(solve(next, PLAIN)));
+  // I1 разложен копией образца I0; в той же строке, до правленого — без сдвига
+  assert.equal(inc.rects['I1/mt'], geo.rects['I1/mt']);
+  assert.equal(inc.rects['I1/mb/bt'], geo.rects['I1/mb/bt']);
+});
+
+test('круг54: заглушка сверх предела берёт размер от текущего мастера, а не из прошлого раскрытия', () => {
+  const doc = libDoc((board, lib) => {
+    const L = [{ op: 'create', node: { type: 'frame', id: 'M', parent: lib, children: [], layout: { mode: 'column' }, size: fx(120, 40) } }];
+    for (let i = 0; i < 59; i++) L.push({ op: 'create', node: { type: 'rect', id: 'r' + i, parent: 'M', size: fx(4, 4) } });
+    L.push({ op: 'set', id: 'M', path: 'component', value: { name: 'M' } },
+      { op: 'create', node: { type: 'frame', id: 'G', parent: board, children: [], layout: { mode: 'row', wrap: true, gap: 4 }, size: { w: { mode: 'fixed', value: 4000 }, h: { mode: 'hug' } } } });
+    for (let i = 0; i < 1000; i++) L.push({ op: 'create', node: { type: 'instance', id: 'I' + i, parent: 'G', of: 'M' } });
+    return L;
+  });
+  quiet(() => solve(doc, OPTS));
+  const next = applyOps(doc, [{ op: 'set', id: 'M', path: 'size', value: fx(200, 70) }], { checkExpand: false }).doc;
+  const a = quiet(() => solve(next, OPTS));
+  const fresh = quiet(() => solve(structuredClone(next), OPTS));
+  assert.ok(Object.keys(a.expanded).some((id) => a.expanded[id].stub), 'есть заглушки');
+  assert.equal(hashGeometry(a), hashGeometry(fresh));
+});
