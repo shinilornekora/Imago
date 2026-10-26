@@ -12725,6 +12725,25 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
   return crit;
 }
 
+/** Круг 56 (SPEC §22): наибольший образец, который показывается модели (data:-адрес, знаков). */
+export const REF_IMAGE_MAX_CHARS = 1100 * 1024;
+
+/**
+ * Круг 56 (SPEC §22): картинка-образец для арт-директора со зрением — первая встроенная (data:)
+ * картинка из тех, чьи цвета считаются (§20), если реплика называет образец (RE_IMAGE_REF).
+ * Адресные картинки не берутся: провайдеры принимают картинку данными, а сеть — не наша.
+ * @returns {{mime: string, data: string}|null}
+ */
+export function referenceImage(doc, selection, geo, utterance) {
+  if (!RE_IMAGE_REF.test(String(utterance == null ? '' : utterance))) return null;
+  for (const s of imageSources(doc, selection, geo)) {
+    if (s.src.length > REF_IMAGE_MAX_CHARS) continue;
+    const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(s.src);
+    if (m) return { mime: m[1], data: m[2] };
+  }
+  return null;
+}
+
 /** Круг 53 (SPEC §20): срок на цвета картинок — декодирование и счёт всех картинок команды вместе. */
 export const IMAGE_COLORS_MS = 4000;
 
@@ -13236,7 +13255,9 @@ async function runCommandCore(options = {}) {
       emit('direct', '');
       try {
         const pictures = await pictureColors(imageColors, doc, selection, signal, serviceNote, geoNow);
-        const raw = await ask(SCHEMAS.direction, [
+        // круг 56 (SPEC §22): модель видит картинки — образец ей показывается самой картинкой
+        const ref = provider.vision === true ? referenceImage(doc, selection, geoNow, utterance) : null;
+        const directMessages = (img) => [
           { role: 'system', content: PROMPTS.direction({
             subject: `${String(utterance).trim()}${plan && plan.summary ? ` (${plan.summary})` : ''}`,
             neighbours: neighboursLine(engine, doc, geoNow),
@@ -13245,8 +13266,20 @@ async function runCommandCore(options = {}) {
             variantHint,
             fontsLocked: webFonts === false,
           }) },
-          { role: 'user', content: userTurn },
-        ], { stage: 'direct', temperature: temperature == null ? 0.8 : temperature });
+          { role: 'user', content: img ? imageTurn(`${userTurn}\n\nОбразец приложен картинкой: палитру, материалы и настроение бери с него`
+            + ' (что на нём изображено — не предмет макета, если об этом не просили).', img) : userTurn },
+        ];
+        const directOpts = { stage: 'direct', temperature: temperature == null ? 0.8 : temperature };
+        if (ref) emit('direct', 'Смотрю на образец');
+        let raw;
+        try {
+          raw = await ask(SCHEMAS.direction, directMessages(ref), directOpts);
+        } catch (e) {
+          // модель не приняла картинку — тот же вызов без неё: образ решается по цветам образца (§20)
+          if (!ref || !(e instanceof BrainError) || !visionRefusal(e)) throw e;
+          serviceNote(`Модель не приняла картинку-образец (${factOnly(e.message)}) — образ по её цветам`);
+          raw = await ask(SCHEMAS.direction, directMessages(null), directOpts);
+        }
         direction = normalizeDirection(raw, { doc, webFonts });
         if (direction) {
           for (const n of direction.notes) serviceNote(`Арт-направление: ${n}`);
