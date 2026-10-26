@@ -29,7 +29,15 @@ const calls = new Map();     // callId → {resolve, reject}
 let callSeq = 0;
 /** Круг 47 (SPEC §14.4): снимки досок для критика — один рендер (и кеш шрифтов) на воркер. */
 let renderer = null;
-const renderBoard = (args) => (renderer || (renderer = createRenderer()))(args);
+/** Снимок — ожидание сети, а не счёт: пул на это время часы задания не ведёт (круг 47). */
+const renderFor = (id) => async (args) => {
+  parentPort.postMessage({ type: 'io', id, on: true });
+  try {
+    return await (renderer || (renderer = createRenderer()))(args);
+  } finally {
+    parentPort.postMessage({ type: 'io', id, on: false });
+  }
+};
 
 /** Часть реплики для передачи в главный поток: текст или картинка (§14.3), ничего лишнего. */
 const partOf = (p) => (p && p.type === 'image'
@@ -160,7 +168,7 @@ async function run(id, job) {
       render: art.critic === false ? null
         // проверка: снимок без resvg и сети — готовый PNG (круг 47)
         : testHooks && typeof art.fakeShot === 'string' ? async () => ({ mime: 'image/png', data: art.fakeShot, width: 8, height: 8 })
-          : art.render !== false ? renderBoard : null,
+          : art.render !== false ? renderFor(id) : null,
       activeArtboardId: job.activeArtboardId || null, history: job.history || null,
       library: job.library || null,
       selectionBy: job.selectionBy || 'human',
@@ -200,7 +208,13 @@ parentPort.on('message', (msg) => {
     if (!w) return;
     calls.delete(msg.callId);
     if (msg.ok) w.resolve({ data: msg.data, usage: msg.usage });
-    else w.reject(new BrainError(msg.error.kind || 'model', msg.error.message || 'Сбой модели', msg.error.code ? { code: msg.error.code } : undefined));
+    else {
+      const extra = {
+        ...(msg.error.code ? { code: msg.error.code } : {}),
+        ...(Number.isInteger(msg.error.status) ? { status: msg.error.status } : {}),
+      };
+      w.reject(new BrainError(msg.error.kind || 'model', msg.error.message || 'Сбой модели', Object.keys(extra).length ? extra : undefined));
+    }
   }
 });
 

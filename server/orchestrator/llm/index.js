@@ -194,8 +194,9 @@ export function createLlm(cfg = {}) {
     provider = makeProvider({
       kind: 'openai', name: 'OpenAI-совместимая модель', baseUrl: parsed.publicBase,
       model: model || undefined, fetch: providerFetch, timeout: cfg.timeout, maxBodyBytes,
-      // круг 47: видит ли модель картинки — из LLM_VISION; не задано — узнаётся по первому отказу
-      vision: cfg.vision,
+      // круг 47: видит ли модель картинки — только по LLM_VISION=1: текстовые модели LM Studio/Ollama
+      // картинку чаще молча выбрасывают, чем отвергают, и «узнать по отказу» нельзя
+      vision: cfg.vision === true,
     });
   }
 

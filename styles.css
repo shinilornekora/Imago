@@ -1359,16 +1359,25 @@ textarea.field { font-family: var(--ui); resize: vertical; min-height: 58px; lin
 }
 /* Круг 47 (SPEC §14.5): решение арт-директора под итогом команды — образцы, образ, шрифты, критик. */
 .msg-art {
-  margin: 6px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
-  font-size: var(--t-xs); color: var(--muted); min-width: 0;
+  margin: 8px 0 0; display: flex; flex-direction: column; gap: 4px;
+  font-size: var(--t-sm); color: var(--muted); min-width: 0;
 }
-.msg-art-swatches { display: inline-flex; gap: 3px; flex: none; }
+.msg-art-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
+.msg-art-swatches { display: inline-flex; gap: 4px; flex: none; }
 .msg-art-swatch {
-  width: 14px; height: 14px; border-radius: 999px; flex: none;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 22%, transparent);
+  width: 18px; height: 18px; padding: 0; border: 0; border-radius: 999px; flex: none; cursor: pointer;
+  /* двойное кольцо: образец виден и на панели того же цвета (#15171c на #14161c), и на светлой */
+  box-shadow: 0 0 0 1px var(--panel), 0 0 0 2px var(--line-strong);
 }
-.msg-art-words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.msg-art-verdict { font-family: var(--mono); color: var(--agent); white-space: nowrap; }
+.msg-art-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.msg-art-font { color: var(--text); font-size: var(--t-md); white-space: nowrap; }
+.msg-art-words {
+  color: var(--text); min-width: 0;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.msg-art-verdict { color: var(--muted); }
+@media (pointer: coarse) { .msg-art-swatch { width: 24px; height: 24px; } }
+
 /* Нативных чекбоксов в приложении больше нет: выбор везде живёт в пилюлях и сегментах
    (круг 11, п.16). Остаётся только приглушение недоступного переключателя. */
 .row[data-off="on"] { opacity: .55; }

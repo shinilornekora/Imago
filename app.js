@@ -153,12 +153,6 @@ function stageErrorNote(e) {
 }
 
 /**
- * Круг 29, п.9. Начертания, которые впервые появляются с инспектором (моноширинный для чисел,
- * полужирный заголовков), браузер грузит по первому требованию — и когда шрифт приходит,
- * весь документ раскладывается заново («Fonts changed»). На большом макете это лишние
- * треть секунды на первом выделении. Просим их сразу, пока холст пуст.
- */
-/**
  * Круг 47 (SPEC §14.2): гарнитуры документа — на страницу. Холст рисует SVG прямо в странице, и
  * семейство, которого у страницы нет (Prata из решения арт-директора), выходило запасным
  * шрифтом, а ширины текста — мерились им же. Подключаем стили Google Fonts по семейству (только
@@ -181,6 +175,8 @@ function ensureDocFonts(doc) {
       link.rel = 'stylesheet';
       link.href = href;
       link.dataset.font = f.family;
+      // не пришло (нет сети) — забыть, чтобы следующий документ попробовал снова
+      link.addEventListener('error', () => { docFontsSeen.delete(f.family); docFontsDoc = null; link.remove(); }, { once: true });
       document.head.appendChild(link);
     }
   } catch { /* без шрифтов холст нарисует запасным */ }
@@ -190,11 +186,30 @@ function ensureDocFonts(doc) {
  * Круг 47 (SPEC §14.4): снимок черновика доски для критика агента в браузере — PNG той же
  * отрисовкой, что холст, с гарнитурами внутри. Не вышло — null, и критик смотрит выжимку.
  */
-function renderForCritic({ doc, geo, artboardId, maxSide }) {
+async function renderForCritic({ doc, geo, artboardId }) {
   ensureDocFonts(doc);
-  return CORE.boardPNG(doc, artboardId, { geo, maxSide });
+  // раскладку черновика считали до прихода новых гарнитур: дождаться их и перемерить, иначе снимок
+  // рисует настоящий шрифт в чужих переносах строк
+  try {
+    if (document.fonts && typeof document.fonts.load === 'function') {
+      const fams = fontsInDoc(doc).filter((f) => catalogFont(f));
+      await Promise.race([
+        Promise.all(fams.map((f) => document.fonts.load(`16px "${f}"`, 'Аа0').catch(() => null))),
+        new Promise((r) => setTimeout(r, 4000)),
+      ]);
+      await new Promise((r) => setTimeout(r, 0));
+      geo = CORE.solve(doc);
+    }
+  } catch { /* перемерить не вышло — снимок по прежней раскладке */ }
+  return CORE.boardPNG(doc, artboardId, { geo });
 }
 
+/**
+ * Круг 29, п.9. Начертания, которые впервые появляются с инспектором (моноширинный для чисел,
+ * полужирный заголовков), браузер грузит по первому требованию — и когда шрифт приходит,
+ * весь документ раскладывается заново («Fonts changed»). На большом макете это лишние
+ * треть секунды на первом выделении. Просим их сразу, пока холст пуст.
+ */
 function warmFonts() {
   try {
     if (!document.fonts || typeof document.fonts.load !== 'function') return;
@@ -3191,10 +3206,11 @@ function presentServerResult(raw, utterance, { variant = null } = {}) {
   const partly = typeof res.cannot === 'string' ? res.cannot.trim() : '';
   const followups = Array.isArray(res.followups) ? res.followups.slice(0, 3).map(String) : [];
   const label = variant ? `${utterance} · ${variant.label || 'вариант'}` : utterance;
-  const art = SHELL.artSummary(res.direction, res.critique);
+  const art = SHELL.artSummary(res.direction, res.critique, { blocked: !!issueLine(r.warnings) });
   rememberPair(utterance, headline);
   if (!variant) addChat('you', utterance);
-  addChat('agent', headline, followups, [aside, art && art.line].filter(Boolean).join(' · '));
+  addChat('agent', headline, followups, aside);
+  if (art) addChat('agent', art.line);
   state.awaitingClarify = null;
   // часть просьбы невыполнима — говорим вместе с тем, что сделано (как у brain, п.19)
   if (partly) addChat('agent', partly);
@@ -3769,6 +3785,8 @@ function lmStudioProvider() {
     kind: 'lmstudio',
     baseUrl: settings.lmstudio.baseUrl,
     model: settings.lmstudio.model,
+    // круг 47: видит ли модель картинки (снимок доски для самопроверки) — решает человек
+    vision: settings.lmstudio.vision === true,
   });
 }
 
@@ -9547,10 +9565,11 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
       : (summary && summary !== headline ? summary : '');
     // в память разговора кладём факт, а не намерение: иначе «верни как было» не на что опереть (п.12)
     // круг 47 (SPEC §14.5): образ, палитра, шрифты и вердикт критика — под итогом
-    const art = SHELL.artSummary(res.direction, res.critique);
+    const art = SHELL.artSummary(res.direction, res.critique, { blocked: !!issueLine(res.warnings) });
     rememberPair(utterance, headline);
     addChat('you', utterance);
-    addChat('agent', headline, followups, [aside, art && art.line].filter(Boolean).join(' · '));
+    addChat('agent', headline, followups, aside);
+    if (art) addChat('agent', art.line);
     state.awaitingClarify = null;
 
     // часть просьбы невыполнима — об этом говорим вместе с тем, что всё-таки сделано (п.19)
@@ -10505,29 +10524,46 @@ function showMsg(kind, text, opts = {}) {
     const box = document.createElement('div');
     box.className = 'msg-art';
     box.setAttribute('role', 'group');
-    box.setAttribute('aria-label', 'Решение арт-директора');
+    box.setAttribute('aria-label', 'Оформление, которое выбрал агент');
+    const head = document.createElement('div');
+    head.className = 'msg-art-head';
     if (opts.art.swatches.length) {
       const row = document.createElement('span');
       row.className = 'msg-art-swatches';
       for (const sw of opts.art.swatches) {
-        const dot = document.createElement('span');
+        // образец — кнопка: цвет в строку команды («сделай акцент …» договорит человек)
+        const dot = document.createElement('button');
+        dot.type = 'button';
         dot.className = 'msg-art-swatch';
         dot.style.background = sw.hex;
         dot.title = `${sw.label} ${sw.hex}`;
+        dot.setAttribute('aria-label', `${sw.label} ${sw.hex} — вставить в строку команды`);
+        dot.addEventListener('click', () => {
+          const cur = dom.command.value.trim();
+          dom.command.value = cur ? `${cur} ${sw.hex}` : `${sw.label} ${sw.hex} — `;
+          dom.command.focus();
+        });
         row.appendChild(dot);
       }
-      // образцы цвета — для глаза; диктору — словами
-      row.setAttribute('aria-label', `Палитра: ${opts.art.swatches.map((x) => `${x.label} ${x.hex}`).join(', ')}`);
-      row.setAttribute('role', 'img');
-      box.appendChild(row);
+      head.appendChild(row);
     }
-    const words = document.createElement('span');
-    words.className = 'msg-art-words';
-    words.textContent = human([opts.art.concept, opts.art.fonts].filter(Boolean).join(' · '));
-    words.title = words.textContent;
-    if (words.textContent) box.appendChild(words);
+    for (const fam of opts.art.families || []) {
+      // название гарнитуры — ею же: так выбор виден, а не только назван
+      const f = document.createElement('span');
+      f.className = 'msg-art-font';
+      f.style.fontFamily = `"${fam.replace(/["\\]/g, '')}", var(--ui)`;
+      f.textContent = `Аа ${fam}`;
+      head.appendChild(f);
+    }
+    if (head.childNodes.length) box.appendChild(head);
+    if (opts.art.concept) {
+      const words = document.createElement('div');
+      words.className = 'msg-art-words';
+      words.textContent = human(opts.art.concept);
+      box.appendChild(words);
+    }
     if (opts.art.verdict) {
-      const v = document.createElement('span');
+      const v = document.createElement('div');
       v.className = 'msg-art-verdict';
       v.textContent = human(opts.art.verdict);
       box.appendChild(v);
@@ -13623,6 +13659,12 @@ function fillSettings(body) {
   const lmRows = [
     row('Адрес', field('input', settings.lmstudio.baseUrl, (v) => { settings.lmstudio.baseUrl = v.trim(); saveSettings(); }, 'Адрес LM Studio')),
     row('Модель', field('input', settings.lmstudio.model, (v) => { settings.lmstudio.model = v.trim(); saveSettings(); }, 'Имя модели')),
+    // круг 47 (SPEC §14.3): мультимодальной модели агент показывает снимок собранного экрана
+    row('Картинки', selectField(['no', 'yes'], settings.lmstudio.vision === true ? 'yes' : 'no', (v) => {
+      settings.lmstudio.vision = v === 'yes';
+      saveSettings();
+      if (state.providerKind === 'lmstudio') useLmStudio();
+    }, { no: 'модель их не видит', yes: 'видит (Qwen-VL, Gemma 3, LLaVA…)' })),
     connect,
   ];
   // путь назад виден, пока есть куда возвращаться (п.3)

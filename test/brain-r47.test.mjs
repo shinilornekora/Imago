@@ -109,7 +109,10 @@ test('круг 47: решение арт-директора — годное п�
   assert.deepEqual(d.notes, [], 'чинить было нечего');
   assert.match(directionBrief(d), /Образ: Утренняя кофейня/);
   assert.match(directionBrief(d), /фон доски #f4ead8/);
-  assert.match(directionBrief(d), /заголовки и крупные цифры — Prata, текст — Golos Text/);
+  assert.match(directionBrief(d), /Шрифты: заголовки — Prata, текст — Golos Text/);
+  assert.match(directionBrief(d), /сильнее правила 4/, 'генератору прямо сказано: токены цвета документа здесь не пишем');
+  const forCritic = directionBrief(d, { forCritic: true });
+  assert.doesNotMatch(forCritic, /пиши|Ставит/, 'критику — только решение, без указаний генератору');
 });
 
 test('круг 47: нечитаемая палитра и чужие шрифты чинятся — с записью, что починено', () => {
@@ -154,9 +157,21 @@ test('круг 47: схемы direction и critique понижаются для 
   assert.equal(normalizeCritique(SCHEMAS.critique.example).verdict, 'revise');
 });
 
+test('круг 47: фон — спокойный материал, акцент — отличимый от фона (мёд не становится и тем, и другим)', () => {
+  const ratio = (a, b) => core.contrastRatio(a, b);
+  const honey = normalizeDirection({ concept: 'Пасека', materials: [{ name: 'мёд', hex: '#f2b705' }, { name: 'воск', hex: '#3b2f2f' }, { name: 'дерево', hex: '#8b5a2b' }] });
+  assert.notEqual(honey.palette.bg, honey.palette.accent);
+  assert.ok(ratio(honey.palette.accent, honey.palette.bg) >= 3, `акцент виден на фоне: ${honey.palette.accent} на ${honey.palette.bg}`);
+  const one = normalizeDirection({ concept: 'Ночь', materials: [{ name: 'индиго', hex: '#123456' }] });
+  assert.ok(ratio(one.palette.accent, one.palette.bg) >= 3, 'и с одним материалом');
+  const same = normalizeDirection({ concept: 'x', palette: { bg: '#f4ead8', text: '#222222', accent: '#f0e6d2' } });
+  assert.ok(ratio(same.palette.accent, same.palette.bg) >= 3);
+  assert.ok(same.notes.some((n) => /сливался с фоном/.test(n)));
+});
+
 /* ── воплощение решения ────────────────────────────────────────────────── */
 
-test('круг 47: шрифты решения — заголовочным стилям display, прочим text, с ближайшим начертанием', () => {
+test('круг 47: шрифты решения — заголовкам display, прочим text (heading — жирным текстом), ближайшее начертание', () => {
   const doc = empty();
   const d = normalizeDirection(DIRECTION);
   const { tree, fonts } = applyDirection(TREE, d, doc, { asArtboard: true });
@@ -164,17 +179,46 @@ test('круг 47: шрифты решения — заголовочным ст
   const [title, sub, row] = tree.children;
   assert.deepEqual(title.style, { token: 'display', font: 'Prata', fontWeight: 400 }, 'у Prata только 400 — стоит 400, а не синтетический жирный');
   assert.deepEqual(sub.style, { token: 'body', font: 'Golos Text' });
-  assert.equal(row.children[0].style.font, 'Prata', 'heading — заголовочный');
+  assert.equal(row.children[0].style.font, 'Golos Text', 'heading 18px — текстом: акцидентный на мелком подзаголовке читается плохо');
+  assert.equal(row.children[1].style.font, 'Prata', 'title — заголовочный');
   assert.equal(title.color, d.palette.text, 'тексту без цвета — текст палитры');
   assert.equal(row.children[1].color, '#2f6f62', 'цвет модели не трогаем');
   assert.equal(tree.fill, '#f4ead8', 'новой доске без фона — фон палитры');
   assert.equal(TREE.children[0].style, 'display', 'исходное дерево не тронуто');
-  // шрифт, который модель уже поставила из набора, — её выбор
   const own = applyDirection({ type: 'text', text: 'x', style: { token: 'display', font: 'Unbounded' } }, d, doc);
   assert.equal(own.tree.style.font, 'Unbounded');
   assert.equal(own.fonts, 0);
-  // блок внутри существующей доски фон доски не перекрашивает
   assert.equal(applyDirection(TREE, d, doc, { asArtboard: false }).tree.fill, undefined);
+  // крупный заголовок без токена — тоже заголовок
+  assert.equal(applyDirection({ type: 'text', text: '56', style: { fontSize: 56, fontWeight: 800 } }, d, doc).tree.style.font, 'Prata');
+  // рукописный акцидентный — только на самом крупном
+  const script = normalizeDirection({ concept: 'Пляж', fonts: { display: 'Pacifico', text: 'Nunito' } });
+  const two = applyDirection({ type: 'frame', children: [
+    { type: 'text', text: 'a', style: 'display' }, { type: 'text', text: 'b', style: 'title' }] }, script, doc);
+  assert.equal(two.tree.children[0].style.font, 'Pacifico');
+  assert.equal(two.tree.children[1].style.font, 'Nunito');
+});
+
+test('круг 47: токены цвета документа → роли палитры; текст на акценте — читаемым цветом', () => {
+  const doc = empty();
+  const dark = normalizeDirection({ concept: 'Ночная дорожка', palette: { bg: '#15171c', surface: '#20242c', text: '#f2f4f7', muted: '#9aa3b2', accent: '#c6ff3d', accent2: '#ff4f6d' }, fonts: { display: 'Russo One', text: 'Exo 2' } });
+  const tree = {
+    type: 'frame', name: 'Тренировки', fill: 'canvas', children: [
+      { type: 'text', name: 'Заголовок', text: 'Темп', style: 'display', color: 'text' },
+      { type: 'text', name: 'Подпись', text: 'за неделю', style: 'caption', color: 'muted' },
+      { type: 'frame', name: 'Кнопка', fill: 'accent', children: [{ type: 'text', name: 'Надпись', text: 'Старт', style: 'body' }] },
+      { type: 'frame', name: 'Карточка', fill: { token: 'surface' }, children: [] },
+    ],
+  };
+  const { tree: t } = applyDirection(tree, dark, doc, { asArtboard: true });
+  assert.equal(t.fill, '#15171c');
+  assert.equal(t.children[0].color, '#f2f4f7');
+  assert.equal(t.children[1].color, '#9aa3b2');
+  assert.equal(t.children[2].fill, '#c6ff3d');
+  const label = t.children[2].children[0];
+  assert.equal(label.color, dark.palette.onAccent, 'надпись на акценте — текст на акценте');
+  assert.ok(core.contrastRatio(label.color, '#c6ff3d') >= 4.5);
+  assert.equal(t.children[3].fill, '#20242c');
 });
 
 /* ── конвейер ───────────────────────────────────────────────────────────── */
@@ -212,6 +256,7 @@ test('круг 47: «собери экран» — образ до раскла�
   assert.ok(Array.isArray(crit), 'реплика критика — с картинкой');
   assert.deepEqual(crit[1], { type: 'image', mime: 'image/png', data: PNG.data });
   assert.match(provider.calls[3].messages[0].content, /РЕШЕНИЕ АРТ-ДИРЕКТОРА/);
+  assert.match(provider.calls[3].messages[0].content, /СЛОИ МАКЕТА[\s\S]*Заголовок/, 'со снимком — и имена слоёв');
   assert.equal(res.critique.score, 8.5);
   assert.equal(res.critique.seen, 'image');
   assert.equal(res.critique.revised, undefined);
@@ -227,92 +272,95 @@ test('круг 47: критик недоволен — один круг дор�
   const revise = provider.calls[4].messages;
   assert.equal(revise[revise.length - 2].role, 'assistant', 'модель видит своё прежнее дерево');
   assert.match(revise[revise.length - 1].content, /4\/10, выглядит шаблонно/);
+  assert.doesNotThrow(() => JSON.parse(revise[revise.length - 2].content), 'прежнее дерево — целым JSON');
   assert.match(revise[revise.length - 1].content, /круглый штамп/);
   assert.ok(byName(res.preview.doc, 'Штамп'), 'доработка на макете');
   assert.equal(byName(res.preview.doc, 'Штамп').rotate, -12);
   assert.equal(res.critique.revised, true);
-  assert.equal(artSummary(res.direction, res.critique).verdict, 'критик 4/10 — доработал по замечаниям');
+  assert.equal(artSummary(res.direction, res.critique).verdict, 'Первая сборка — 4 из 10 → доработал: шапка — просто текст по левому краю, без образа');
 });
 
 test('круг 47: доработка собралась хуже (отказ, пустое дерево) — остаётся собранное', async () => {
   for (const second of [{ cannot: 'не могу' }, { type: 'frame', name: 'Пусто', children: [{ type: 'whatever' }] }]) {
     const doc = empty();
-    const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, second], critique: [CRIT_BAD] });
-    const res = await runCommand({ doc, selection: [], utterance: 'собери экран меню кофейни', provider, engine: core });
+    const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, second], critique: [CRIT_BAD] }, { vision: true });
+    const res = await runCommand({ doc, selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render: async () => PNG });
     assert.equal(res.error, undefined, JSON.stringify(res.error));
     assert.ok(boardOf(res.preview.doc, 'Кофейня'), 'первый вариант на месте');
     assert.notEqual(res.critique.revised, true);
   }
 });
 
-test('круг 47: модель не приняла картинку — критик смотрит выжимку, провайдер помечен «без зрения»', async () => {
-  const { BrainError } = await import('../src/brain.js');
-  const doc = empty();
-  let renders = 0;
-  const render = async () => { renders++; return PNG; };
-  const provider = fake({
-    plan: [PLAN, PLAN], direction: [DIRECTION, DIRECTION], tree: [TREE, TREE],
-    critique: [new BrainError('model', 'Модель не приняла запрос'), CRIT_OK, CRIT_OK],
-  });
-  const res = await runCommand({ doc, selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render });
-  assert.equal(res.error, undefined, JSON.stringify(res.error));
-  const crits = provider.calls.filter((c) => c.schema === 'critique');
-  assert.equal(crits.length, 2);
-  assert.ok(Array.isArray(crits[0].messages[1].content), 'сначала — со снимком');
-  assert.equal(typeof crits[1].messages[1].content, 'string', 'потом — без');
-  assert.match(crits[1].messages[0].content, /МАКЕТ \(выжимка/);
-  assert.match(crits[1].messages[0].content, /Утро в Зерне/, 'в выжимке — новая доска');
-  assert.equal(res.critique.seen, 'text');
-  assert.equal(provider.vision, false);
-  assert.ok(res.serviceNotes.some((n) => /не приняла снимок/.test(n)));
-  // следующая команда снимок уже не просит
-  await runCommand({ doc, selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render });
-  assert.equal(renders, 1);
-});
-
-test('круг 47: сеть оборвалась на снимке — по выжимке, но зрение не снимается', async () => {
-  const { BrainError } = await import('../src/brain.js');
-  const provider = fake({ plan: PLAN, direction: DIRECTION, tree: TREE, critique: [new BrainError('network', 'Нет связи с моделью'), CRIT_OK] });
-  const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render: async () => PNG });
-  assert.equal(res.critique.seen, 'text');
-  assert.notEqual(provider.vision, false);
-});
-
-test('круг 47: снимка нет (render не дан, вернул null или упал) — критик по выжимке, команда цела', async () => {
-  for (const render of [null, async () => null, async () => { throw new Error('canvas'); }, async () => ({ mime: 'image/png', data: '' })]) {
-    const provider = fake({ plan: PLAN, direction: DIRECTION, tree: TREE, critique: CRIT_OK });
-    const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render });
-    assert.equal(res.error, undefined);
-    const c = provider.calls.find((x) => x.schema === 'critique');
-    assert.equal(typeof c.messages[1].content, 'string');
-    assert.equal(res.critique.seen, 'text');
+test('круг 47: модель отвергла снимок (400) или сеть упала — самопроверка по приметам, зрение остаётся', async () => {
+  const { BrainError, visionRefusal } = await import('../src/brain.js');
+  assert.equal(visionRefusal(new BrainError('model', 'x', { status: 400 })), true);
+  assert.equal(visionRefusal(new BrainError('model', 'x', { status: 500 })), false);
+  assert.equal(visionRefusal(new BrainError('model', 'x', { status: 400, code: 'llm_bad_response' })), false);
+  assert.equal(visionRefusal(new BrainError('network', 'x', { status: 400 })), false);
+  for (const err of [new BrainError('model', 'Модель не приняла запрос', { status: 400 }), new BrainError('network', 'Нет связи')]) {
+    const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, TREE_BETTER], critique: [err] }, { vision: true });
+    const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render: async () => PNG });
+    assert.equal(res.error, undefined, JSON.stringify(res.error));
+    assert.equal(provider.calls.filter((c) => c.schema === 'critique').length, 1, 'второго вызова критика без картинки нет');
+    assert.equal(res.critique.seen, 'signals');
+    assert.equal(provider.vision, true, 'зрение заявлено — снимок снимается только у этой команды');
+    assert.ok(res.serviceNotes.some((n) => /не приняла снимок/.test(n)));
   }
 });
 
-test('круг 47: арт-директор и критик сломались — команда выполняется как раньше, без образа', async () => {
-  const provider = fake({ plan: PLAN, tree: TREE, direction: new Error('500'), critique: { nonsense: true } });
+test('круг 47: без зрения или без снимка модель-критика не зовут — решают приметы шаблона', async () => {
+  for (const [render, vision] of [[null, true], [async () => null, true], [async () => { throw new Error('canvas'); }, true],
+    [async () => ({ mime: 'image/png', data: '' }), true], [async () => PNG, undefined], [async () => PNG, false]]) {
+    let shots = 0;
+    const r = render ? async (a) => { shots++; return render(a); } : null;
+    const provider = fake({ plan: PLAN, direction: DIRECTION, tree: [TREE, TREE_BETTER] }, { vision });
+    const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, render: r });
+    assert.equal(res.error, undefined);
+    assert.equal(provider.calls.filter((c) => c.schema === 'critique').length, 0);
+    assert.equal(res.critique.seen, 'signals');
+    assert.equal(res.critique.score, null, 'цифры без снимка нет — её нечем обосновать');
+    if (vision !== true) assert.equal(shots, 0, 'модели без заявленного зрения снимок и не делается');
+  }
+  const plain = { type: 'frame', name: 'Плоско', children: [
+    { type: 'text', name: 'А', text: 'Один', style: 'body', align: 'center' }, { type: 'text', name: 'Б', text: 'Два', style: 'body', align: 'center' },
+    { type: 'text', name: 'В', text: 'Три', style: 'body', align: 'center' }, { type: 'text', name: 'Г', text: 'Четыре', style: 'body', align: 'center' },
+  ] };
+  const better = { ...clone(plain), children: [...clone(plain).children.map((c) => ({ ...c, align: 'left' })), { type: 'ellipse', name: 'Пятно', size: { w: 40, h: 40 }, fill: '#ff0000' }] };
+  const provider = fake({ plan: PLAN, tree: [plain, better] });
+  const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, direction: false });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.critique.verdict, 'revise', res.critique.signals.join(' | '));
+  assert.ok(res.critique.signals.length >= 2);
+  assert.ok(res.critique.fixes.length);
+  assert.equal(res.critique.revised, true);
+  assert.match(provider.calls[provider.calls.length - 1].messages.at(-1).content, /Самопроверка нашла/);
+  assert.match(artSummary(null, res.critique).verdict, /^Самопроверка: \d приметы? шаблона → доработал/);
+});
+
+test('круг 47: арт-директор сломался — команда как раньше; критик без оценки — собранное остаётся', async () => {
+  const provider = fake({ plan: PLAN, tree: TREE, direction: new Error('500') });
   const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core });
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.ok(boardOf(res.preview.doc, 'Кофейня'));
   assert.equal(res.direction, undefined);
-  assert.equal(res.critique, undefined);
   assert.doesNotMatch(provider.calls.find((c) => c.schema === 'tree').messages[0].content, /АРТ-НАПРАВЛЕНИЕ/);
   assert.ok(res.serviceNotes.some((n) => /Арт-направление не получилось/.test(n)));
-  assert.ok(res.serviceNotes.some((n) => /без оценки/.test(n)));
   assert.equal(res.warnings.some((w) => /Арт|Критик/.test(w)), false, 'человеку о внутренней кухне не говорим');
+  const p2 = fake({ plan: PLAN, direction: DIRECTION, tree: TREE, critique: { score: null, verdict: 'ok' } }, { vision: true });
+  const r2 = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider: p2, engine: core, render: async () => PNG });
+  assert.equal(r2.critique, undefined);
+  assert.ok(r2.serviceNotes.some((n) => /без оценки/.test(n)));
 });
 
-test('круг 47: direction:false и critic:false — ни одного лишнего вызова; правка — без образа и критика', async () => {
-  const provider = fake({ plan: PLAN, tree: TREE });
-  const res = await runCommand({ doc: empty(), selection: [], utterance: 'собери экран меню кофейни', provider, engine: core, direction: false, critic: false });
-  assert.deepEqual(provider.calls.map((c) => c.schema), ['plan', 'tree']);
-  assert.equal(res.error, undefined);
-  // правка существующего — не «новое оформление»: ни арт-директора, ни критика
+test('круг 47: вставка в существующую доску — ни образа, ни критика: держим её оформление', async () => {
   const doc = empty();
-  const t = Object.values(doc.nodes).find((n) => n.type === 'text');
-  const p2 = fake({ plan: { intent: 'edit', title: 'Крупнее', summary: 'Крупнее', steps: ['Стиль'] }, patch: { edits: [{ op: 'set', target: t.id, path: 'style', value: 'display' }] } });
-  await runCommand({ doc, selection: [t.id], utterance: 'сделай крупнее', provider: p2, engine: core });
-  assert.equal(p2.calls.filter((c) => c.schema === 'direction' || c.schema === 'critique').length, 0);
+  const board = Object.values(doc.nodes).find((n) => n.parent === doc.root && n.type === 'frame' && n.role !== 'library');
+  const provider = fake({ plan: { intent: 'create', title: 'Плашка', summary: 'Добавлю плашку', steps: ['Плашка'] },
+    tree: { type: 'frame', name: 'Плашка', children: [{ type: 'text', name: 'Т', text: 'Привет', style: 'body' }] } });
+  const res = await runCommand({ doc, selection: [board.id], utterance: 'добавь сюда плашку с приветствием', provider, engine: core, activeArtboardId: board.id });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(provider.calls.filter((c) => c.schema === 'direction' || c.schema === 'critique').length, 0);
+  assert.equal(res.direction, undefined);
 });
 
 test('круг 47: варианты — у каждого свой образ (с характером варианта), критика нет', async () => {
@@ -425,26 +473,63 @@ function runCommandSync(doc, tree) {
 
 /* ── карточка итога ────────────────────────────────────────────────────── */
 
-test('круг 47: карточка итога — образ, образцы палитры, шрифты, критик; мусор с сервера мимо', () => {
+test('круг 47: карточка итога — образ, образцы палитры, шрифты, оценка; мусор с сервера мимо', () => {
   const a = artSummary(normalizeDirection(DIRECTION), { score: 8.5, verdict: 'ok', seen: 'image' });
   assert.equal(a.swatches.length, 6);
   assert.deepEqual(a.swatches[0], { role: 'bg', hex: '#f4ead8', label: 'фон' });
   assert.equal(a.fonts, 'Prata + Golos Text');
-  assert.equal(a.verdict, 'критик 8,5/10');
-  assert.match(a.line, /^Образ: Утренняя кофейня.* · Prata \+ Golos Text · критик 8,5\/10$/);
+  assert.deepEqual(a.families, ['Prata', 'Golos Text']);
+  assert.equal(a.verdict, 'Взгляд со стороны: 8,5 из 10');
+  assert.match(a.line, /^Образ: Утренняя кофейня.* · Prata \+ Golos Text · Взгляд со стороны: 8,5 из 10$/);
   const b = artSummary({ palette: { bg: 'url(javascript:1)', text: '#ABCDEF' }, fonts: { display: 7 } }, { score: 'x' });
   assert.deepEqual(b.swatches, [{ role: 'text', hex: '#abcdef', label: 'текст' }]);
   assert.equal(b.verdict, '');
   assert.equal(artSummary(null, null), null);
   assert.equal(artSummary({}, {}), null);
-  assert.match(artSummary(null, { score: 5, verdict: 'revise', seen: 'text' }).verdict, /доработка не легла.*без снимка/);
+  assert.match(artSummary(null, { score: 5, verdict: 'revise' }).verdict, /доработка не легла/);
+  assert.equal(artSummary(null, { score: null, verdict: 'ok', seen: 'image' }), null, 'оценки нет — нечего показывать');
+  // при нечитаемом тексте оценка вида не показывается
+  assert.equal(artSummary(normalizeDirection(DIRECTION), { score: 9, verdict: 'ok', seen: 'image' }, { blocked: true }).verdict, '');
+  assert.equal(artSummary(null, { seen: 'signals', signals: [], verdict: 'ok' }).verdict, 'Самопроверка: примет шаблона нет');
 });
 
-test('круг 47: промпт критика без снимка — с выжимкой, со снимком — без неё', () => {
-  const t = PROMPTS.critic({ subject: 'x', seen: 'text', digest: 'ВЫЖИМКА', signals: '- a' });
-  assert.match(t, /картинки нет/);
-  assert.match(t, /ВЫЖИМКА/);
-  const i = PROMPTS.critic({ subject: 'x', seen: 'image', digest: '', signals: '- a' });
-  assert.match(i, /снимок приложен/);
-  assert.doesNotMatch(i, /МАКЕТ \(выжимка/);
+test('круг 47: промпт критика — со снимком, слоями, замечаниями проверки и пометками о снимке', () => {
+  const t = PROMPTS.critic({ subject: 'x', signals: '- a', problems: '- контраст 1.2', layers: 'Шапка', notes: 'Снимок показывает верх доски' });
+  assert.match(t, /снимок только что собранного макета/);
+  assert.match(t, /ЗАМЕЧАНИЯ ПРОВЕРКИ[\s\S]*контраст/);
+  assert.match(t, /СЛОИ МАКЕТА[\s\S]*Шапка/);
+  assert.match(t, /О СНИМКЕ: Снимок показывает верх/);
+});
+
+test('круг 47: снимок — доска с картинкой, высокая доска обрезается сверху, моно и эмодзи-безопасность', () => {
+  const doc = empty();
+  const b = Object.values(doc.nodes).find((n) => n.parent === doc.root && n.type === 'frame' && n.role !== 'library');
+  const t = Object.values(doc.nodes).find((n) => n.type === 'text');
+  const r = core.applyOps(doc, [
+    core.ops.create({ id: 'im1', type: 'image', name: 'Фото', parent: b.id, src: 'data:image/png;base64,iVBORw0KGgo=', size: { w: { mode: 'fixed', value: 100 }, h: { mode: 'fixed', value: 80 } } }),
+    core.ops.set(t.id, 'characters', 'a\u0001b © 2026'),
+  ]);
+  assert.equal(r.error, undefined);
+  const out = quiet(() => core.renderSVG(r.doc, b.id, { maxHeight: 300 }));
+  assert.ok(out, 'доска с картинкой снимается');
+  assert.match(out.svg, /xlink:href="data:image\/png/);
+  assert.doesNotMatch(out.svg, /\u0001/, 'управляющих знаков в XML нет');
+  assert.match(out.svg, /© 2026/);
+  assert.equal(out.cropped, true);
+  assert.equal(out.height, 300);
+  assert.ok(out.fullHeight > 300);
+  assert.match(out.svg, /^<\?xml[^>]*>\s*<svg [^>]*height="300"[^>]*viewBox="0 0 \d+ 300"/);
+  // «Rubik Mono One» — акцидентный, не моно; «JetBrains Mono» — моно, но своим шрифтом
+  assert.equal(core.resolveTextStyle(doc, { style: { token: 'body', font: 'Rubik Mono One' } }).mono, false);
+  assert.match(core.resolveTextStyle(doc, { style: { token: 'body', font: 'JetBrains Mono' } }).fontFamily, /^JetBrains Mono, IBM Plex Mono/);
+});
+
+test('круг 47: тема документа при досках в своей палитре — об этом сказано', async () => {
+  const doc = empty();
+  const b = Object.values(doc.nodes).find((n) => n.parent === doc.root && n.type === 'frame' && n.role !== 'library');
+  const d2 = core.applyOps(doc, [core.ops.set(b.id, 'fill', '#15171c')]).doc;
+  const provider = fake({ plan: { intent: 'theme', title: 'Тёмная', summary: 'Тёмная тема', steps: ['Цвета'] },
+    theme: { summary: 'Тёмная', colors: [{ name: 'canvas', value: '#101418' }, { name: 'text', value: '#f2f4f8' }] } });
+  const res = await runCommand({ doc: d2, selection: [], utterance: 'сделай тёмную тему', provider, engine: core });
+  assert.ok(res.warnings.some((w) => /собран в собственной палитре/.test(w)), res.warnings.join(' | '));
 });

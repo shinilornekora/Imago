@@ -284,6 +284,13 @@ export function createDslv(o = {}) {
       finish(job, msg.result, null);
       return;
     }
+    /* Круг 47 (SPEC §14.4): снимок доски для критика ждёт сеть (шрифты) — это не счёт: часы
+       задания стоят, воркер свободен для соседей, как во время вызова модели. */
+    if (msg.type === 'io') {
+      if (msg.on) { disarm(job); job.llmPending++; pump(); }
+      else if (job.llmPending > 0) { job.llmPending--; if (!job.llmPending && !job.settled) arm(job); }
+      return;
+    }
     if (msg.type === 'llm') {
       disarm(job);
       job.llmPending++;
@@ -344,7 +351,11 @@ export function createDslv(o = {}) {
       } catch (e) {
         return {
           ok: false, usage,
-          error: { kind: (e && e.kind) || 'model', message: (e && e.message) || 'Сбой модели', ...(e && e.code ? { code: e.code } : {}) },
+          error: {
+            kind: (e && e.kind) || 'model', message: (e && e.message) || 'Сбой модели', ...(e && e.code ? { code: e.code } : {}),
+            // круг 47: статус отказа модели — brain по нему решает, видит ли модель картинки
+            ...(e && Number.isInteger(e.status) ? { status: e.status } : {}),
+          },
         };
       }
     })();

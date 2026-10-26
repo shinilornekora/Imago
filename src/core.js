@@ -5527,10 +5527,12 @@ function resolveTextStyle(doc, node) {
   const lineHeight = isNum(lhRaw) ? (lhRaw <= 4 ? r2(lhRaw * fontSize) : lhRaw) : r2(fontSize * 1.4);
   const letterSpacing = isNum(over.letterSpacing) ? over.letterSpacing
     : (isNum(base.letterSpacing) ? base.letterSpacing : 0);
-  const mono = /mono/i.test(font);
+  // круг 47: моноширинный — семейство, чьё имя КОНЧАЕТСЯ на Mono (JetBrains Mono, Martian Mono);
+  // «Rubik Mono One» — акцидентный, и подменять его IBM Plex Mono было нельзя
+  const mono = /\bmono$/i.test(font.trim());
   return {
     font, fontSize, fontWeight, lineHeight, letterSpacing, mono,
-    fontFamily: mono ? FALLBACK_MONO : (font + ', ' + FALLBACK_FONT)
+    fontFamily: mono ? (/^ibm plex mono$/i.test(font.trim()) ? FALLBACK_MONO : font + ', ' + FALLBACK_MONO) : (font + ', ' + FALLBACK_FONT)
   };
 }
 
@@ -7995,7 +7997,10 @@ function rotateAttr(deg, rect, dx, dy) {
  * одного синхронного вызова renderSVG.
  * ------------------------------------------------------------------ */
 
-const escXml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// знаки, которых в XML нет вовсе (управляющие, одиночные суррогаты, U+FFFE/FFFF): resvg на них
+// бросает, а <img> не грузит разметку — выкидываем при сериализации
+const XML_BAD = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+const escXml = (s) => String(s).replace(XML_BAD, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 class MemText {
   constructor(text) { this.nodeType = 3; this.data = String(text); this.parentNode = null; }
@@ -8013,6 +8018,8 @@ class MemEl {
     this.style = css;
   }
   setAttribute(k, v) { this.attrs.set(String(k), String(v)); }
+  // ссылка картинки — единственный атрибут с пространством имён на пути toSVG (xlink:href)
+  setAttributeNS(ns, k, v) { this.attrs.set(ns === 'http://www.w3.org/1999/xlink' && !/:/.test(k) ? 'xlink:' + k : String(k), String(v)); }
   getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
   removeAttribute(k) { this.attrs.delete(k); }
   hasAttribute(k) { return this.attrs.has(k); }
@@ -8046,7 +8053,7 @@ class MemEl {
     if (css) a += ' style="' + escXml(css) + '"';
     // <style> — текст как есть: в CSS нет ни «<», ни «&», которые надо прятать
     const inner = this.tagName === 'style'
-      ? this.childNodes.map((c) => (c.nodeType === 3 ? c.data : c.outerHTML)).join('')
+      ? this.childNodes.map((c) => (c.nodeType === 3 ? String(c.data).replace(XML_BAD, '') : c.outerHTML)).join('')
       : this.childNodes.map((c) => c.outerHTML).join('');
     return '<' + this.tagName + a + (inner ? '>' + inner + '</' + this.tagName + '>' : '/>');
   }
@@ -11940,6 +11947,10 @@ class Stage {
   }
 }
 
+/** Снимок для критика (круг 47): ширина до 768 px, высота до 1536 px — дальше верх доски. */
+const SHOT_CRITIC_W = 768;
+const SHOT_CRITIC_H = 1536;
+
 /** Сцена без страницы: поля, которые читает путь toSVG, и ничего больше. */
 function headlessStage(doc, geo, id, embedFonts) {
   const st = Object.create(Stage.prototype);
@@ -11971,11 +11982,25 @@ function renderSVG(doc, artboardId, opts = {}) {
   const prev = svgDom;
   svgDom = memDom;
   try {
-    const svg = st.toSVG(artboardId, doc, geo, { fonts: !!opts.fonts });
+    let svg = st.toSVG(artboardId, doc, geo, { fonts: !!opts.fonts, srcMap: opts.srcMap instanceof Map ? opts.srcMap : undefined });
     if (!svg) return null;
     let families = [];
-    try { families = [...st._fontNeeds(artboardId).keys()]; } catch { families = []; }
-    return { svg, width: r2(rect.w), height: r2(rect.h), families };
+    let weights = {};
+    try {
+      const needs = st._fontNeeds(artboardId);
+      families = [...needs.keys()];
+      for (const [f, rec] of needs) weights[f] = [...rec.weights].sort((a, b) => a - b);
+    } catch { families = []; weights = {}; }
+    // круг 47: высокая доска — верх до maxHeight (снимок 390×6000 иначе сжимался в полоску)
+    let height = r2(rect.h);
+    let cropped = false;
+    if (isNum(opts.maxHeight) && opts.maxHeight > 0 && rect.h > opts.maxHeight) {
+      height = r2(opts.maxHeight);
+      cropped = true;
+      const W = r2(rect.w);
+      svg = svg.replace(/<svg ([^>]*?)height="[^"]*"([^>]*?)viewBox="0 0 [^ "]+ [^"]+"/, `<svg $1height="${height}"$2viewBox="0 0 ${W} ${height}"`);
+    }
+    return { svg, width: r2(rect.w), height, fullHeight: r2(rect.h), cropped, families, weights };
   } finally {
     svgDom = prev;
   }
@@ -11994,13 +12019,18 @@ async function boardPNG(doc, artboardId, opts = {}) {
   const geo = opts.geo && opts.geo.rects ? opts.geo : solve(doc);
   const rect = geo.rects[artboardId];
   if (!rect || !(rect.w > 0) || !(rect.h > 0)) return null;
-  try { await headlessStage(doc, geo, artboardId, true).prepareFonts(artboardId); } catch (e) { /* без гарнитур — системным */ }
-  const out = renderSVG(doc, artboardId, { geo, fonts: true });
+  const hs = headlessStage(doc, geo, artboardId, true);
+  try { await hs.prepareFonts(artboardId); } catch (e) { /* без гарнитур — системным */ }
+  // внешние картинки — в data: (SVG внутри <img> чужие адреса не грузит); не вышло — без них
+  let srcMap;
+  try { const ext = hs._externalImages(artboardId); if (ext.length) srcMap = await inlineImageSrcs(ext); } catch (e) { srcMap = undefined; }
+  const maxW = isNum(opts.maxWidth) && opts.maxWidth > 0 ? opts.maxWidth : SHOT_CRITIC_W;
+  const k = Math.min(1, maxW / rect.w);
+  const maxH = (isNum(opts.maxHeight) && opts.maxHeight > 0 ? opts.maxHeight : SHOT_CRITIC_H) / k;
+  const out = renderSVG(doc, artboardId, { geo, fonts: true, srcMap, maxHeight: maxH });
   if (!out) return null;
-  const side = isNum(opts.maxSide) && opts.maxSide > 0 ? opts.maxSide : 1024;
-  const k = Math.min(1, side / Math.max(rect.w, rect.h));
-  const W = Math.max(1, Math.round(rect.w * k));
-  const H = Math.max(1, Math.round(rect.h * k));
+  const W = Math.max(1, Math.round(out.width * k));
+  const H = Math.max(1, Math.round(out.height * k));
   const url = URL.createObjectURL(new Blob([out.svg], { type: 'image/svg+xml;charset=utf-8' }));
   try {
     const img = new Image();
@@ -12019,7 +12049,7 @@ async function boardPNG(doc, artboardId, opts = {}) {
     ctx.drawImage(img, 0, 0, W, H);
     const dataUrl = canvas.toDataURL('image/png');
     const comma = dataUrl.indexOf(',');
-    return comma > 0 ? { mime: 'image/png', data: dataUrl.slice(comma + 1), width: W, height: H } : null;
+    return comma > 0 ? { mime: 'image/png', data: dataUrl.slice(comma + 1), width: W, height: H, cropped: out.cropped, fullHeight: out.fullHeight } : null;
   } catch (e) {
     logOnce('boardPNG', 'снимок доски для критика не получился', e);
     return null;

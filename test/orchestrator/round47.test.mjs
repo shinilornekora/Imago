@@ -52,25 +52,28 @@ test('круг 47: образ и вердикт — в result; стадии пр
   assert.ok(r.events.some((e) => e.event === 'stage' && /Ищу образ/.test(e.data.label || '')), 'стадия образа видна');
 });
 
-test('круг 47: модель отвергла снимок — критик по выжимке, и следующая команда картинку не шлёт', async (t) => {
+test('круг 47: зрение не заявлено (LLM_VISION пусто) — снимок не шлётся; заявлено и модель отвергла — по приметам', async (t) => {
   const document = await startDocument();
-  let rejected = 0;
+  let withImage = 0;
   const llm = await startFakeLlm({
     plan: PLAN_CREATE, direction: DIRECTION, tree: TREE_OK,
     critique: (body) => {
-      if (Array.isArray(userParts(body))) { rejected++; return undefined; }   // 400 — «не умею картинки»
+      if (Array.isArray(userParts(body))) { withImage++; return undefined; }   // 400 — «не умею картинки»
       return CRIT_OK;
     },
   });
-  const orch = await startOrch({ document, llm: { baseUrl: llm.base }, art: { fakeShot: SHOT } });
-  t.after(async () => { await orch.close(); await document.close(); await llm.close(); });
+  const warns = [];
+  const plain = await startOrch({ document, llm: { baseUrl: llm.base }, art: { fakeShot: SHOT } });
+  const seeing = await startOrch({ document, llm: { baseUrl: llm.base, vision: true }, art: { fakeShot: SHOT }, log: { info() {}, warn: (m) => warns.push(String(m)) } });
+  t.after(async () => { await plain.close(); await seeing.close(); await document.close(); await llm.close(); });
   const p = await createProject(document);
-  const r1 = resultOf(await command(orch.url, { command_id: cid('a'), project: p.id, text: 'собери экран тарифов', client: 'c1' }));
-  assert.equal(r1.critique.seen, 'text');
-  assert.equal(rejected, 1);
-  const r2 = resultOf(await command(orch.url, { command_id: cid('b'), project: p.id, text: 'собери экран тарифов', client: 'c1' }));
-  assert.equal(r2.critique.seen, 'text');
-  assert.equal(rejected, 1, 'второй раз картинку не прислали');
+  const r1 = resultOf(await command(plain.url, { command_id: cid('a'), project: p.id, text: 'собери экран тарифов', client: 'c1' }));
+  assert.equal(r1.critique.seen, 'signals');
+  assert.equal(withImage, 0, 'модели без заявленного зрения картинку не шлём');
+  const r2 = resultOf(await command(seeing.url, { command_id: cid('b'), project: p.id, text: 'собери экран тарифов', client: 'c1' }));
+  assert.equal(withImage, 1);
+  assert.equal(r2.critique.seen, 'signals', 'отказ — самопроверка по приметам');
+  assert.ok(warns.some((w) => /отвергла запрос со снимком доски/.test(w)), 'администратору — одна строка в лог');
 });
 
 test('круг 47: арт-направление и критик выключены — только план и дерево', async (t) => {
@@ -115,11 +118,27 @@ test('круг 47: рендер — без resvg null; текст без шри�
   const r = createRenderer({ fetch: offline, log: { warn: (m) => warns.push(m) } });
   assert.equal(await r({ doc: boardDoc(true), artboardId: 'b1' }), null, 'текст нечем нарисовать — пусть критик смотрит выжимку');
   assert.equal(warns.length, 1, 'одно предупреждение, а не на каждый шрифт');
-  const png = await r({ doc, artboardId: 'b1', maxSide: 100 });
+  // неудача помнится: вторая команда в сеть не идёт и срок не ждёт
+  let asked2 = 0;
+  const r3 = createRenderer({ fetch: async () => { asked2++; throw new Error('нет сети'); }, log: { warn() {} } });
+  await r3({ doc: boardDoc(true), artboardId: 'b1' });
+  const once = asked2;
+  await r3({ doc: boardDoc(true), artboardId: 'b1' });
+  assert.equal(asked2, once);
+  // общий срок: зависшая сеть не держит снимок дольше deadlineMs
+  const hang = createRenderer({ fetch: () => new Promise(() => {}), deadlineMs: 50, log: { warn() {} } });
+  const t0 = Date.now();
+  assert.equal(await hang({ doc: boardDoc(true), artboardId: 'b1' }), null);
+  assert.ok(Date.now() - t0 < 1000);
+  // эмодзи убираются, а ©, ™ и стрелки — нет
+  const { EMOJI_RE } = await import('../../server/orchestrator/render.js');
+  assert.equal('15 🍪 © ™ → ☀'.replace(EMOJI_RE, ''), '15  © ™ → ☀');
+  const png = await r({ doc, artboardId: 'b1', geo: core.solve(doc) });
   assert.ok(png, 'доска без текста рисуется и без шрифтов');
   assert.equal(png.mime, 'image/png');
-  assert.equal(png.width, 100);
-  assert.equal(png.height, 60);
+  assert.equal(png.width, 200);
+  assert.equal(png.height, 120);
+  assert.equal(png.approxText, true, 'критику сказано: переносы строк на сервере приблизительные');
   assert.equal(Buffer.from(png.data, 'base64').subarray(1, 4).toString(), 'PNG');
   // ходит только за семействами набора и только к Google Fonts
   const asked = [];

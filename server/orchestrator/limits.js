@@ -168,3 +168,7 @@ export const SSE_PING_MS = 15000;
 export const RENDER_FONT_TIMEOUT_MS = 8000;
 export const FONT_CACHE_FAMILIES = 12;
 export const RENDER_FONT_MAX_BYTES = 4 * 1024 * 1024;
+/** Общий срок снимка (все шрифты и рисование); дольше — критик смотрит описание доски. */
+export const RENDER_DEADLINE_MS = 12000;
+/** Семейство не пришло — столько не пробовать снова (закрытая сеть не держит каждую команду). */
+export const RENDER_FONT_FAIL_TTL_MS = 10 * 60 * 1000;

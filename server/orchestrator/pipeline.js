@@ -23,6 +23,7 @@ import * as core from '../../src/core.js';
 import { OrchError, toOrchError, INTERNAL_MESSAGE, notFound, badRequest, llmDown, llmUnconfigured, documentBusy, agentBusy, documentEngine, safeDetail, cancelled as cancelledErr, shuttingDown as shuttingDownErr } from './errors.js';
 import { MAX_QUEUE_PER_PROJECT, VARIANTS_TTL_MS, MAX_VARIANT_SETS, SHUTDOWN_GRACE_MS, SHUTDOWN_ABORT_WAIT_MS } from './limits.js';
 import {
+  visionRefusal,
   isInternalError, recognizeAction, recognizeVariants, recognizeUndoDoubt, recognizeComponentIntent,
   classifyUtterance, hasWords,
 } from '../../src/brain.js';
@@ -34,11 +35,11 @@ export const RECOGNIZE_MAX = 2000;
 /** Длина `command_id` транзакции, которую хранит Document service (круг 25). */
 const TX_COMMAND_ID_MAX = 64;
 
-/** Стадии brain → ключи §10.3. Не названные — не показываются (их смысл несёт result). */
 /** Круг 47: есть ли в репликах картинка (запрос со снимком доски для критика). */
 const hasImage = (messages) => Array.isArray(messages)
   && messages.some((m) => m && Array.isArray(m.content) && m.content.some((p) => p && p.type === 'image'));
 
+/** Стадии brain → ключи §10.3. Не названные — не показываются (их смысл несёт result). */
 const BRAIN_STAGE = {
   plan: 'llm', generate: 'llm', retry: 'llm', variant: 'llm',
   materialize: 'validate', validate: 'validate', repair: 'repair',
@@ -464,10 +465,14 @@ export function createPipeline(deps) {
           if (e && e.detail) {
             log.warn(`[orchestrator] команда ${cmd.command_id}: модель отвергла запрос${e.status ? ` (${e.status})` : ''}: ${llm.redact(String(e.detail))}`);
           }
-          // круг 47: модель отвергла запрос со снимком (4xx) — картинок она не видит, больше не шлём
-          if (e && e.kind === 'model' && hasImage(messages) && llm.provider) llm.provider.vision = false;
+          // круг 47: модель отвергла запрос со снимком — картинок она не видит, больше не шлём
+          if (hasImage(messages) && visionRefusal(e)) {
+            adminHint('vision', 'модель отвергла запрос со снимком доски — самопроверка идёт по приметам шаблона; если модель картинок не видит, задайте LLM_VISION=0');
+          }
           // наружу из главного потока — только очищенный текст
-          throw Object.assign(new Error(llm.redact(e && e.message ? e.message : 'Сбой модели')), { kind: (e && e.kind) || 'model', code: e && e.code });
+          throw Object.assign(new Error(llm.redact(e && e.message ? e.message : 'Сбой модели')), {
+            kind: (e && e.kind) || 'model', code: e && e.code, ...(e && Number.isInteger(e.status) ? { status: e.status } : {}),
+          });
         } finally {
           usage.ms += Date.now() - t;
         }

@@ -3925,7 +3925,7 @@ export const ART_ROLE_WORDS = Object.freeze({
  * @param {object|null} direction @param {object|null} critique
  * @returns {{concept: string, swatches: Array<{role: string, hex: string, label: string}>, fonts: string, verdict: string, line: string}|null}
  */
-export function artSummary(direction, critique) {
+export function artSummary(direction, critique, opts = {}) {
   const d = direction && typeof direction === 'object' ? direction : null;
   const c = critique && typeof critique === 'object' ? critique : null;
   const str = (v, n) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, n) : '');
@@ -3936,14 +3936,25 @@ export function artSummary(direction, critique) {
     .filter((x) => x.hex);
   const f = d && d.fonts && typeof d.fonts === 'object' ? d.fonts : {};
   const fonts = [str(f.display, 40), str(f.text, 40)].filter(Boolean).filter((x, i, a) => a.indexOf(x) === i).join(' + ');
+  // круг 47: оценка — о ПЕРВОЙ сборке (после доработки её никто не ставил): у итога цифры нет
   let verdict = '';
-  if (c && Number.isFinite(Number(c.score))) {
-    const score = Math.round(Math.max(0, Math.min(10, Number(c.score))) * 10) / 10;
-    verdict = `критик ${String(score).replace('.', ',')}/10`
-      + (c.revised ? ' — доработал по замечаниям' : c.verdict === 'revise' ? ' — доработка не легла, оставил собранное' : '')
-      + (c.seen === 'text' ? ' (смотрел без снимка)' : '');
+  const first = c && (Array.isArray(c.issues) ? str(c.issues[0], 120) : '');
+  const score = c && (typeof c.score === 'number' || (typeof c.score === 'string' && c.score.trim()))
+    && Number.isFinite(Number(c.score)) ? Math.round(Math.max(0, Math.min(10, Number(c.score))) * 10) / 10 : null;
+  if (c && c.seen === 'signals') {
+    const n = Array.isArray(c.signals) ? c.signals.length : 0;
+    verdict = c.revised ? `Самопроверка: ${n} ${plural(n, 'примета', 'приметы', 'примет')} шаблона → доработал${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}`
+      : n ? `Самопроверка: ${n} ${plural(n, 'примета', 'приметы', 'примет')} шаблона, правка не потребовалась` : 'Самопроверка: примет шаблона нет';
+  } else if (c && score !== null) {
+    const s10 = String(score).replace('.', ',');
+    verdict = c.revised ? `Первая сборка — ${s10} из 10 → доработал${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}`
+      : c.verdict === 'revise' ? `Взгляд со стороны: ${s10} из 10, доработка не легла — оставил собранное`
+        : `Взгляд со стороны: ${s10} из 10`;
   }
+  // при нечитаемом тексте оценка вида не к месту — главное там замечание проверки
+  if (opts.blocked && verdict && !(c && c.revised)) verdict = '';
   if (!concept && !swatches.length && !fonts && !verdict) return null;
   const line = [concept ? `Образ: ${concept}` : '', fonts, verdict].filter(Boolean).join(' · ');
-  return { concept, swatches, fonts, verdict, line };
+  // семейства отдельно: оболочка набирает их название ими же («Аа Prata»)
+  return { concept, swatches, fonts, families: [str(f.display, 40), str(f.text, 40)].filter(Boolean), verdict, line };
 }
