@@ -50,7 +50,7 @@ const FORMAT_HISTORY = {
   },
   // круг 48: поле theme доски (FIELD_RULES.theme, limits.theme) и разрешение токенов по теме (behavior.theme)
   3: {
-    hash: '09ac71c4256b7aca-hk',
+    hash: '2e13535d09280c37-in',
     sections: {
       enums: '3d5f4badd56fba2b-fk',
       fields: '5e1b972410a4a2da-ci',
@@ -61,12 +61,13 @@ const FORMAT_HISTORY = {
       paths: 'b234b2d53b1b8147-3p',
       refs: 'eec439faf7e0f954-9k',
       tokens: '64506054ac161ae6-4h',
-      'behavior.dressed': '7ea289aceaeb4d92-40',
+      'behavior.dressed': 'c6092bb5cc3d0433-5o',
+      'behavior.exact': '0349a62a4df9ae3c-cc',
       'behavior.fields': '9145fe2b7ad8eb7d-5ygg',
       'behavior.nested': '8d622e246577c17e-14s9',
       'behavior.nodes': 'f67d12ae3ab43950-1i',
       'behavior.ops': '19a88724b0f91cfe-38h',
-      'behavior.results': '775568fc757e28d2-4yc',
+      'behavior.results': 'b99de9b918cf3b77-6q0',
       'behavior.svg': '3d023ee1e6c9c4bb-2z',
       'behavior.theme': 'd2cdef0fe4aa52b9-5s',
       'behavior.tokens': 'cd226f5ed7cee580-25s0'
