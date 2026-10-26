@@ -12725,6 +12725,26 @@ async function critiqueBoard({ engine, attempt, direction, utterance, plan, rend
   return crit;
 }
 
+/** Круг 56 (SPEC §22): наибольший образец, который показывается модели (data:-адрес, знаков). */
+export const REF_IMAGE_MAX_CHARS = 1100 * 1024;
+
+/**
+ * Круг 56 (SPEC §22): картинка-образец для арт-директора со зрением — первая встроенная (data:)
+ * картинка из тех, чьи цвета считаются (§20), если реплика называет образец (RE_IMAGE_REF).
+ * Адресные картинки не берутся: провайдеры принимают картинку данными, а сеть — не наша.
+ * @returns {{mime: string, data: string}|{skipped: 'url'|'big'}|null} skipped — образец есть, но показать нельзя
+ */
+export function referenceImage(doc, selection, geo, utterance) {
+  if (!RE_IMAGE_REF.test(String(utterance == null ? '' : utterance))) return null;
+  // образец — главная (первая) картинка; не подошла — не подменяем её мелкой соседней иконкой
+  const [s] = imageSources(doc, selection, geo);
+  if (!s) return null;
+  const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(s.src);
+  if (!m) return { skipped: 'url' };
+  if (s.src.length > REF_IMAGE_MAX_CHARS) return { skipped: 'big' };
+  return { mime: m[1], data: m[2] };
+}
+
 /** Круг 53 (SPEC §20): срок на цвета картинок — декодирование и счёт всех картинок команды вместе. */
 export const IMAGE_COLORS_MS = 4000;
 
@@ -12840,6 +12860,8 @@ async function runCommandCore(options = {}) {
      * [{id, colors: [{hex, share}]}]; пиксели считает оболочка (canvas) или сервер (resvg).
      */
     imageColors = null,
+    /** Круг 56: общее для команды и её вариантов — {refused}: модель уже отвергла картинку-образец. */
+    visionState = { refused: false },
   } = options;
 
   const stages = [];
@@ -13236,7 +13258,12 @@ async function runCommandCore(options = {}) {
       emit('direct', '');
       try {
         const pictures = await pictureColors(imageColors, doc, selection, signal, serviceNote, geoNow);
-        const raw = await ask(SCHEMAS.direction, [
+        // круг 56 (SPEC §22): модель видит картинки — образец ей показывается самой картинкой
+        // отказ модели от картинки помнится на всю команду и её варианты: не повторяем N раз
+        const seen = provider.vision === true && !(visionState && visionState.refused) ? referenceImage(doc, selection, geoNow, utterance) : null;
+        const ref = seen && seen.data ? seen : null;
+        if (seen && seen.skipped === 'big') serviceNote(`Образец слишком большой, чтобы показать его модели${pictures ? ', — образ по его цветам' : ''}`);
+        const directMessages = (img) => [
           { role: 'system', content: PROMPTS.direction({
             subject: `${String(utterance).trim()}${plan && plan.summary ? ` (${plan.summary})` : ''}`,
             neighbours: neighboursLine(engine, doc, geoNow),
@@ -13245,8 +13272,23 @@ async function runCommandCore(options = {}) {
             variantHint,
             fontsLocked: webFonts === false,
           }) },
-          { role: 'user', content: userTurn },
-        ], { stage: 'direct', temperature: temperature == null ? 0.8 : temperature });
+          { role: 'user', content: img ? imageTurn(`${userTurn}\n\nОбразец приложен картинкой: палитру, материалы и настроение бери с него`
+            + ' (что на нём изображено — не предмет макета, если об этом не просили).', img) : userTurn },
+        ];
+        const directOpts = { stage: 'direct', temperature: temperature == null ? 0.8 : temperature };
+        if (ref) emit('direct', 'Смотрю на образец');
+        let raw;
+        try {
+          raw = await ask(SCHEMAS.direction, directMessages(ref), directOpts);
+        } catch (e) {
+          /* модель не приняла картинку — тот же вызов без неё: образ решается по цветам образца (§20).
+           * 5xx с картинкой — тоже: llama.cpp падает на формате, которого не знает (WebP), не 400. */
+          const refused = e instanceof BrainError && (visionRefusal(e) || (e.kind === 'model' && e.status >= 500));
+          if (!ref || !refused) throw e;
+          if (visionState) visionState.refused = true;
+          serviceNote(`Модель не приняла картинку-образец (${factOnly(e.message)})${pictures ? ' — образ по её цветам' : ' — образ без неё'}`);
+          raw = await ask(SCHEMAS.direction, directMessages(null), directOpts);
+        }
         direction = normalizeDirection(raw, { doc, webFonts });
         if (direction) {
           for (const n of direction.notes) serviceNote(`Арт-направление: ${n}`);
@@ -15571,6 +15613,7 @@ async function runVariantsCore(options = {}) {
   } = options;
   const count = Math.max(1, Math.min(6, Number(n) || 3));
   const sharedColors = sharedImageColors(imageColors);
+  const visionState = { refused: false };
   /* Если сюда прилетела сама просьба о вариантах («три варианта: сделай шапку компактнее»),
    * гоняем модель по КОМАНДЕ, а не по просьбе: иначе каждый вариант получит план про варианты. */
   const wantVariants = recognizeVariants(utterance, { doc });
@@ -15673,7 +15716,7 @@ async function runVariantsCore(options = {}) {
       insideVariants: true,
       // общий план приходит готовым: стадия «Планирую» модель уже не зовёт
       ...(shared ? { plan: { ...shared, steps: [...(shared.steps || [])], targets: [...(shared.targets || [])] } } : {}),
-      persona, activeArtboardId, history, geo, modelTier, selectionBy, direction, webFonts, artOffBy, imageColors: sharedColors,
+      persona, activeArtboardId, history, geo, modelTier, selectionBy, direction, webFonts, artOffBy, imageColors: sharedColors, visionState,
       temperature: persona.temperature,
       variantHint: total > 1 ? variantInstruction(persona, index, total, [], others) : '',
       stagePrefix: prefix,
