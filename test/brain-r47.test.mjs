@@ -72,6 +72,19 @@ function empty() {
 }
 const boardOf = (doc, name) => Object.values(doc.nodes).find((n) => n && n.name === name && n.parent === doc.root);
 const byName = (doc, name) => Object.values(doc.nodes).find((n) => n && n.name === name);
+/* Круг 48: решение новой доски — её темой; узлы держат токены. Что видит человек — по теме. */
+const themeFont = (r, n) => {
+  const st = n.style;
+  if (st && typeof st === 'object' && st.font) return st.font;
+  const tok = typeof st === 'string' ? st : (st && st.token) || 'body';
+  return r.theme && r.theme.type[tok] ? r.theme.type[tok].font : null;
+};
+const themeHex = (r, v) => {
+  const name = typeof v === 'string' ? v : v && v.token;
+  return (r.theme && name && r.theme.colors[name]) || v;
+};
+const seenFont = (doc, n) => core.resolveTextStyle(core.docAt(doc, n.id), n).font;
+const seenColor = (doc, n, k) => core.resolveColor(core.docAt(doc, n.id), n[k]);
 
 /* ── набор шрифтов ─────────────────────────────────────────────────────── */
 
@@ -184,16 +197,24 @@ test('круг 47: фон — спокойный материал, акцент 
 test('круг 47: шрифты решения — заголовкам display, прочим text (heading — жирным текстом), ближайшее начертание', () => {
   const doc = empty();
   const d = normalizeDirection(DIRECTION);
-  const { tree, fonts } = applyDirection(TREE, d, doc, { asArtboard: true });
+  const r = applyDirection(TREE, d, doc, { asArtboard: true });
+  const { tree, fonts } = r;
   assert.equal(fonts, 4, 'все четыре текста');
   const [title, sub, row] = tree.children;
-  assert.deepEqual(title.style, { token: 'display', font: 'Prata', fontWeight: 400 }, 'у Prata только 400 — стоит 400, а не синтетический жирный');
-  assert.deepEqual(sub.style, { token: 'body', font: 'Golos Text' });
-  assert.equal(row.children[0].style.font, 'Golos Text', 'heading 18px — текстом: акцидентный на мелком подзаголовке читается плохо');
-  assert.equal(row.children[1].style.font, 'Prata', 'title — заголовочный');
-  assert.equal(title.color, d.palette.text, 'тексту без цвета — текст палитры');
-  assert.equal(row.children[1].color, '#2f6f62', 'цвет модели не трогаем');
-  assert.equal(tree.fill, '#f4ead8', 'новой доске без фона — фон палитры');
+  // круг 48: шрифты — темой доски, узлы держат токены
+  assert.deepEqual(tree.$theme, r.theme, 'тема — корню новой доски');
+  assert.deepEqual(r.theme.type.display, { font: 'Prata', fontWeight: 400 }, 'у Prata только 400 — стоит 400, а не синтетический жирный');
+  assert.equal(title.style, 'display', 'переопределения нет: шрифт даёт тема');
+  assert.equal(sub.style, 'body');
+  assert.deepEqual(r.theme.type.body, { font: 'Golos Text' });
+  assert.equal(themeFont(r, row.children[0]), 'Golos Text', 'heading 18px — текстом: акцидентный на мелком подзаголовке читается плохо');
+  assert.equal(themeFont(r, row.children[1]), 'Prata', 'title — заголовочный');
+  assert.equal(title.color, 'text', 'тексту без цвета — токен текста');
+  assert.equal(r.theme.colors.text, d.palette.text, '…а его значение на доске — текст палитры');
+  assert.equal(row.children[1].color, 'accent', 'hex модели, совпавший с ролью палитры, — её токен: доску перекрашивает тема');
+  assert.equal(themeHex(r, row.children[1].color), '#2f6f62');
+  assert.equal(tree.fill, 'canvas', 'новой доске без фона — фон токеном');
+  assert.equal(r.theme.colors.canvas, '#f4ead8', '…фон палитры темой');
   assert.equal(TREE.children[0].style, 'display', 'исходное дерево не тронуто');
   const own = applyDirection({ type: 'text', text: 'x', style: { token: 'display', font: 'Unbounded' } }, d, doc);
   assert.equal(own.tree.style.font, 'Unbounded');
@@ -220,15 +241,25 @@ test('круг 47: токены цвета документа → роли па�
       { type: 'frame', name: 'Карточка', fill: { token: 'surface' }, children: [] },
     ],
   };
-  const { tree: t } = applyDirection(tree, dark, doc, { asArtboard: true });
-  assert.equal(t.fill, '#15171c');
-  assert.equal(t.children[0].color, '#f2f4f7');
-  assert.equal(t.children[1].color, '#9aa3b2');
-  assert.equal(t.children[2].fill, '#c6ff3d');
+  const r = applyDirection(tree, dark, doc, { asArtboard: true });
+  const t = r.tree;
+  // круг 48: токены остаются токенами, значения — темой доски
+  assert.equal(t.fill, 'canvas');
+  assert.equal(themeHex(r, t.fill), '#15171c');
+  assert.equal(themeHex(r, t.children[0].color), '#f2f4f7');
+  assert.equal(themeHex(r, t.children[1].color), '#9aa3b2');
+  assert.equal(themeHex(r, t.children[2].fill), '#c6ff3d');
   const label = t.children[2].children[0];
-  assert.equal(label.color, dark.palette.onAccent, 'надпись на акценте — текст на акценте');
-  assert.ok(core.contrastRatio(label.color, '#c6ff3d') >= 4.5);
-  assert.equal(t.children[3].fill, '#20242c');
+  assert.equal(label.color, 'onAccent', 'надпись на акценте — текст на акценте');
+  assert.equal(themeHex(r, label.color), dark.palette.onAccent);
+  assert.ok(core.contrastRatio(themeHex(r, label.color), '#c6ff3d') >= 4.5);
+  assert.deepEqual(t.children[3].fill, { token: 'surface' });
+  assert.equal(themeHex(r, t.children[3].fill), '#20242c');
+  // вставка не новой доской — темы нет, как в круге 47: токены → #rrggbb ролей
+  const flat = applyDirection(tree, dark, doc, { asArtboard: false });
+  assert.equal(flat.theme, null);
+  assert.equal(flat.tree.$theme, undefined);
+  assert.equal(flat.tree.children[0].color, '#f2f4f7');
 });
 
 /* ── конвейер ───────────────────────────────────────────────────────────── */
@@ -255,9 +286,13 @@ test('круг 47: «собери экран» — образ до раскла�
   // шрифты — на слоях документа
   const after = res.preview.doc;
   const board = boardOf(after, 'Кофейня');
-  assert.equal(after.nodes[board.id].fill, '#f4ead8');
-  assert.equal(byName(after, 'Заголовок').style.font, 'Prata');
-  assert.equal(core.resolveTextStyle(after, byName(after, 'Подзаголовок')).font, 'Golos Text');
+  // круг 48: решение — темой доски (поле theme в самом create), узлы — токенами
+  assert.equal(seenColor(after, after.nodes[board.id], 'fill'), '#f4ead8');
+  assert.equal(after.nodes[board.id].theme.colors.canvas, '#f4ead8');
+  assert.equal(seenFont(after, byName(after, 'Заголовок')), 'Prata');
+  assert.equal(seenFont(after, byName(after, 'Подзаголовок')), 'Golos Text');
+  assert.equal(core.resolveTextStyle(after, byName(after, 'Подзаголовок')).font, 'IBM Plex Sans', 'вне темы доски — шрифт документа');
+  assert.ok(res.ops.some((o) => o.op === 'create' && o.node.id === board.id && o.node.theme), 'тема — в самом create доски');
   // критик видел снимок именно новой доски
   assert.equal(shots.length, 1);
   assert.equal(shots[0].artboardId, board.id);
@@ -479,7 +514,7 @@ test('круг 47: renderSVG — та же отрисовка сцены без 
 /** Дерево → документ через materialize настоящего прогона (без модели). */
 function runCommandSync(doc, tree) {
   const r = core.applyOps(doc, [core.ops.create({ id: 'b1', type: 'frame', name: tree.name, parent: doc.root, pos: { x: 0, y: 0 },
-    size: { w: { mode: 'fixed', value: 390 }, h: { mode: 'hug' } }, fill: tree.fill,
+    size: { w: { mode: 'fixed', value: 390 }, h: { mode: 'hug' } }, fill: tree.fill, ...(tree.$theme ? { theme: tree.$theme } : {}),
     layout: { mode: 'column', gap: 16, padding: { t: 24, r: 24, b: 24, l: 24 }, align: 'stretch', justify: 'start', wrap: false }, children: [] })]);
   let cur = r.doc;
   let i = 0;
@@ -600,7 +635,8 @@ test('круг 47: кегль акцента — отдельным полем f
     { type: 'text', text: 'мало', style: 'body', fontSize: 2 },
   ] }, d, doc, { asArtboard: true });
   assert.equal(tree.children[0].style.fontSize, 96);
-  assert.equal(tree.children[0].style.font, 'Prata');
+  assert.equal(tree.children[0].style.font, undefined, 'круг 48: шрифт стиля display — темой доски');
+  assert.equal(tree.$theme.type.display.font, 'Prata');
   assert.equal(tree.children[0].fontSize, undefined);
   assert.equal(tree.children[1].style.fontSize, 12);
   assert.deepEqual(SCHEMAS.tree.schema.properties.style, { type: 'string' }, 'style в схеме — снова строка: без объектов внутри anyOf');

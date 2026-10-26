@@ -6926,7 +6926,7 @@ function layerTipFor(n) {
   const name = n.name || defaultName(n);
   if (n.type === 'vector') {
     const paths = SHELL.vectorPaths(n);
-    const fill = paths.length ? SHELL.paintWord(paths[0].fill, { colors: state.doc.tokens.colors, colorWord: (v) => humanValue(v) }) : '';
+    const fill = paths.length ? SHELL.paintWord(paths[0].fill, { colors: colorsAt(n), colorWord: (v) => humanValue(v) }) : '';
     const inIll = SHELL.isIllustration(state.doc, nodeById(state.doc, n.parent));
     return `${name} — ${inIll ? 'деталь иллюстрации' : 'вектор'}, ${paths.length} ${plural(paths.length, 'контур', 'контура', 'контуров')}`
       + `${fill && fill !== 'нет' ? `, заливка ${fill}` : ''}`;
@@ -8156,7 +8156,7 @@ function stateColorField(node, key, field, cur, title) {
   const dot = document.createElement('span');
   dot.className = 'swatch-dot';
   const tok = colorToken(cur);
-  const hex = tok ? (state.doc.tokens.colors || {})[tok] : null;
+  const hex = tok ? colorsAt(node)[tok] : null;
   // «как в покое» — пунктирное кольцо, а не перечёркнутый кружок «без заливки»: это не цвет
   if (cur !== undefined && hex) dot.style.background = hex; else dot.classList.add(cur === undefined ? 'same' : 'none');
   const txt = document.createElement('span');
@@ -8293,13 +8293,27 @@ const paintOpen = new Set();
 /** Выбранный контур вектора: {node, i} — список контуров помнит выбор для слоя. */
 let pathPick = null;
 
+/**
+ * Круг 48 (SPEC §15): документ, каким его видит слой — токены его доски (тема поверх документа).
+ * Образцы цветов инспектора и кружки краски показывают значения той доски, где слой лежит.
+ */
+function tokenDoc(node) {
+  if (!node || !node.id || typeof CORE.docAt !== 'function') return state.doc;
+  try { return CORE.docAt(state.doc, node.id) || state.doc; } catch { return state.doc; }
+}
+/** Цвета токенов на доске слоя. */
+function colorsAt(node) {
+  const d = tokenDoc(node);
+  return (d && d.tokens && d.tokens.colors) || state.doc.tokens.colors || {};
+}
+
 /** Фон кружка-образца краски: ядро знает градиенты точнее (resolvePaint), без него — словарь. */
-function paintBg(p) {
+function paintBg(p, node) {
   if (p === undefined || p === null) return '';
   if (typeof CORE.paintCss === 'function') {
-    try { const css = CORE.paintCss(state.doc, p); if (css) return css; } catch { /* ниже — своё */ }
+    try { const css = CORE.paintCss(tokenDoc(node), p); if (css) return css; } catch { /* ниже — своё */ }
   }
-  return SHELL.paintCss(p, state.doc.tokens.colors || {});
+  return SHELL.paintCss(p, colorsAt(node));
 }
 
 /** Записать поле контура (или всех контуров) одной транзакцией. */
@@ -8349,7 +8363,7 @@ function colorInput(hex, onPick, label) {
  * @param {{key:string, title:string, mixed?:boolean, onPick:(v:any)=>void, node:object, noneLabel?:string}} o
  */
 function paintField(cur, o) {
-  const colors = state.doc.tokens.colors || {};
+  const colors = colorsAt(o.node);
   const d = document.createElement('details');
   d.className = 'state-color paint-field';
   d.dataset.paint = o.key;
@@ -8358,7 +8372,7 @@ function paintField(cur, o) {
   const sum = document.createElement('summary');
   const dot = document.createElement('span');
   dot.className = 'swatch-dot';
-  const css = o.mixed ? '' : paintBg(cur);
+  const css = o.mixed ? '' : paintBg(cur, o.node);
   if (css) dot.style.background = css; else dot.classList.add(o.mixed ? 'same' : 'none');
   const txt = document.createElement('span');
   txt.className = 'paint-word';
@@ -8493,7 +8507,7 @@ function vectorGroup(node) {
   if (widthC.mixed && (strokeC.mixed || SHELL.paintKind(strokeC.value) !== 'none')) kids.push(noteEl('Толщина у контуров разная — новое число встанет всем.'));
 
   if (paths.length > 1) {
-    const colors = state.doc.tokens.colors || {};
+    const colors = colorsAt(node);
     const pick = pathPick && pathPick.node === node.id && pathPick.i < paths.length ? pathPick.i : -1;
     const list = document.createElement('div');
     list.className = 'path-list';
@@ -8510,7 +8524,7 @@ function vectorGroup(node) {
       // что контур показывает на деле: своя краска или унаследованная от вектора
       const fillNow = SHELL.effectivePathValue(node, p, 'fill');
       const strokeNow = SHELL.effectivePathValue(node, p, 'stroke');
-      const css = paintBg(fillNow);
+      const css = paintBg(fillNow, node);
       if (css) dot.style.background = css; else dot.classList.add('none');
       const sc = SHELL.paintHex(strokeNow, colors);
       if (sc && Number(SHELL.effectivePathValue(node, p, 'strokeWidth')) > 0) dot.style.boxShadow = `0 0 0 2px var(--panel-2), 0 0 0 3.5px ${sc}`;
@@ -8573,7 +8587,7 @@ function fillGroup(node) {
   grad.className = 'linkish';
   grad.textContent = 'Градиент или свой цвет…';
   grad.title = 'Залить градиентом из текущего цвета — вернуть можно отменой';
-  grad.addEventListener('click', () => pick(SHELL.gradientWith(node.fill, {}, state.doc.tokens.colors || {})));
+  grad.addEventListener('click', () => pick(SHELL.gradientWith(node.fill, {}, colorsAt(node))));
   return group('Заливка', [swatches(node, 'fill', 'Заливка'), grad]);
 }
 
@@ -9069,7 +9083,7 @@ function swatches(node, prop, label, opts = {}) {
   w.className = 'swatch-groups';
   w.setAttribute('role', 'group');
   w.setAttribute('aria-label', label || 'Цвет');
-  const colors = state.doc.tokens.colors || {};
+  const colors = colorsAt(node);
   const cur = colorToken('value' in opts ? opts.value : node[prop]);
   const pick = typeof opts.onPick === 'function' ? opts.onPick : ((v) => setProp(node.id, prop, v));
   const used = new Set();

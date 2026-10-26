@@ -152,7 +152,7 @@ export function fontStylesheetUrl(families) {
   return parts.length ? 'https://fonts.googleapis.com/css2?' + parts.join('&') + '&display=swap' : '';
 }
 
-/** Гарнитуры документа: токены типографики и поправки `style.font` у текстов. @returns {string[]} */
+/** Гарнитуры документа: токены типографики, поправки `style.font` у текстов и шрифты тем досок. @returns {string[]} */
 export function fontsInDoc(doc) {
   const out = new Set();
   const types = doc && doc.tokens && doc.tokens.type;
@@ -168,6 +168,14 @@ export function fontsInDoc(doc) {
       const n = nodes[id];
       const st = n && n.style;
       if (st && typeof st === 'object' && typeof st.font === 'string' && st.font.trim()) out.add(st.font.trim());
+      // круг 48 (SPEC §15): шрифты темы доски
+      const tt = n && n.type === 'frame' && n.theme && typeof n.theme === 'object' ? n.theme.type : null;
+      if (tt && typeof tt === 'object' && !Array.isArray(tt)) {
+        for (const k of Object.keys(tt)) {
+          const e = tt[k];
+          if (e && typeof e === 'object' && typeof e.font === 'string' && e.font.trim()) out.add(e.font.trim());
+        }
+      }
     }
   }
   return [...out].sort();
