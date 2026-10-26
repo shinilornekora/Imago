@@ -135,6 +135,26 @@ describe('круг 45: сирота спасения — created_at в спис�
         await svc.close();
       }
     });
+    it(`DELETE пустого проекта, на который прибит импорт, — 409 not_empty, а не ошибка базы · ${b.name}`, { skip: !b.available || b.name !== 'pg' }, async () => {
+      const svc = await startFor(b.name);
+      try {
+        const h = api(svc.url);
+        const cid = cidOf();
+        const id = (await h.post('/api/projects', { name: 'сирота с импортом', doc: createDoc(), create_id: cid })).body.id;
+        const other = (await h.post('/api/projects', { name: 'импортёр' })).body.id;
+        // таблицы импорта код пока не пишет — строки кладём прямо в базу (ON DELETE RESTRICT)
+        await svc.storage.pool.query('INSERT INTO library_versions (project_id, tag, seq) VALUES ($1, $2, 0)', [id, 'v1']);
+        await svc.storage.pool.query('INSERT INTO project_imports (project_id, library_id, version_tag) VALUES ($1, $2, $3)', [other, id, 'v1']);
+        const r = await del(h, id, { create_id: cid });
+        assert.equal(r.status, 409, r.text);
+        assert.equal(r.body.detail.cause, 'not_empty');
+        assert.equal(r.body.retryable, false);
+        assert.equal((await h.get(`/api/projects/${id}`)).status, 200, 'проект на месте');
+      } finally {
+        await svc.close();
+      }
+    });
+
     it(`DELETE на одном экземпляре — второй по шине снимает голову и закрывает сокеты 4404, чтение там — 404 · ${b.name}`, { skip: !b.available }, async () => {
       const a = await startFor(b.name);
       const twin = await startTwin(b.name, a);
