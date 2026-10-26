@@ -1899,3 +1899,10 @@ button.t-action:hover { text-decoration: underline; }
 .path-edit-title { font-size: var(--t-sm); font-weight: 600; color: var(--text); }
 /* круг 38: пока открыта палитра, чипы-подсказки над ней не нужны — у неё свой список */
 .dock:has(.palette:not([hidden])) .hints { display: none; }
+
+/* круг 58 (SPEC §21.5): картинку можно бросить на строку команды — образцом */
+.commandbar.drop-ready {
+  border-style: dashed;
+  border-color: var(--accent);
+  box-shadow: var(--shadow), 0 0 0 4px color-mix(in srgb, var(--accent) 24%, transparent);
+}

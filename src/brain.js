@@ -13110,7 +13110,18 @@ async function runCommandCore(options = {}) {
     const scope = resolveScope(doc, agentSelIgnored ? [] : selection, engine, { activeArtboardId, selectionBy });
     const hasSelection = scope.kind === 'selection';
     // круг 9, п.6: узлы области работы выигрывают у одноимённых с чужого артборда
-    const guess = classifyUtterance(utterance, { hasSelection, doc, prefer: new Set(collectSubtree(doc, scope.ids)) });
+    let guess = classifyUtterance(utterance, { hasSelection, doc, prefer: new Set(collectSubtree(doc, scope.ids)) });
+    /* Круг 58 (SPEC §21.5): выделен образец и он назван словами — выделение показывает образец, а не
+     * место правки. «Лендинг студии йоги в цветах этой картинки» без глагола при выделении иначе
+     * считался правкой картинки. Намерение — по реплике без слов об образце и без выделения;
+     * явная правка («поменяй фон …»), вопрос и оформление остаются как были. */
+    if (guess.intent !== 'create' && referencePicked(doc, scope, utterance)) {
+      // без документа: «карточку товара» здесь — предмет нового экрана, а не слой, который правят
+      const rest = classifyUtterance(withoutImageRef(utterance));
+      if (rest.intent !== 'edit' && rest.intent !== 'ask' && rest.intent !== 'theme') {
+        guess = { ...rest, reference: true, reason: `образец выделен и назван словами; ${rest.reason}` };
+      }
+    } else if (guess.intent === 'create' && referencePicked(doc, scope, utterance)) guess = { ...guess, reference: true };
     const geoNow = geoIn || safeSolve(engine, doc);
     // валидатор зовётся ОДИН раз: из него и замечания для промпта (круг 3, п.5),
     // и множество «это было до нас» — чтобы старые нарушения не вменялись агенту
@@ -13770,6 +13781,11 @@ function arbitrateIntent(plan, guess, warn) {
   }
   if (planned === 'illustration' && guess.art && (guess.intent === 'create' || guess.intent === 'edit')) return guess.intent;
   if (planned === 'refuse') return 'refuse';
+  // круг 58: выделен образец — план «правка» по нему значил бы перекрасить саму картинку
+  if (guess.reference && guess.intent === 'create' && planned === 'edit') {
+    warn('Выделен образец, и он назван словами — собираю новый экран по нему, картинку не правлю');
+    return 'create';
+  }
   if (guess.intent === 'clarify' && guess.confidence >= 0.8 && planned !== 'ask') {
     warn(`Команда «${guess.reason}» — вместо «${planned}» переспрашиваю`);
     return 'clarify';
@@ -14252,6 +14268,16 @@ function picturesOnly(doc, ids) {
   return list.every((id) => pic(id, 0));
 }
 
+/**
+ * Круг 55 (SPEC §21): выделена картинка (или доска из одних картинок) и о ней сказано как об образце.
+ * Картинка на настоящем экране — образец, только если просят экран целиком.
+ */
+function referencePicked(doc, scope, utterance) {
+  const spoken = String(utterance || '');
+  return !!scope && scope.kind === 'selection' && RE_IMAGE_REF.test(spoken) && picturesOnly(doc, scope.ids)
+    && (RE_WHOLE_SCREEN.test(spoken) || scope.ids.every((id) => picturesOnly(doc, [artboardOf(doc, id) || id])));
+}
+
 function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null) {
   const note = warn || (() => {});
   const spoken = String(utterance || '');
@@ -14272,8 +14298,7 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
    * («собери экран в цветах этой картинки») — выделение показывает образец, а не место: новая доска. */
   /* Картинка на настоящем экране («добавь кнопку в цветах этой картинки») — место правки, а не образец:
    * образец — это вставленная картинка на своей доске (доска из одних картинок) или когда просят экран. */
-  const pictureRef = scope.kind === 'selection' && RE_IMAGE_REF.test(spoken) && picturesOnly(doc, scope.ids)
-    && (saidWhole || scope.ids.every((id) => picturesOnly(doc, [artboardOf(doc, id) || id])));
+  const pictureRef = referencePicked(doc, scope, spoken);
   const explicit = saidNew || pictureRef;
   // круг 27: выделение агента («вот что я сделал») просьбу собрать экран не перебивает
   const wholeScreen = saidWhole && (scope.kind !== 'selection' || scope.selectionBy === 'agent') && !RE_HERE_PLACE.test(spoken);
