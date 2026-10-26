@@ -316,6 +316,9 @@ async function boot() {
   globalThis.addEventListener('paste', onImagePaste);
   dom.canvas.addEventListener('dragover', onImageDragOver);
   dom.canvas.addEventListener('drop', onImageDrop);
+  // круг 58 (SPEC §21.5): картинка в строке команды — образец для команды
+  dom.command.addEventListener('dragover', onImageDragOver);
+  dom.command.addEventListener('drop', onCommandDrop);
   stage = new Stage(dom.canvas, {
     // круг 50: шрифты из сети выключены — и в экспорт начертания не встраиваются
     embedFonts: settings.webFonts !== false,
@@ -13022,11 +13025,34 @@ function editableTarget(t) {
 }
 
 function onImagePaste(e) {
-  if (editableTarget(e.target)) return;   // в поле команды и в инспекторе вставка — их дело
+  // круг 58: картинка в строку команды — образец для команды (текст из буфера — как обычно, в строку)
+  if (e.target === dom.command) {
+    const items = e.clipboardData && e.clipboardData.items;
+    const file = imageFileOf(items);
+    const text = e.clipboardData && typeof e.clipboardData.getData === 'function' ? e.clipboardData.getData('text/plain') : '';
+    if (!file || text) return;
+    e.preventDefault();
+    insertImageFile(file, null, { reference: true });
+    return;
+  }
+  if (editableTarget(e.target)) return;   // в инспекторе вставка — его дело
   const file = imageFileOf(e.clipboardData && e.clipboardData.items);
   if (!file) return;
   e.preventDefault();
   insertImageFile(file, null);
+}
+
+/** Круг 58: файл, брошенный на строку команды, — тоже образец; не картинка — браузер его не открывает. */
+function onCommandDrop(e) {
+  const files = e.dataTransfer && e.dataTransfer.files;
+  if (!files || !files.length) return;
+  e.preventDefault();
+  const file = imageFileOf(files);
+  if (!file) {
+    showMsg('error', 'Этот файл образцом не станет', { note: 'Подойдут картинки PNG, JPEG, GIF и WebP.', ms: 7000 });
+    return;
+  }
+  insertImageFile(file, null, { reference: true });
 }
 
 function onImageDragOver(e) {
@@ -13092,7 +13118,7 @@ function prepareImage(file) {
   });
 }
 
-async function insertImageFile(file, client) {
+async function insertImageFile(file, client, { reference = false } = {}) {
   if (!state.doc) return;
   const ready = await prepareImage(file);
   if (!ready) {
@@ -13100,7 +13126,8 @@ async function insertImageFile(file, client) {
     return;
   }
   // брошена на доску — в эту доску; мимо досок — новой доской на месте броска; вставка — по выделению
-  let selection = state.selection;
+  // круг 58: образец для команды — всегда своей доской рядом с остальными, не внутрь выделенного
+  let selection = reference ? [] : state.selection;
   let at = null;
   if (client && stage && typeof stage.toWorld === 'function') {
     const w = stage.toWorld(client.x, client.y);
@@ -13131,6 +13158,17 @@ async function insertImageFile(file, client) {
   if (!res || !res.ok) return;
   setSelection(r.select);
   if (!r.into) fitAfterLayout(r.select);
+  if (reference) {
+    const next = SHELL.referenceCommandText(dom.command.value);
+    dom.command.value = next.value;
+    dom.command.focus();
+    try { dom.command.setSelectionRange(next.caret, next.caret); } catch { /* поле без выделения */ }
+    showMsg('result', 'Образец на макете', {
+      note: 'Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом. Допишите, что собрать.',
+      ms: 9000,
+    });
+    return;
+  }
   showMsg('result', 'Картинка на макете', { note: 'Можно сказать: «собери экран в цветах этой картинки».', ms: 8000 });
 }
 
