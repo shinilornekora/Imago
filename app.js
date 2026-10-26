@@ -436,7 +436,8 @@ function remeasure(opts = {}) {
   if (!opts.cacheCleared) resetTextMeasure();
   let was = '';
   try { was = hashGeometry(state.geo); } catch { was = ''; }
-  const geo = solve(state.doc);
+  // круг 57: с памятью — после смены шрифтов следующая правка снова по месту
+  const geo = solveKept(state.doc);
   state.geo = geo;
   // измерения не изменились — ни перерисовки, ни пересчёта вида: на старте таких
   // событий приходит несколько, и каждое стоило полного круга (п.21)
@@ -1132,11 +1133,13 @@ function onSyncChange(view, info = {}) {
     }
     case 'confirmed': {
       settleHistory(info);
+      const predicted = state.doc;
       state.doc = view;
       settleWrapWords(info);
-      // сервер применил ровно то, что мы предсказали, — геометрия та же, рисовать нечего
-      if (info.same) { refreshSheet(); return; }
-      state.geo = solveKept(view);
+      // сервер применил ровно то, что мы предсказали, — геометрия та же, рисовать нечего;
+      // круг 57: память раскладки переходит к документу сервера — следующая правка снова по месту
+      if (info.same) { state.geo = CORE.solveCarry ? CORE.solveCarry(prevGeo, predicted, view) : prevGeo; refreshSheet(); return; }
+      state.geo = solveFrom(prevGeo, view);
       pruneSelection();
       renderAll();
       refreshSheet();
@@ -1165,7 +1168,7 @@ function onSyncChange(view, info = {}) {
       }
       const caught = flushCatchupTimer();
       // чужое переименование геометрию не трогает — решатель не зовём (круг 27, п.8)
-      state.geo = !caught && info.tx && Array.isArray(info.tx.ops) ? geoAfter(info.tx.ops, prevDoc, view, prevGeo) : solveKept(view);
+      state.geo = !caught && info.tx && Array.isArray(info.tx.ops) ? geoAfter(info.tx.ops, prevDoc, view, prevGeo) : solveFrom(prevGeo, view);
       pruneSelection();
       const diff = !caught && info.tx && Array.isArray(info.tx.ops) ? diffOf(info.tx.ops, prevGeo) : null;
       renderAll(diff ? { diff, prevGeo } : {});
@@ -1194,7 +1197,7 @@ function holdCatchup() {
   catchupTimer = setTimeout(() => {
     catchupTimer = null;
     if (!server || !state.doc) return;
-    state.geo = solveKept(state.doc);
+    state.geo = solveFrom(state.geo, state.doc);
     pruneSelection();
     renderAll();
     refreshSheet();
@@ -4063,6 +4066,15 @@ function solveKept(doc) {
   return solve(doc, { incremental: true });
 }
 
+/**
+ * Круг 57 (SPEC §18.6): геометрия для нового документа состояния от текущей — по месту правки,
+ * когда прежний документ не под рукой (отмена, повтор, подтверждение сервера, кадр догона).
+ * Документ — из applyOps или реплики (неизменённые узлы общие), иначе всё равно полная.
+ */
+function solveFrom(prevGeo, doc) {
+  return typeof CORE.solveNext === 'function' ? CORE.solveNext(prevGeo, doc) : solveKept(doc);
+}
+
 let issuesTimer = null;
 /** Замечания раскладки досчитать в простое: имена в их тексте могли смениться. */
 function refreshIssuesSoon() {
@@ -4537,9 +4549,12 @@ function stepHistory(back, { quiet = false } = {}) {
     state.selection = [];
     state.collapsed = null;
   } else {
-    const res = applyOps(state.doc, back ? tx.inverse : tx.ops);
+    const step = back ? tx.inverse : tx.ops;
+    const res = applyOps(state.doc, step);
     if (res.error) { showMsg('error', `${what} не удался: ${opError(res.error)}`); return false; }
-    state.doc = res.doc; state.geo = solveKept(state.doc);
+    // круг 57: отмена и повтор — по месту правки, как сама правка
+    const prevDoc = state.doc;
+    state.doc = res.doc; state.geo = geoAfter(step, prevDoc, state.doc, state.geo);
   }
   tx.undone = back;
   state.cursor += back ? -1 : 1;
@@ -14242,7 +14257,7 @@ function adoptDoc(raw) {
   if (next.root !== raw.root || alien.length) throw new Error('не разобрался как документ Imago');
   const tree = treeProblem(next);
   if (tree) throw new Error(tree);
-  const geo = solve(next);
+  const geo = solveKept(next);
   if (!geo || !geo.rects) throw new Error('раскладка не считается');
   // createDoc чинит узлы не по схеме, но починка бывает и неполной: размер без числа
   // доходит до solve и возвращается как NaN. Такой документ до состояния не допускаем.
