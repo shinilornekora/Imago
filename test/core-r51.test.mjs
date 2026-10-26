@@ -6,10 +6,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../src/core.js';
 
-const { createDoc, applyOps, ops, solve, solveAfter, hashGeometry } = core;
+const { createDoc, applyOps, ops, solve, solveAfter, solveCarry, hashGeometry } = core;
 const quiet = (fn) => { const w = console.warn; console.warn = () => {}; try { return fn(); } finally { console.warn = w; } };
 const measureText = (text, style) => String(text || '').length * (style.fontSize || 16) * 0.52;
 const OPTS = { measureText };
+const KEPT = { ...OPTS, incremental: true };
 
 /** Псевдослучайность с зерном — падение воспроизводится. */
 function rng(seed) {
@@ -89,7 +90,7 @@ test('круг51: по месту правки — та же геометрия,
   for (let seed = 1; seed <= 12; seed++) {
     const r = rng(seed);
     let doc = randomDoc(r);
-    let geo = solve(doc, OPTS);
+    let geo = solve(doc, KEPT);
     for (let step = 0; step < 40; step++) {
       const op = randomOp(r, doc, step);
       const res = applyOps(doc, op);
@@ -111,7 +112,7 @@ test('круг51: по месту правки — та же геометрия,
 
 test('круг51: когда по месту нельзя — честно полная (чужая или использованная геометрия, другой измеритель, экземпляры)', () => {
   const doc = randomDoc(rng(99));
-  const geo = solve(doc, OPTS);
+  const geo = solve(doc, KEPT);
   const text = Object.keys(doc.nodes).find((id) => doc.nodes[id].type === 'text');
   const op = [ops.set(text, 'characters', 'Другое')];
   const next = applyOps(doc, op).doc;
@@ -125,6 +126,26 @@ test('круг51: когда по месту нельзя — честно по�
   assert.equal(hashGeometry(c), hashGeometry(a));
   // без прежней геометрии — полная
   assert.equal(hashGeometry(solveAfter(null, doc, next, op, OPTS)), hashGeometry(a));
+  // обычная solve память не держит (снимки, проверки, черновики агента) — после неё полная
+  const plain = solve(doc, OPTS);
+  const d = solveAfter(plain, doc, next, op, OPTS);
+  assert.equal(hashGeometry(d), hashGeometry(a));
+  assert.ok(!Object.keys(d.rects).some((id) => d.rects[id] === plain.rects[id]), 'без памяти — ничего не перенесено');
+});
+
+test('круг51: правка без геометрии (имя) не рвёт цепочку — следующая снова по месту', () => {
+  const doc = randomDoc(rng(7));
+  const geo = solve(doc, KEPT);
+  const ids = Object.keys(doc.nodes).filter((id) => id !== doc.root);
+  const renamed = applyOps(doc, [ops.set(ids[0], 'name', 'Новое имя')]).doc;
+  const same = solveCarry(geo, doc, renamed);
+  assert.equal(same, geo);
+  const text = ids.find((id) => doc.nodes[id].type === 'text');
+  const op = [ops.set(text, 'characters', 'Совсем другой текст')];
+  const next = applyOps(renamed, op).doc;
+  const inc = solveAfter(same, renamed, next, op, OPTS);
+  assert.equal(hashGeometry(inc), hashGeometry(solve(next, OPTS)));
+  assert.ok(Object.keys(inc.rects).some((id) => inc.rects[id] === geo.rects[id]), 'поддеревья перенесены — цепочка жива');
 });
 
 test('круг51: 1 тыс. слоёв — правка текста по месту заметно быстрее полной', () => {
@@ -139,7 +160,7 @@ test('круг51: 1 тыс. слоёв — правка текста по мес
       ops.create({ id: `c${i}r`, type: 'rect', parent: `c${i}`, size: { w: { mode: 'fill' }, h: { mode: 'fixed', value: 6 } } }));
   }
   doc = applyOps(doc, list).doc;
-  let geo = solve(doc, OPTS);
+  let geo = solve(doc, KEPT);
   let full = 0;
   let inc = 0;
   for (let i = 0; i < 20; i++) {
@@ -149,8 +170,11 @@ test('круг51: 1 тыс. слоёв — правка текста по мес
     solve(next, OPTS);
     full += performance.now() - t;
     t = performance.now();
-    geo = solveAfter(geo, doc, next, op, OPTS);
+    const after = solveAfter(geo, doc, next, op, OPTS);
     inc += performance.now() - t;
+    // признак пути по месту, а не тихой полной раскладки: далёкая карточка — тот же объект
+    assert.equal(after.rects.c0, geo.rects.c0, `шаг ${i}: карточка вне правки пересчитана`);
+    geo = after;
     doc = next;
   }
   assert.ok(inc * 2 < full, `по месту ${inc.toFixed(1)} мс против полной ${full.toFixed(1)} мс`);

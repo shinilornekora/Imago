@@ -6567,9 +6567,11 @@ function cacheGet(cache, id, key) {
   const m = cache.get(id);
   return m ? m.get(key) : undefined;
 }
+const CACHE_KEYS_PER_NODE = 12;  // цепочка solveAfter несёт кеши дальше: старые ограничения чистых узлов не копятся
 function cacheSet(cache, id, key, v) {
   let m = cache.get(id);
   if (!m) { m = new Map(); cache.set(id, m); }
+  else if (m.size >= CACHE_KEYS_PER_NODE && !m.has(key)) m.delete(m.keys().next().value);
   m.set(key, v);
 }
 
@@ -6950,8 +6952,8 @@ function solveWith(doc, opts, seed) {
     placeNode(ctx, child, r2(pos.x), r2(pos.y), m.w, m.h);
   }
   ctx.doc = doc;
-  // круг 51: заготовка для следующей раскладки по месту правки — только без экземпляров
-  if (!ex.count) {
+  // круг 51: заготовка для следующей раскладки по месту правки — по просьбе (incremental) и без экземпляров
+  if (!ex.count && (options.incremental === true || seed)) {
     SOLVE_MEMO.set(geo, { doc, fn: options.measureText || null, epoch: measureEpochValue, meas: ctx.measCache, flow: ctx.flowCache, span: ctx.span });
   }
   const forced = options.selfTest === true;
@@ -6974,7 +6976,7 @@ function solveWith(doc, opts, seed) {
 
 /**
  * Круг 51 (SPEC §18): раскладка ПО МЕСТУ ПРАВКИ. Полная раскладка после каждой правки держит
- * бюджет кадра (16 мс) лишь до ~750 слоёв: 93–97 % времени — раскладка. Здесь пересчитывается
+ * бюджет кадра (16 мс) лишь до ~750 слоёв (пилот). Здесь пересчитывается
  * только изменённое: узлы правки и их предки (в прежнем и новом документе) теряют записи кешей
  * мер и потоков; остальное меряется из кеша, а чистое поддерево того же размера переносится из
  * прежней геометрии со сдвигом. Что изменилось — по самим документам (dirtyAfter), операции —
@@ -6993,10 +6995,21 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
   const dirty = memo && memo.doc === prevDoc && memo.fn === (options.measureText || null) && memo.epoch === measureEpochValue
     ? dirtyAfter(prevDoc, nextDoc) : null;
-  if (!dirty) return solve(nextDoc, opts);
+  if (!dirty) return solve(nextDoc, { ...options, incremental: true });
   SOLVE_MEMO.delete(prevGeo);
   for (const id of dirty) { memo.meas.delete(id); memo.flow.delete(id); }
   return solveWith(nextDoc, { ...options, __inSelfTest: true }, { meas: memo.meas, flow: memo.flow, geo: prevGeo, span: memo.span, dirty });
+}
+
+/**
+ * Круг 51: правка не тронула геометрию (имя, замок…) — та же geo годится и для nextDoc; память
+ * раскладки переходит к nextDoc, чтобы следующая правка снова шла по месту, а не полностью.
+ * @returns {object} geo
+ */
+function solveCarry(geo, prevDoc, nextDoc) {
+  const memo = geo ? SOLVE_MEMO.get(geo) : null;
+  if (memo && memo.doc === prevDoc) memo.doc = nextDoc;
+  return geo;
 }
 
 /**
@@ -13067,7 +13080,7 @@ async function boardPNG(doc, artboardId, opts = {}) {
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
   /* Круг 47 (SPEC §14.4): SVG доски без страницы — снимок для критика агента — */
-  renderSVG, boardPNG, solveAfter,
+  renderSVG, boardPNG, solveAfter, solveCarry,
   /* Круг 31 (K1): большая отмена/правка — пачками в пределах транзакции — */
   splitOps, SPLIT_MAX_OPS, SPLIT_MAX_BYTES,
   /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */

@@ -44,7 +44,7 @@ for (const n of SIZES) {
   const { doc, mid, count } = boardDoc(n);
   const opts = { measureText };
   let cur = doc;
-  let geo = core.solve(cur, opts);
+  let geo = core.solve(cur, { ...opts, incremental: true });
   const full = [];
   const inc = [];
   for (let i = 0; i < RUNS; i++) {
