@@ -22,6 +22,8 @@ import {
 } from './src/core.js';
 import * as CORE from './src/core.js';
 import { makeProvider, runCommand, runVariants } from './src/brain.js';
+/* Круг 53 (SPEC §20): цвета картинок документа для арт-директора — пиксели считает страница. */
+import { paletteFromPixels, SWATCH_LIMITS } from './src/swatches.js';
 /* Круг 22 (SPEC §9.5): клиент-реплика. Документ в серверном режиме живёт в ней, а не в
    localStorage/db; оболочка получает view и шлёт транзакции. */
 import { createSync, idbStorage, memoryStorage, droppedLine, statusLine, engineWords, LIMITS } from './src/sync.js';
@@ -193,6 +195,48 @@ function ensureDocFonts(doc) {
  * Круг 47 (SPEC §14.4): снимок черновика доски для критика агента в браузере — PNG той же
  * отрисовкой, что холст, с гарнитурами внутри. Не вышло — null, и критик смотрит выжимку.
  */
+/**
+ * Круг 53 (SPEC §20): цвета картинок документа для арт-директора. Картинка рисуется в квадрат
+ * SWATCH_LIMITS.side на canvas; чужая картинка без CORS (холст «испорчен») и битая — без цветов.
+ * Кеш по адресу картинки — на сеанс, не больше 64 картинок.
+ */
+const imageColorCache = new Map();
+async function imageColorsInPage(sources, { signal } = {}) {
+  const out = [];
+  for (const s of Array.isArray(sources) ? sources : []) {
+    if (signal && signal.aborted) break;
+    if (!s || typeof s.src !== 'string') continue;
+    let colors = imageColorCache.get(s.src);
+    if (!colors) {
+      colors = await pixelColors(s.src);
+      imageColorCache.set(s.src, colors);
+      while (imageColorCache.size > 64) imageColorCache.delete(imageColorCache.keys().next().value);
+    }
+    if (colors.length) out.push({ id: s.id, colors: colors.map((c) => ({ ...c })) });
+  }
+  return out;
+}
+
+function pixelColors(src) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.decoding = 'async';
+    img.onload = () => {
+      try {
+        const side = SWATCH_LIMITS.side;
+        const c = document.createElement('canvas');
+        c.width = side; c.height = side;
+        const g = c.getContext('2d', { willReadFrequently: true });
+        g.drawImage(img, 0, 0, side, side);
+        resolve(paletteFromPixels(g.getImageData(0, 0, side, side).data, side, side));
+      } catch { resolve([]); }
+    };
+    img.onerror = () => resolve([]);
+    img.src = src;
+  });
+}
+
 async function renderForCritic({ doc, geo, artboardId }) {
   ensureDocFonts(doc);
   // раскладку черновика считали до прихода новых гарнитур: дождаться их и перемерить, иначе снимок
@@ -9613,6 +9657,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
         onStage: (rec) => onAgentStage(rec, 3, runId),
         history: state.pairs.slice(), geo: state.geo, activeArtboardId: activeArtboardId(),
         selectionBy: state.selectionBy,
+        imageColors: imageColorsInPage,
         ...agentArtOptions(),
       });
       hideStage();
@@ -9663,6 +9708,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
       selectionBy: state.selectionBy,
       // круг 47 (SPEC §14.4): снимок черновика доски для визуального критика
       render: renderForCritic,
+      imageColors: imageColorsInPage,
       ...agentArtOptions(),
     });
     hideStage();

@@ -20,7 +20,9 @@
  * семейству, не больше FONT_CACHE_FAMILIES семейств (старые вытесняются).
  */
 
+import { createHash } from 'node:crypto';
 import { renderSVG, solve } from '../../src/core.js';
+import { paletteFromPixels, encodedSize, SWATCH_LIMITS, SWATCH_MAX_PIXELS } from '../../src/swatches.js';
 import { catalogFont, nearestWeight, DEFAULT_FONT } from '../../src/fonts.js';
 import { RENDER_FONT_TIMEOUT_MS, FONT_CACHE_FAMILIES, RENDER_FONT_MAX_BYTES, RENDER_DEADLINE_MS, RENDER_FONT_FAIL_TTL_MS } from './limits.js';
 
@@ -34,6 +36,8 @@ export const EMOJI_RE = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\u{FE0F
 /** Снимок для критика: ширина до 768 px, высота до 1536 px (дальше — верх доски). */
 const SHOT_W = 768;
 const SHOT_H = 1536;
+/** Круг 53: сколько картинок помнить с посчитанными цветами. */
+const IMAGE_COLORS_CACHE = 64;
 
 let resvgModule;   // undefined — не пробовали; null — нет
 
@@ -220,5 +224,48 @@ export function createRenderer(opts = {}) {
       clearTimeout(timer);
       if (outer) outer.removeEventListener('abort', onAbort);
     }
+  };
+}
+
+/**
+ * Круг 53 (SPEC §20): цвета картинок документа для арт-директора — пиксели через resvg (картинка
+ * вписывается в квадрат SWATCH_LIMITS.side без сохранения пропорций: важна доля цвета, не форма).
+ * Только картинки, встроенные в документ (`data:` png/jpeg/gif/webp, до SWATCH_LIMITS.maxSrc знаков,
+ * площадь по заголовку файла — не больше SWATCH_MAX_PIXELS: распаковку бомбы не начинаем):
+ * за картинками по адресу сервер в сеть не ходит. resvg нет или картинка не декодировалась — без неё.
+ * Кеш — по содержимому (sha1 адреса), не больше IMAGE_COLORS_CACHE картинок (старые вытесняются).
+ * @param {{resvg?: object|null}} [opts] resvg — подмена модуля (тесты: null — «не установлен»)
+ * @returns {(sources: {id: string, src: string}[], o?: {signal?: AbortSignal}) => Promise<{id: string, colors: {hex: string, share: number}[]}[]>}
+ */
+export function createImageColors(opts = {}) {
+  const cache = new Map();
+  return async (sources, o = {}) => {
+    const R = 'resvg' in opts ? opts.resvg : await loadResvg();
+    if (!R || typeof R.Resvg !== 'function') return [];
+    const out = [];
+    const side = SWATCH_LIMITS.side;
+    for (const s of Array.isArray(sources) ? sources : []) {
+      if (o.signal && o.signal.aborted) break;
+      const src = s && typeof s.src === 'string' ? s.src : '';
+      if (!/^data:image\/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(src) || src.length > SWATCH_LIMITS.maxSrc) continue;
+      const key = createHash('sha1').update(src).digest('hex');
+      let colors = cache.get(key);
+      if (colors) { cache.delete(key); cache.set(key, colors); } else {
+        try {
+          // размер — по заголовку, до распаковки: огромная картинка в маленьком файле не декодируется
+          const dims = encodedSize(Buffer.from(src.slice(src.indexOf(',') + 1, src.indexOf(',') + 1 + 256 * 1024), 'base64'));
+          if (!dims || dims.w * dims.h > SWATCH_MAX_PIXELS) throw new Error('размер картинки не узнан или слишком велик');
+          const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${side}" height="${side}"><image href="${src}" width="${side}" height="${side}" preserveAspectRatio="none"/></svg>`;
+          const img = new R.Resvg(svg).render();
+          colors = paletteFromPixels(img.pixels, img.width, img.height);
+        } catch {
+          colors = [];
+        }
+        cache.set(key, colors);
+        while (cache.size > IMAGE_COLORS_CACHE) cache.delete(cache.keys().next().value);
+      }
+      if (colors.length) out.push({ id: s.id, colors: colors.map((c) => ({ ...c })) });
+    }
+    return out;
   };
 }
