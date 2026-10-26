@@ -95,6 +95,8 @@ describe('круг 45: сирота спасения — created_at в спис�
         const q = (await h.post('/api/projects', { name: 'сирота в адресе', doc: createDoc(), create_id: cid4 })).body.id;
         assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cid4}`, { create_id: cidOf() })).status, 400);
         assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cid4}`, { create_id: 5 })).status, 400, 'нестроковый ключ в теле — не молча');
+        assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cid4}`, { create_id: '' })).status, 400, 'пустой ключ в теле — не молча');
+        assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cid4}`, [])).status, 400, 'тело не объект');
         assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cidOf()}`)).status, 409);
         assert.equal((await h.raw('DELETE', `/api/projects/${q}?create_id=${cid4}`)).status, 204);
         assert.equal((await h.get(`/api/projects/${q}`)).status, 404);

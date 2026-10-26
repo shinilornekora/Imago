@@ -5123,8 +5123,8 @@ function formatBehavior() {
     let res = '';
     const rootId = doc.root;
     const libId = libraryNode(doc).id;
-    const tryOps = (list) => bit(() => {
-      const r = applyOps(doc, deepClone(list));
+    const tryOps = (list, base = doc) => bit(() => {
+      const r = applyOps(base, deepClone(list));
       if (r.error) return false;
       // id корня и библиотеки у документа-пробы случайны (createDoc) — в отпечаток идут именами
       res += fnv64(stableJSON({ nodes: r.doc.nodes, tokens: r.doc.tokens }).split(rootId).join('ROOT').split(libId).join('LIB')).slice(0, 6);
@@ -5134,13 +5134,14 @@ function formatBehavior() {
       'layout.__proto__', 'layout.prototype', 'layout.constructor', 'props.toString', 'props.p', 'props.zz', 'paths.0.d', 'paths.1', 'paths.2',
       'paths.5', 'paths.-1', 'paths.01', 'paths.length', 'paths.0.fill', 'size.w.value', 'pos.x', 'pos.z', 'states.hover.opacity',
       'component.name', 'component.props.0.name', 'of', 'characters', 'style.fontSize', 'layout.padding.t', 'viewBox.w']));
+    const setProbes = [];   // те же пробы — ещё раз с exact (семейство exact)
     for (const id of ['pb', 'pt', 'pr', 'pv', 'pm', 'pi']) {
-      for (const path of pathCands) for (const v of [1, 'x', 0.5, { x: 1, y: 1 }, undefined]) op += tryOps([{ op: 'set', id, path, value: v }]);
+      for (const path of pathCands) for (const v of [1, 'x', 0.5, { x: 1, y: 1 }, undefined]) { const l = [{ op: 'set', id, path, value: v }]; setProbes.push(l); op += tryOps(l); }
     }
     // каждое поле таблиц через set на каждом узле — короткая палитра (applyOps: keepFieldForm, checkNode, черновик)
     const short = [null, true, 'x', '#000000', -1, 0, 0.5, 1, 1.5, 2, 361, 1e9, [], {}, { x: 1 }, { x: 1, y: 1 }, undefined];
     for (const id of ['pb', 'pt', 'pr', 'pv', 'pi']) {
-      for (const k of fields) for (const v of short) op += tryOps([{ op: 'set', id, path: k, value: v }]);
+      for (const k of fields) for (const v of short) { const l = [{ op: 'set', id, path: k, value: v }]; setProbes.push(l); op += tryOps(l); }
     }
     const sz = { w: { mode: 'fixed', value: 5 }, h: { mode: 'fixed', value: 5 } };
     const opProbes = [
@@ -5245,6 +5246,40 @@ function formatBehavior() {
     for (const node of exactCreates) {
       ex += tryOps([{ op: 'create', node, exact: true }]);
       ex += tryOps([{ op: 'create', node }]);
+    }
+    /* Проход 4 (arch-r45d Д1‴): не выборочно, а ВСЕ пробы set и операций корпуса `ops` — ещё раз с
+       exact (мягкая проверка узла в set, ветвь withoutBadFields); и узлы, которые уже негодны до
+       правки: цель пропса вынесена из мастера (move его не перепроверяет), поле прежней формы. */
+    const withExact = (list) => list.map((o) => (o && typeof o === 'object' ? { ...o, exact: true } : o));
+    for (const list of setProbes) ex += tryOps(withExact(list));
+    for (const list of opProbes) ex += tryOps(withExact(list));
+    const broken = [
+      { op: 'create', node: { type: 'frame', id: 'nm', parent: libId, name: 'M', children: [], size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+      { op: 'create', node: { type: 'text', id: 'nmt', parent: 'nm', characters: 'x', size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+      { op: 'set', id: 'nm', path: 'component', value: { name: 'M', props: [{ name: 'label', kind: 'text', target: 'nmt', path: 'characters' }] } },
+      { op: 'move', id: 'nmt', parent: 'pb', index: 0 }
+    ];
+    const brokenSets = [
+      ['nm', 'component', { name: 'M', props: [{ name: 'title', kind: 'text', target: 'nmt', path: 'characters' }] }],
+      ['nm', 'component', { name: 'M', props: [] }],
+      ['nm', 'component', { name: 'M2', props: [{ name: 'label', kind: 'text', target: 'nmt', path: 'characters' }] }],
+      ['nm', 'name', 'M3'], ['nm', 'clip', true], ['nm', 'opacity', 0.5], ['nm', 'opacity', 2]
+    ];
+    for (const [id, path, value] of brokenSets) {
+      ex += tryOps([...broken, { op: 'set', id, path, value }]);
+      ex += tryOps([...broken, { op: 'set', id, path, value, exact: true }]);
+    }
+    /* поля прежней формы у узла (документ прежних кругов: `clip: 1`, объект в style.token — операцией
+       их уже не положить, кладём прямо в копию документа-пробы) — правка соседнего поля с exact и без
+       (ветвь withoutBadFields) */
+    const legacyDoc = deepClone(doc);
+    Object.assign(legacyDoc.nodes.pr, { clip: 1, radius: 'radii.99' });
+    Object.assign(legacyDoc.nodes.pt, { style: { token: { x: 1 } } });
+    for (const id of ['pr', 'pt']) {
+      for (const [path, value] of [['name', 'z'], ['opacity', 0.5], ['clip', true], ['clip', 2], ['radius', 4], ['fill', 'accent'], ['opacity', 3], ['style', 'body'], ['characters', 'y']]) {
+        ex += tryOps([{ op: 'set', id, path, value }], legacyDoc);
+        ex += tryOps([{ op: 'set', id, path, value, exact: true }], legacyDoc);
+      }
     }
     out.exact = ex;
     out.results = res;
