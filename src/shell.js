@@ -366,6 +366,8 @@ export function shellIntentFromServer(shell) {
       return { kind: 'theme', mode: ['dark', 'light', 'auto', 'cycle', 'ask'].includes(a.mode) ? a.mode : 'cycle' };
     case 'variants-close':
       return { kind: 'variants-close' };
+    case 'agent-setting':
+      return ['direction', 'critic', 'webFonts'].includes(a.what) ? { kind: 'agent-setting', what: a.what, on: typeof a.on === 'boolean' ? a.on : null } : null;
     case 'variants':
       // args.of — к какой команде считать варианты («а по-другому» после прошлой)
       return {
@@ -1863,6 +1865,15 @@ const RE_NEW_BOARD = /^(?:нов(?:ая|ую) доск[ау]|пуст(?:ая|у�
    состояния. Формы только целиковые: «добавь просмотр» и «сделай экран просмотра» — работа
    для модели. «просмотр» и «режим просмотра» — включить; выйти — явными словами. */
 const PV_LEAD = '(?:включи |включить |открой |открыть |покажи |показать |запусти |запустить |перейди в |перейти в |войди в |войти в |давай |в )?';
+/* Круг 50: «выключи арт-направление», «включи самопроверку», «не грузи шрифты из сети», «собирай без
+   образа» — только целиком: «выключи образ на кнопке» сюда не попадает. */
+const RE_AGENT_SETTING = /^(?:(включи|включить|верни|выключи|выключить|отключи|отключить)\s+(арт-направление|арт направление|образ|самопроверку|критика|шрифты из сети|шрифты|веб-шрифты|веб шрифты|вебшрифты)|(?:собирай|работай|делай)\s+(без образа|без арт-направления|без самопроверки|без шрифтов из сети|с образом|с арт-направлением|с самопроверкой|со шрифтами из сети)|(не проверяй себя|проверяй себя|не грузи шрифты из сети|не загружай шрифты из сети|грузи шрифты из сети|загружай шрифты из сети))$/;
+function agentSettingOf(m) {
+  const word = m[2] || m[3] || m[4] || '';
+  const what = /образ|арт/.test(word) ? 'direction' : /провер|критик/.test(word) ? 'critic' : 'webFonts';
+  const on = m[1] ? /^(включ|верни)/.test(m[1]) : !/(^|\s)(без|не)\s/.test(word);
+  return { kind: 'agent-setting', what, on };
+}
 const RE_PREVIEW_ON = new RegExp(`^${PV_LEAD}(?:режим просмотра|режим предпросмотра|просмотр|предпросмотр)$`
   + '|^посмотреть вживую$|^покажи вживую$|^проверить анимации$|^проверь анимации$');
 const RE_PREVIEW_OFF = /^(?:выйди|выйти|выход|выходи) из (?:режима )?(?:пред)?просмотра$|^(?:выключи|выключить|закрой|закрыть|заверши|завершить|останови|остановить) (?:режим (?:пред)?просмотра|(?:пред)?просмотр)$|^(?:хватит|конец) (?:пред)?просмотра$|^(?:вернись|вернуться|назад) к правке$|^режим правки$/;
@@ -1903,6 +1914,8 @@ export function shellIntent(said, ctx = {}) {
 
   /* Круг 36 (SPEC §11.3): режим «Просмотр» — дело оболочки, как масштаб и тема. Раньше
      RE_SHOW: «покажи просмотр» иначе искал бы доску с именем «просмотр». */
+  // круг 50 (SPEC §17.2): настройки агента словами — до доски/слоя по имени
+  { const m = RE_AGENT_SETTING.exec(t); if (m) return agentSettingOf(m); }
   if (RE_PREVIEW_OFF.test(t)) return { kind: 'preview', on: false };
   if (RE_PREVIEW_ON.test(t)) return { kind: 'preview', on: true };
 
@@ -2146,6 +2159,10 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'stop', group: 'Агент', title: 'Стоп', hint: 'Остановить работу агента', slash: ['стоп', 'stop'], phrases: ['стоп', 'хватит'] },
   { id: 'variants', group: 'Агент', title: 'Три варианта', hint: 'Три варианта последней команды — их считает агент', slash: ['варианты', 'variants'], phrases: ['три варианта', 'покажи варианты'], byAgent: true },
   { id: 'variants-close', group: 'Агент', title: 'Закрыть варианты', hint: 'Макет остаётся прежним', slash: ['закрыть варианты'], phrases: ['закрой варианты', 'ни один не подходит'] },
+  // круг 50 (SPEC §17.2): настройки агента — словом, слэшем и в настройках; без слова — сказать, как сейчас
+  { id: 'art-direction', group: 'Агент', title: 'Арт-направление', hint: 'Образ, палитра и шрифты перед сборкой нового экрана; без слова — сказать, включено ли', slash: ['образ', 'арт-направление', 'art'], args: [{ name: 'режим', kind: 'enum', values: ON_OFF, optional: true }], bare: true, example: '/образ выкл', phrases: ['выключи арт-направление', 'собирай без образа'] },
+  { id: 'art-critic', group: 'Агент', title: 'Самопроверка', hint: 'Агент смотрит на собранный экран и дорабатывает шаблонное; без слова — сказать, включена ли', slash: ['самопроверка', 'критик', 'critic'], args: [{ name: 'режим', kind: 'enum', values: ON_OFF, optional: true }], bare: true, example: '/самопроверка выкл', phrases: ['выключи самопроверку', 'не проверяй себя'] },
+  { id: 'web-fonts', group: 'Агент', title: 'Шрифты из сети', hint: 'Гарнитуры макета из Google Fonts на холсте, в экспорте и при арт-направлении; выкл — шрифты системы', slash: ['шрифты из сети', 'шрифты', 'веб-шрифты', 'web fonts'], args: [{ name: 'режим', kind: 'enum', values: ON_OFF, optional: true }], bare: true, example: '/шрифты из сети выкл', phrases: ['не грузи шрифты из сети', 'выключи веб-шрифты'] },
 
   /* — Справка — */
   { id: 'help', group: 'Справка', title: 'Команды', hint: 'Справка: все команды оболочки по группам', slash: ['помощь', 'команды', 'help', '?'], phrases: ['команды', 'что ты умеешь'] },
@@ -2299,6 +2316,13 @@ const PLAIN_INTENTS = {
   help: () => ({ kind: 'help' }),
 };
 
+/** Круг 50: настройка агента — «вкл»/«выкл»; без слова — спросить, как сейчас (on: null). */
+function agentSettingArg(what, rest, cmd) {
+  if (!rest) return { kind: 'agent-setting', what, on: null };
+  const on = argPick(rest, ON_WORDS);
+  return on == null ? bad(cmd, `${cmd.title}: «вкл» или «выкл»`) : { kind: 'agent-setting', what, on };
+}
+
 /** Разбор аргументов у команд, которым они нужны: (хвост, хвост как набран, ctx) → намерение. */
 const SLASH_ARGS = {
   zoom(rest, raw, ctx, cmd) {
@@ -2307,6 +2331,9 @@ const SLASH_ARGS = {
     if (n < 10 || n > 600) return bad(cmd, 'Масштаб — от 10 до 600 %');
     return { kind: 'zoom', to: n / 100 };
   },
+  'art-direction': (rest, raw, ctx, cmd) => agentSettingArg('direction', rest, cmd),
+  'art-critic': (rest, raw, ctx, cmd) => agentSettingArg('critic', rest, cmd),
+  'web-fonts': (rest, raw, ctx, cmd) => agentSettingArg('webFonts', rest, cmd),
   preview(rest, raw, ctx, cmd) {
     if (!rest) return { kind: 'preview', on: true };
     const on = argPick(rest, ON_WORDS);
@@ -2551,6 +2578,7 @@ export function commandIdOf(intent) {
     case 'stop': return 'stop';
     case 'variants': return 'variants';
     case 'variants-close': return 'variants-close';
+    case 'agent-setting': return { direction: 'art-direction', critic: 'art-critic', webFonts: 'web-fonts' }[intent.what] || null;
     case 'help': return 'help';
     case 'palette': return 'palette';
     default: return null;

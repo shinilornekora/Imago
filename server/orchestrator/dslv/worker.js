@@ -167,7 +167,8 @@ async function run(id, job) {
     const common = {
       doc: job.doc, selection: job.selection || [], utterance: job.utterance,
       provider: proxyProvider(id, art.vision), signal: ctl.signal, engine: core, onStage,
-      direction: art.direction !== false, critic: art.critic !== false,
+      direction: art.direction !== false, critic: art.critic !== false, webFonts: art.webFonts !== false,
+      artOffBy: art.offBy && typeof art.offBy === 'object' ? art.offBy : null,
       render: art.critic === false ? null
         // проверка: снимок без resvg и сети — готовый PNG (круг 47)
         : testHooks && typeof art.fakeShot === 'string' ? async () => ({ mime: 'image/png', data: art.fakeShot, width: 8, height: 8 })

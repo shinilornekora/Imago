@@ -165,6 +165,8 @@ let docFontsDoc = null;
 const docFontsReady = new Map();
 function ensureDocFonts(doc) {
   if (!doc || doc === docFontsDoc || typeof document === 'undefined' || !document.head) return;
+  // круг 50 (SPEC §17.3): шрифты из сети выключены — холст набирает шрифтами системы
+  if (settings.webFonts === false) return;
   docFontsDoc = doc;
   try {
     for (const family of fontsInDoc(doc)) {
@@ -196,7 +198,8 @@ async function renderForCritic({ doc, geo, artboardId }) {
   // раскладку черновика считали до прихода новых гарнитур: дождаться их и перемерить, иначе снимок
   // рисует настоящий шрифт в чужих переносах строк
   try {
-    if (document.fonts && typeof document.fonts.load === 'function') {
+    // круг 50: шрифты из сети выключены — ждать нечего, снимок системными
+    if (settings.webFonts !== false && document.fonts && typeof document.fonts.load === 'function') {
       const fams = fontsInDoc(doc).map((f) => catalogFont(f)).filter(Boolean).map((f) => f.family);
       // пока стили не разобраны, check() для неизвестного семейства — true (по спецификации): сначала
       // ждём сами стили, потом начертания; уже готовые на странице — перемерять (весь документ) незачем
@@ -214,7 +217,7 @@ async function renderForCritic({ doc, geo, artboardId }) {
       }
     }
   } catch { /* перемерить не вышло — снимок по прежней раскладке */ }
-  return CORE.boardPNG(doc, artboardId, { geo });
+  return CORE.boardPNG(doc, artboardId, { geo, fonts: settings.webFonts !== false });
 }
 
 /**
@@ -260,6 +263,8 @@ async function boot() {
      мир» и своё дублирование без слов — две истины одной команды. */
   globalThis.addEventListener('keydown', onModKeyCapture, true);
   stage = new Stage(dom.canvas, {
+    // круг 50: шрифты из сети выключены — и в экспорт начертания не встраиваются
+    embedFonts: settings.webFonts !== false,
     onSelect: (ids) => setSelection(ids),
     // круг 39 (N3): ⌘/Ctrl+D сцены — та же команда таблицы со словами и «Отменить» (если перехват мимо)
     onDuplicate: () => applyShellIntent({ kind: 'duplicate' }, ''),
@@ -2716,6 +2721,8 @@ async function runOnServer(utterance, { variants, ctrl, runId }) {
       author: settings.author || undefined,
       mode: variants ? 'variants' : 'run',
       n: variants ? 3 : undefined,
+      // круг 50: выключенное человеком — серверу (включить выключенное у сервиса нельзя)
+      art: agentArtOptions(),
       signal: ctrl.signal,
       onEvent: (ev) => onServerAgentEvent(ev, runId, variants),
     });
@@ -9594,6 +9601,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
         onStage: (rec) => onAgentStage(rec, 3, runId),
         history: state.pairs.slice(), geo: state.geo, activeArtboardId: activeArtboardId(),
         selectionBy: state.selectionBy,
+        ...agentArtOptions(),
       });
       hideStage();
       const all = (list || []).filter(Boolean);
@@ -9643,6 +9651,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
       selectionBy: state.selectionBy,
       // круг 47 (SPEC §14.4): снимок черновика доски для визуального критика
       render: renderForCritic,
+      ...agentArtOptions(),
     });
     hideStage();
 
@@ -11585,6 +11594,17 @@ function applyShellIntent(intent, said) {
     }
     case 'preview': {
       setPreview(intent.on !== false, { say: true });
+      return true;
+    }
+    // круг 50 (SPEC §17.2): настройки агента; без «вкл/выкл» — сказать, как сейчас
+    case 'agent-setting': {
+      if (intent.on == null) {
+        const on = settings[AGENT_SETTING[intent.what].key] !== false;
+        const w = AGENT_SETTING[intent.what];
+        showMsg('plain', `${w.title} ${on ? w.onWord : w.offWord}.`, { note: `${on ? 'Выключить' : 'Включить'}: ${w.slash} ${on ? 'выкл' : 'вкл'}`, ms: 7000 });
+        return true;
+      }
+      setAgentSetting(intent.what, intent.on, { say: true });
       return true;
     }
     // круг 46: проекты — на сервере и без него (группа «Файл»)
@@ -13663,6 +13683,11 @@ async function exportSvg() {
  * (`embedded` | `partial` | `missing` | `none` | `off`) и списком начертаний (круг 11, п.18).
  */
 function fontWarning(fonts, missing, what) {
+  // круг 50: шрифты из сети выключены человеком — сказать, что их в файле нет
+  if (fonts === 'off' && settings.webFonts === false) {
+    return what === 'SVG' ? 'Шрифты из сети выключены — начертания в SVG не встроены: у получателя текст будет шрифтами его системы.'
+      : `Шрифты из сети выключены — ${what} нарисован шрифтами системы.`;
+  }
   if (fonts !== 'partial' && fonts !== 'missing') return '';
   const list = (Array.isArray(missing) ? missing : []).filter(Boolean).slice(0, 3).join(', ');
   const head = fonts === 'missing'
@@ -13952,6 +13977,20 @@ function fillSettings(body) {
     : '«Одна команда»: микрофон выключается сам — после отправки и после десяти секунд тишины. '
       + '«Слушать постоянно»: слышит всё, что говорят рядом, пока его не выключить.';
   body.appendChild(group('Голос', [always, voiceNote]));
+  // круг 50 (SPEC §17.2): то же, что команды «/образ», «/самопроверка», «/шрифты из сети»
+  const artRow = (label, key, what) => row(label, segField(['on', 'off'], settings[key] === false ? 'off' : 'on',
+    (v) => { setAgentSetting(what, v === 'on'); openSettings(); }, ['Вкл', 'Выкл']));
+  const artNote = document.createElement('div');
+  artNote.className = 'note';
+  artNote.textContent = 'Арт-направление: перед новым экраном агент решает образ, палитру и шрифты. Самопроверка: смотрит на собранное '
+    + 'и дорабатывает шаблонное (дольше и дороже). Шрифты из сети: гарнитуры макета из Google Fonts на холсте, в снимке и в экспорте; '
+    + 'выключены — макет шрифтами системы (шрифт самого интерфейса грузится как раньше). Это настройки: действуют, пока их не поменять.';
+  body.appendChild(group('Агент: оформление', [
+    artRow('Арт-направление', 'artDirection', 'direction'),
+    artRow('Самопроверка', 'artCritic', 'critic'),
+    artRow('Шрифты из сети', 'webFonts', 'webFonts'),
+    artNote,
+  ]));
   /* Круг 25, п.6: на телефоне кнопка темы уступает место имени проекта в шапке — выбор
      темы есть и здесь (и голосом: «тёмная тема интерфейса»). */
   body.appendChild(group('Оформление', [row('Тема', segField(
@@ -15442,6 +15481,40 @@ function sanitizePairs(list) {
 
 /* -------------------------------- настройки ---------------------------------- */
 
+/** Круг 50 (SPEC §17.2): настройки живого дизайна — ключ в settings и слова. */
+const AGENT_SETTING = {
+  direction: { key: 'artDirection', title: 'Арт-направление', onWord: 'включено', offWord: 'выключено', slash: '/образ',
+    onSay: 'Новые экраны — снова с образом: палитра и мотивы под предмет (если сервис агента его не выключил).', offSay: 'Новые экраны собираю без образа — в оформлении документа.' },
+  critic: { key: 'artCritic', title: 'Самопроверка', onWord: 'включена', offWord: 'выключена', slash: '/самопроверка',
+    onSay: 'После сборки смотрю на экран и дорабатываю шаблонное (если сервис агента её не выключил).', offSay: 'Собранный экран больше не проверяю — быстрее, но шаблонное останется.' },
+  webFonts: { key: 'webFonts', title: 'Шрифты из сети', onWord: 'включены', offWord: 'выключены', slash: '/шрифты из сети',
+    onSay: 'Гарнитуры снова загружаются из Google Fonts.', offSay: 'Шрифты макета из сети больше не загружаю и не встраиваю в снимок и экспорт: макет — шрифтами системы, агент шрифтов не выбирает. Уже загруженные останутся до перезагрузки страницы.' },
+};
+
+/** Выключенное человеком — для brain в браузере и для сервера (только false). */
+function agentArtOptions() {
+  const out = {};
+  if (settings.artDirection === false) out.direction = false;
+  if (settings.artCritic === false) out.critic = false;
+  if (settings.webFonts === false) out.webFonts = false;
+  return out;
+}
+
+function setAgentSetting(what, on, { say = false } = {}) {
+  const w = AGENT_SETTING[what];
+  if (!w) return;
+  const was = settings[w.key] !== false;
+  settings[w.key] = !!on;
+  saveSettings();
+  if (what === 'webFonts') {
+    if (stage && stage.opts) stage.opts.embedFonts = !!on;
+    if (on) { docFontsDoc = null; ensureDocFonts(state.doc); }
+  }
+  // это настройка, а не разовая просьба — так и говорим
+  const keep = ` Это настройка — действует, пока не ${on ? 'выключите' : 'включите'}: ${w.slash} ${on ? 'выкл' : 'вкл'}.`;
+  if (say) showMsg('result', was === !!on ? `${w.title} и так ${on ? w.onWord : w.offWord}` : `${w.title} ${on ? w.onWord : w.offWord}`, { note: (on ? w.onSay : w.offSay) + keep, ms: 9000 });
+}
+
 function loadSettings() {
   // локальная сборка кладёт свои значения по умолчанию в window.IMAGO_DEFAULTS
   const dflt = (typeof globalThis !== 'undefined' && globalThis.IMAGO_DEFAULTS) || {};
@@ -15454,6 +15527,10 @@ function loadSettings() {
     introSeen: false,
     voiceAlways: false,   // «слушать постоянно» — по выбору человека, не по умолчанию (п.9)
     author: '',           // круг 22: имя для других участников (серверный режим)
+    // круг 50 (SPEC §17.2): арт-направление, самопроверка агента и шрифты из сети — выключаемы
+    artDirection: true,
+    artCritic: true,
+    webFonts: true,
     ...dflt,
     lmstudio: { enabled: false, baseUrl: 'http://localhost:1234/v1', model: 'local-model', ...(dflt.lmstudio || {}) },
   };

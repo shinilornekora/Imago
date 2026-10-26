@@ -438,6 +438,12 @@ export async function runServerCommand(p = {}) {
   if (p.author) body.author = p.author;
   if (p.mode) body.mode = p.mode;
   if (Number.isFinite(p.n)) body.n = p.n;
+  // круг 50: настройки агента человека — только выключенное (сервис включённое не включает)
+  if (p.art && typeof p.art === 'object') {
+    const art = {};
+    for (const k of ['direction', 'critic', 'webFonts']) if (p.art[k] === false) art[k] = false;
+    if (Object.keys(art).length) body.art = art;
+  }
   // память разговора (§10.5): до пяти пар, строки не длиннее 500 символов — сервер
   // отверг бы больше (400), а планировщику хватает и этого
   if (Array.isArray(p.history) && p.history.length) {
