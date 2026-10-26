@@ -4228,3 +4228,57 @@ export function artSummary(direction, critique, opts = {}) {
   }
   return { concept, conceptShort, swatches, fonts, families: [str(f.display, 40), str(f.text, 40)].filter((x, i, a) => x && a.indexOf(x) === i), verdict, line };
 }
+
+/**
+ * Круг 55 (SPEC §21): картинка в макет — вставкой из буфера или перетаскиванием файла. Куда:
+ * выделена рамка — в неё последним слоем; выделен другой слой — в его рамку сразу за ним; ничего
+ * (или выделено несколько, или библиотека) — новой доской по размеру картинки в `at`. Ширина — не
+ * больше IMAGE_INSERT.maxW, высота по пропорции. Имя — из имени файла без расширения.
+ * @param {object} doc
+ * @param {{selection?: string[], src: string, width: number, height: number, fileName?: string,
+ *   at: {x: number, y: number}, ids: {board: string, image: string}, boards?: number}} o
+ * @returns {{ops: object[], select: string[], into: string|null}|{error: string}}
+ */
+export const IMAGE_INSERT = { maxW: 480, maxSide: 1600, maxBytes: 1536 * 1024 };
+export function imageInsertOps(doc, o) {
+  const nodes = doc && doc.nodes && typeof doc.nodes === 'object' ? doc.nodes : null;
+  if (!nodes || typeof doc.root !== 'string') return { error: 'документ не открыт' };
+  if (!o || typeof o.src !== 'string' || !/^data:image\/(png|jpeg|gif|webp);base64,/i.test(o.src)) return { error: 'это не картинка' };
+  const nw = Number(o.width);
+  const nh = Number(o.height);
+  if (!(nw > 0 && nh > 0)) return { error: 'у картинки нет размера' };
+  const w = Math.max(1, Math.round(Math.min(nw, IMAGE_INSERT.maxW)));
+  const h = Math.max(1, Math.round((w * nh) / nw));
+  const base = typeof o.fileName === 'string' ? o.fileName.replace(/\.[a-z0-9]{2,5}$/i, '') : '';
+  const name = base.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Картинка';
+  const image = { id: o.ids.image, type: 'image', name, src: o.src, size: { w: { mode: 'fixed', value: w }, h: { mode: 'fixed', value: h } } };
+  const own = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(nodes, id) ? nodes[id] : null;
+  const inLibrary = (id) => {
+    for (let cur = id, i = 0; own(cur) && i < 64; i++) {
+      const n = own(cur);
+      if (n.type === 'page' && n.role === 'library') return true;
+      cur = n.parent;
+    }
+    return false;
+  };
+  const sel = Array.isArray(o.selection) ? o.selection.filter((id) => own(id) && id !== doc.root) : [];
+  if (sel.length === 1 && !inLibrary(sel[0])) {
+    const n = own(sel[0]);
+    if (n.type === 'frame' && !n.locked) {
+      return { ops: [{ op: 'create', node: { ...image, parent: n.id } }], select: [image.id], into: n.id };
+    }
+    const p = own(n.parent);
+    if (p && p.type === 'frame' && p.id !== doc.root && !p.locked) {
+      const at = Array.isArray(p.children) ? p.children.indexOf(n.id) : -1;
+      return { ops: [{ op: 'create', node: { ...image, parent: p.id }, ...(at >= 0 ? { index: at + 1 } : {}) }], select: [image.id], into: p.id };
+    }
+  }
+  const pad = 0;
+  const board = {
+    id: o.ids.board, type: 'frame', name: name === 'Картинка' ? `Картинка ${(Number(o.boards) || 0) + 1}` : name, parent: doc.root, children: [],
+    pos: { x: Math.round(Number(o.at && o.at.x) || 0), y: Math.round(Number(o.at && o.at.y) || 0) },
+    size: { w: { mode: 'hug' }, h: { mode: 'hug' } },
+    layout: { mode: 'column', gap: 0, padding: { t: pad, r: pad, b: pad, l: pad }, align: 'start', justify: 'start', wrap: false },
+  };
+  return { ops: [{ op: 'create', node: board }, { op: 'create', node: { ...image, parent: board.id } }], select: [image.id], into: null };
+}

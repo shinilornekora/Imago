@@ -312,6 +312,10 @@ async function boot() {
      в фазе захвата раньше сцены (она вешает свой обработчик позже): у сцены своя «рамка во весь
      мир» и своё дублирование без слов — две истины одной команды. */
   globalThis.addEventListener('keydown', onModKeyCapture, true);
+  // круг 55 (SPEC §21): картинка в макет — вставкой из буфера и перетаскиванием файла на холст
+  globalThis.addEventListener('paste', onImagePaste);
+  dom.canvas.addEventListener('dragover', onImageDragOver);
+  dom.canvas.addEventListener('drop', onImageDrop);
   stage = new Stage(dom.canvas, {
     // круг 50: шрифты из сети выключены — и в экспорт начертания не встраиваются
     embedFonts: settings.webFonts !== false,
@@ -12985,6 +12989,119 @@ function nextArtboardPos(list) {
   }
   const last = rects[rects.length - 1];
   return { x: Math.round(last.x + last.w + ARTBOARD_GAP_X), y: Math.round(last.y) };
+}
+
+/* -------------------------- круг 55: картинка в макет --------------------------- */
+
+/** Файл-картинка из буфера или перетаскивания; не картинка — null. */
+function imageFileOf(list) {
+  for (const it of list ? Array.from(list) : []) {
+    const f = typeof it.getAsFile === 'function' ? (it.kind === 'file' ? it.getAsFile() : null) : it;
+    if (f && /^image\/(png|jpeg|gif|webp)$/i.test(f.type || '')) return f;
+  }
+  return null;
+}
+
+function editableTarget(t) {
+  return !!(t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '')));
+}
+
+function onImagePaste(e) {
+  if (editableTarget(e.target)) return;   // в поле команды и в инспекторе вставка — их дело
+  const file = imageFileOf(e.clipboardData && e.clipboardData.items);
+  if (!file) return;
+  e.preventDefault();
+  insertImageFile(file, null);
+}
+
+function onImageDragOver(e) {
+  const types = e.dataTransfer ? Array.from(e.dataTransfer.types || []) : [];
+  if (types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+}
+
+function onImageDrop(e) {
+  const file = imageFileOf(e.dataTransfer && e.dataTransfer.files);
+  if (!file) return;
+  e.preventDefault();
+  insertImageFile(file, { x: e.clientX, y: e.clientY });
+}
+
+/**
+ * Картинка → data:-адрес не больше IMAGE_INSERT.maxSide по большей стороне и maxBytes по весу
+ * (документ ходит транзакциями: тело запроса сервера — 4 МБ). С прозрачностью — PNG, иначе JPEG.
+ * Анимация GIF не сохраняется (первый кадр). Не открылась за 8 с — null.
+ */
+function prepareImage(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    const finish = (v) => { clearTimeout(timer); URL.revokeObjectURL(url); resolve(v); };
+    const timer = setTimeout(() => { img.onload = img.onerror = null; finish(null); }, 8000);
+    img.onerror = () => finish(null);
+    img.onload = () => {
+      try {
+        const nw = img.naturalWidth;
+        const nh = img.naturalHeight;
+        if (!(nw > 0 && nh > 0)) { finish(null); return; }
+        let k = Math.min(1, SHELL.IMAGE_INSERT.maxSide / Math.max(nw, nh));
+        let alpha = null;
+        for (let i = 0; i < 6; i++) {
+          const w = Math.max(1, Math.round(nw * k));
+          const h = Math.max(1, Math.round(nh * k));
+          const c = document.createElement('canvas');
+          c.width = w; c.height = h;
+          const g = c.getContext('2d', { willReadFrequently: true });
+          g.drawImage(img, 0, 0, w, h);
+          if (alpha === null) {
+            alpha = false;
+            if (!/jpeg/i.test(file.type)) {
+              const d = g.getImageData(0, 0, w, h).data;
+              for (let j = 3; j < d.length; j += 4) if (d[j] < 255) { alpha = true; break; }
+            }
+          }
+          const src = c.toDataURL(alpha ? 'image/png' : 'image/jpeg', 0.86);
+          const bytes = Math.floor(((src.length - src.indexOf(',') - 1) * 3) / 4);
+          if (bytes <= SHELL.IMAGE_INSERT.maxBytes) { finish({ src, width: w, height: h }); return; }
+          k *= 0.75;
+        }
+        finish(null);
+      } catch { finish(null); }
+    };
+    img.src = url;
+  });
+}
+
+async function insertImageFile(file, client) {
+  if (!state.doc) return;
+  const ready = await prepareImage(file);
+  if (!ready) {
+    showMsg('error', 'Картинку не удалось открыть', { note: 'Подойдут PNG, JPEG, GIF и WebP.', ms: 7000 });
+    return;
+  }
+  // брошена на доску — в эту доску; мимо досок — новой доской на месте броска; вставка — по выделению
+  let selection = state.selection;
+  let at = null;
+  if (client && stage && typeof stage.toWorld === 'function') {
+    const w = stage.toWorld(client.x, client.y);
+    const hit = artboards(state.doc).find((a) => {
+      const r = state.geo.rects[a.id];
+      return r && w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h;
+    });
+    selection = hit ? [hit.id] : [];
+    at = { x: w.x, y: w.y };
+  }
+  if (!at) at = nextArtboardPos(artboards(state.doc));
+  const stamp = Date.now().toString(36);
+  const r = SHELL.imageInsertOps(state.doc, {
+    selection, src: ready.src, width: ready.width, height: ready.height, fileName: file.name || '',
+    at, ids: { board: `ab_${stamp}`, image: `img_${stamp}` }, boards: artboards(state.doc).length,
+  });
+  if (r.error) { showMsg('error', `Картинку не вставил: ${r.error}`, { ms: 7000 }); return; }
+  const res = commit(r.ops, 'Картинка');
+  if (!res || !res.ok) return;
+  setSelection(r.select);
+  if (!r.into) fitAfterLayout(r.select);
+  showMsg('result', 'Картинка на макете', { note: 'Можно сказать: «собери экран в цветах этой картинки».', ms: 8000 });
 }
 
 function addArtboard() {
