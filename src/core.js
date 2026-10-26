@@ -2454,7 +2454,7 @@ function instanceSummary(doc, idOrNode) {
 const expandCache = new WeakMap();
 
 /**
- * Круг 52: «форма» раскрытого экземпляра — ключ, равный у экземпляров с одним и тем же раскрытым
+ * Круг 54: «форма» раскрытого экземпляра — ключ, равный у экземпляров с одним и тем же раскрытым
  * поддеревом с точностью до id: те же объекты мастеров (зависимости раскрытия) и те же поля самого
  * экземпляра, кроме id, родителя, места и имени. По нему solve раскладывает поддерево один раз, а
  * остальные экземпляры той же формы и того же размера получают его копию со сдвигом (placeNode).
@@ -6608,7 +6608,7 @@ function measureNode(ctx, node, availW, availH, stretch) {
     + '#' + (stretch || '-');
   const hit = cacheGet(ctx.measCache, node.id, key);
   if (hit) return hit;
-  // круг 52: экземпляр той же формы уже мерян с теми же ограничениями — его мера
+  // круг 54: экземпляр той же формы уже мерян с теми же ограничениями — его мера
   const shape = node.synthetic && ctx.shapeMeas ? expandShape.get(node) : undefined;
   if (shape !== undefined) {
     const same = ctx.shapeMeas.get(shape + '|' + key);
@@ -6884,7 +6884,7 @@ function placeNode(ctx, node, x, y, w, h, depth) {
     const sp = ctx.prevSpan.get(node.id);
     if (pr && sp && pr.w === r2(w) && pr.h === r2(h) && copyPlaced(ctx, sp, r2(x) - pr.x, r2(y) - pr.y)) return;
   }
-  // круг 52: экземпляр той же формы и того же размера уже разложен в этой раскладке — копия со сдвигом
+  // круг 54: экземпляр той же формы и того же размера уже разложен в этой раскладке — копия со сдвигом
   const shape = node.synthetic && ctx.shapePlaced ? expandShape.get(node) : undefined;
   const tkey = shape === undefined ? undefined : shape + '|' + r2(w) + '#' + r2(h);
   if (tkey !== undefined) {
@@ -6916,7 +6916,7 @@ function placeNode(ctx, node, x, y, w, h, depth) {
 }
 
 /**
- * Круг 52: разложенное поддерево экземпляра как образец для экземпляров той же формы — хвосты id
+ * Круг 54: разложенное поддерево экземпляра как образец для экземпляров той же формы — хвосты id
  * (после id корня), прямоугольники относительно корня, строки текста, отрезки. null — в поддереве
  * чужой id (не «корень/…»): такой образец не переносится.
  */
@@ -6942,10 +6942,10 @@ function shapeOf(ctx, rootId, start) {
 }
 
 let shapeCopies = 0;   // сколько экземпляров разложено копией образца — тестам, без часов
-/** Круг 52: счётчик копий образца формы экземпляра (для тестов скорости без часов). */
+/** Круг 54: счётчик копий образца формы экземпляра (для тестов скорости без часов). */
 function solveShapeCopies() { return shapeCopies; }
 
-/** Круг 52: копия образца shapeOf под корнем rootId в точке (x, y). false — копировать нельзя. */
+/** Круг 54: копия образца shapeOf под корнем rootId в точке (x, y). false — копировать нельзя. */
 function copyShape(ctx, t, rootId, x, y) {
   const n = t.tails.length;
   const ids = new Array(n);
@@ -7011,7 +7011,7 @@ function solve(doc, opts) {
 /** Круг 51: что раскладка оставляет для следующей по месту правки (geo → кеши, отрезки, условия). */
 const SOLVE_MEMO = new WeakMap();
 
-/** pre (круг 52) — готовое раскрытие {ex, nodes} от solveAfter, чтобы не раскрывать второй раз. */
+/** pre (круг 54) — готовое раскрытие {ex, nodes} от solveAfter, чтобы не раскрывать второй раз. */
 function solveWith(doc, opts, seed, pre) {
   const options = opts || {};
   const ctx = {
@@ -7024,11 +7024,11 @@ function solveWith(doc, opts, seed, pre) {
     placed: new Set(),  // уже размещённые — ловит узел с двумя родителями
     rects: {}, lines: {}, order: [],
     span: new Map(),    // круг 51: id → [начало, конец) отрезка поддерева в seq
-    seq: null,          // круг 52: все размещённые узлы по порядку, с раскрытыми; без экземпляров — сам order
+    seq: null,          // круг 54: все размещённые узлы по порядку, с раскрытыми; без экземпляров — сам order
     prev: seed ? seed.geo : null,
     prevSpan: seed ? seed.span : null,
     prevSeq: seed ? seed.seq : null,
-    // круг 52: форма экземпляра + ограничения → мера; форма + размер → образец раскладки поддерева
+    // круг 54: форма экземпляра + ограничения → мера; форма + размер → образец раскладки поддерева
     // (на одну доску). shapes:false — без образцов: эталон для тестов
     shapeMeas: options.shapes === false ? null : new Map(),
     shapePlaced: options.shapes === false ? null : new Map(),
@@ -7065,7 +7065,7 @@ function solveWith(doc, opts, seed, pre) {
     placeNode(ctx, child, r2(pos.x), r2(pos.y), m.w, m.h);
   }
   ctx.doc = doc;
-  // круг 51: заготовка для следующей раскладки по месту правки — по просьбе (incremental). Круг 52: и с
+  // круг 51: заготовка для следующей раскладки по месту правки — по просьбе (incremental). Круг 54: и с
   // экземплярами — память держит общую карту «документ + раскрытые», по ней ищутся грязные узлы
   if (options.incremental === true || seed) {
     SOLVE_MEMO.set(geo, { doc, nodes: ctx.nodes, seq: ctx.seq, fn: options.measureText || null, epoch: measureEpochValue, meas: ctx.measCache, flow: ctx.flowCache, span: ctx.span });
@@ -7098,7 +7098,7 @@ function solveWith(doc, opts, seed, pre) {
  * Когда так нельзя — честно полная раскладка:
  *   • prevGeo не от solve этого же prevDoc (или уже использована) или другой измеритель/эпоха шрифтов;
  *   • изменились токены, тема доски, узел перешёл на другую доску.
- * Круг 52: документы с экземплярами — тоже по месту: грязные ищутся по общей карте «документ +
+ * Круг 54: документы с экземплярами — тоже по месту: грязные ищутся по общей карте «документ +
  * раскрытые узлы»; правка мастера пачкает все его экземпляры, правка вне экземпляров — ни одного.
  * prevGeo после этого — использованная: её кеши перешли новой геометрии.
  * @param {object} prevGeo @param {object} prevDoc @param {object} nextDoc @param {object[]} [opsList]
@@ -7111,7 +7111,7 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   if (!memo || memo.doc !== prevDoc || memo.fn !== (options.measureText || null) || memo.epoch !== measureEpochValue) {
     return solve(nextDoc, { ...options, incremental: true });
   }
-  // круг 52: раскрытие кешировано по объекту экземпляра и его зависимостям (expandCache), поэтому у
+  // круг 54: раскрытие кешировано по объекту экземпляра и его зависимостям (expandCache), поэтому у
   // нетронутых экземпляров раскрытые узлы — те же объекты, и сравнение по тождеству видит только правку
   const ex = expandDoc(nextDoc);
   const nodes = ex.count && isObj(nextDoc && nextDoc.nodes) ? { ...nextDoc.nodes, ...ex.nodes } : null;
@@ -7142,7 +7142,7 @@ function solveCarry(geo, prevDoc, nextDoc) {
  * неизменённые узлы между версиями, поэтому изменённый узел — тот, чей объект другой (или его нет
  * в одной из версий). Так верно и для чужой транзакции поверх своих неподтверждённых правок, и
  * для починки при применении. Плюс все предки — до и после. null — только полная раскладка.
- * prevNodes/nextNodes (круг 52) — общие карты «документ + раскрытые узлы», если есть экземпляры;
+ * prevNodes/nextNodes (круг 54) — общие карты «документ + раскрытые узлы», если есть экземпляры;
  * maxChanged — изменённых больше: null сразу, без подъёма к предкам.
  */
 function dirtyAfter(prevDoc, nextDoc, prevNodes, nextNodes, maxChanged) {
@@ -7166,7 +7166,7 @@ function dirtyAfter(prevDoc, nextDoc, prevNodes, nextNodes, maxChanged) {
   for (const id of Object.keys(P)) if (!hasOwnProp.call(N, id)) changed.push(id);
   if (isNum(maxChanged) && changed.length > maxChanged) return null;
   const dirty = new Set();
-  // круг 52: свой «уже пройден» у каждой версии — правка мастера пачкает тысячи раскрытых узлов, и
+  // круг 54: свой «уже пройден» у каждой версии — правка мастера пачкает тысячи раскрытых узлов, и
   // подъём от каждого до корня прежнего документа стоил бы больше самой раскладки
   const seenP = new Set();
   const seenN = new Set();
