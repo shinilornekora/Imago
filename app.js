@@ -10585,18 +10585,34 @@ function showMsg(kind, text, opts = {}) {
         short.setAttribute('aria-hidden', 'true');
         words.appendChild(short);
         words.classList.add('has-short');   // без :has (Firefox до 121) вёрстка та же
-        // узкий экран: нажатие раскрывает образ целиком (материалы), повторное — сворачивает
-        words.tabIndex = 0;
-        words.setAttribute('role', 'button');
-        words.setAttribute('aria-expanded', 'false');
-        words.setAttribute('aria-label', `Образ: ${human(opts.art.concept)}`);
+        // узкий экран: нажатие раскрывает образ целиком (материалы), повторное — сворачивает; на
+        // широком образ виден целиком — там это обычный текст, без лишней остановки Tab
+        const narrow = typeof matchMedia === 'function' ? matchMedia('(max-width: 480px)') : null;
         const toggle = () => {
+          if (!narrow || !narrow.matches) return;
           const open = words.dataset.open !== 'on';
           words.dataset.open = open ? 'on' : '';
           words.setAttribute('aria-expanded', open ? 'true' : 'false');
         };
+        const asButton = () => {
+          if (narrow && narrow.matches) {
+            words.tabIndex = 0;
+            words.setAttribute('role', 'button');
+            words.setAttribute('aria-expanded', words.dataset.open === 'on' ? 'true' : 'false');
+            words.setAttribute('aria-label', `Образ: ${human(opts.art.concept)}`);
+          } else {
+            words.removeAttribute('tabindex');
+            for (const a of ['role', 'aria-expanded', 'aria-label']) words.removeAttribute(a);
+          }
+        };
+        asButton();
+        // слушатель живёт, пока карточка на странице: следующий итог заменит блок целиком
+        if (narrow && typeof narrow.addEventListener === 'function') {
+          const onChange = () => { if (!words.isConnected) { narrow.removeEventListener('change', onChange); return; } asButton(); };
+          narrow.addEventListener('change', onChange);
+        }
         words.addEventListener('click', toggle);
-        words.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+        words.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && narrow && narrow.matches) { e.preventDefault(); toggle(); } });
       }
       box.appendChild(words);
     }
