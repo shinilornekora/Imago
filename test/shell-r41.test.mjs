@@ -167,7 +167,7 @@ test('r41 (UX): нет сети у компьютера — «Нет сети»,
 
 /* ------------------------------ «/выделить …» на 20 тыс. слоёв ------------------------------ */
 
-test('r41 (код): «/выделить заг» на 20 тыс. слоёв — быстрее 30 мс (основы имён — заранее, в простое)', () => {
+test('r41 (код): «/выделить заг» на 20 тыс. слоёв — без пересчёта основ имён (основы — заранее, в простое)', () => {
   let doc = core.createDoc();
   const b = core.artboards(doc)[0].id;
   const ops = [];
@@ -177,15 +177,19 @@ test('r41 (код): «/выделить заг» на 20 тыс. слоёв — 
   let r = { next: 0, ids: null };
   do r = SHELL.warmNameStems(doc, { from: r.next, count: 1500, ids: r.ids }); while (r.next < r.ids.length);
   const ctx = { doc, activeArtboardId: b };
+  /* Круг 45: скорость — не часами. Предел 30 мс срывался под нагрузкой соседних прогонов и при этом едва
+     отличал тёплый поиск (≈ 14 мс) от поиска без кеша основ имён (≈ 34 мс). Суть требования — после
+     прогрева в простое запрос не считает основы заново: это и проверяем счётчиком, точно и без часов;
+     часы — только грубая граница от провала на порядок. */
   for (const q of ['/выделить заг', 'выдели заголовок 5']) {
-    let best = Infinity;
-    for (let k = 0; k < 5; k++) {
-      const t = performance.now();
-      const hit = SHELL.shellIntent(q, ctx);
-      best = Math.min(best, performance.now() - t);
-      assert.equal(hit.kind, 'select');
-    }
-    assert.ok(best < 30, `«${q}»: ${best.toFixed(1)} мс`);
+    const before = SHELL.nameStemsComputed();
+    const t = performance.now();
+    const hit = SHELL.shellIntent(q, ctx);
+    const took = performance.now() - t;
+    assert.equal(hit.kind, 'select');
+    // запрос сам — одна-две основы (слова запроса), имена слоёв — все из кеша
+    assert.ok(SHELL.nameStemsComputed() - before <= 3, `«${q}»: посчитано заново ${SHELL.nameStemsComputed() - before} основ`);
+    assert.ok(took < 500, `«${q}»: ${took.toFixed(1)} мс`);
   }
   // внутри активной доски — выше: слой другой доски с тем же именем идёт после
   const other = core.artboards(doc)[1].id;

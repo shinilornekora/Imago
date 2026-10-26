@@ -107,11 +107,16 @@ test('r45: удаление сироты в «Проектах» — подтв�
     const row = (name) => page.locator('#sheet-body .pitem', { hasText: name });
     await row('Спасение пустое').waitFor({ timeout: 10000 });
     assert.match(await row('Спасение пустое').innerText(), /первая попытка/);
+    const showCard = () => page.evaluate(() => { const m = document.getElementById('dockmsg'); m.hidden = false; m.dataset.role = 'rescue-orphan'; });
+    const cardShown = () => page.evaluate(() => { const m = document.getElementById('dockmsg'); return !m.hidden && m.dataset.role === 'rescue-orphan'; });
+    // карточка «первая попытка тоже сохранилась» на виду (её показывает спасение) — после удаления снимается
+    await showCard();
     // удаление: «Удалить» → подтверждение в строке → «Удалить»
     await row('Спасение пустое').getByRole('button', { name: 'Удалить' }).click();
     await row('Спасение пустое').locator('.pconfirm').getByRole('button', { name: 'Удалить' }).click();
     await page.locator('.toast', { hasText: 'Удалил пустую первую попытку «Спасение пустое»' }).waitFor({ timeout: 10000 });
     assert.equal(await row('Спасение пустое').count(), 0, 'строки нет');
+    assert.equal(await cardShown(), false, 'карточка о сироте снята');
     assert.equal(await page.evaluate(() => !!document.activeElement && document.activeElement.matches('.pitem .pname')), true, 'фокус — на строке списка, не на «Создать проект»');
     const left = await page.evaluate(() => JSON.parse(localStorage.getItem('imago.rescue.orphans.v1') || '[]').map((x) => x.createId));
     assert.deepEqual(left, ['rescue_smoke_2', 'rescue_smoke_x'], 'подсказка удалённой забыта');
@@ -131,12 +136,16 @@ test('r45: удаление сироты в «Проектах» — подтв�
       assert.equal((await post(svc, `/api/projects/${busy.body.id}/tx`, { tx_id: 'tx_smoke_1', base_seq: 0, ops: [{ op: 'set', id: root2, path: 'name', value: 'z' }], engine: CODE_ENGINE })).status, 201);
       await route.continue();
     });
+    await showCard();
     await row('Спасение занятое').getByRole('button', { name: 'Удалить' }).click();
     await row('Спасение занятое').locator('.pconfirm').getByRole('button', { name: 'Удалить' }).click();
     await page.locator('.toast', { hasText: 'уже есть правки' }).waitFor({ timeout: 10000 });
     await page.waitForTimeout(500);
     assert.doesNotMatch(await row('Спасение занятое').innerText(), /первая попытка/, 'список перечитан: правка есть, сироты нет');
     assert.equal(await row('Спасение занятое').getByRole('button', { name: 'Удалить' }).count(), 0);
+    assert.equal(await cardShown(), false, '409 not_empty: карточка о «первой попытке» уже неправда — снята');
+    const after = await page.evaluate(() => JSON.parse(localStorage.getItem('imago.rescue.orphans.v1') || '[]').map((x) => x.createId));
+    assert.ok(!after.includes('rescue_smoke_2'), 'подсказка «занятого» забыта');
     assert.deepEqual(errors, []);
   });
 });
@@ -186,5 +195,23 @@ test('r45: «История» соавтора — чужая правка ру�
     const old = (await a.locator('#sheet-body .hitem[data-who="other"] .what').first().innerText()).trim();
     assert.ok(old && !/Изменил свойство/.test(old), 'подпись старого клиента — по операциям: ' + old);
     assert.deepEqual(errors, []);
+  });
+});
+
+test('r45: знак у «Imago» в тон знаку агента — сервер агента без документа не «подключён»', { skip: !chromium && 'нет Playwright', timeout: 120000 }, async () => {
+  await withService(async (svc, browser) => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+    let health = { ok: true, engine: 2, document: 'down', llm: 'up', model: 'fake-model', reason: 'storage' };
+    await page.route('**/agent/health*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(health) }));
+    await page.goto(svc.url + '/');
+    await page.waitForSelector('#command', { timeout: 30000 });
+    const dot = page.locator('#agent-dot');
+    await page.waitForFunction(() => { const d = document.getElementById('agent-dot'); return d && /документ|база/.test(d.getAttribute('aria-label') || ''); }, null, { timeout: 20000 });
+    assert.equal(await dot.getAttribute('data-state'), 'off');
+    assert.doesNotMatch(await dot.getAttribute('aria-label'), /Агент подключён/);
+    // всё живо — «Агент подключён: сервер, fake-model»
+    health = { ok: true, engine: 2, document: 'up', llm: 'up', model: 'fake-model' };
+    await page.waitForFunction(() => /Агент подключён: сервер, fake-model/.test(document.getElementById('agent-dot').getAttribute('aria-label') || ''), null, { timeout: 30000 });
+    assert.equal(await dot.getAttribute('data-state'), 'ready');
   });
 });
