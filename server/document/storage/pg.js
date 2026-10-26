@@ -1498,7 +1498,9 @@ export function createPgStorage(opts = {}) {
       if (!hasCreateId || typeof createId !== 'string' || !createId) return { status: 'create_id' };
       const res = await pool.query(
         `DELETE FROM projects p WHERE p.id = $1 AND p.create_id = $2 AND p.kind = 'design' AND p.head_seq = 0
-            AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.project_id = p.id) RETURNING id`, [id, createId]);
+            AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.project_id = p.id)
+            AND NOT EXISTS (SELECT 1 FROM project_imports i WHERE i.library_id = p.id) RETURNING id`, [id, createId]);
+      // на проект прибит чужой импорт (ON DELETE RESTRICT) — «не пустой», а не 500 (arch r45f)
       if (res.rowCount) return { status: 'deleted' };
       const row = (await pool.query('SELECT create_id, kind FROM projects WHERE id = $1', [id])).rows[0];
       if (!row) return { status: 'not_found' };

@@ -5556,6 +5556,19 @@ function formatBehavior() {
         ex += tryOps([{ op: 'set', id: 'nm', path, value }], comboDoc);
         ex += tryOps([{ op: 'set', id: 'nm', path, value, exact: true }], comboDoc);
       }
+      /* и причина не по полю (висячий parent — такой документ проходит импорт): прежний узел негоден
+         и мягко, и строго, но по-разному — ветвь «прежняя причина» зависит от строгости (код r45f) */
+      // и вектор прежних кругов без viewBox; каждый — с полем прежней формы и без
+      for (const bad of [(n) => { n.parent = 'ghost'; }, (n) => { n.parent = 'ghost'; n.clip = 1; },
+        (n) => { n.type = 'vector'; delete n.children; n.paths = []; n.clip = 1; }]) {
+        const ghostDoc = deepClone(rb.doc);
+        bad(ghostDoc.nodes.nm);
+        for (const [path, value] of [['name', 'M5'], ['clip', true], ['opacity', 0.5],
+          ['component', { name: 'M', props: [{ name: 'title', kind: 'text', target: 'nmt', path: 'characters' }] }]]) {
+          ex += tryOps([{ op: 'set', id: 'nm', path, value }], ghostDoc);
+          ex += tryOps([{ op: 'set', id: 'nm', path, value, exact: true }], ghostDoc);
+        }
+      }
     } else ex += 'x';
     out.exact = ex;
     out.results = res;
