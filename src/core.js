@@ -5199,22 +5199,54 @@ function formatBehavior() {
       { op: 'create', node: { type: 'frame', id: 'nq', parent: 'pb', children: [], size: sz, stroke: 'accent', fill: 'surface',
         radius: ['radii.1', 'radii.1', 'radii.2', 'radii.2'], layout: { mode: 'row', gap: 8, padding: 'spacing.2' } } },
       { op: 'create', node: { type: 'text', id: 'nt', parent: 'nd', characters: 'т', style: { token: 'body', fontSize: 20 }, color: { token: 'text' },
-        size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } }
+        size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+      // скругление другой длины, чем у присланного массива: поэлементно — только при равной длине
+      { op: 'create', node: { type: 'rect', id: 'nr', parent: 'pb', size: sz, radius: ['radii.1', 'radii.1'] } }
     ];
     const dressedSets = [
       ['stroke', ['accent', 'line', { color: 'accent' }, { color: 'accent', width: 1 }, { token: 'accent' }]],
       ['fill', ['surface', 'accent', { token: 'surface' }, { color: 'surface' }, { value: 'surface' }]],
       ['color', ['text', { token: 'text' }, 'muted']],
       ['style', ['body', { token: 'body' }, 'title']],
-      ['radius', [0, 4, 8, 12, 'radii.2', 'radii.99', -1, [4, 4, 8, 8], [4, 4, 8, 9], [8, 8, 8, 8]]],
+      ['radius', [0, 4, 8, 12, 'radii.2', 'radii.99', -1, [4, 4], [4, 20], [4, 4, 20, 20], [4, 4, 8, 8], [4, 4, 8, 9], [8, 8, 8, 8]]],
       ['layout', [{ mode: 'column', gap: 4 }, { mode: 'column', gap: 8, padding: 4 }, { mode: 'column', gap: 6, padding: { t: 4, r: 2 } }]],
       ['layout.gap', [4, 8, 6, 'spacing.3', 'spacing.99', -1]], ['layout.padding', [4, 8, { t: 4 }, [4, 2], [4, 2, 4, 2]]], ['layout.padding.t', [4, 6]],
       ['states', [{ hover: { lift: 2 } }, { hover: { lift: 4, opacity: 0.9 } }]], ['states.hover', [{ lift: 2 }, { lift: 6 }]], ['states.hover.lift', [2, 4]]
     ];
-    for (const id of ['nd', 'nq', 'nt']) {
+    for (const id of ['nd', 'nq', 'nt', 'nr']) {
       for (const [path, vals] of dressedSets) for (const value of vals) dr += tryOps([...dressed, { op: 'set', id, path, value }]);
     }
     out.dressed = dr;
+
+    /* Круг 45, проход 3 (arch-r45c Д1″): операции отмены (`exact: true`, invertOps) лежат в журнале и
+       переигрываются экземплярами — их ветви (без сохранения формы, мягкая проверка узла, мёртвые
+       ссылки шкал) тоже в отпечатке. Те же «одетые» правки и пробы set с exact, плюс create с exact. */
+    let ex = '';
+    for (const id of ['nd', 'nq', 'nt', 'nr']) {
+      for (const [path, vals] of dressedSets) for (const value of vals) ex += tryOps([...dressed, { op: 'set', id, path, value, exact: true }]);
+    }
+    for (const id of ['pb', 'pt', 'pr', 'pi']) {
+      for (const path of ['radius', 'layout', 'layout.gap', 'states.hover.lift', 'props.n', 'props.e', 'of', 'name']) {
+        for (const v of ['radii.99', 'spacing.99', { mode: 'row', gap: 'spacing.99' }, { hover: { lift: 'spacing.99' } }, 'nope', 2, 'bogus']) {
+          ex += tryOps([{ op: 'set', id, path, value: v, exact: true }]);
+        }
+      }
+    }
+    const exactCreates = [
+      { type: 'rect', id: 'n1', parent: 'pb', size: sz, radius: 'radii.99' },
+      { type: 'frame', id: 'n1', parent: 'pb', children: [], size: sz, layout: { mode: 'row', gap: 'spacing.99', padding: { t: 'spacing.99' } } },
+      { type: 'frame', id: 'n1', parent: 'pb', children: [], size: sz, states: { hover: { lift: 'spacing.99' } } },
+      { type: 'instance', id: 'n1', parent: 'pb', of: 'pm', props: { n: 2, e: 'bogus', zz: 1 } },
+      { type: 'instance', id: 'n1', parent: 'pb', of: 'nope' },
+      { type: 'frame', id: 'n1', parent: libId, children: [], size: sz, component: { name: 'Z', props: [{ name: 'q', kind: 'text', target: 'n2', path: 'characters' }] } },
+      { type: 'rect', id: 'n1', parent: 'pb', size: sz, stroke: { color: 'bogus', width: 3 }, fill: { token: 'nope' } },
+      { type: 'rect', id: 'n1', parent: 'nope', size: sz }
+    ];
+    for (const node of exactCreates) {
+      ex += tryOps([{ op: 'create', node, exact: true }]);
+      ex += tryOps([{ op: 'create', node }]);
+    }
+    out.exact = ex;
     out.results = res;
     probeCache = out;
     return out;

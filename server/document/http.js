@@ -573,6 +573,9 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
         // создания, без единой записи журнала; любой другой проект этим путём не удаляется
         await writeRoute(req, async (body) => {
           // ключ — в теле или в `?create_id=` (часть прокси режет тело у DELETE); оба — должны совпасть
+          if (body && typeof body === 'object' && body.create_id !== undefined && typeof body.create_id !== 'string') {
+            throw badRequest('create_id: строка', { detail: { param: 'create_id' } });
+          }
           const fromBody = body && typeof body === 'object' && typeof body.create_id === 'string' ? body.create_id : '';
           const fromQuery = url.searchParams.get('create_id') || '';
           if (fromBody && fromQuery && fromBody !== fromQuery) throw badRequest('create_id в теле и в адресе разные', { detail: { param: 'create_id' } });

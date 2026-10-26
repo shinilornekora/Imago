@@ -75,7 +75,7 @@ test('круг45: поведенческий корпус детерминиро
 
 /* Круг 45, проход 2 (arch-r45b Д1′): правка «сохранения формы» при set меняет отпечаток.
    Мутант — копия src/core.js с одной заменой (ядро без импортов, грузится само). */
-test('круг45: мутанты keepFieldForm (строка поверх объекта, радиус и зазор поверх ссылки) меняют отпечаток формата', { timeout: 60000 }, async () => {
+test('круг45: мутанты keepFieldForm и ветвей отмены (exact) меняют отпечаток формата', { timeout: 60000 }, async () => {
   const { readFileSync, writeFileSync, mkdtempSync, rmSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { tmpdir } = await import('node:os');
@@ -84,14 +84,20 @@ test('круг45: мутанты keepFieldForm (строка поверх объ
   const mutants = {
     'строка поверх объекта заменяет объект': ["if (typeof value === 'string' && cur && typeof cur === 'object') return cur;", ''],
     'radius без keepRadiusForm': ["if (field === 'radius') return keepRadiusForm(doc, node.radius, value);", ''],
-    'layout.gap без keepScaleForm': ["if (parts.length === 2 && parts[1] === 'gap') return keepScaleForm(doc, cur.gap, value, 'spacing');", '']
+    'layout.gap без keepScaleForm': ["if (parts.length === 2 && parts[1] === 'gap') return keepScaleForm(doc, cur.gap, value, 'spacing');", ''],
+    // круг 45, проход 3 (arch-r45c): массив скругления другой длины и ветви отмены (exact)
+    'radius-массив без проверки длины': ['if (!Array.isArray(cur) || cur.length !== value.length) return value;', 'if (!Array.isArray(cur)) return value;'],
+    'exact всё равно сохраняет форму': ['const value = !op.exact ? keepFieldForm(node, path, op.value, draft) : op.value;', 'const value = keepFieldForm(node, path, op.value, draft);'],
+    'create с exact проверяет ссылки шкал': ['      if (!op.exact) {', '      if (true) {'],
+    'set с exact проверяет ссылки шкал': ["if (!op.exact && (parts[0] === 'layout'", "if ((parts[0] === 'layout'"],
+    'checkNode всегда строгий': ['checkNode(node, draft, !!op.exact)', 'checkNode(node, draft, false)']
   };
   const dir = mkdtempSync(join(tmpdir(), 'imago-mut-'));
   try {
     for (const [name, [from, to]] of Object.entries(mutants)) {
-      assert.equal(src.split(from).length, 2, `${name}: строка мутации есть в ядре ровно один раз`);
+      assert.ok(src.split(from).length >= 2, `${name}: строка мутации есть в ядре`);
       const file = join(dir, name.replace(/\W+/g, '_') + '.mjs');
-      writeFileSync(file, src.replace(from, to));
+      writeFileSync(file, src.split(from).join(to));
       const m = await import(pathToFileURL(file).href);
       assert.notEqual(m.FORMAT_SIGNATURE.hash, core.FORMAT_SIGNATURE.hash, `${name}: отпечаток должен измениться`);
     }

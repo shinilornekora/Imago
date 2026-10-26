@@ -71,7 +71,7 @@ test('r43: сирота первой попытки — словами и пом
   assert.equal(SHELL.isRescueOrphan({ id: 'p_x', name: 'Спасение', head_seq: 3, created_at: iso(t0 + 1000) }, hints), false, 'с правками — не пустая копия');
   assert.equal(SHELL.isRescueOrphan({ id: 'p_y', name: 'Другой', head_seq: 0, created_at: iso(t0 + 1000) }, hints), false);
   assert.equal(SHELL.isRescueOrphan({ id: 'p_z', name: 'Спасение', head_seq: 0, created_at: iso(t0 - 3600 * 1000) }, hints), false, 'старый одноимённый — не сирота');
-  assert.match(app, /const hint = SHELL\.rescueOrphanHint\(p, orphanHints\(\)\);\s*const orphan = hint \? 'первая попытка сохранения, без последних правок'/);
+  assert.match(app, /const hint = orphans\.get\(p\.id\) \|\| null;\s*const orphan = hint \? 'первая попытка сохранения, без последних правок'/);
   assert.match(app, /if \(job\.orphan\) rememberOrphan\(/);
 });
 

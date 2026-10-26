@@ -1634,6 +1634,15 @@ function forgetOrphan(createId) {
     localStorage.setItem(ORPHAN_KEY, JSON.stringify((Array.isArray(list) ? list : []).filter((x) => x && x.createId !== createId)));
   } catch { /* памяти нет */ }
 }
+/** Круг 45 (UX r45c): сервер ответил «не этот create_id» — эта строка не наша сирота, пометку с неё снять. */
+function notOrphan(createId, id) {
+  try {
+    const list = JSON.parse(localStorage.getItem(ORPHAN_KEY) || '[]');
+    const next = (Array.isArray(list) ? list : []).map((x) => (x && x.createId === createId
+      ? { ...x, not: [...(Array.isArray(x.not) ? x.not : []), id].slice(-20) } : x));
+    localStorage.setItem(ORPHAN_KEY, JSON.stringify(next));
+  } catch { /* памяти нет */ }
+}
 function orphanHints() {
   try {
     const list = JSON.parse(localStorage.getItem(ORPHAN_KEY) || '[]');
@@ -3603,7 +3612,8 @@ async function deleteOrphan(p, hint, btn) {
   if (btn) btn.disabled = true;
   let reload = false;
   try {
-    await apiJson(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'DELETE', body: { create_id: hint.createId } });
+    // ключ и в теле, и в адресе: часть прокси режет тело у DELETE (круг 45, проход 3)
+    await apiJson(`/api/projects/${encodeURIComponent(p.id)}?create_id=${encodeURIComponent(hint.createId)}`, { method: 'DELETE', body: { create_id: hint.createId } });
     forgetOrphan(hint.createId);
     if (Array.isArray(server.list)) server.list = server.list.filter((x) => x.id !== p.id);
     if (dom.dockmsg && !dom.dockmsg.hidden && dom.dockmsg.dataset.role === 'rescue-orphan') hideMsg();
@@ -3612,6 +3622,7 @@ async function deleteOrphan(p, hint, btn) {
     const gone = e && e.status === 404;
     const used = e && e.status === 409 && e.detail && e.detail.cause === 'not_empty';
     if (gone || used) forgetOrphan(hint.createId);
+    else if (e && e.status === 409) notOrphan(hint.createId, p.id);
     if (gone && Array.isArray(server.list)) server.list = server.list.filter((x) => x.id !== p.id);
     // 409 not_empty: пометки «первая попытка» больше нет — и карточка о ней уже неправда (UX r45b М1)
     if ((gone || used) && dom.dockmsg && !dom.dockmsg.hidden && dom.dockmsg.dataset.role === 'rescue-orphan') hideMsg();
@@ -3722,6 +3733,7 @@ function fillProjects(body, list, { loading } = {}) {
   // одинаковые имена различаем временем создания (п.7)
   const names = new Map();
   for (const p of items) names.set(p.name || '', (names.get(p.name || '') || 0) + 1);
+  const orphans = SHELL.rescueOrphanMatches(items, orphanHints());
   for (const p of items) {
     const item = document.createElement('div');
     item.className = 'pitem';
@@ -3751,7 +3763,7 @@ function fillProjects(body, list, { loading } = {}) {
       ? (Number(p.head_seq) ? `${p.head_seq} ${plural(Number(p.head_seq), 'правка', 'правки', 'правок')}` : 'без правок') : '';
     const whenLine = when ? `менялся ${when}${exact ? `, ${exact}` : ''}` : (exact ? `менялся ${exact}` : '');
     // круг 43: пустой проект первой попытки спасения — помечен, чтобы его не путали со спасённым
-    const hint = SHELL.rescueOrphanHint(p, orphanHints());
+    const hint = orphans.get(p.id) || null;
     const orphan = hint ? 'первая попытка сохранения, без последних правок' : '';
     meta.textContent = [p.id === current ? 'открыт' : '', p.kind === 'library' ? 'библиотека' : '', orphan, whenLine, edits].filter(Boolean).join(' · ');
     const rename = document.createElement('button');

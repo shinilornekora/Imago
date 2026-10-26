@@ -71,7 +71,7 @@ test('r45 (Д9): сирота помечается по настоящему о�
   assert.equal(SHELL.rescueOrphanHint({ ...row, created_at: undefined, updated_at: undefined }, hints), null);
   // кнопка удаления — только у сироты с ключом и не у открытого проекта; ключ уходит в тело DELETE
   assert.match(app, /if \(hint && hint\.createId && p\.id !== current\)/);
-  assert.match(app, /method: 'DELETE', body: \{ create_id: hint\.createId \}/);
+  assert.match(app, /\?create_id=\$\{encodeURIComponent\(hint\.createId\)\}`, \{ method: 'DELETE', body: \{ create_id: hint\.createId \} \}/);
   assert.match(app, /q\.textContent = `Удалить пустую первую попытку «\$\{clip\(p\.name \|\| 'Без названия', 40\)\}»\? Правок в ней нет\.`/, 'не молча: подтверждение в строке с именем');
   assert.match(app, /role: 'rescue-orphan'/, 'карточку о сироте снимаем после удаления');
 });
@@ -193,4 +193,29 @@ test('r45 (S9): прежний оркестратор без полей document
   assert.deepEqual(SHELL.agentBadge('server', { ok: true }), { dot: 'on', words: 'агент: сервер' });
   assert.equal(SHELL.agentBadge('server', { ok: true, llm: 'up' }).dot, 'on');
   assert.doesNotMatch(SHELL.agentModeTitle('server', { ok: true }), /не видит документ|база данных/);
+});
+
+test('r45 (UX r45c): одна подсказка сироты помечает не больше одной строки; «не этот create_id» — не её', () => {
+  const t0 = Date.parse('2026-10-26T07:00:00Z');
+  const iso = (ms) => new Date(ms).toISOString();
+  const row = (id, ms) => ({ id, name: 'Спасение dup', head_seq: 0, created_at: iso(ms) });
+  // свою первую попытку создали через 1 с после начала спасения, одноимённую соавтора — через 20 с
+  const mine = row('p_mine', t0 + 1000);
+  const theirs = row('p_theirs', t0 + 20000);
+  const h = { name: 'Спасение dup', since: t0, at: t0 + 60000, keep: 'p_new', createId: 'k1' };
+  const m = SHELL.rescueOrphanMatches([theirs, mine, row('p_new', t0 + 30000)], [h]);
+  assert.equal(m.size, 1);
+  assert.equal(m.get('p_mine'), h, 'ближайшая к началу спасения — своя');
+  assert.equal(m.has('p_theirs'), false);
+  // сервер сказал «не этот create_id» про строку — подсказка ей больше не подходит
+  const wrong = SHELL.rescueOrphanMatches([theirs], [{ ...h, not: ['p_theirs'] }]);
+  assert.equal(wrong.size, 0);
+  // две подсказки и две строки — каждой своя
+  const h2 = { ...h, since: t0 + 19000, createId: 'k2' };
+  const both = SHELL.rescueOrphanMatches([theirs, mine], [h, h2]);
+  assert.equal(both.get('p_mine').createId, 'k1');
+  assert.equal(both.get('p_theirs').createId, 'k2');
+  // оболочка помечает по всему списку и запоминает отказ 409 create_id
+  assert.match(app, /const orphans = SHELL\.rescueOrphanMatches\(items, orphanHints\(\)\);/);
+  assert.match(app, /else if \(e && e\.status === 409\) notOrphan\(hint\.createId, p\.id\);/);
 });

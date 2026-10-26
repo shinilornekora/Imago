@@ -705,6 +705,35 @@ export function rescueOrphanHint(p, hints = []) {
   return best;
 }
 
+/**
+ * Круг 45, проход 3 (UX r45c): пометка сирот по всему списку — одна подсказка помечает не больше
+ * ОДНОЙ строки. Одноимённую пустую попытку соавтора (или другой вкладки) в том же окне иначе
+ * назвали бы «своей первой попыткой» с кнопкой «Удалить». Строка подсказке — ближайшая по времени
+ * создания к началу спасения (`since`); строки из `h.not` (сервер ответил «не этот create_id») —
+ * не её. → Map id → подсказка.
+ */
+export function rescueOrphanMatches(list = [], hints = []) {
+  const pairs = [];
+  for (const h of Array.isArray(hints) ? hints : []) {
+    if (!h) continue;
+    const not = Array.isArray(h.not) ? h.not : [];
+    for (const p of Array.isArray(list) ? list : []) {
+      if (!p || not.includes(p.id) || rescueOrphanHint(p, [h]) !== h) continue;
+      const at = Date.parse(p.created_at || p.updated_at || '');
+      pairs.push({ p, h, d: Math.abs(at - (Number(h.since) || 0)) });
+    }
+  }
+  pairs.sort((a, b) => a.d - b.d);
+  const out = new Map();
+  const used = new Set();
+  for (const { p, h, d: _ } of pairs) {
+    if (out.has(p.id) || used.has(h)) continue;
+    out.set(p.id, h);
+    used.add(h);
+  }
+  return out;
+}
+
 /** Тело первой попытки спасения хранится до стольких символов JSON: больше — sessionStorage может не принять. */
 export const RESCUE_BODY_KEEP = 1_500_000;
 
