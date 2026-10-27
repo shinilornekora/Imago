@@ -167,13 +167,15 @@ export function createRenderer(opts = {}) {
     });
   }
 
-  async function shot({ doc, geo: geoIn, artboardId, signal, drawing }) {
+  async function shot({ doc, geo: geoIn, artboardId, signal, drawing, maxWidth }) {
     const mod = opts.resvg !== undefined ? opts.resvg : await loadResvg();
     if (!mod || typeof mod.Resvg !== 'function') return null;
     const geo = geoIn && geoIn.rects ? geoIn : solve(doc);
     const rect = geo.rects[artboardId];
     if (!rect) return null;
-    const k = rect.w > 0 ? Math.min(1, SHOT_W / rect.w) : 1;
+    // круг 65: maxWidth — уже снимка критика (снимок мудборда не влез в предел образца), не шире его
+    const limitW = Number.isFinite(maxWidth) && maxWidth > 0 ? Math.min(SHOT_W, maxWidth) : SHOT_W;
+    const k = rect.w > 0 ? Math.min(1, limitW / rect.w) : 1;
     // внешних картинок сервер не тянет — плашкой (критику об этом сказано)
     const out = renderSVG(doc, artboardId, { geo, maxHeight: SHOT_H / k, externalImages: 'placeholder' });
     if (!out || !out.svg) return null;
@@ -192,7 +194,9 @@ export function createRenderer(opts = {}) {
       const png = new mod.Resvg(out.svg.replace(EMOJI_RE, ''), {
         fitTo: { mode: 'width', value: width },
         background: '#ffffff',
-        font: { fontBuffers: lists.flat(), loadSystemFonts: false, defaultFontFamily: DEFAULT_FONT },
+        // круг 65: пустой fontBuffers у resvg-js 2.6 сбрасывает fitTo — снимок выходил в полный размер
+        // доски (мудборд без текста, круг 60); без гарнитур поле не передаём
+        font: { ...(lists.flat().length ? { fontBuffers: lists.flat() } : {}), loadSystemFonts: false, defaultFontFamily: DEFAULT_FONT },
       }).render().asPng();
       return {
         mime: 'image/png', data: Buffer.from(png).toString('base64'),

@@ -13047,7 +13047,7 @@ function renderSVG(doc, artboardId, opts = {}) {
  * ещё не применённой правки (черновика), а не того, что на холсте. Гарнитуры тянутся в кеш
  * экспорта и встраиваются; сторона снимка — не больше maxSide.
  * @param {object} doc @param {string} artboardId
- * @param {{geo?:object, maxSide?:number, timeoutMs?:number}} [opts]
+ * @param {{geo?:object, maxWidth?:number, maxHeight?:number, timeoutMs?:number, fonts?:boolean, mime?:'image/png'|'image/jpeg'}} [opts]
  * @returns {Promise<{mime:string, data:string, width:number, height:number}|null>} data — base64 без префикса
  */
 async function boardPNG(doc, artboardId, opts = {}) {
@@ -13084,9 +13084,12 @@ async function boardPNG(doc, artboardId, opts = {}) {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, W, H);
     ctx.drawImage(img, 0, 0, W, H);
-    const dataUrl = canvas.toDataURL('image/png');
+    // круг 65: opts.mime 'image/jpeg' — снимок фотографий (мудборд): в разы легче PNG
+    const jpeg = opts.mime === 'image/jpeg';
+    const dataUrl = jpeg ? canvas.toDataURL('image/jpeg', 0.85) : canvas.toDataURL('image/png');
     const comma = dataUrl.indexOf(',');
-    return comma > 0 ? { mime: 'image/png', data: dataUrl.slice(comma + 1), width: W, height: H, cropped: out.cropped, shownHeight: out.height, fullHeight: out.fullHeight } : null;
+    const mime = dataUrl.slice(5, dataUrl.indexOf(';'));   // браузер без JPEG отдаёт PNG — пишем, что есть
+    return comma > 0 ? { mime, data: dataUrl.slice(comma + 1), width: W, height: H, cropped: out.cropped, shownHeight: out.height, fullHeight: out.fullHeight } : null;
   } catch (e) {
     logOnce('boardPNG', 'снимок доски для критика не получился', e);
     return null;
