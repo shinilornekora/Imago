@@ -4408,3 +4408,77 @@ export function imageInsertOps(doc, o) {
   };
   return { ops: [{ op: 'create', node: board }, { op: 'create', node: { ...image, parent: board.id } }], select: [image.id], into: null };
 }
+
+/* ------------------------- круг 67: цвета экрана в инспекторе ------------------------- */
+
+/** Пары «цвет — фон», которые проверяются после правки цвета экрана (как у тематизатора, §15.4). */
+const THEME_CONTRAST = [['text', 'canvas', 4.5, 'текст на фоне'], ['text', 'surface', 4.5, 'текст на карточках'], ['muted', 'canvas', 3, 'подписи на фоне']];
+
+/**
+ * Круг 67 (SPEC §15.6): строки «Цвета экрана» — каждый цвет документа (и имена темы, которых в
+ * документе нет) с тем, что видит доска: `hex` — действующий, `own` — свой у экрана, `docHex` — общий.
+ * Цвет документа не hex (не годится для поля выбора) — строки нет.
+ * @returns {{name: string, hex: string, own: boolean, docHex: string|null}[]}
+ */
+export function boardColorRows(doc, board) {
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
+  const own = isObj(theme.colors) ? theme.colors : {};
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  const rows = [];
+  for (const name of [...Object.keys(base), ...Object.keys(own).filter((k) => !(k in base))]) {
+    const docHex = toHex6(base[name]);
+    const mine = Object.prototype.hasOwnProperty.call(own, name) ? toHex6(own[name]) : null;
+    const hex = mine || docHex;
+    if (!hex) continue;
+    rows.push({ name, hex, own: !!mine, docHex });
+  }
+  return rows;
+}
+
+/**
+ * Круг 67 (SPEC §15.6): правка цвета экрана из инспектора — одна операция `set theme` на основе
+ * прежней темы. `hex` null или равный общему цвету документа — цвет снимается с темы (экран берёт
+ * общий); тема опустела — снимается вся. Шрифты темы не трогаются. Ничего не меняется или тема не
+ * годится по ядру — null. `title` — имя цвета человеку («акцент») для записи истории.
+ * @returns {{ops: object[], label: string, warnings: string[]}|null}
+ */
+export function themeColorOps(doc, board, name, hex, { title } = {}) {
+  // имя — как у ядра (буква, затем буквы, цифры, «-», «_»): «__proto__» в объект не пишется ключом
+  if (!board || !board.id || typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(name)) return null;
+  const want = hex == null ? null : toHex6(hex);
+  if (hex != null && !want) return null;
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  const colors = { ...(isObj(theme.colors) ? theme.colors : {}) };
+  const docHex = toHex6(base[name]);
+  const had = Object.prototype.hasOwnProperty.call(colors, name);
+  if (want === null || want === docHex) {
+    if (!had) return null;
+    delete colors[name];
+  } else {
+    if (had && toHex6(colors[name]) === want) return null;
+    colors[name] = want;
+  }
+  const next = { ...theme };
+  if (Object.keys(colors).length) next.colors = colors; else delete next.colors;
+  const value = Object.keys(next).length ? next : undefined;
+  if (value !== undefined && CORE_NS.themeProblem && CORE_NS.themeProblem(value)) return null;
+  const screen = `«${String(board.name || 'Доска').slice(0, 40)}»`;
+  const said = typeof title === 'string' && title.trim() ? title.trim().slice(0, 40) : name;
+  const label = value === undefined ? `Экран ${screen} вернулся к оформлению документа`
+    : colors[name] ? `Свой цвет экрана ${screen}: ${said} ${want.toUpperCase()}`
+      : `Экран ${screen}: ${said} — как в документе`;
+  // контраст после правки — по тому, что увидит доска
+  const warnings = [];
+  const seen = (k) => toHex6((value && value.colors && value.colors[k]) || base[k]);
+  if (CORE_NS.contrastRatio && THEME_CONTRAST.some(([fg, bg]) => fg === name || bg === name)) {
+    for (const [fg, bg, min, ru] of THEME_CONTRAST) {
+      if (fg !== name && bg !== name) continue;
+      const a = seen(fg); const b = seen(bg);
+      if (!a || !b) continue;
+      const r = CORE_NS.contrastRatio(a, b);
+      if (r < min) warnings.push(`На экране ${screen} ${ru} читается плохо: контраст ${r.toFixed(1)}:1 (нужно от ${min}:1)`);
+    }
+  }
+  return { ops: [OPS.set(board.id, 'theme', value)], label, warnings };
+}

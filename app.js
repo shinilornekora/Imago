@@ -8841,28 +8841,73 @@ function tokenType(token, node) {
 
 /**
  * Круг 48 (SPEC §15): тема выделенной доски — строка «что своё» и кнопка «Вернуть общее
- * оформление». Задают тему словами агенту; здесь — увидеть и снять.
+ * оформление». Круг 67 (§15.6): цвета экрана правятся здесь же — каждый цвет документа, каким его
+ * видит доска; правка ложится в тему доски (свой цвет только у этого экрана), «как в документе» —
+ * снимает его с темы. У доски без темы список свёрнут.
  */
+const themeColorsOpen = new Set();
 function boardThemeGroup(node) {
   if (!node || node.type !== 'frame' || node.parent !== state.doc.root || typeof CORE.boardTheme !== 'function') return null;
   const t = CORE.boardTheme(node);
-  if (!t) return null;
-  const bits = [];
-  for (const [k, v] of Object.entries(t.colors || {})) bits.push(`${k} ${v}`);
-  for (const [k, v] of Object.entries(t.type || {})) bits.push(`${k} — ${[v.font, v.fontWeight].filter(Boolean).join(' ')}`);
-  const line = document.createElement('div');
-  line.className = 'note';
-  line.textContent = bits.length ? `Своё у экрана: ${bits.slice(0, 4).join(', ')}${bits.length > 4 ? ` и ещё ${bits.length - 4}` : ''}` : 'Тема пустая';
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'btn';
-  btn.textContent = 'Вернуть общее оформление';
-  btn.addEventListener('click', () => commit([OPS.set(node.id, 'theme', undefined)], 'Тема экрана снята'));
-  return group('Тема экрана', [line, btn]);
-}
-
-function setProp(id, path, value) {
-  commit([OPS.set(id, path, value)], 'Свойство');
+  const kids = [];
+  if (t) {
+    const bits = [];
+    for (const [k, v] of Object.entries(t.colors || {})) bits.push(`${k} ${v}`);
+    for (const [k, v] of Object.entries(t.type || {})) bits.push(`${k} — ${[v.font, v.fontWeight].filter(Boolean).join(' ')}`);
+    const line = document.createElement('div');
+    line.className = 'note';
+    line.textContent = bits.length ? `Своё у экрана: ${bits.slice(0, 4).join(', ')}${bits.length > 4 ? ` и ещё ${bits.length - 4}` : ''}` : 'Тема пустая';
+    kids.push(line);
+  }
+  const rows = SHELL.boardColorRows(state.doc, node);
+  if (rows.length) {
+    const d = document.createElement('details');
+    d.className = 'theme-colors';
+    if (t || themeColorsOpen.has(node.id)) d.open = true;
+    d.addEventListener('toggle', () => { if (d.open) themeColorsOpen.add(node.id); else themeColorsOpen.delete(node.id); });
+    const sum = document.createElement('summary');
+    sum.textContent = t && t.colors ? `Цвета экрана · своих ${Object.keys(t.colors).length}` : 'Цвета экрана — только у этого экрана';
+    d.appendChild(sum);
+    const pick = (name, hex) => {
+      const cur = state.doc.nodes[node.id];
+      const r = cur ? SHELL.themeColorOps(state.doc, cur, name, hex, { title: SWATCH_NAMES[name] }) : null;
+      if (!r) return;
+      commit(r.ops, r.label);
+      for (const w of r.warnings) toast(w, 'plain', 6000);
+    };
+    for (const row of rows) {
+      const line = document.createElement('div');
+      line.className = 'theme-color-row' + (row.own ? ' own' : '');
+      const name = document.createElement('span');
+      name.className = 'theme-color-name';
+      const human = SWATCH_NAMES[row.name] || row.name;
+      name.textContent = human;
+      name.title = `${row.name}: ${row.own ? `свой у экрана; в документе ${row.docHex ? row.docHex.toUpperCase() : 'нет'}` : 'как в документе'}`;
+      line.append(name, colorInput(row.hex, (h) => pick(row.name, h), `Цвет экрана: ${human}`));
+      if (row.own) {
+        const back = document.createElement('button');
+        back.type = 'button';
+        back.className = 'btn subtle small theme-color-back';
+        back.textContent = '↺';
+        const tip = row.docHex ? `Как в документе: ${row.docHex.toUpperCase()}` : 'Этого цвета в документе нет — снять с экрана';
+        back.title = tip;
+        back.setAttribute('aria-label', `${human}: ${tip}`);
+        back.addEventListener('click', () => pick(row.name, null));
+        line.appendChild(back);
+      }
+      d.appendChild(line);
+    }
+    kids.push(d);
+  }
+  if (t) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.textContent = 'Вернуть общее оформление';
+    btn.addEventListener('click', () => commit([OPS.set(node.id, 'theme', undefined)], 'Тема экрана снята'));
+    kids.push(btn);
+  }
+  return kids.length ? group('Тема экрана', kids) : null;
 }
 
 function group(title, children) {
