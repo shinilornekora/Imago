@@ -1181,6 +1181,8 @@ export const SCHEMAS = {
         boardName: { type: 'string', maxLength: 80 },
         /* Круг 72 (SPEC §15.9): та же правка нескольким экранам — их имена. */
         boardNames: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 80 } },
+        /* Круг 74 (SPEC §15.11): «все экраны, кроме «Оплата»» — та же правка всем, кроме названных. */
+        exceptBoards: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 80 } },
         reset: { type: 'boolean' },
         /* Круг 71 (SPEC §15.8): «сделай этот экран как «Оплата»» — тема экрана-образца копией. */
         likeBoard: { type: 'string', maxLength: 80 },
@@ -1239,6 +1241,7 @@ export const SCHEMAS = {
   board?: boolean,   // true — оформление ОДНОЙ доски из «РАБОТАЕМ С:» (её тема): только colors и font/fontWeight стилей
   boardName?: string, // с board:true — имя экрана, если человек его назвал («экран Оплата»); иначе не пиши
   boardNames?: string[], // с board:true — имена НЕСКОЛЬКИХ экранов, если та же правка нужна им всем
+  exceptBoards?: string[], // с board:true — «все экраны, кроме …»: имена экранов, которые НЕ трогать
   likeBoard?: string, // с board:true — имя экрана-образца: «сделай как экран X»
   reset?: boolean,   // с board:true — снять тему доски целиком (вернуть ей оформление документа)
   colors?: [{name: string, value: "#rrggbb"}],
@@ -2272,7 +2275,8 @@ export const PROMPTS = {
   бывают — при board:true их не пиши. «Верни этому экрану общее оформление» — {board:true, reset:true}.
   Назвал экран по имени — boardName: "<имя>"; назвал несколько («экраны Оплата и Итог тёмными») — boardNames:
   ["<имя>", "<имя>"]: та же правка ляжет темой каждому; «РАБОТАЕМ С:» на нескольких экранах и просят «эти экраны» —
-  board:true без имён, правка ляжет каждому. «Сделай этот экран как «Оплата»», «оформи так же, как
+  board:true без имён, правка ляжет каждому. «Все экраны, кроме «Оплата»» — {board:true, exceptBoards:["Оплата"]}
+  (НЕ токены документа: они перекрасили бы и «Оплату»). «Сделай этот экран как «Оплата»», «оформи так же, как
   экран X» — {board:true, likeBoard:"<имя экрана-образца>"}: его тема ляжет копией (colors и type к ней
   добавляй, только если просят что-то ещё; reset с likeBoard не пиши). Тёмный (или иной) экран — ПОЛНАЯ палитра: canvas,
   surface, surfaceAlt, text, muted, line, accentSoft, onAccent (те, что есть в документе), не один фон:
@@ -10796,7 +10800,9 @@ export function themeToOps({ doc, theme, engine, warn, scope = null }) {
   const note = warn || (() => {});
   // круг 48 (SPEC §15): оформление одной доски — её темой
   // круг 71: likeBoard — всегда об одном экране, даже если модель забыла board:true
-  if (theme && (theme.board === true || (typeof theme.likeBoard === 'string' && theme.likeBoard.trim()))) return boardThemeOps({ doc, theme, engine, warn: note, scope });
+  // круг 74: списки экранов (boardNames, exceptBoards) — тоже об экранах, а не о документе
+  const listed = (k) => Array.isArray(theme && theme[k]) && theme[k].some((x) => typeof x === 'string' && x.trim());
+  if (theme && (theme.board === true || (typeof theme.likeBoard === 'string' && theme.likeBoard.trim()) || listed('boardNames') || listed('exceptBoards'))) return boardThemeOps({ doc, theme, engine, warn: note, scope });
   const ops = [];
   /**
    * Круг 5, п.6: проверялся только TOKEN_PATH_RE, а `[A-Za-z0-9_-]+` покрывает «__proto__» и
@@ -11035,10 +11041,15 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
     .filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
   const asked = typeof theme.boardName === 'string' ? theme.boardName.trim() : '';
   if (asked && !names.some((x) => x.toLowerCase() === asked.toLowerCase())) names.unshift(asked);
+  // круг 74 (SPEC §15.11): «все, кроме …» — исключённые экраны (без списка имён — из всех экранов страницы)
+  const except = (Array.isArray(theme.exceptBoards) ? theme.exceptBoards : [])
+    .filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
   let targets = [];
   const missed = [];
   const later = [];                                 // заметки, которые верны, только если правка легла
-  if (names.length) {
+  if (except.length && !names.length) {
+    targets = all.slice();
+  } else if (names.length) {
     for (const n of names) {
       const id = byName(n);
       if (!id) missed.push(n);
@@ -11066,6 +11077,21 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
     if (libs.length) later.push('У библиотеки компонентов своей темы не бывает — она пропущена');
   }
   for (const n of missed) later.push(`Экран «${cutText(n, 40)}» не найден — правка легла на остальные`);
+  if (except.length) {
+    const out = [];
+    for (const n of except) {
+      const id = byName(n);
+      if (!id) later.push(`Экран «${cutText(n, 40)}» не найден — исключать нечего, остальные экраны в правке`);
+      else if (!out.includes(id)) out.push(id);
+    }
+    const kept = targets.filter((id) => !out.includes(id));
+    if (!kept.length) {
+      throw ERR('schema', all.length <= 1
+        ? 'Экран на странице один, и он исключён — менять нечего'
+        : 'Исключены все экраны правки — менять нечего; назовите, какие экраны оформить');
+    }
+    targets = kept;
+  }
   if (targets.length === 1) {
     const ops = oneBoardThemeOps({ doc, theme, engine, note, boardId: targets[0], byName, label });
     later.forEach((m) => note(m));
