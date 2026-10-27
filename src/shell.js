@@ -4747,7 +4747,7 @@ export function themePartResetOps(board, part) {
  */
 export function boardThemeBadge(doc, node) {
   if (!doc || !node || node.type !== 'frame' || node.parent !== doc.root || node.role === 'library') return null;
-  if (node.theme === undefined) return null;
+  if (node.theme == null) return null;   // null core тоже считает «темы нет»
   const theme = typeof CORE_NS.boardTheme === 'function' ? CORE_NS.boardTheme(node) : null;
   if (!theme) {
     return { swatch: null, colors: 0, styles: 0, broken: true, title: 'Тема экрана повреждена и не действует — экран в оформлении документа; «Вернуть общее оформление» в инспекторе её снимет' };

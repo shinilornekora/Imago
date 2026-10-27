@@ -6798,16 +6798,16 @@ function renderLayers() {
     if (themed) {
       const t = document.createElement('span');
       t.className = 'tagpill theme' + (themed.broken ? ' warn' : '');
+      // узкая, как метка состояний: кружок цвета темы; одни шрифты — «Аа», повреждённая — «!»
       if (themed.swatch) {
         const dot = document.createElement('span');
         dot.className = 'dot';
         dot.style.background = themed.swatch;
         t.appendChild(dot);
-      }
-      t.appendChild(document.createTextNode('тема'));
+      } else t.textContent = themed.broken ? '!' : 'Аа';
       t.title = themed.title;
       t.setAttribute('role', 'img');
-      t.setAttribute('aria-label', themed.broken ? 'Тема экрана повреждена' : 'Своя тема экрана');
+      t.setAttribute('aria-label', themed.title);
       row.dataset.theme = 'on';
       row.appendChild(t);
     }

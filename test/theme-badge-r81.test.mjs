@@ -43,6 +43,7 @@ test('круг81: без метки — нет темы, вложенная ра
   assert.equal(boardThemeBadge(doc, doc.nodes.in), null);
   assert.equal(boardThemeBadge(doc, { ...doc.nodes.B, role: 'library', theme: { colors: { accent: '#ff4f6d' } } }), null);
   assert.equal(boardThemeBadge(doc, null), null);
+  assert.equal(boardThemeBadge(doc, { ...doc.nodes.B, theme: null }), null, 'null — темы нет, не «повреждена»');
   const broken = boardThemeBadge(doc, { ...doc.nodes.B, theme: { colors: { accent: 'не цвет' } } });
   assert.equal(broken.broken, true);
   assert.match(broken.title, /повреждена/);
@@ -91,6 +92,17 @@ test('круг81: в браузере — свой цвет экрана даё�
     assert.equal(bg, 'rgb(192, 57, 43)');
     const row = await page.locator(`#layers .layer[data-id="${id}"]`).boundingBox();
     assert.ok(row.height < 30, `строка в одну линию: ${row.height}`);
+    assert.match(await pill.getAttribute('aria-label'), /1 цвет/, 'читалке — то же, что в подсказке');
+    // критик: с меткой состояний и длинным именем на самом узком рельсе — всё ещё одна строка
+    const two = await page.evaluate((id) => {
+      const r = document.querySelector(`#layers .layer[data-id="${id}"]`);
+      r.querySelector('.name').textContent = 'Очень длинное имя экрана оплаты заказа';
+      const s = document.createElement('span'); s.className = 'tagpill motion'; s.textContent = '•';
+      r.dataset.states = 'on'; r.insertBefore(s, r.querySelector('.tagpill.theme'));
+      const rail = document.getElementById('layers'); rail.style.width = '168px';
+      const h = r.getBoundingClientRect().height; rail.style.width = ''; return h;
+    }, id);
+    assert.ok(two < 30, `две метки — одна строка: ${two}`);
     await page.keyboard.press('Escape');
     await first.click();
     await page.keyboard.press('Control+z');
