@@ -37,6 +37,8 @@
            разговоров о документе (история, экспорт), а не среди настроек приложения:
            шкалы принадлежат документу, и правка шага переверстывает холст. -->
       <button class="btn ghost with-icon" id="btn-scales" title="Шкалы отступов и скруглений" aria-label="Шкалы отступов и скруглений"><span class="i" data-icon="scale"></span><span class="btn-label">Шкалы</span></button>
+      <!-- Круг 94 (SPEC §24): зен-режим — только холст, микрофон и ход работы. -->
+      <button class="btn ghost icon" id="btn-zen" aria-pressed="false" title="Зен-режим: только холст (Ctrl+\)" aria-label="Зен-режим"><span class="i" data-icon="zen"></span></button>
       <button class="btn ghost icon" id="btn-theme" title="Тема интерфейса" aria-label="Тема интерфейса"><span class="i" data-icon="theme"></span></button>
       <button class="btn ghost icon" id="btn-settings" title="Настройки агента" aria-label="Настройки агента"><span class="i" data-icon="settings"></span></button>
     </div>
@@ -97,6 +99,17 @@
       </div>
       <p class="worklog-detail" id="work-detail"></p>
       <ol class="worklog-steps" id="work-steps" hidden></ol>
+    </div>
+
+    <!-- Круг 94 (SPEC §24). Зен-режим: справа сверху — статус задач. Пока агент работает,
+         на его месте живёт ход работы (#worklog); в покое — строка «жду команду» или итог
+         последней. «Выйти» проявляется при наведении (на тач-экране видна всегда). -->
+    <div class="zenbar" id="zenbar" hidden>
+      <div class="zen-status" id="zen-status" role="status" aria-live="polite">
+        <span class="zen-dot" id="zen-dot" aria-hidden="true"></span>
+        <span class="zen-text" id="zen-text">Жду команду</span>
+      </div>
+      <button type="button" class="zen-exit" id="btn-zen-exit" title="Выйти из зен-режима (Esc)" aria-label="Выйти из зен-режима"><span class="i" data-icon="close"></span></button>
     </div>
 
     <div class="viewbar" id="viewbar">
@@ -182,6 +195,14 @@
           <span class="i" data-icon="mic"></span>
         </button>
       </div>
+
+      <!-- Круг 94 (SPEC §24). Зен-режим, микрофон выключен: та же круглая кнопка в правом
+           нижнем углу, что и у голосовой сессии, только спокойная. Нажатие включает голос —
+           и её место занимает #voicebar. -->
+      <button type="button" class="voice-mic zen-mic" id="btn-zen-mic" hidden
+              aria-label="Сказать команду" title="Сказать команду (клавиша V)">
+        <span class="i" data-icon="mic"></span>
+      </button>
     </div>
   </main>
 

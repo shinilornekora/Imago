@@ -350,6 +350,9 @@ export function shellIntentFromServer(shell) {
     // круг 36 (SPEC §11.3): режим «Просмотр»; без on — включить
     case 'preview':
       return { kind: 'preview', on: a.on == null ? true : !(a.on === false || a.on === 'false' || a.on === 0) };
+    // круг 94 (SPEC §24): зен-режим — только холст; без on — включить
+    case 'zen':
+      return { kind: 'zen', on: a.on == null ? true : !(a.on === false || a.on === 'false' || a.on === 0) };
     case 'export':
       // what: '' — «экспорт» без формата: открыть окно экспорта
       if (typeof a.what === 'string' || typeof a.format === 'string') return { kind: 'export', what: String(a.what ?? a.format).toLowerCase() };
@@ -1891,6 +1894,18 @@ const RE_PREVIEW_ON = new RegExp(`^${PV_LEAD}(?:режим просмотра|р
   + '|^посмотреть вживую$|^покажи вживую$|^проверить анимации$|^проверь анимации$');
 const RE_PREVIEW_OFF = /^(?:выйди|выйти|выход|выходи) из (?:режима )?(?:пред)?просмотра$|^(?:выключи|выключить|закрой|закрыть|заверши|завершить|останови|остановить) (?:режим (?:пред)?просмотра|(?:пред)?просмотр)$|^(?:хватит|конец) (?:пред)?просмотра$|^(?:вернись|вернуться|назад) к правке$|^режим правки$/;
 
+/* Круг 94 (SPEC §24): зен-режим. «Зен» и «дзен» — так слово слышит распознавание; дефис
+   normSaid не трогает, поэтому «зен-режим» и «зен режим» — оба. Выход словами обязателен:
+   в зен-режиме у человека под рукой только микрофон. */
+const ZEN_WORD = '(?:зен|дзен|zen)а?';
+const ZEN_FORM = `(?:${ZEN_WORD}(?:[- ](?:режим|режима|режиме|мод|мода|моде))?|(?:режим|режима|режиме) ${ZEN_WORD})`;
+const RE_ZEN_OFF = new RegExp(`^(?:выйди|выйти|выход|выходи) из ${ZEN_FORM}$`
+  + `|^(?:выключи|выключить|отключи|отключить|закрой|закрыть|заверши|завершить) ${ZEN_FORM}$`
+  + `|^(?:хватит|конец) ${ZEN_FORM}$`
+  + '|^(?:верни|вернуть|покажи|показать) (?:все )?(?:панели|интерфейс)$');
+const RE_ZEN_ON = new RegExp(`^${PV_LEAD}${ZEN_FORM}$`
+  + '|^(?:спрячь|скрой|убери) (?:все )?(?:панели|интерфейс)$|^только холст$');
+
 /**
  * Намерение, которое выполняет сама оболочка. null — значит это команда агенту.
  * Правила узкие нарочно: «покажи сводку недели» — переключение (артборд с таким именем
@@ -1929,6 +1944,8 @@ export function shellIntent(said, ctx = {}) {
      RE_SHOW: «покажи просмотр» иначе искал бы доску с именем «просмотр». */
   // круг 50 (SPEC §17.2): настройки агента словами — до доски/слоя по имени
   { const m = RE_AGENT_SETTING.exec(t); if (m) return agentSettingOf(m); }
+  if (RE_ZEN_OFF.test(t)) return { kind: 'zen', on: false };
+  if (RE_ZEN_ON.test(t)) return { kind: 'zen', on: true };
   if (RE_PREVIEW_OFF.test(t)) return { kind: 'preview', on: false };
   if (RE_PREVIEW_ON.test(t)) return { kind: 'preview', on: true };
 
@@ -2115,6 +2132,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'fit-board', group: 'Вид', title: 'Вписать доску', hint: 'Показать активную доску целиком', slash: ['вписать доску', 'fit board'], phrases: ['впиши доску', 'покажи эту доску'] },
   { id: 'fit-selection', group: 'Вид', title: 'Вписать выделенное', hint: 'Приблизить к выделенным слоям', slash: ['вписать выделенное', 'к выделенному', 'fit selection'], phrases: ['впиши выделенное', 'покажи выделенное', 'приблизь к выделенному'], needs: 'selection' },
   { id: 'preview', group: 'Вид', title: 'Режим просмотра', hint: 'Наведение и нажатие на холсте проигрывают состояния', slash: ['просмотр', 'preview'], keys: 'P', args: [{ name: 'режим', kind: 'enum', values: ON_OFF, optional: true }], example: '/просмотр вкл', phrases: ['просмотр', 'выйди из просмотра'] },
+  { id: 'zen', group: 'Вид', title: 'Зен-режим', hint: 'Только холст: микрофон внизу справа, ход работы вверху справа. Выйти — Esc', slash: ['зен', 'zen', 'дзен'], keys: 'Mod+\\', args: [{ name: 'режим', kind: 'enum', values: ON_OFF, optional: true }], example: '/зен вкл', phrases: ['зен-режим', 'выйди из зен-режима', 'только холст'] },
   { id: 'theme', group: 'Вид', title: 'Тема интерфейса', hint: 'Тёмная, светлая или как в системе; без слова — следующая', slash: ['тема', 'theme'], args: [{ name: 'какая', kind: 'enum', values: ['тёмная', 'светлая', 'системная'], optional: true }], bare: true, example: '/тема тёмная', phrases: ['тёмная тема интерфейса', 'светлый интерфейс', 'как в системе'] },
 
   /* — Выделение — */
@@ -2362,6 +2380,11 @@ const SLASH_ARGS = {
     const on = argPick(rest, ON_WORDS);
     return on == null ? bad(cmd, 'Просмотр: «вкл» или «выкл»') : { kind: 'preview', on };
   },
+  zen(rest, raw, ctx, cmd) {
+    if (!rest) return { kind: 'zen', on: true };
+    const on = argPick(rest, ON_WORDS);
+    return on == null ? bad(cmd, 'Зен-режим: «вкл» или «выкл»') : { kind: 'zen', on };
+  },
   theme(rest, raw, ctx, cmd) {
     if (!rest) return { kind: 'theme', mode: 'cycle' };
     const mode = argPick(rest, THEME_WORDS);
@@ -2569,6 +2592,7 @@ export function commandIdOf(intent) {
     case 'fit': return intent.all == null ? 'fit' : intent.all ? 'fit-all' : 'fit-board';
     case 'fit-selection': return 'fit-selection';
     case 'preview': return 'preview';
+    case 'zen': return 'zen';
     case 'theme': return 'theme';
     case 'select-all': return 'select-all';
     case 'select': return intent.themed ? 'select-themed' : (intent.ids || []).length || intent.name ? 'select-name' : 'deselect';
