@@ -12737,12 +12737,14 @@ export const REF_IMAGE_MAX_CHARS = 1100 * 1024;
 export function referenceImage(doc, selection, geo, utterance) {
   if (!RE_IMAGE_REF.test(String(utterance == null ? '' : utterance))) return null;
   // образец — главная (первая) картинка; не подошла — не подменяем её мелкой соседней иконкой
-  const [s] = imageSources(doc, selection, geo);
+  const all = imageSources(doc, selection, geo);
+  const [s] = all;
   if (!s) return null;
   const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(s.src);
   if (!m) return { skipped: 'url' };
   if (s.src.length > REF_IMAGE_MAX_CHARS) return { skipped: 'big' };
-  return { mime: m[1], data: m[2] };
+  // круг 59: мудборд — модели говорят, что она видит одну картинку из нескольких
+  return all.length > 1 ? { mime: m[1], data: m[2], of: all.length } : { mime: m[1], data: m[2] };
 }
 
 /** Круг 53 (SPEC §20): срок на цвета картинок — декодирование и счёт всех картинок команды вместе. */
@@ -13110,7 +13112,18 @@ async function runCommandCore(options = {}) {
     const scope = resolveScope(doc, agentSelIgnored ? [] : selection, engine, { activeArtboardId, selectionBy });
     const hasSelection = scope.kind === 'selection';
     // круг 9, п.6: узлы области работы выигрывают у одноимённых с чужого артборда
-    const guess = classifyUtterance(utterance, { hasSelection, doc, prefer: new Set(collectSubtree(doc, scope.ids)) });
+    let guess = classifyUtterance(utterance, { hasSelection, doc, prefer: new Set(collectSubtree(doc, scope.ids)) });
+    /* Круг 58 (SPEC §21.5): выделен образец и он назван словами — выделение показывает образец, а не
+     * место правки. «Лендинг студии йоги в цветах этой картинки» без глагола при выделении иначе
+     * считался правкой картинки. Намерение — по реплике без слов об образце и без выделения;
+     * явная правка («поменяй фон …»), вопрос и оформление остаются как были. */
+    if (guess.intent !== 'create' && referencePicked(doc, scope, utterance)) {
+      // без документа: «карточку товара» здесь — предмет нового экрана, а не слой, который правят
+      const rest = classifyUtterance(withoutImageRef(utterance));
+      if (rest.intent !== 'edit' && rest.intent !== 'ask' && rest.intent !== 'theme') {
+        guess = { ...rest, reference: true, reason: `образец выделен и назван словами; ${rest.reason}` };
+      }
+    } else if (guess.intent === 'create' && referencePicked(doc, scope, utterance)) guess = { ...guess, reference: true };
     const geoNow = geoIn || safeSolve(engine, doc);
     // валидатор зовётся ОДИН раз: из него и замечания для промпта (круг 3, п.5),
     // и множество «это было до нас» — чтобы старые нарушения не вменялись агенту
@@ -13273,7 +13286,8 @@ async function runCommandCore(options = {}) {
             fontsLocked: webFonts === false,
           }) },
           { role: 'user', content: img ? imageTurn(`${userTurn}\n\nОбразец приложен картинкой: палитру, материалы и настроение бери с него`
-            + ' (что на нём изображено — не предмет макета, если об этом не просили).', img) : userTurn },
+            + ' (что на нём изображено — не предмет макета, если об этом не просили).'
+            + (img.of > 1 ? ` Это одна из ${img.of} картинок образца — цвета остальных в списке цветов картинок выше; образ — по всем вместе.` : ''), img) : userTurn },
         ];
         const directOpts = { stage: 'direct', temperature: temperature == null ? 0.8 : temperature };
         if (ref) emit('direct', 'Смотрю на образец');
@@ -13770,6 +13784,11 @@ function arbitrateIntent(plan, guess, warn) {
   }
   if (planned === 'illustration' && guess.art && (guess.intent === 'create' || guess.intent === 'edit')) return guess.intent;
   if (planned === 'refuse') return 'refuse';
+  // круг 58: выделен образец — план «правка» по нему значил бы перекрасить саму картинку
+  if (guess.reference && guess.intent === 'create' && planned === 'edit') {
+    warn('Выделен образец, и он назван словами — собираю новый экран по нему, картинку не правлю');
+    return 'create';
+  }
   if (guess.intent === 'clarify' && guess.confidence >= 0.8 && planned !== 'ask') {
     warn(`Команда «${guess.reason}» — вместо «${planned}» переспрашиваю`);
     return 'clarify';
@@ -14252,6 +14271,16 @@ function picturesOnly(doc, ids) {
   return list.every((id) => pic(id, 0));
 }
 
+/**
+ * Круг 55 (SPEC §21): выделена картинка (или доска из одних картинок) и о ней сказано как об образце.
+ * Картинка на настоящем экране — образец, только если просят экран целиком.
+ */
+function referencePicked(doc, scope, utterance) {
+  const spoken = String(utterance || '');
+  return !!scope && scope.kind === 'selection' && RE_IMAGE_REF.test(spoken) && picturesOnly(doc, scope.ids)
+    && (RE_WHOLE_SCREEN.test(spoken) || scope.ids.every((id) => picturesOnly(doc, [artboardOf(doc, id) || id])));
+}
+
 function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null) {
   const note = warn || (() => {});
   const spoken = String(utterance || '');
@@ -14272,8 +14301,7 @@ function describePlacement(doc, scope, engine, utterance, plan, warn, geo = null
    * («собери экран в цветах этой картинки») — выделение показывает образец, а не место: новая доска. */
   /* Картинка на настоящем экране («добавь кнопку в цветах этой картинки») — место правки, а не образец:
    * образец — это вставленная картинка на своей доске (доска из одних картинок) или когда просят экран. */
-  const pictureRef = scope.kind === 'selection' && RE_IMAGE_REF.test(spoken) && picturesOnly(doc, scope.ids)
-    && (saidWhole || scope.ids.every((id) => picturesOnly(doc, [artboardOf(doc, id) || id])));
+  const pictureRef = referencePicked(doc, scope, spoken);
   const explicit = saidNew || pictureRef;
   // круг 27: выделение агента («вот что я сделал») просьбу собрать экран не перебивает
   const wholeScreen = saidWhole && (scope.kind !== 'selection' || scope.selectionBy === 'agent') && !RE_HERE_PLACE.test(spoken);

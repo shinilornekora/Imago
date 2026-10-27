@@ -4230,6 +4230,114 @@ export function artSummary(direction, critique, opts = {}) {
 }
 
 /**
+ * Круг 59 (SPEC §21.6): несколько картинок разом — мудборд: одна доска-образец, картинки рядами по
+ * MOODBOARD.perRow (каждый ряд — своя рамка), каждая вписана в клетку MOODBOARD.cell × cell·MOODBOARD.tall
+ * с сохранением пропорций (мелкие — увеличиваются при показе: цвета от этого не меняются). Доска из одних
+ * картинок — образец по §21: арт-директор видит цвета всех (до четырёх, §20). Больше MOODBOARD.max —
+ * лишние не кладутся (их число — в `dropped`). Одна картинка — как imageInsertOps без выделения.
+ * @param {object} doc
+ * @param {{images: {src: string, width: number, height: number, fileName?: string}[], at: {x: number, y: number},
+ *   ids: {board: string, images: string[], rows?: string[]}, boards?: number}} o
+ * @returns {{ops: object[], select: string[], into: null, dropped: number}|{error: string}}
+ */
+export const MOODBOARD = { cell: 240, tall: 1.5, perRow: 2, gap: 12, pad: 12, max: 4 };
+export function moodboardOps(doc, o) {
+  const list = o && Array.isArray(o.images) ? o.images : [];
+  if (!list.length) return { error: 'картинок нет' };
+  const taken = list.slice(0, MOODBOARD.max);
+  const dropped = list.length - taken.length;
+  const made = [];
+  for (let i = 0; i < taken.length; i++) {
+    const one = imageInsertOps(doc, { ...taken[i], selection: [], at: o.at, ids: { board: o.ids.board, image: o.ids.images[i] }, boards: o.boards });
+    if (one.error) return { error: `${taken[i].fileName || `картинка ${i + 1}`}: ${one.error}` };
+    if (taken.length === 1) return { ...one, dropped };
+    const img = one.ops.map((x) => x.node).find((n) => n && n.type === 'image');
+    // вписать в клетку: ширина — клетка, слишком высокая — по высоте клетки
+    const k = Number(taken[i].height) / Number(taken[i].width);
+    let w = MOODBOARD.cell;
+    let h = Math.round(w * k);
+    if (h > MOODBOARD.cell * MOODBOARD.tall) { h = Math.round(MOODBOARD.cell * MOODBOARD.tall); w = Math.max(1, Math.round(h / k)); }
+    made.push({ ...img, size: { w: { mode: 'fixed', value: w }, h: { mode: 'fixed', value: Math.max(1, h) } } });
+  }
+  const p = MOODBOARD.pad;
+  const cols = Math.min(MOODBOARD.perRow, made.length);
+  const board = {
+    id: o.ids.board, type: 'frame', name: 'Образец', parent: doc.root, children: [],
+    pos: { x: Math.round(Number(o.at && o.at.x) || 0), y: Math.round(Number(o.at && o.at.y) || 0) },
+    size: { w: { mode: 'fixed', value: cols * MOODBOARD.cell + (cols - 1) * MOODBOARD.gap + 2 * p }, h: { mode: 'hug' } },
+    layout: { mode: 'column', gap: MOODBOARD.gap, padding: { t: p, r: p, b: p, l: p }, align: 'start', justify: 'start', wrap: false },
+  };
+  const ops = [{ op: 'create', node: board }];
+  for (let r = 0; r * MOODBOARD.perRow < made.length; r++) {
+    const rowId = (o.ids.rows && o.ids.rows[r]) || `${o.ids.board}_r${r}`;
+    ops.push({ op: 'create', node: { id: rowId, type: 'frame', name: `Ряд ${r + 1}`, parent: board.id, children: [],
+      size: { w: { mode: 'hug' }, h: { mode: 'hug' } },
+      layout: { mode: 'row', gap: MOODBOARD.gap, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'center', justify: 'start', wrap: false } } });
+    for (const n of made.slice(r * MOODBOARD.perRow, (r + 1) * MOODBOARD.perRow)) ops.push({ op: 'create', node: { ...n, parent: rowId } });
+  }
+  return { ops, select: [board.id], into: null, dropped };
+}
+
+/**
+ * Круг 59: что из брошенного или вставленного не легло в мудборд — словами, у каждой причины своя фраза.
+ * @param {{images: number, taken: number, failed: number, other: number}} c картинок всего, взято (до max),
+ *   из взятых не открылось, файлов не-картинок
+ * @returns {string} '' — легло всё
+ */
+export function moodboardLeftover({ images = 0, taken = 0, failed = 0, other = 0 } = {}) {
+  const pl = (n, one, few, many) => {
+    const a = Math.abs(n) % 100;
+    const b = a % 10;
+    return a > 10 && a < 20 ? many : b === 1 ? one : b >= 2 && b <= 4 ? few : many;
+  };
+  const out = [];
+  const over = Math.max(0, images - taken);
+  if (over) out.push(`Ещё ${over} ${pl(over, 'картинка не вошла', 'картинки не вошли', 'картинок не вошли')}: в образец идёт до ${MOODBOARD.max}.`);
+  if (failed > 0) out.push(`${failed} ${pl(failed, 'картинка не открылась', 'картинки не открылись', 'картинок не открылись')}.`);
+  if (other > 0) out.push(`${other} ${pl(other, 'файл — не картинка', 'файла — не картинки', 'файлов — не картинки')}.`);
+  return out.join(' ');
+}
+
+/**
+ * Круг 58 (SPEC §21.5): картинка, вставленная в строку команды, — образец для этой команды. Она ложится
+ * на макет отдельной доской (её цвета видит арт-директор, модели со зрением — её саму), а в строке
+ * появляются слова об образце, если их там ещё нет: команда без них образца не берёт (§21).
+ * Пустая строка — готовая команда «собери экран в цветах этой картинки» с выделенным словом «экран»:
+ * человек впечатывает свой предмет поверх. Строка с «/» — команда оболочки, её не трогаем.
+ * @param {string} value текст строки команды
+ * @returns {{value: string, caret: number, caretEnd?: number}}
+ */
+export const REFERENCE_WORDS = 'в цветах этой картинки';
+/** Круг 59: образец из нескольких картинок (мудборд). */
+export const REFERENCE_WORDS_MANY = 'в цветах этих картинок';
+export function referenceCommandText(value, { many = false } = {}) {
+  const text = String(value == null ? '' : value);
+  if (RE_IMAGE_REF.test(text) || text.trim().startsWith('/')) return { value: text, caret: text.length };
+  const head = text.replace(/[\s,.;:—–-]+$/u, '');
+  const words = many ? REFERENCE_WORDS_MANY : REFERENCE_WORDS;
+  if (!head.trim()) {
+    const v = `собери экран ${words}`;
+    return { value: v, caret: 7, caretEnd: 12 };
+  }
+  const value2 = `${head} ${words}`;
+  return { value: value2, caret: value2.length };
+}
+
+/**
+ * Круг 58: текст, который браузер кладёт в буфер вместе с картинкой, — имя файла или адрес, а не
+ * слова человека: каждая строка кончается расширением картинки или это адрес (круг 59: несколько строк —
+ * несколько файлов).
+ */
+export function clipboardTextIsLabel(text) {
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return false;
+  // несколько файлов из файлового менеджера — их имена по строке на файл
+  const lines = t.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  return lines.length <= 32 && lines.every((x) => /^(?:https?:\/\/|data:image\/|file:\/\/)\S+$/iu.test(x)
+    || (/\.(?:png|jpe?g|gif|webp|heic|heif|bmp|tiff?|avif)$/iu.test(x) && x.length <= 255));
+}
+
+/**
  * Круг 55 (SPEC §21): картинка в макет — вставкой из буфера или перетаскиванием файла. Куда:
  * выделена рамка — в неё последним слоем; выделен другой слой — в его рамку сразу за ним; ничего
  * (или выделено несколько, или библиотека) — новой доской по размеру картинки в `at`. Ширина — не
@@ -4243,24 +4351,6 @@ export function artSummary(direction, critique, opts = {}) {
  *   innerWidth?: (id: string) => number|null, origin?: (id: string) => {x: number, y: number}|null}} o
  * @returns {{ops: object[], select: string[], into: string|null}|{error: string}}
  */
-/**
- * Круг 58 (SPEC §21.5): картинка, вставленная в строку команды, — образец для этой команды. Она ложится
- * на макет отдельной доской (её цвета видит арт-директор, модели со зрением — её саму), а в строке
- * появляются слова об образце, если их там ещё нет: команда без них образца не берёт (§21).
- * Пустая строка — слова с курсором в начале: человек дописывает, что собрать.
- * @param {string} value текст строки команды
- * @returns {{value: string, caret: number}}
- */
-export const REFERENCE_WORDS = 'в цветах этой картинки';
-export function referenceCommandText(value) {
-  const text = String(value == null ? '' : value);
-  if (RE_IMAGE_REF.test(text)) return { value: text, caret: text.length };
-  const head = text.replace(/[\s,.;:—–-]+$/u, '');
-  if (!head.trim()) return { value: ` ${REFERENCE_WORDS}`, caret: 0 };
-  const value2 = `${head} ${REFERENCE_WORDS}`;
-  return { value: value2, caret: value2.length };
-}
-
 /* хранится вдвое крупнее показа (960 при показе до 480) и до 600 КБ: предел документа на сервере — 24 МБ,
    и каждая картинка — ещё и в истории отмены */
 export const IMAGE_INSERT = { maxW: 480, maxSide: 960, maxBytes: 600 * 1024, minInto: 160 };

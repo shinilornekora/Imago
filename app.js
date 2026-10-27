@@ -21,7 +21,7 @@ import {
   ensureLibraryOps, ensureScaleRefsOps,
 } from './src/core.js';
 import * as CORE from './src/core.js';
-import { makeProvider, runCommand, runVariants } from './src/brain.js';
+import { makeProvider, runCommand, runVariants, RE_IMAGE_REF } from './src/brain.js';
 /* Круг 53 (SPEC §20): цвета картинок документа для арт-директора — пиксели считает страница. */
 import { paletteFromPixels, srcKey, SWATCH_LIMITS } from './src/swatches.js';
 /* Круг 22 (SPEC §9.5): клиент-реплика. Документ в серверном режиме живёт в ней, а не в
@@ -316,9 +316,13 @@ async function boot() {
   globalThis.addEventListener('paste', onImagePaste);
   dom.canvas.addEventListener('dragover', onImageDragOver);
   dom.canvas.addEventListener('drop', onImageDrop);
-  // круг 58 (SPEC §21.5): картинка в строке команды — образец для команды
-  dom.command.addEventListener('dragover', onImageDragOver);
-  dom.command.addEventListener('drop', onCommandDrop);
+  // круг 58 (SPEC §21.5): картинка в строке команды — образец для команды (вся полоса команды, с подсветкой)
+  dom.commandbar.addEventListener('dragover', onCommandDragOver);
+  dom.commandbar.addEventListener('dragleave', () => { dom.commandbar.classList.remove('drop-ready'); });
+  dom.commandbar.addEventListener('drop', onCommandDrop);
+  // файл, брошенный мимо холста и строки, браузер не открывает вместо редактора
+  globalThis.addEventListener('dragover', (e) => { if (filesDragged(e)) e.preventDefault(); });
+  globalThis.addEventListener('drop', (e) => { if (filesDragged(e)) e.preventDefault(); });
   stage = new Stage(dom.canvas, {
     // круг 50: шрифты из сети выключены — и в экспорт начертания не встраиваются
     embedFonts: settings.webFonts !== false,
@@ -9611,6 +9615,8 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
       return;
     }
   }
+  // круг 58: команда об образце из строки — образец выделен, даже если выделение успело уйти
+  if (!variants) reselectReference(utterance);
 
   /* Круг 29 (UX Д3): проекта на сервере нет — агенту его не прочитать и не записать.
      Команду не отправляем (она вернулась бы «проект не найден»), а говорим, что делать. */
@@ -13012,6 +13018,16 @@ function nextArtboardPos(list) {
 /* -------------------------- круг 55: картинка в макет --------------------------- */
 
 /** Файл-картинка из буфера или перетаскивания; не картинка — null. */
+/** Круг 59: все подходящие картинки по порядку (для мудборда). */
+function imageFilesOf(list) {
+  const out = [];
+  for (const it of list ? Array.from(list) : []) {
+    const f = typeof it.getAsFile === 'function' ? (it.kind === 'file' ? it.getAsFile() : null) : it;
+    if (f && /^image\/(png|jpeg|gif|webp)$/i.test(f.type || '')) out.push(f);
+  }
+  return out;
+}
+
 function imageFileOf(list) {
   for (const it of list ? Array.from(list) : []) {
     const f = typeof it.getAsFile === 'function' ? (it.kind === 'file' ? it.getAsFile() : null) : it;
@@ -13030,9 +13046,19 @@ function onImagePaste(e) {
     const items = e.clipboardData && e.clipboardData.items;
     const file = imageFileOf(items);
     const text = e.clipboardData && typeof e.clipboardData.getData === 'function' ? e.clipboardData.getData('text/plain') : '';
-    if (!file || text) return;
+    const fileItem = Array.from(items || []).some((it) => it && it.kind === 'file');
+    if (!file) {
+      // файл есть, но не из тех картинок (HEIC, PDF…) и текста нет — говорим, а не молчим
+      if (fileItem && !text) {
+        e.preventDefault();
+        showMsg('error', 'Этот файл образцом не станет', { note: 'Подойдут картинки PNG, JPEG, GIF и WebP.', ms: 7000 });
+      }
+      return;
+    }
+    // вместе с картинкой браузер кладёт имя файла или адрес — это не текст человека
+    if (text && !SHELL.clipboardTextIsLabel(text)) return;
     e.preventDefault();
-    insertImageFile(file, null, { reference: true });
+    referenceFromFiles(imageFilesOf(items));
     return;
   }
   if (editableTarget(e.target)) return;   // в инспекторе вставка — его дело
@@ -13042,17 +13068,123 @@ function onImagePaste(e) {
   insertImageFile(file, null);
 }
 
-/** Круг 58: файл, брошенный на строку команды, — тоже образец; не картинка — браузер его не открывает. */
+function filesDragged(e) {
+  const types = e && e.dataTransfer ? Array.from(e.dataTransfer.types || []) : [];
+  return types.includes('Files');
+}
+
+function onCommandDragOver(e) {
+  if (!filesDragged(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  dom.commandbar.classList.add('drop-ready');
+}
+
+/** Круг 58: файл, брошенный на полосу команды, — тоже образец; не картинка — браузер его не открывает. */
 function onCommandDrop(e) {
+  dom.commandbar.classList.remove('drop-ready');
   const files = e.dataTransfer && e.dataTransfer.files;
   if (!files || !files.length) return;
   e.preventDefault();
+  e.stopPropagation();
   const file = imageFileOf(files);
   if (!file) {
     showMsg('error', 'Этот файл образцом не станет', { note: 'Подойдут картинки PNG, JPEG, GIF и WebP.', ms: 7000 });
     return;
   }
-  insertImageFile(file, null, { reference: true });
+  referenceFromFiles(imageFilesOf(files), files.length);
+}
+
+/* Круг 58 (SPEC §21.5): образец, положенный из строки команды, — команда его помнит: если до отправки
+   выделение ушло (щелчок по холсту, Esc), образец выделяется снова, раз о нём говорят слова. */
+let pendingReference = null;
+
+/**
+ * Образец из строки команды. Пока агент работает — нет: правка документа под ним сорвала бы его итог.
+ * Круг 59 (SPEC §21.6): картинок несколько — одна доска-мудборд (до SHELL.MOODBOARD.max).
+ */
+function referenceFromFiles(files, total = files.length) {
+  if (!files.length) return;
+  if (state.running) {
+    showMsg('plain', 'Агент ещё работает — образец положу после', {
+      note: 'Вставьте картинку снова, когда он закончит: правка документа сейчас сорвала бы его итог.', ms: 7000,
+    });
+    return;
+  }
+  if (files.length === 1) { insertImageFile(files[0], null, { reference: true, more: total > 1 }); return; }
+  insertMoodboard(files, total);
+}
+
+/* Круг 59: картинки мудборда показываются по 240 px — хранить их по 960 px и 600 КБ незачем: четыре такие
+   почти заняли бы предел транзакции сервера (4 МБ). Для цветов и для модели со зрением хватает 480 px. */
+const MOODBOARD_IMAGE = { maxSide: 480, maxBytes: 250 * 1024 };
+
+/** Круг 59: несколько картинок — одной доской-образцом рядом с остальными, выделена целиком. */
+async function insertMoodboard(files, total) {
+  if (!state.doc) return;
+  const taken = files.slice(0, SHELL.MOODBOARD.max);
+  const ready = (await Promise.all(taken.map((f) => prepareImage(f, MOODBOARD_IMAGE)))).map((r, i) => (r ? { ...r, fileName: taken[i].name || '' } : null));
+  // пока картинки открывались, человек мог отправить команду — тогда не кладём (правка сорвала бы итог)
+  if (state.running || !state.doc) {
+    showMsg('plain', 'Агент уже работает — образец не положил', { note: 'Вставьте картинки снова, когда он закончит.', ms: 7000 });
+    return;
+  }
+  const ok = ready.filter(Boolean);
+  if (!ok.length) {
+    showMsg('error', 'Картинки не удалось открыть', { note: 'Подойдут PNG, JPEG, GIF и WebP.', ms: 7000 });
+    return;
+  }
+  const stamp = Date.now().toString(36);
+  const r = SHELL.moodboardOps(state.doc, {
+    images: ok, at: nextArtboardPos(artboards(state.doc)), boards: artboards(state.doc).length,
+    ids: { board: `ab_${stamp}`, images: ok.map((_, i) => `img_${stamp}_${i}`) },
+  });
+  if (r.error) { showMsg('error', `Образец не положил: ${r.error}`, { ms: 7000 }); return; }
+  const res = commit(r.ops, 'Образец');
+  if (!res || !res.ok) return;
+  setSelection(r.select);
+  fitAfterLayout(r.select);
+  const notes = SHELL.moodboardLeftover({ images: files.length, taken: taken.length, failed: taken.length - ok.length, other: total - files.length });
+  const lead = ok.length > 1
+    ? `${ok.length} ${plural(ok.length, 'картинка легла', 'картинки легли', 'картинок легли')} одной доской и выделены: команда возьмёт их цвета, а новый экран встанет рядом.`
+    : 'Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом.';
+  offerReferenceWords(ok.length > 1, r.select[0] || null, lead, notes ? ` ${notes}` : '');
+}
+
+/** Слова об образце в строке команды, фокус, сообщение (круги 58–59). */
+function offerReferenceWords(many, refId, lead, tail = '') {
+  pendingReference = refId;
+  const before = dom.command.value;
+  const next = SHELL.referenceCommandText(before, { many });
+  if (next.value !== before) {
+    dom.command.value = next.value;
+    dom.command.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  dom.command.focus();
+  try { dom.command.setSelectionRange(next.caret, next.caretEnd != null ? next.caretEnd : next.caret); } catch { /* поле без выделения */ }
+  const typed = before.trim() && !before.trim().startsWith('/');
+  showMsg('result', 'Образец на макете', {
+    note: `${lead} ${typed ? 'Команда готова — отправьте или поправьте.' : 'Впишите, что собрать, вместо «экран».'}${tail}`,
+    ms: 9000,
+  });
+}
+
+/** Перед отправкой команды: слова об образце есть, а выделение ушло — вернуть его на образец. */
+function reselectReference(utterance) {
+  const ref = pendingReference;
+  pendingReference = null;
+  if (!ref || !state.doc || !nodeById(state.doc, ref) || !RE_IMAGE_REF.test(utterance)) return;
+  if (state.selection.length === 1 && state.selection[0] === ref) return;
+  // круг 59: выбрана картинка внутри мудборда — это выбор человека, не трогаем
+  const boardOf = (id) => {
+    let cur = nodeById(state.doc, id);
+    for (let i = 0; cur && cur.parent !== state.doc.root && i < 64; i++) cur = nodeById(state.doc, cur.parent);
+    return cur ? cur.id : id;
+  };
+  const refBoard = boardOf(ref);
+  if (state.selection.length && state.selection.every((id) => boardOf(id) === refBoard)) return;
+  setSelection([ref]);
+  toast('Образец снова выделен: команда о нём', 'plain', 4000);
 }
 
 function onImageDragOver(e) {
@@ -13078,7 +13210,7 @@ function onImageDrop(e) {
  * (документ ходит транзакциями: тело запроса сервера — 4 МБ). С прозрачностью — PNG, иначе JPEG.
  * Анимация GIF не сохраняется (первый кадр). Не открылась за 8 с — null.
  */
-function prepareImage(file) {
+function prepareImage(file, { maxSide = SHELL.IMAGE_INSERT.maxSide, maxBytes = SHELL.IMAGE_INSERT.maxBytes } = {}) {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -13090,7 +13222,7 @@ function prepareImage(file) {
         const nw = img.naturalWidth;
         const nh = img.naturalHeight;
         if (!(nw > 0 && nh > 0)) { finish(null); return; }
-        let k = Math.min(1, SHELL.IMAGE_INSERT.maxSide / Math.max(nw, nh));
+        let k = Math.min(1, maxSide / Math.max(nw, nh));
         let alpha = null;
         for (let i = 0; i < 6; i++) {
           const w = Math.max(1, Math.round(nw * k));
@@ -13108,7 +13240,7 @@ function prepareImage(file) {
           }
           const src = c.toDataURL(alpha ? 'image/png' : 'image/jpeg', 0.86);
           const bytes = Math.floor(((src.length - src.indexOf(',') - 1) * 3) / 4);
-          if (bytes <= SHELL.IMAGE_INSERT.maxBytes) { finish({ src, width: w, height: h }); return; }
+          if (bytes <= maxBytes) { finish({ src, width: w, height: h }); return; }
           k *= 0.75;
         }
         finish(null);
@@ -13118,9 +13250,14 @@ function prepareImage(file) {
   });
 }
 
-async function insertImageFile(file, client, { reference = false } = {}) {
+async function insertImageFile(file, client, { reference = false, more = false } = {}) {
   if (!state.doc) return;
   const ready = await prepareImage(file);
+  // круг 59: пока картинка открывалась, человек мог отправить команду — образец тогда не кладём
+  if (reference && state.running) {
+    showMsg('plain', 'Агент уже работает — образец не положил', { note: 'Вставьте картинку снова, когда он закончит.', ms: 7000 });
+    return;
+  }
   if (!ready) {
     showMsg('error', 'Картинку не удалось открыть', { note: 'Подойдут PNG, JPEG, GIF и WebP.', ms: 7000 });
     return;
@@ -13154,19 +13291,14 @@ async function insertImageFile(file, client, { reference = false } = {}) {
     origin: (id) => { const r = state.geo.rects[id]; return r ? { x: r.x, y: r.y } : null; },
   });
   if (r.error) { showMsg('error', `Картинку не вставил: ${r.error}`, { ms: 7000 }); return; }
-  const res = commit(r.ops, 'Картинка');
+  const res = commit(r.ops, reference ? 'Образец' : 'Картинка');
   if (!res || !res.ok) return;
   setSelection(r.select);
   if (!r.into) fitAfterLayout(r.select);
   if (reference) {
-    const next = SHELL.referenceCommandText(dom.command.value);
-    dom.command.value = next.value;
-    dom.command.focus();
-    try { dom.command.setSelectionRange(next.caret, next.caret); } catch { /* поле без выделения */ }
-    showMsg('result', 'Образец на макете', {
-      note: 'Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом. Допишите, что собрать.',
-      ms: 9000,
-    });
+    offerReferenceWords(false, r.select[0] || null,
+      'Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом.',
+      more ? ' Остальные брошенные файлы — не картинки.' : '');
     return;
   }
   showMsg('result', 'Картинка на макете', { note: 'Можно сказать: «собери экран в цветах этой картинки».', ms: 8000 });
