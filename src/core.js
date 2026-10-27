@@ -7244,7 +7244,8 @@ function solveWith(doc, opts, seed, pre) {
  * прежней геометрии со сдвигом. Что изменилось — по самим документам (dirtyAfter), операции —
  * только для вызывающего. Результат — тот же, что у solve(nextDoc) (тесты на случайных правках).
  * Когда так нельзя — честно полная раскладка:
- *   • prevGeo не от solve этого же prevDoc (или уже использована) или другой измеритель/эпоха шрифтов;
+ *   • prevGeo без памяти (обычная solve) или уже использована, другой измеритель/эпоха шрифтов;
+ *     prevDoc — только для вызывающего: прежний документ берётся из памяти prevGeo (круг 57);
  *   • изменились токены, тема доски, узел перешёл на другую доску.
  * Круг 54: документы с экземплярами — тоже по месту: грязные ищутся по общей карте «документ +
  * раскрытые узлы»; правка мастера пачкает все его экземпляры, правка вне экземпляров — ни одного.
@@ -7260,18 +7261,21 @@ function solveWith(doc, opts, seed, pre) {
 function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   const options = opts || {};
   const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
-  if (!memo || memo.doc !== prevDoc || memo.fn !== (options.measureText || null) || memo.epoch !== measureEpochValue) {
+  // круг 57: прежний документ — тот, от которого посчитана prevGeo (память), а не слова вызывающего:
+  // изменения ищутся по самим объектам узлов, поэтому так верно всегда, а цепочка не рвётся, когда
+  // документ состояния пересобран с теми же узлами или геометрия отстала на несколько версий
+  if (!memo || memo.fn !== (options.measureText || null) || memo.epoch !== measureEpochValue) {
     return solve(nextDoc, { ...options, incremental: true });
   }
   // круг 61: правка вне экземпляров и библиотеки — раскрытие то же, общая карта правится на месте
-  const quick = quickAfter(memo, prevDoc, nextDoc);
+  const quick = quickAfter(memo, memo.doc, nextDoc);
   if (quick) return afterDirty(prevGeo, memo, nextDoc, options, memo.ex, memo.nodes, quick.size, quick.dirty);
   // круг 54: раскрытие кешировано по объекту экземпляра и его зависимостям (expandCache), поэтому у
   // нетронутых экземпляров раскрытые узлы — те же объекты, и сравнение по тождеству видит только правку.
   // Круг 62: общая карта памяти собрана от prevDoc (memo.base) и его раскрытия — новая не собирается:
   // изменённые id — по частям раскрытия (changedParts), карта правится на месте
-  const inPlace = !!(memo.nodes && memo.ex && memo.ex.parts && memo.ex.count && memo.base === prevDoc
-    && isObj(prevDoc.nodes) && nextDoc && isObj(nextDoc.nodes));
+  const inPlace = !!(memo.nodes && memo.ex && memo.ex.parts && memo.ex.count && memo.base === memo.doc
+    && memo.doc && isObj(memo.doc.nodes) && nextDoc && isObj(nextDoc.nodes));
   const { ex, merged } = expandAll(nextDoc, !inPlace);
   const parts = inPlace && ex.count;
   const full = (nodes, size) => solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes, size });
@@ -7284,12 +7288,12 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   if (!parts) {
     if (many) return full(merged);
     const half = Math.floor(Object.keys(merged || nextDoc.nodes).length / 2);
-    return afterDirty(prevGeo, memo, nextDoc, options, ex, merged, undefined, dirtyAfter(prevDoc, nextDoc, memo.nodes, merged, half));
+    return afterDirty(prevGeo, memo, nextDoc, options, ex, merged, undefined, dirtyAfter(memo.doc, nextDoc, memo.nodes, merged, half));
   }
-  if (prevDoc.tokens !== nextDoc.tokens || prevDoc.root !== nextDoc.root) return full({ ...nextDoc.nodes, ...ex.nodes });
+  if (memo.doc.tokens !== nextDoc.tokens || memo.doc.root !== nextDoc.root) return full({ ...nextDoc.nodes, ...ex.nodes });
   const M = memo.nodes;
   const out = ex.nodes;
-  const changed = changedParts(memo.ex, prevDoc, nextDoc, ex);
+  const changed = changedParts(memo.ex, memo.doc, nextDoc, ex);
   const getN = (id) => (hasOwnProp.call(out, id) ? out[id] : ownNode(nextDoc.nodes, id));
   let size = memo.size;   // размер карты после правки
   for (const id of changed) {
@@ -7305,6 +7309,20 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
     else delete M[id];
   }
   return afterDirty(prevGeo, memo, nextDoc, options, ex, M, size, dirty);
+}
+
+/**
+ * Круг 57 (SPEC §18.6): следующая раскладка от той, что уже есть, когда вызывающий не держит
+ * прежний документ: отмена и повтор, подтверждение сервера, отложенный кадр догона. Прежний
+ * документ — тот, от которого geo посчитана (память раскладки); нет памяти — полная раскладка.
+ * Результат тот же, что у solve(nextDoc).
+ * @param {object} prevGeo @param {object} nextDoc @param {{measureText?:Function}} [opts]
+ * @returns {object} geo
+ */
+function solveNext(prevGeo, nextDoc, opts) {
+  const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
+  if (memo && memo.doc === nextDoc && memo.fn === ((opts && opts.measureText) || null) && memo.epoch === measureEpochValue) return prevGeo;
+  return solveAfter(prevGeo, null, nextDoc, null, opts);
 }
 
 /**
@@ -13511,7 +13529,7 @@ async function boardPNG(doc, artboardId, opts = {}) {
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
   /* Круг 47 (SPEC §14.4): SVG доски без страницы — снимок для критика агента — */
-  renderSVG, boardPNG, solveAfter, solveCarry, solveShapeCopies, solveMemoMap,
+  renderSVG, boardPNG, solveAfter, solveCarry, solveNext, solveShapeCopies, solveMemoMap,
   /* Круг 31 (K1): большая отмена/правка — пачками в пределах транзакции — */
   splitOps, SPLIT_MAX_OPS, SPLIT_MAX_BYTES,
   /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */
