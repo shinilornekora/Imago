@@ -4186,7 +4186,7 @@ export function artSummary(direction, critique, opts = {}) {
     .filter((x) => x.hex);
   const f = d && d.fonts && typeof d.fonts === 'object' ? d.fonts : {};
   const fonts = [str(f.display, 40), str(f.text, 40)].filter(Boolean).filter((x, i, a) => a.indexOf(x) === i).join(' + ');
-  // круг 47: оценка — о ПЕРВОЙ сборке (после доработки её никто не ставил): у итога цифры нет
+  // круг 47: оценка — о ПЕРВОЙ сборке; круг 52: доработку по снимку критик смотрит ещё раз (after)
   let verdict = '';
   const first = c && (Array.isArray(c.issues) ? str(c.issues[0], 120) : '');
   const score = c && (typeof c.score === 'number' || (typeof c.score === 'string' && c.score.trim()))
@@ -4201,9 +4201,15 @@ export function artSummary(direction, critique, opts = {}) {
         : n ? `Самопроверка: в целом не шаблонно; ${what}` : 'Самопроверка: шаблонных ходов не нашёл';
   } else if (c && score !== null) {
     const s10 = String(score).replace('.', ',');
-    verdict = c.revised ? `Первая сборка — ${s10} из 10 → доработал${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}`
-      : c.verdict === 'revise' ? `Взгляд со стороны: ${s10} из 10, доработка не легла — оставил собранное`
-        : `Взгляд со стороны: ${s10} из 10`;
+    const a = c.after && typeof c.after === 'object' ? c.after : null;
+    const later = a && Number.isFinite(Number(a.score)) && (typeof a.score === 'number' || (typeof a.score === 'string' && a.score.trim()))
+      ? String(Math.round(Math.max(0, Math.min(10, Number(a.score))) * 10) / 10).replace('.', ',') : null;
+    verdict = c.revised && later !== null && later !== s10 ? `Первая сборка — ${s10} из 10 → после доработки ${later} из 10`
+      : c.revised && later !== null ? `Первая сборка — ${s10} из 10 → доработал${a.verdict === 'ok' ? ', критик доволен' : ', оценка та же'}${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}`
+      : c.revised ? `Первая сборка — ${s10} из 10 → доработал${first ? `: ${first.charAt(0).toLowerCase()}${first.slice(1)}` : ''}${c.recheck === 'unchecked' ? ' (доработку не перепроверил)' : ''}`
+        : c.recheck === 'worse' && later !== null ? `Взгляд со стороны: ${s10} из 10, доработка вышла не лучше (${later} из 10) — оставил первую сборку`
+          : c.verdict === 'revise' ? `Взгляд со стороны: ${s10} из 10, доработка не легла — оставил собранное`
+            : `Взгляд со стороны: ${s10} из 10`;
   }
   // при нечитаемом тексте оценка вида не к месту — главное там замечание проверки
   if (opts.blocked && verdict && !(c && c.revised)) verdict = '';
