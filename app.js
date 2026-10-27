@@ -8993,6 +8993,8 @@ function boardThemeGroup(node) {
     const first = document.createElement('option');
     first.value = '';
     first.textContent = 'выбрать экран…';
+    first.disabled = true;
+    first.selected = true;
     sel.appendChild(first);
     for (const src of sources) {
       const o = document.createElement('option');
@@ -9000,11 +9002,12 @@ function boardThemeGroup(node) {
       o.textContent = src.name;
       sel.appendChild(o);
     }
-    sel.setAttribute('aria-label', 'Взять тему другого экрана');
     sel.addEventListener('change', () => {
       const cur = state.doc.nodes[node.id];
       const r = cur && sel.value ? SHELL.copyThemeOps(state.doc, cur, sel.value) : null;
-      if (r) commit(r.ops, r.label); else sel.value = '';
+      if (!r) { sel.value = ''; return; }
+      commit(r.ops, r.label);
+      if (r.replaced) toast(`${r.label}. Вернуть прежнюю — Ctrl+Z.`, 'plain', 6000);
     });
     line.append(name, sel);
     kids.push(line);

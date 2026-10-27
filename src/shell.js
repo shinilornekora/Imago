@@ -4607,37 +4607,64 @@ export function fontChoices() {
 
 /* ------------------------- круг 70: тема с другого экрана ------------------------- */
 
+/** Тема для сравнения: ключи по порядку (тема {colors,type} и {type,colors} — одна и та же). */
+function themeKey(t) {
+  const sort = (v) => (isObj(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sort(v[k])])) : typeof v === 'string' ? v.toLowerCase() : v);
+  return JSON.stringify(t ? sort(t) : null);
+}
+
+/** Имена досок страницы для выбора и истории: повторяющиеся — с номером по порядку («Экран (2)»). */
+function boardLabels(doc) {
+  const root = doc && doc.nodes && doc.nodes[doc.root];
+  const ids = (root && Array.isArray(root.children) ? root.children : []).filter((id) => doc.nodes[id] && doc.nodes[id].type === 'frame' && doc.nodes[id].role !== 'library');
+  const seen = new Map();
+  const total = new Map();
+  for (const id of ids) { const n = String(doc.nodes[id].name || 'Доска').slice(0, 60); total.set(n, (total.get(n) || 0) + 1); }
+  const out = new Map();
+  for (const id of ids) {
+    const n = String(doc.nodes[id].name || 'Доска').slice(0, 60);
+    const k = (seen.get(n) || 0) + 1;
+    seen.set(n, k);
+    out.set(id, total.get(n) > 1 ? `${n} (${k})` : n);
+  }
+  return out;
+}
+
 /**
  * Круг 70 (SPEC §15.8): экраны, чью тему можно взять для этой доски, — доски страницы с годной своей
- * темой, кроме самой доски и экранов с той же темой. @returns {{id: string, name: string}[]}
+ * темой, кроме самой доски и экранов с той же темой; имена повторяются — с номером.
+ * @returns {{id: string, name: string}[]}
  */
 export function themeSources(doc, board) {
   if (!doc || !board) return [];
-  const root = doc.nodes && doc.nodes[doc.root];
-  const mine = JSON.stringify((CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || null);
+  const mine = themeKey((CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || null);
   const out = [];
-  for (const id of (root && Array.isArray(root.children) ? root.children : [])) {
+  for (const [id, name] of boardLabels(doc)) {
     const n = doc.nodes[id];
-    if (!n || id === board.id || n.type !== 'frame' || n.role === 'library') continue;
+    if (id === board.id) continue;
     const t = CORE_NS.boardTheme && CORE_NS.boardTheme(n);
-    if (!t || JSON.stringify(t) === mine) continue;
-    out.push({ id, name: String(n.name || 'Доска').slice(0, 60) });
+    if (!t || themeKey(t) === mine) continue;
+    out.push({ id, name });
   }
   return out;
 }
 
 /**
  * Круг 70 (SPEC §15.8): тема экрана `fromId` — этой доске, одной операцией `set theme` (копия:
- * дальше темы живут порознь). Источник без годной темы, та же доска или та же тема — null.
- * @returns {{ops: object[], label: string}|null}
+ * дальше темы живут порознь). Своя тема доски заменяется — об этом в подписи. Источник без годной
+ * темы, библиотека, та же доска или та же тема — null.
+ * @returns {{ops: object[], label: string, replaced: boolean}|null}
  */
 export function copyThemeOps(doc, board, fromId) {
   const src = doc && doc.nodes && doc.nodes[fromId];
-  if (!board || !board.id || !src || src.id === board.id) return null;
+  if (!board || !board.id || !src || src.id === board.id || src.role === 'library' || src.parent !== doc.root) return null;
   const t = CORE_NS.boardTheme && CORE_NS.boardTheme(src);
   if (!t) return null;
   const mine = CORE_NS.boardTheme && CORE_NS.boardTheme(board);
-  if (mine && JSON.stringify(mine) === JSON.stringify(t)) return null;
-  const name = (n) => `«${String(n.name || 'Доска').slice(0, 40)}»`;
-  return { ops: [OPS.set(board.id, 'theme', JSON.parse(JSON.stringify(t)))], label: `Экран ${name(board)} — в теме экрана ${name(src)}` };
+  if (mine && themeKey(mine) === themeKey(t)) return null;
+  const labels = boardLabels(doc);
+  const name = (n) => `«${labels.get(n.id) || String(n.name || 'Доска').slice(0, 40)}»`;
+  const replaced = !!mine;
+  return { ops: [OPS.set(board.id, 'theme', JSON.parse(JSON.stringify(t)))], replaced,
+    label: `Экран ${name(board)} — в теме экрана ${name(src)}${replaced ? ' (своя тема заменена)' : ''}` };
 }

@@ -91,9 +91,33 @@ test('круг70: в браузере — «как у экрана» берёт 
     assert.equal(await page.locator('#inspector .theme-copy-select').count(), 0, 'та же тема — источника больше нет');
     await page.keyboard.press('Control+z');
     await page.waitForFunction(() => document.querySelectorAll('#inspector .theme-color-row.own').length === 0, null, { timeout: 5000 });
+    assert.equal(await page.locator('#inspector .theme-copy-select').count(), 1, 'после отмены источник снова в выборе');
+    await page.keyboard.press('Control+Shift+z');
+    await page.waitForFunction(() => document.querySelectorAll('#inspector .theme-color-row.own').length === 1, null, { timeout: 5000 });
     assert.deepEqual(errors, [], 'ошибок страницы нет');
   } finally {
     await browser.close();
     srv.close();
   }
+});
+
+test('круг70: своя тема заменяется — сказано; порядок ключей не важен; повторные имена — с номером; библиотека — не источник', () => {
+  let doc = screens();
+  doc = core.applyOps(doc, [core.ops.set('sum', 'theme', { colors: { accent: '#ff4f6d' } })]).doc;
+  const r = copyThemeOps(doc, doc.nodes.sum, 'pay');
+  assert.equal(r.replaced, true);
+  assert.equal(r.label, 'Экран «Итог» — в теме экрана «Оплата» (своя тема заменена)');
+  // та же тема в другом порядке ключей — не источник
+  const swapped = { type: { title: { font: 'Prata' } }, colors: { text: '#E8EAF0', canvas: '#101418' } };
+  doc = core.applyOps(doc, [core.ops.set('sum', 'theme', swapped)]).doc;
+  assert.ok(!themeSources(doc, doc.nodes.sum).some((x) => x.id === 'pay'));
+  assert.equal(copyThemeOps(doc, doc.nodes.sum, 'pay'), null);
+  // два экрана с одним именем — различимы
+  doc = core.applyOps(doc, [core.ops.set('twin', 'name', 'Оплата'), core.ops.set('sum', 'theme', undefined)]).doc;
+  const names = themeSources(doc, doc.nodes.sum).map((x) => x.name);
+  assert.deepEqual(names.sort(), ['Оплата (1)', 'Оплата (2)'].sort());
+  assert.match(copyThemeOps(doc, doc.nodes.sum, 'twin').label, /в теме экрана «Оплата \(2\)»/);
+  const lib = Object.values(doc.nodes).find((n) => n.role === 'library');
+  const withLib = { ...doc, nodes: { ...doc.nodes, [lib.id]: { ...lib, theme: { colors: { canvas: '#000000' } } } } };
+  assert.equal(copyThemeOps(withLib, withLib.nodes.sum, lib.id), null);
 });
