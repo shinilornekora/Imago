@@ -51,10 +51,11 @@
 - Модель без зрения картинок не видит: для образца и цветов — строка цветов (`swatches.js`); критик без зрения не зовётся вовсе (§14.3), это не баг.
 - Новая схема/поле схемы → `SCHEMAS`, промпт в `PROMPTS`, `tools/stub.js` (заглушка отвечает формой), тест `test/brain-r*.test.mjs`.
 - Тема нескольких экранов (круг 72): отказ одного экрана — заметка «пропущен», заметки «правка легла» — только если хоть одна операция вышла; выделение, оставленное агентом (`selectionBy:'agent'`), — не список экранов.
+- `RE.theme` (круг 76): «сделай эти экраны тёмными» и т. п. — оформление, только если экран — прямое дополнение глагола и между ним и цветом одно имя экрана (части — `R76`); `\b` в регулярках с кириллицей не работает (ASCII) — границы через `(?<!\p{L})`, а `rx()` уже ставит `WB` в начало.
 - `downgradeSchema` — для провайдеров, которые не принимают полную JSON Schema (LM Studio): проверяй оба пути.
 
 ## Отладка
-`node --test test/brain.test.mjs test/brain-r36.test.mjs test/brain-r47.test.mjs test/brain-r52.test.mjs`; темы — `test/theme-paths-r69`, `theme-like-r71`, `theme-many-r72`, `theme-except-r74`, `board-names-r75`; образец — `reference-r56`, `moodboard-shot-r60`. В браузере — `dev.html` с `tools/stub.js`.
+`node --test test/brain.test.mjs test/brain-r36.test.mjs test/brain-r47.test.mjs test/brain-r52.test.mjs`; темы — `test/theme-paths-r69`, `theme-like-r71`, `theme-many-r72`, `theme-except-r74`, `board-names-r75`, `theme-words-r76`; образец — `reference-r56`, `moodboard-shot-r60`. В браузере — `dev.html` с `tools/stub.js`.
 
 ## Ссылки
 - SPEC: §1.6, §5, §6, §7, §10.6, §11, §12, §14, §15.3, §17, §19, §20, §21, §22
