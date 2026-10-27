@@ -13124,12 +13124,17 @@ function referenceFromFiles(files, total = files.length) {
 const MOODBOARD_IMAGE = { maxSide: 480, maxBytes: 250 * 1024 };
 
 /** Круг 59: несколько картинок — одной доской-образцом рядом с остальными, выделена целиком. */
-async function insertMoodboard(files, total) {
+async function insertMoodboard(files, total, { at = null, reference = true } = {}) {
   if (!state.doc) return;
+  const docId = state.doc.id;
   const taken = files.slice(0, SHELL.MOODBOARD.max);
   const ready = (await Promise.all(taken.map((f) => prepareImage(f, MOODBOARD_IMAGE)))).map((r, i) => (r ? { ...r, fileName: taken[i].name || '' } : null));
   // пока картинки открывались, человек мог отправить команду — тогда не кладём (правка сорвала бы итог)
-  if (state.running || !state.doc) {
+  if (!state.doc || state.doc.id !== docId) {
+    showMsg('plain', 'Документ сменился, пока открывались картинки', { note: 'Бросьте их снова.', ms: 7000 });
+    return;
+  }
+  if (reference && state.running) {
     showMsg('plain', 'Агент уже работает — образец не положил', { note: 'Вставьте картинки снова, когда он закончит.', ms: 7000 });
     return;
   }
@@ -13140,15 +13145,21 @@ async function insertMoodboard(files, total) {
   }
   const stamp = Date.now().toString(36);
   const r = SHELL.moodboardOps(state.doc, {
-    images: ok, at: nextArtboardPos(artboards(state.doc)), boards: artboards(state.doc).length,
+    images: ok, at: at || nextArtboardPos(artboards(state.doc)), boards: artboards(state.doc).length, name: reference ? 'Образец' : 'Картинки',
     ids: { board: `ab_${stamp}`, images: ok.map((_, i) => `img_${stamp}_${i}`) },
   });
   if (r.error) { showMsg('error', `Образец не положил: ${r.error}`, { ms: 7000 }); return; }
-  const res = commit(r.ops, 'Образец');
+  const res = commit(r.ops, reference ? 'Образец' : 'Картинки');
   if (!res || !res.ok) return;
   setSelection(r.select);
   fitAfterLayout(r.select);
-  const notes = SHELL.moodboardLeftover({ images: files.length, taken: taken.length, failed: taken.length - ok.length, other: total - files.length });
+  const notes = SHELL.moodboardLeftover({ images: files.length, taken: taken.length, failed: taken.length - ok.length, other: total - files.length, into: reference ? 'reference' : 'board' });
+  if (!reference) {
+    showMsg('result', ok.length > 1 ? `${ok.length} ${plural(ok.length, 'картинка легла', 'картинки легли', 'картинок легли')} одной доской` : 'Картинка на макете', {
+      note: `Можно сказать: «собери экран в цветах ${ok.length > 1 ? 'этих картинок' : 'этой картинки'}».${notes ? ` ${notes}` : ''}`, ms: 8000,
+    });
+    return;
+  }
   const lead = ok.length > 1
     ? `${ok.length} ${plural(ok.length, 'картинка легла', 'картинки легли', 'картинок легли')} одной доской и выделены: команда возьмёт их цвета, а новый экран встанет рядом.`
     : 'Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом.';
@@ -13201,12 +13212,89 @@ function onImageDrop(e) {
   if (!files || !files.length) return;
   // любой файл с холста — наш: иначе браузер откроет его вместо редактора
   e.preventDefault();
-  const file = imageFileOf(files);
-  if (!file) {
+  const images = imageFilesOf(files);
+  if (!images.length) {
     showMsg('error', 'Этот файл на макет не ляжет', { note: 'Подойдут картинки PNG, JPEG, GIF и WebP.', ms: 7000 });
     return;
   }
-  insertImageFile(file, { x: e.clientX, y: e.clientY });
+  // круг 63 (SPEC §21.7): несколько картинок на холст — мимо досок мудбордом, на доску — все в неё
+  if (images.length > 1) { dropImages(images, files.length, { x: e.clientX, y: e.clientY }); return; }
+  insertImageFile(images[0], { x: e.clientX, y: e.clientY });
+}
+
+/** Верхняя видимая доска под точкой экрана и мировые координаты точки (позже в списке — выше). */
+function boardUnder(client) {
+  if (!client || !stage || typeof stage.toWorld !== 'function') return { hit: null, at: null };
+  const w = stage.toWorld(client.x, client.y);
+  // скрытая и запертая доски картинку не принимают (imageInsertOps тогда кладёт её новой доской)
+  const hit = artboards(state.doc).slice().reverse().find((a) => {
+    const r = state.geo.rects[a.id];
+    return a.visible !== false && !a.locked && r && w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h;
+  });
+  return { hit: hit || null, at: { x: w.x, y: w.y } };
+}
+
+/** Внутренняя ширина рамки и её угол — для imageInsertOps (круг 55). */
+function frameInner(id) {
+  const r = state.geo.rects[id];
+  const n = nodeById(state.doc, id);
+  if (!r || !n) return null;
+  const pad = n.layout ? resolveLayout(state.doc, n.layout).padding : null;
+  return r.w - (pad ? (Number(pad.l) || 0) + (Number(pad.r) || 0) : 0);
+}
+function frameOrigin(id) { const r = state.geo.rects[id]; return r ? { x: r.x, y: r.y } : null; }
+
+/**
+ * Круг 63 (SPEC §21.7): несколько картинок брошены на холст. Мимо досок — одной доской-мудбордом в точке
+ * броска (как из строки команды, §21.6, но без слов в строке: это не обязательно образец). На доску —
+ * все в неё, одна за другой, одной правкой.
+ */
+async function dropImages(files, total, client) {
+  if (!state.doc) return;
+  const docId = state.doc.id;
+  const { hit, at } = boardUnder(client);
+  if (!hit) { insertMoodboard(files, total, { at, reference: false }); return; }
+  const taken = files.slice(0, SHELL.MOODBOARD.max);
+  // вес одной правки: несколько картинок — каждая меньше, чтобы транзакция не подходила к пределу сервера
+  const each = taken.length > 2 ? { maxSide: 720, maxBytes: Math.floor((2400 * 1024) / taken.length) } : {};
+  const ready = (await Promise.all(taken.map((f) => prepareImage(f, each)))).map((r, i) => (r ? { ...r, fileName: taken[i].name || '' } : null));
+  const ok = ready.filter(Boolean);
+  if (!ok.length) { showMsg('error', 'Картинки не удалось открыть', { note: 'Подойдут PNG, JPEG, GIF и WebP.', ms: 7000 }); return; }
+  // пока картинки открывались, доска могла уйти, запереться или документ смениться
+  const now = state.doc && state.doc.id === docId ? nodeById(state.doc, hit.id) : null;
+  if (!now || now.locked || now.visible === false) {
+    showMsg('plain', 'Доска изменилась, пока открывались картинки', { note: 'Бросьте их снова.', ms: 7000 });
+    return;
+  }
+  const stamp = Date.now().toString(36);
+  const ops = [];
+  const select = [];
+  let draft = state.doc;
+  // геометрия — прежняя: спрашивают только саму доску, а её размер и отступы картинки внутри не меняют;
+  // несколько картинок — не шире половины доски, чтобы не уходили столбом вниз
+  const inner = (id) => { const w = frameInner(id); return w && ok.length > 1 ? Math.max(SHELL.IMAGE_INSERT.minInto, Math.floor(w / 2)) : w; };
+  for (let i = 0; i < ok.length; i++) {
+    const r = SHELL.imageInsertOps(draft, {
+      selection: [hit.id], src: ok[i].src, width: ok[i].width, height: ok[i].height, fileName: ok[i].fileName,
+      at: { x: at.x + i * 24, y: at.y + i * 24 }, ids: { board: `ab_${stamp}_${i}`, image: `img_${stamp}_${i}` },
+      boards: artboards(draft).length, innerWidth: inner, origin: frameOrigin,
+    });
+    if (r.error) { showMsg('error', `Картинку не вставил: ${r.error}`, { ms: 7000 }); return; }
+    // в доску не легло (не должно: доска проверена) — не плодим доски, а кладём мудбордом
+    if (r.into !== hit.id) { insertMoodboard(files, total, { at, reference: false }); return; }
+    const next = applyOps(draft, r.ops);
+    if (next.error) { showMsg('error', `Картинку не вставил: ${opError(next.error)}`, { ms: 7000 }); return; }
+    draft = next.doc;
+    ops.push(...r.ops);
+    select.push(...r.select);
+  }
+  const res = commit(ops, 'Картинки');
+  if (!res || !res.ok) return;
+  setSelection(select);
+  const notes = SHELL.moodboardLeftover({ images: files.length, taken: taken.length, failed: taken.length - ok.length, other: total - files.length, into: 'board' });
+  showMsg('result', `${ok.length} ${plural(ok.length, 'картинка', 'картинки', 'картинок')} на доске «${displayName(hit)}»`, {
+    note: `Отменить все — одним Ctrl+Z.${notes ? ` ${notes}` : ''}`, ms: 8000,
+  });
 }
 
 /**
@@ -13270,29 +13358,16 @@ async function insertImageFile(file, client, { reference = false, more = false }
   // круг 58: образец для команды — всегда своей доской рядом с остальными, не внутрь выделенного
   let selection = reference ? [] : state.selection;
   let at = null;
-  if (client && stage && typeof stage.toWorld === 'function') {
-    const w = stage.toWorld(client.x, client.y);
-    // верхняя видимая доска под точкой (позже в списке — выше на холсте)
-    const hit = artboards(state.doc).slice().reverse().find((a) => {
-      const r = state.geo.rects[a.id];
-      return a.visible !== false && r && w.x >= r.x && w.x <= r.x + r.w && w.y >= r.y && w.y <= r.y + r.h;
-    });
-    selection = hit ? [hit.id] : [];
-    at = { x: w.x, y: w.y };
+  if (client) {
+    const under = boardUnder(client);
+    if (under.at) { selection = under.hit ? [under.hit.id] : []; at = under.at; }
   }
   if (!at) at = nextArtboardPos(artboards(state.doc));
   const stamp = Date.now().toString(36);
   const r = SHELL.imageInsertOps(state.doc, {
     selection, src: ready.src, width: ready.width, height: ready.height, fileName: file.name || '',
     at, ids: { board: `ab_${stamp}`, image: `img_${stamp}` }, boards: artboards(state.doc).length,
-    innerWidth: (id) => {
-      const r = state.geo.rects[id];
-      const n = nodeById(state.doc, id);
-      if (!r || !n) return null;
-      const pad = n.layout ? resolveLayout(state.doc, n.layout).padding : null;
-      return r.w - (pad ? (Number(pad.l) || 0) + (Number(pad.r) || 0) : 0);
-    },
-    origin: (id) => { const r = state.geo.rects[id]; return r ? { x: r.x, y: r.y } : null; },
+    innerWidth: frameInner, origin: frameOrigin,
   });
   if (r.error) { showMsg('error', `Картинку не вставил: ${r.error}`, { ms: 7000 }); return; }
   const res = commit(r.ops, reference ? 'Образец' : 'Картинка');

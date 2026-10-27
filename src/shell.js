@@ -4237,7 +4237,8 @@ export function artSummary(direction, critique, opts = {}) {
  * лишние не кладутся (их число — в `dropped`). Одна картинка — как imageInsertOps без выделения.
  * @param {object} doc
  * @param {{images: {src: string, width: number, height: number, fileName?: string}[], at: {x: number, y: number},
- *   ids: {board: string, images: string[], rows?: string[]}, boards?: number}} o
+ *   ids: {board: string, images: string[], rows?: string[]}, boards?: number, name?: string}} o — name доски
+ *   (по умолчанию «Образец»; круг 63: брошенные на холст — «Картинки»)
  * @returns {{ops: object[], select: string[], into: null, dropped: number}|{error: string}}
  */
 export const MOODBOARD = { cell: 240, tall: 1.5, perRow: 2, gap: 12, pad: 12, max: 4 };
@@ -4262,7 +4263,7 @@ export function moodboardOps(doc, o) {
   const p = MOODBOARD.pad;
   const cols = Math.min(MOODBOARD.perRow, made.length);
   const board = {
-    id: o.ids.board, type: 'frame', name: 'Образец', parent: doc.root, children: [],
+    id: o.ids.board, type: 'frame', name: typeof o.name === 'string' && o.name.trim() ? o.name.trim().slice(0, 60) : 'Образец', parent: doc.root, children: [],
     pos: { x: Math.round(Number(o.at && o.at.x) || 0), y: Math.round(Number(o.at && o.at.y) || 0) },
     size: { w: { mode: 'fixed', value: cols * MOODBOARD.cell + (cols - 1) * MOODBOARD.gap + 2 * p }, h: { mode: 'hug' } },
     layout: { mode: 'column', gap: MOODBOARD.gap, padding: { t: p, r: p, b: p, l: p }, align: 'start', justify: 'start', wrap: false },
@@ -4280,11 +4281,11 @@ export function moodboardOps(doc, o) {
 
 /**
  * Круг 59: что из брошенного или вставленного не легло в мудборд — словами, у каждой причины своя фраза.
- * @param {{images: number, taken: number, failed: number, other: number}} c картинок всего, взято (до max),
- *   из взятых не открылось, файлов не-картинок
+ * @param {{images: number, taken: number, failed: number, other: number, into?: 'reference'|'board'}} c картинок
+ *   всего, взято (до max), из взятых не открылось, файлов не-картинок; куда кладутся — образцом или на холст
  * @returns {string} '' — легло всё
  */
-export function moodboardLeftover({ images = 0, taken = 0, failed = 0, other = 0 } = {}) {
+export function moodboardLeftover({ images = 0, taken = 0, failed = 0, other = 0, into = 'reference' } = {}) {
   const pl = (n, one, few, many) => {
     const a = Math.abs(n) % 100;
     const b = a % 10;
@@ -4292,7 +4293,9 @@ export function moodboardLeftover({ images = 0, taken = 0, failed = 0, other = 0
   };
   const out = [];
   const over = Math.max(0, images - taken);
-  if (over) out.push(`Ещё ${over} ${pl(over, 'картинка не вошла', 'картинки не вошли', 'картинок не вошли')}: в образец идёт до ${MOODBOARD.max}.`);
+  // круг 63: не образец (брошены на холст) — тот же предел, но словами «за раз»
+  const cap = into === 'reference' ? `в образец идёт до ${MOODBOARD.max}` : `за раз кладу до ${MOODBOARD.max}`;
+  if (over) out.push(`Ещё ${over} ${pl(over, 'картинка не вошла', 'картинки не вошли', 'картинок не вошли')}: ${cap}.`);
   if (failed > 0) out.push(`${failed} ${pl(failed, 'картинка не открылась', 'картинки не открылись', 'картинок не открылись')}.`);
   if (other > 0) out.push(`${other} ${pl(other, 'файл — не картинка', 'файла — не картинки', 'файлов — не картинки')}.`);
   return out.join(' ');
