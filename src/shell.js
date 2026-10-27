@@ -4815,7 +4815,7 @@ export function themedBoardsIntent(doc) {
  * @returns {{refs: Array<{id: string, path: string, token: string, value: any}>, ambiguous: number}}
  */
 const HEX_REFS_MEMO = new WeakMap();   // документ → (доска → ответ): инспектор зовёт на каждой перерисовке
-export function boardHexRefs(doc, board) {
+export function boardHexRefs(doc, board, { keepLast = false } = {}) {
   if (!doc || !doc.nodes || !board || board.type !== 'frame' || board.parent !== doc.root || board.role === 'library') return { refs: [], ambiguous: 0 };
   let memo = HEX_REFS_MEMO.get(doc);
   if (!memo) HEX_REFS_MEMO.set(doc, (memo = new Map()));
@@ -4829,7 +4829,8 @@ export function boardHexRefs(doc, board) {
   else {
     const nodes = [];
     out = hexRefsOf(doc, board, nodes);
-    HEX_REFS_LAST.set(board.id, { tokens: doc.tokens, nodes, out });
+    // keepLast: прошлый документ (§15.25) не вытесняет ответ нового — иначе следующая правка обошла бы всё заново
+    if (!keepLast) HEX_REFS_LAST.set(board.id, { tokens: doc.tokens, nodes, out });
   }
   memo.set(board.id, { board, out });
   return out;
@@ -4948,6 +4949,70 @@ export function bindAllColorsOps(doc) {
     ? `Экран «${boards[0].name.slice(0, 40)}»: цвета ${total} ${plural(total, 'слоя', 'слоёв', 'слоёв')} привязаны к палитре`
     : `Цвета ${total} ${plural(total, 'слоя', 'слоёв', 'слоёв')} на ${boards.length} ${plural(boards.length, 'экране', 'экранах', 'экранах')} привязаны к палитре: ${shown}`;
   return { ops, label, boards, ambiguous };
+}
+
+/**
+ * Круг 89 (SPEC §15.25): правка сменила цвет палитры (общий или темы экрана), а слои, окрашенные кодом
+ * прежнего значения, остались прежними — тема их «не заметила». Здесь — такие слои: в прошлом документе
+ * их код равнялся ровно одному цвету палитры (§15.21), этот цвет правка поменяла, а сам код правка не
+ * трогала. Операции привязывают их к токену — в новом документе они пойдут за палитрой.
+ * @returns {{ops: object[], layers: number, boards: Array<{id: string, name: string, n: number}>, tokens: string[]}|null}
+ */
+export function staleHexRefs(prevDoc, nextDoc) {
+  if (!prevDoc || !nextDoc || prevDoc === nextDoc || !prevDoc.nodes || !nextDoc.nodes) return null;
+  // дёшево (зовётся на каждой правке, и на перетаскивании): ни палитра документа, ни тема ни одного
+  // экрана не менялись — и говорить не о чем
+  const sameTokens = prevDoc.tokens === nextDoc.tokens;
+  const kids = (nextDoc.nodes[nextDoc.root] && Array.isArray(nextDoc.nodes[nextDoc.root].children)) ? nextDoc.nodes[nextDoc.root].children : [];
+  if (sameTokens && kids.every((id) => !prevDoc.nodes[id] || !nextDoc.nodes[id] || prevDoc.nodes[id].theme === nextDoc.nodes[id].theme)) return null;
+  const names = boardLabels(nextDoc);
+  const scopeOf = (doc) => (typeof CORE_NS.themeScope === 'function' ? CORE_NS.themeScope(doc) : () => doc);
+  const prevScope = scopeOf(prevDoc);
+  const nextScope = scopeOf(nextDoc);
+  const docNames = (prevDoc.tokens && isObj(prevDoc.tokens.colors) && prevDoc.tokens.colors) || {};
+  const at = (node, path) => path.split('.').reduce((v, k) => (v == null ? undefined : v[k]), node);
+  const ops = [];
+  const boards = [];
+  const tokens = new Set();
+  for (const [id, name] of names) {
+    const was = prevDoc.nodes[id];
+    if (!was || was.type !== 'frame' || was.parent !== prevDoc.root) continue;
+    if (sameTokens && was.theme === nextDoc.nodes[id].theme) continue;
+    const ps = prevScope(id) || prevDoc;
+    const ns = nextScope(id) || nextDoc;
+    const changed = new Set(Object.keys(docNames).filter((k) => {
+      const a = CORE_NS.resolveColor(ps, k);
+      const b = CORE_NS.resolveColor(ns, k);
+      return a && b && a !== b;
+    }));
+    if (!changed.size) continue;
+    const refs = boardHexRefs(prevDoc, was, { keepLast: true }).refs.filter((r) => changed.has(r.token) && nextDoc.nodes[r.id]
+      && JSON.stringify(at(nextDoc.nodes[r.id], r.path)) === JSON.stringify(at(prevDoc.nodes[r.id], r.path)));
+    if (!refs.length) continue;
+    for (const r of refs) { ops.push(OPS.set(r.id, r.path, r.value)); tokens.add(r.token); }
+    boards.push({ id, name, n: new Set(refs.map((r) => r.id)).size });
+  }
+  if (!ops.length) return null;
+  return { ops, layers: boards.reduce((k, b) => k + b.n, 0), boards, tokens: [...tokens] };
+}
+
+/** Круг 89: слова сообщения и строки истории для {@link staleHexRefs}; `words` — имена цветов для человека. */
+export function staleHexPhrase(stale, words = {}) {
+  const n = stale.layers;
+  const one = n === 1;                         // «его» — только об одном слое: «21 слой … их» читается лучше
+  const many = stale.tokens.length > 1;
+  const where = stale.boards.length === 1
+    ? `на экране «${stale.boards[0].name.slice(0, 40)}»`
+    : `на экранах ${stale.boards.slice(0, 3).map((b) => `«${b.name.slice(0, 40)}»`).join(', ')}${stale.boards.length > 3 ? ` и ещё ${stale.boards.length - 3}` : ''}`;
+  const say = (t) => `«${words[t] || t}»`;
+  const what = many ? `кодами прежних цветов ${stale.tokens.slice(0, 4).map(say).join(', ')}` : `кодом прежнего цвета ${say(stale.tokens[0])}`;
+  const fresh = many ? 'новые цвета' : 'новый цвет';
+  return {
+    text: `${n} ${plural(n, 'слой', 'слоя', 'слоёв')} ${where} ${plural(n, 'окрашен', 'окрашены', 'окрашены')} ${what} — ${fresh} ${one ? 'его' : 'их'} не ${many ? 'перекрасили' : 'перекрасил'}`,
+    offer: `Привязать ${one ? 'его' : 'их'} к палитре — и ${one ? 'он пойдёт' : 'они пойдут'} за ${many ? 'новыми цветами' : 'новым цветом'}.`,
+    action: one ? 'Перекрасить и его' : 'Перекрасить и их',
+    label: `Цвета ${n} ${plural(n, 'слоя', 'слоёв', 'слоёв')} ${where} привязаны к палитре — пошли за ${many ? 'новыми цветами' : 'новым цветом'}`,
+  };
 }
 
 /* ------------------------- круг 70: тема с другого экрана ------------------------- */
