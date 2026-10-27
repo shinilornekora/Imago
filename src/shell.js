@@ -4740,6 +4740,29 @@ export function themePartResetOps(board, part) {
   };
 }
 
+/**
+ * Круг 81 (SPEC §15.17): метка «своя тема» у экрана в списке слоёв — по ней видно, какие экраны
+ * не в оформлении документа. Только доска верхнего уровня (не библиотека) с действующей темой.
+ * @returns {{swatch: string|null, colors: number, styles: number, title: string}|null}
+ */
+export function boardThemeBadge(doc, node) {
+  if (!doc || !node || node.type !== 'frame' || node.parent !== doc.root || node.role === 'library') return null;
+  if (node.theme === undefined) return null;
+  const theme = typeof CORE_NS.boardTheme === 'function' ? CORE_NS.boardTheme(node) : null;
+  if (!theme) {
+    return { swatch: null, colors: 0, styles: 0, broken: true, title: 'Тема экрана повреждена и не действует — экран в оформлении документа; «Вернуть общее оформление» в инспекторе её снимет' };
+  }
+  const colors = isObj(theme.colors) ? Object.keys(theme.colors) : [];
+  const styles = isObj(theme.type) ? Object.keys(theme.type) : [];
+  if (!colors.length && !styles.length) return null;
+  const swatch = colors.length ? theme.colors.canvas || theme.colors.accent || theme.colors[colors[0]] : null;
+  const bits = [
+    colors.length ? `${colors.length} ${plural(colors.length, 'цвет', 'цвета', 'цветов')}` : '',
+    styles.length ? `шрифты ${styles.length} ${plural(styles.length, 'стиля', 'стилей', 'стилей')}` : '',
+  ].filter(Boolean).join(', ');
+  return { swatch: swatch || null, colors: colors.length, styles: styles.length, title: `Своя тема экрана: ${bits} — в инспекторе, «Тема экрана»` };
+}
+
 /* ------------------------- круг 70: тема с другого экрана ------------------------- */
 
 /** Тема для сравнения: ключи по порядку (тема {colors,type} и {type,colors} — одна и та же). */
