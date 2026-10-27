@@ -492,6 +492,8 @@ const ICONS = {
   plus: '<path d="M8 3.5v9"/><path d="M3.5 8h9"/>',
   'artboard-add': '<rect x="2" y="2.75" width="8.5" height="10.5" rx="1.5"/><path d="M13 8.5v4.75"/><path d="M10.6 10.9h4.8"/>',
   mic: '<rect x="6" y="2" width="4" height="7.5" rx="2"/><path d="M3.75 7.5A4.25 4.25 0 0 0 12.25 7.5"/><path d="M8 11.75V14"/>',
+  // круг 94: крупная круглая кнопка голоса — капсула залита, иначе тонкий контур теряется в 60 px
+  'mic-solid': '<rect x="5.5" y="1.5" width="5" height="8.25" rx="2.5" fill="currentColor" stroke="none"/><path d="M3.25 7.75a4.75 4.75 0 0 0 9.5 0"/><path d="M8 12.5v2"/>',
   'chevron-left': '<path d="M9.75 3.5 5.25 8l4.5 4.5"/>',
   'chevron-right': '<path d="M6.25 3.5 10.75 8l-4.5 4.5"/>',
   'chevron-down': '<path d="M3.5 6.25 8 10.75l4.5-4.5"/>',
