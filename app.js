@@ -243,7 +243,9 @@ function pixelColors(src) {
   });
 }
 
-async function renderForCritic({ doc, geo, artboardId }) {
+async function renderForCritic({ doc, geo, artboardId, pictures = false }) {
+  // круг 60 (SPEC §22.1): доска из одних картинок (мудборд) — ни шрифтов, ни перемера не нужно
+  if (pictures) return CORE.boardPNG(doc, artboardId, { geo, fonts: false });
   ensureDocFonts(doc);
   // раскладку черновика считали до прихода новых гарнитур: дождаться их и перемерить, иначе снимок
   // рисует настоящий шрифт в чужих переносах строк
@@ -9692,6 +9694,8 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
         history: state.pairs.slice(), geo: state.geo, activeArtboardId: activeArtboardId(),
         selectionBy: state.selectionBy,
         imageColors: imageColorsInPage,
+        // круг 60: снимок мудборда для модели со зрением (критика в вариантах нет)
+        render: renderForCritic,
         ...agentArtOptions(),
       });
       hideStage();
