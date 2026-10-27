@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../src/core.js';
 
-const { createDoc, applyOps, solve, solveAfter, hashGeometry, artboards, libraryNode, expandDoc } = core;
+const { createDoc, applyOps, solve, solveAfter, solveCarry, hashGeometry, artboards, libraryNode, expandDoc } = core;
 const quiet = (fn) => { const w = console.warn; console.warn = () => {}; try { return fn(); } finally { console.warn = w; } };
 const measureText = (text, style) => String(text || '').length * (style.fontSize || 16) * 0.52;
 const OPTS = { measureText };
@@ -65,6 +65,11 @@ function randomOp(r, doc, step) {
   if (k < 0.66) return [{ op: 'create', node: { type: 'instance', id: 'x' + step, parent: 'G', of: 'M' } }];
   if (k < 0.72 && insts.length > 1) return [{ op: 'remove', id: inst() }];
   if (k < 0.78 && insts.length > 1) return [{ op: 'move', id: inst(), parent: 'G', index: Math.floor(r() * insts.length) }];
+  // круг 61: настоящие узлы среди экземпляров — быстрый путь (раскрытие то же)
+  const reals = Object.keys(doc.nodes).filter((id) => /^r\d/.test(id));
+  if (k < 0.82) return [{ op: 'create', node: { type: 'text', id: 'r' + step, parent: 'G', characters: word() } }];
+  if (k < 0.85 && reals.length) return [{ op: 'remove', id: reals[Math.floor(r() * reals.length)] }];
+  if (k < 0.88 && reals.length) return [{ op: 'move', id: reals[0], parent: 'G', index: Math.floor(r() * 5) }];
   if (k < 0.92) return [{ op: 'set', id: 'note', path: 'characters', value: word() }];               // вне экземпляров
   return [{ op: 'set', id: 'G', path: 'size', value: { w: { mode: 'fixed', value: 800 + Math.floor(r() * 800) }, h: { mode: 'hug' } } }];
 }
@@ -371,4 +376,31 @@ test('круг54: перенос предка меняет глубину экз
       geo = inc;
     }
   }
+});
+
+test('круг61: быстрый путь — правка вне экземпляров не раскрывает заново; новый id, совпавший с раскрытым, и solveCarry — обычный путь', () => {
+  const doc = instanceDoc(20);
+  const geo = solve(doc, KEPT);
+  const op = [{ op: 'set', id: 'note', path: 'characters', value: 'Совсем другая подпись' }];
+  const next = applyOps(doc, op).doc;
+  const inc = solveAfter(geo, doc, next, op, OPTS);
+  assert.equal(hashGeometry(inc), hashGeometry(solve(next, PLAIN)));
+  assert.equal(inc.expanded, geo.expanded, 'раскрытие — тот же объект: expandDoc не звали');
+  assert.equal(inc.rects['I5/mt'], geo.rects['I5/mt']);
+  // настоящий узел с id раскрытого («I2/mr») — коллизия: обычный путь, и тот же результат, что у эталона
+  const op2 = [{ op: 'create', node: { type: 'rect', id: 'I2/mr', parent: 'G', size: fx(30, 30) } }];
+  const next2 = applyOps(next, op2).doc;
+  const inc2 = solveAfter(inc, next, next2, op2, OPTS);
+  assert.equal(hashGeometry(inc2), hashGeometry(solve(next2, PLAIN)));
+  // имя (без геометрии) через solveCarry, потом правка текста — карта памяти отстала: обычный путь, верно
+  const g3 = solve(doc, KEPT);
+  const renamed = applyOps(doc, [{ op: 'set', id: 'note', path: 'name', value: 'Подпись' }]).doc;
+  solveCarry(g3, doc, renamed);
+  const op4 = [{ op: 'set', id: 'note', path: 'characters', value: 'После переименования' }];
+  const next4 = applyOps(renamed, op4).doc;
+  assert.equal(hashGeometry(solveAfter(g3, renamed, next4, op4, OPTS)), hashGeometry(solve(next4, PLAIN)));
+  // новая доска с темой рядом с экземплярами
+  const op5 = [{ op: 'create', node: { type: 'frame', id: 'T', parent: doc.root, pos: { x: 3000, y: 0 }, children: [], size: hug, theme: { type: { body: { fontWeight: 700 } } } } }];
+  const r5 = applyOps(next, op5);
+  if (!r5.error) assert.equal(hashGeometry(solveAfter(solve(next, KEPT), next, r5.doc, op5, OPTS)), hashGeometry(solve(r5.doc, PLAIN)));
 });
