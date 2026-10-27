@@ -21,7 +21,7 @@ import {
 } from './core.js';
 // круг 25: cutText/cleanText появляются в core параллельно — берём оттуда, если уже есть
 import * as CORE_NS from './core.js';
-import { recognizeAction } from './brain.js';
+import { recognizeAction, RE_IMAGE_REF } from './brain.js';
 // круг 41: причины отброшенного — одна истина со словами реплики (§9.10)
 import { DROP_WORDS } from './sync.js';
 
@@ -4227,6 +4227,39 @@ export function artSummary(direction, critique, opts = {}) {
     break;
   }
   return { concept, conceptShort, swatches, fonts, families: [str(f.display, 40), str(f.text, 40)].filter((x, i, a) => x && a.indexOf(x) === i), verdict, line };
+}
+
+/**
+ * Круг 58 (SPEC §21.5): картинка, вставленная в строку команды, — образец для этой команды. Она ложится
+ * на макет отдельной доской (её цвета видит арт-директор, модели со зрением — её саму), а в строке
+ * появляются слова об образце, если их там ещё нет: команда без них образца не берёт (§21).
+ * Пустая строка — готовая команда «собери экран в цветах этой картинки» с выделенным словом «экран»:
+ * человек впечатывает свой предмет поверх. Строка с «/» — команда оболочки, её не трогаем.
+ * @param {string} value текст строки команды
+ * @returns {{value: string, caret: number, caretEnd?: number}}
+ */
+export const REFERENCE_WORDS = 'в цветах этой картинки';
+export function referenceCommandText(value) {
+  const text = String(value == null ? '' : value);
+  if (RE_IMAGE_REF.test(text) || text.trim().startsWith('/')) return { value: text, caret: text.length };
+  const head = text.replace(/[\s,.;:—–-]+$/u, '');
+  if (!head.trim()) {
+    const v = `собери экран ${REFERENCE_WORDS}`;
+    return { value: v, caret: 7, caretEnd: 12 };
+  }
+  const value2 = `${head} ${REFERENCE_WORDS}`;
+  return { value: value2, caret: value2.length };
+}
+
+/**
+ * Круг 58: текст, который браузер кладёт в буфер вместе с картинкой, — имя файла или адрес, а не
+ * слова человека: одна строка, кончается расширением картинки, или один адрес.
+ */
+export function clipboardTextIsLabel(text) {
+  const t = String(text == null ? '' : text).trim();
+  if (!t || /[\r\n]/.test(t)) return false;
+  if (/^(?:https?:\/\/|data:image\/|file:\/\/)\S+$/iu.test(t)) return true;
+  return /\.(?:png|jpe?g|gif|webp|heic|heif|bmp|tiff?|avif)$/iu.test(t) && t.length <= 255;
 }
 
 /**

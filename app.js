@@ -21,7 +21,7 @@ import {
   ensureLibraryOps, ensureScaleRefsOps,
 } from './src/core.js';
 import * as CORE from './src/core.js';
-import { makeProvider, runCommand, runVariants } from './src/brain.js';
+import { makeProvider, runCommand, runVariants, RE_IMAGE_REF } from './src/brain.js';
 /* Круг 53 (SPEC §20): цвета картинок документа для арт-директора — пиксели считает страница. */
 import { paletteFromPixels, srcKey, SWATCH_LIMITS } from './src/swatches.js';
 /* Круг 22 (SPEC §9.5): клиент-реплика. Документ в серверном режиме живёт в ней, а не в
@@ -316,6 +316,13 @@ async function boot() {
   globalThis.addEventListener('paste', onImagePaste);
   dom.canvas.addEventListener('dragover', onImageDragOver);
   dom.canvas.addEventListener('drop', onImageDrop);
+  // круг 58 (SPEC §21.5): картинка в строке команды — образец для команды (вся полоса команды, с подсветкой)
+  dom.commandbar.addEventListener('dragover', onCommandDragOver);
+  dom.commandbar.addEventListener('dragleave', () => { dom.commandbar.classList.remove('drop-ready'); });
+  dom.commandbar.addEventListener('drop', onCommandDrop);
+  // файл, брошенный мимо холста и строки, браузер не открывает вместо редактора
+  globalThis.addEventListener('dragover', (e) => { if (filesDragged(e)) e.preventDefault(); });
+  globalThis.addEventListener('drop', (e) => { if (filesDragged(e)) e.preventDefault(); });
   stage = new Stage(dom.canvas, {
     // круг 50: шрифты из сети выключены — и в экспорт начертания не встраиваются
     embedFonts: settings.webFonts !== false,
@@ -9608,6 +9615,8 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
       return;
     }
   }
+  // круг 58: команда об образце из строки — образец выделен, даже если выделение успело уйти
+  if (!variants) reselectReference(utterance);
 
   /* Круг 29 (UX Д3): проекта на сервере нет — агенту его не прочитать и не записать.
      Команду не отправляем (она вернулась бы «проект не найден»), а говорим, что делать. */
@@ -13022,11 +13031,83 @@ function editableTarget(t) {
 }
 
 function onImagePaste(e) {
-  if (editableTarget(e.target)) return;   // в поле команды и в инспекторе вставка — их дело
+  // круг 58: картинка в строку команды — образец для команды (текст из буфера — как обычно, в строку)
+  if (e.target === dom.command) {
+    const items = e.clipboardData && e.clipboardData.items;
+    const file = imageFileOf(items);
+    const text = e.clipboardData && typeof e.clipboardData.getData === 'function' ? e.clipboardData.getData('text/plain') : '';
+    const fileItem = Array.from(items || []).some((it) => it && it.kind === 'file');
+    if (!file) {
+      // файл есть, но не из тех картинок (HEIC, PDF…) и текста нет — говорим, а не молчим
+      if (fileItem && !text) {
+        e.preventDefault();
+        showMsg('error', 'Этот файл образцом не станет', { note: 'Подойдут картинки PNG, JPEG, GIF и WebP.', ms: 7000 });
+      }
+      return;
+    }
+    // вместе с картинкой браузер кладёт имя файла или адрес — это не текст человека
+    if (text && !SHELL.clipboardTextIsLabel(text)) return;
+    e.preventDefault();
+    referenceFromFile(file);
+    return;
+  }
+  if (editableTarget(e.target)) return;   // в инспекторе вставка — его дело
   const file = imageFileOf(e.clipboardData && e.clipboardData.items);
   if (!file) return;
   e.preventDefault();
   insertImageFile(file, null);
+}
+
+function filesDragged(e) {
+  const types = e && e.dataTransfer ? Array.from(e.dataTransfer.types || []) : [];
+  return types.includes('Files');
+}
+
+function onCommandDragOver(e) {
+  if (!filesDragged(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  dom.commandbar.classList.add('drop-ready');
+}
+
+/** Круг 58: файл, брошенный на полосу команды, — тоже образец; не картинка — браузер его не открывает. */
+function onCommandDrop(e) {
+  dom.commandbar.classList.remove('drop-ready');
+  const files = e.dataTransfer && e.dataTransfer.files;
+  if (!files || !files.length) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const file = imageFileOf(files);
+  if (!file) {
+    showMsg('error', 'Этот файл образцом не станет', { note: 'Подойдут картинки PNG, JPEG, GIF и WebP.', ms: 7000 });
+    return;
+  }
+  referenceFromFile(file, files.length > 1);
+}
+
+/* Круг 58 (SPEC §21.5): образец, положенный из строки команды, — команда его помнит: если до отправки
+   выделение ушло (щелчок по холсту, Esc), образец выделяется снова, раз о нём говорят слова. */
+let pendingReference = null;
+
+/** Образец из строки команды. Пока агент работает — нет: правка документа под ним сорвала бы его итог. */
+function referenceFromFile(file, more = false) {
+  if (state.running) {
+    showMsg('plain', 'Агент ещё работает — образец положу после', {
+      note: 'Вставьте картинку снова, когда он закончит: правка документа сейчас сорвала бы его итог.', ms: 7000,
+    });
+    return;
+  }
+  insertImageFile(file, null, { reference: true, more });
+}
+
+/** Перед отправкой команды: слова об образце есть, а выделение ушло — вернуть его на образец. */
+function reselectReference(utterance) {
+  const ref = pendingReference;
+  pendingReference = null;
+  if (!ref || !state.doc || !nodeById(state.doc, ref) || !RE_IMAGE_REF.test(utterance)) return;
+  if (state.selection.length === 1 && state.selection[0] === ref) return;
+  setSelection([ref]);
+  toast('Образец снова выделен: команда о нём', 'plain', 4000);
 }
 
 function onImageDragOver(e) {
@@ -13092,7 +13173,7 @@ function prepareImage(file) {
   });
 }
 
-async function insertImageFile(file, client) {
+async function insertImageFile(file, client, { reference = false, more = false } = {}) {
   if (!state.doc) return;
   const ready = await prepareImage(file);
   if (!ready) {
@@ -13100,7 +13181,8 @@ async function insertImageFile(file, client) {
     return;
   }
   // брошена на доску — в эту доску; мимо досок — новой доской на месте броска; вставка — по выделению
-  let selection = state.selection;
+  // круг 58: образец для команды — всегда своей доской рядом с остальными, не внутрь выделенного
+  let selection = reference ? [] : state.selection;
   let at = null;
   if (client && stage && typeof stage.toWorld === 'function') {
     const w = stage.toWorld(client.x, client.y);
@@ -13127,10 +13209,27 @@ async function insertImageFile(file, client) {
     origin: (id) => { const r = state.geo.rects[id]; return r ? { x: r.x, y: r.y } : null; },
   });
   if (r.error) { showMsg('error', `Картинку не вставил: ${r.error}`, { ms: 7000 }); return; }
-  const res = commit(r.ops, 'Картинка');
+  const res = commit(r.ops, reference ? 'Образец' : 'Картинка');
   if (!res || !res.ok) return;
   setSelection(r.select);
   if (!r.into) fitAfterLayout(r.select);
+  if (reference) {
+    pendingReference = r.select[0] || null;
+    const before = dom.command.value;
+    const next = SHELL.referenceCommandText(before);
+    if (next.value !== before) {
+      dom.command.value = next.value;
+      dom.command.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    dom.command.focus();
+    try { dom.command.setSelectionRange(next.caret, next.caretEnd != null ? next.caretEnd : next.caret); } catch { /* поле без выделения */ }
+    const typed = before.trim() && !before.trim().startsWith('/');
+    showMsg('result', 'Образец на макете', {
+      note: `Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом. ${typed ? 'Команда готова — отправьте или поправьте.' : 'Впишите, что собрать, вместо «экран».'}${more ? ' Взял первую картинку из брошенных.' : ''}`,
+      ms: 9000,
+    });
+    return;
+  }
   showMsg('result', 'Картинка на макете', { note: 'Можно сказать: «собери экран в цветах этой картинки».', ms: 8000 });
 }
 
