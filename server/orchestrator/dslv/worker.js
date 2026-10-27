@@ -67,7 +67,7 @@ function proxyProvider(id, vision) {
             content: Array.isArray(m.content) ? m.content.map(partOf) : String(m.content == null ? '' : m.content),
           })),
           schema: name ? { ref: name } : schema,
-          opts: pick(opts, ['temperature', 'maxTokens', 'modelTier']),
+          opts: pick(opts, ['temperature', 'maxTokens', 'modelTier', 'stage']),
         });
       }).then((reply) => {
         for (const u of reply.usage || []) {
