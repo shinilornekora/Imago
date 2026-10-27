@@ -36,10 +36,12 @@ test('круг85: коды, совпавшие с палитрой, — к то�
   const doc = screen(null);
   const { refs, ambiguous } = boardHexRefs(doc, doc.nodes.B);
   const by = Object.fromEntries(refs.map((r) => [`${r.id}:${r.path}`, r.token]));
-  assert.deepEqual(by, { 'B:fill': 'surface', 'btn:fill': 'accent', 'btn:stroke.color': 'line', 'btn:states.hover.fill': 'accentInk', 'bt:color': 'onAccent', 'h:color': 'text' });
+  assert.deepEqual(by, { 'B:fill': 'surface', 'btn:fill': 'accent', 'btn:stroke.color': 'line', 'btn:states.hover.fill': 'accentInk', 'bt:color': 'onAccent', 'h:color': 'text',
+    // круг 95 (§15.29): и стопы градиента
+    'g:fill.gradient.stops.0': 'accent', 'g:fill.gradient.stops.1': 'surface' });
   assert.equal(ambiguous, 0);
   const r = bindBoardColorsOps(doc, doc.nodes.B);
-  assert.equal(r.label, 'Экран «Оплата»: цвета 4 слоёв привязаны к палитре');
+  assert.equal(r.label, 'Экран «Оплата»: цвета 5 слоёв привязаны к палитре');
   const after = core.applyOps(doc, r.ops);
   assert.equal(after.error, undefined, JSON.stringify(after.error));
   for (const [k] of Object.entries(by)) {
@@ -48,7 +50,7 @@ test('круг85: коды, совпавшие с палитрой, — к то�
   }
   assert.deepEqual(after.doc.nodes.h.color, { token: 'text' }, 'форма {color} → {token}');
   assert.equal(after.doc.nodes.odd.fill, '#123456', 'цвета вне палитры — как были');
-  assert.deepEqual(after.doc.nodes.g.fill, doc.nodes.g.fill, 'градиент не трогаем');
+  assert.deepEqual(after.doc.nodes.g.fill.gradient.stops, [{ at: 0, token: 'accent' }, { at: 1, token: 'surface' }], 'круг 95: стопы градиента — к токену');
   assert.equal(bindBoardColorsOps(after.doc, after.doc.nodes.B), null, 'второй раз — нечего');
 });
 
@@ -127,7 +129,7 @@ test('круг85: в браузере — экран с цветами кодо�
     await page.locator('#layers .layer[data-id="B"]').click();
     const btn = page.locator('#inspector .theme-hex button');
     await btn.waitFor({ timeout: 5000 });
-    assert.match(await page.locator('#inspector .theme-hex .note').innerText(), /^4 слоя окрашены кодом цвета/);
+    assert.match(await page.locator('#inspector .theme-hex .note').innerText(), /^5 слоёв окрашены кодом цвета/);
     await btn.click();
     await page.waitForFunction(() => !document.querySelector('#inspector .theme-hex'), null, { timeout: 5000 });
     await page.keyboard.press('Control+z');
