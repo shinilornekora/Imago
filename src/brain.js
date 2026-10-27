@@ -1180,6 +1180,8 @@ export const SCHEMAS = {
         board: { type: 'boolean' },
         boardName: { type: 'string' },
         reset: { type: 'boolean' },
+        /* Круг 71 (SPEC §15.8): «сделай этот экран как «Оплата»» — тема экрана-образца копией. */
+        likeBoard: { type: 'string' },
         colors: {
           type: 'array',
           maxItems: 24,
@@ -2264,7 +2266,9 @@ export const PROMPTS = {
   остальные доски не изменятся. Имена — ТЕ ЖЕ токены документа (canvas, surface, text, accent…):
   слои доски на них уже ссылаются. Кегли, интерлиньяж, шкалы, движение и тени у доски свои не
   бывают — при board:true их не пиши. «Верни этому экрану общее оформление» — {board:true, reset:true}.
-  Назвал экран по имени — boardName: "<имя>". Тёмный (или иной) экран — ПОЛНАЯ палитра: canvas,
+  Назвал экран по имени — boardName: "<имя>". «Сделай этот экран как «Оплата»», «оформи так же, как
+  экран X» — {board:true, likeBoard:"<имя экрана-образца>"}: его тема ляжет копией (colors и type к ней
+  добавляй, только если просят что-то ещё). Тёмный (или иной) экран — ПОЛНАЯ палитра: canvas,
   surface, surfaceAlt, text, muted, line, accentSoft, onAccent (те, что есть в документе), не один фон:
   иначе карточки и подписи останутся светлыми и текст пропадёт.
 - «Перекрась вот эту карточку, остальное не трогай» (часть экрана, не доска целиком) — НЕ задача
@@ -11009,11 +11013,14 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const all = boardIds(doc);
   const label = (id) => cutText(strOf(nodeOf(doc, id) && nodeOf(doc, id).name) || 'Доска', 40);
   let boardId = null;
+  const byName = (asked) => {
+    const low = asked.toLowerCase().replace(/^экран[а-я]*\s+/u, '').replace(/[«»"]/g, '').trim();
+    return all.find((id) => strOf(nodeOf(doc, id).name).trim().toLowerCase() === low)
+      || all.find((id) => low && strOf(nodeOf(doc, id).name).trim().toLowerCase().includes(low)) || null;
+  };
   const asked = typeof theme.boardName === 'string' ? theme.boardName.trim() : '';
   if (asked) {
-    const low = asked.toLowerCase().replace(/^экран\s+/u, '').replace(/[«»"]/g, '').trim();
-    boardId = all.find((id) => strOf(nodeOf(doc, id).name).trim().toLowerCase() === low)
-      || all.find((id) => strOf(nodeOf(doc, id).name).trim().toLowerCase().includes(low)) || null;
+    boardId = byName(asked);
     if (!boardId) throw ERR('schema', `Экран «${cutText(asked, 40)}» не найден — назовите его, как на холсте, или выделите доску`);
   } else {
     const ids = scope ? [...(Array.isArray(scope.ids) ? scope.ids : []), ...(scope.containerId ? [scope.containerId] : [])] : [];
@@ -11026,11 +11033,28 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
     if (!boardId) throw ERR('schema', 'Тема одного экрана: непонятно, какого — выделите доску или слой на ней');
   }
   const board = nodeOf(doc, boardId);
+  // круг 71 (SPEC §15.8): «как у экрана X» — тема образца копией (поверх — сказанные цвета и шрифты)
+  const like = typeof theme.likeBoard === 'string' ? theme.likeBoard.trim() : '';
+  let likeId = null;
+  let likeTheme = null;
+  if (like && theme.reset !== true) {
+    likeId = byName(like);
+    if (!likeId) throw ERR('schema', `Экран «${cutText(like, 40)}» не найден — назовите образец, как на холсте`);
+    if (likeId === boardId) throw ERR('schema', `Экран «${label(boardId)}» и есть образец — назовите другой, с которого взять оформление`);
+    likeTheme = engine && engine.boardTheme ? engine.boardTheme(nodeOf(doc, likeId)) : null;
+    const extra = asArray(theme.colors).length || asArray(theme.type).length;
+    if (!likeTheme && !extra) {
+      // образец — в оформлении документа: «как он» значит «верни общее»
+      if (board.theme === undefined) throw ERR('schema', `Экран «${label(likeId)}» в оформлении документа, и этот тоже — менять нечего`);
+      return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: undefined })];
+    }
+  }
   if (theme.reset === true) {
     if (board.theme === undefined) throw ERR('schema', 'У этого экрана своей темы и так нет — он в оформлении документа');
     return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: undefined })];
   }
-  const cur = engine && engine.boardTheme ? engine.boardTheme(board) : (board.theme && typeof board.theme === 'object' ? board.theme : null);
+  const mineTheme = engine && engine.boardTheme ? engine.boardTheme(board) : (board.theme && typeof board.theme === 'object' ? board.theme : null);
+  const cur = likeId ? likeTheme : mineTheme;
   const next = { colors: { ...((cur && cur.colors) || {}) }, type: JSON.parse(JSON.stringify((cur && cur.type) || {})) };
   const docColors = (doc.tokens && doc.tokens.colors) || {};
   const docTypes = (doc.tokens && doc.tokens.type) || {};
@@ -11093,7 +11117,7 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
     note(`У одного экрана свои только цвета и шрифты: ${what.join(', ')} — ${many ? 'общие' : 'общее'} для документа, ${many ? 'пропущены' : 'пропущено'}.`
       + ` Чтобы поменять ${many ? 'их' : 'это'} на экране «${label(boardId)}», скажите, каким слоям`);
   }
-  if (!changed) throw ERR('schema', 'Модель не предложила ни одного корректного изменения темы экрана');
+  if (!changed && !likeId) throw ERR('schema', 'Модель не предложила ни одного корректного изменения темы экрана');
   if (!Object.keys(next.colors).length) delete next.colors;
   if (!Object.keys(next.type).length) delete next.type;
   const bad = engine && engine.themeProblem ? engine.themeProblem(next) : null;
@@ -11112,6 +11136,14 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   }
   // круг 69 (SPEC §15.4): у экрана уже есть тема — правка по путям (theme.colors.<имя>, theme.type.<стиль>):
   // правка человека в инспекторе (§15.6) другого цвета той же доски за время команды не затирается
+  if (likeId) {
+    // копия образца — одной операцией: своя тема этого экрана заменяется
+    const canon = (v) => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((q) => [q, x[q]])) : typeof x === 'string' ? x.toLowerCase() : x));
+    const same = canon(mineTheme || null) === canon(Object.keys(next).length ? next : null);
+    if (same) throw ERR('schema', `Экран «${label(boardId)}» уже в оформлении экрана «${label(likeId)}» — менять нечего`);
+    if (mineTheme) note(`Своя тема экрана «${label(boardId)}» заменена оформлением экрана «${label(likeId)}» — вернуть прежнюю можно отменой`);
+    return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: Object.keys(next).length ? next : undefined })];
+  }
   if (!cur) return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: next })];
   if (!touchedColors.size && !touchedTypes.size) throw ERR('schema', `Экран «${label(boardId)}» уже в этих цветах и шрифтах — менять нечего`);
   return [
@@ -13822,6 +13854,8 @@ function hasEdits(data, intent) {
   if (intent === 'theme') {
     // круг 48: «верни экрану общее оформление» — правка без списков
     if (data.board === true && data.reset === true) return true;
+    // круг 71: «как у экрана X» — тоже правка без списков
+    if (data.board === true && typeof data.likeBoard === 'string' && data.likeBoard.trim()) return true;
     return ['colors', 'type', 'spacing', 'radii'].some((k) => Array.isArray(data[k]) && data[k].length > 0);
   }
   if (intent === 'illustration') return [data.parts, data.details, data.shapes].some((v) => Array.isArray(v) && v.length > 0);
