@@ -12118,6 +12118,18 @@ function applyShellIntent(intent, said) {
       return true;
     }
     case 'bind-colors': {
+      // круг 87 (§15.23): все экраны разом — одна правка, одна отмена
+      if (intent.all) {
+        const r = SHELL.bindAllColorsOps(state.doc);
+        if (!r.ops.length) {
+          toast(`Ни на одном экране нет цветов кодом, равных цветам палитры${r.ambiguous ? ` (неоднозначных — ${r.ambiguous}: у палитры два цвета с таким значением)` : ''}.`, 'plain', 6000);
+          return true;
+        }
+        const res = commit(r.ops, r.label, 'human', { quiet: true });
+        if (res && res.ok === false) return true;
+        toast(r.label, 'plain', 6000);
+        return true;
+      }
       // круг 86 (§15.22): экран — активная доска (у выделения — его доска)
       // выделение в библиотеке активной доски не меняет — молча правили бы чужой экран
       if (state.selection[0] && inLibrary(state.selection[0])) {
