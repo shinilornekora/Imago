@@ -177,7 +177,8 @@ export function createRenderer(opts = {}) {
     // внешних картинок сервер не тянет — плашкой (критику об этом сказано)
     const out = renderSVG(doc, artboardId, { geo, maxHeight: SHOT_H / k, externalImages: 'placeholder' });
     if (!out || !out.svg) return null;
-    const need = [...new Set([...out.families, DEFAULT_FONT])];
+    // круг 60: на доске нет текста (мудборд из картинок) — шрифты не нужны, в сеть не ходим
+    const need = /<text[\s>]/.test(out.svg) ? [...new Set([...out.families, DEFAULT_FONT])] : [];
     const lists = await untilAbort(Promise.all(need.map((n) => family(n, out.weights[n]))), signal);
     if (!lists) return null;
     // семейство доски не пришло — снимок нарисовал бы его чужим шрифтом и обманул критика

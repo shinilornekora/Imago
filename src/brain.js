@@ -12752,28 +12752,53 @@ export const MOODBOARD_SHOT_MS = 8000;
 
 /**
  * Круг 60 (SPEC §22.1): образец — доска из нескольких картинок (мудборд, §21.6). Модели со зрением
- * показывается снимок всей доски тем же рисовальщиком, что у критика (браузер или сервер). Нет
- * рисовальщика, снимок не успел, обрезан, с плашками вместо картинок или слишком велик — null:
- * тогда показывается одна картинка с пометкой «одна из N» (§22).
+ * показывается снимок всей доски тем же рисовальщиком, что у критика (браузер или сервер), с пометкой
+ * `pictures: true` (на доске одни картинки — шрифтов не ждать). Снимок — только когда выделение
+ * показывает доску целиком: сама доска или все её картинки; часть картинок или несколько досок — нет.
+ * Нет рисовальщика, не успел (рисование тогда прерывается), с плашками вместо картинок, обрезан или
+ * слишком велик — null: показывается одна картинка с пометкой «одна из N» (§22). Один снимок на команду
+ * и её варианты (`shared` — общее состояние зрения, §22).
  * @returns {Promise<{mime: string, data: string, of: number, board: true}|null>}
  */
-async function moodboardShot({ render, doc, selection, geo, signal, serviceNote, of }) {
+async function moodboardShot({ render, doc, selection, geo, signal, serviceNote, of, shared }) {
   if (typeof render !== 'function') return null;
-  const first = asArray(selection).find((id) => nodeOf(doc, id));
-  const boardId = first ? artboardOf(doc, first) || first : null;
-  if (!boardId || !picturesOnly(doc, [boardId])) return null;
+  const sel = asArray(selection).filter((id) => nodeOf(doc, id));
+  const boards = new Set(sel.map((id) => artboardOf(doc, id) || id));
+  if (boards.size !== 1) return null;
+  const [boardId] = boards;
+  if (!picturesOnly(doc, [boardId]) || imageSources(doc, [boardId], geo).length !== of) return null;
+  const key = `${boardId}:${of}`;
+  if (shared && shared.shot && shared.shot.key === key && shared.shot.doc === doc) return shared.shot.promise;
+  const promise = takeMoodboardShot({ render, doc, geo, boardId, signal, serviceNote, of });
+  if (shared) shared.shot = { key, doc, promise };
+  return promise;
+}
+
+async function takeMoodboardShot({ render, doc, geo, boardId, signal, serviceNote, of }) {
+  const note = (m) => { if (typeof serviceNote === 'function') serviceNote(m); };
+  // свой сигнал: срок вышел — рисование прерывается, а не идёт впустую в фоне
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  const stop = () => { if (ctrl) ctrl.abort(); };
+  if (signal) { if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true }); }
   let shot = null;
   try {
-    shot = await raceAbort(Promise.resolve(render({ doc, geo, artboardId: boardId, signal })), signal, MOODBOARD_SHOT_MS,
-      'Снимок образца не успел');
+    shot = await raceAbort(Promise.resolve(render({ doc, geo, artboardId: boardId, signal: ctrl ? ctrl.signal : signal, pictures: true })),
+      signal, MOODBOARD_SHOT_MS, 'Снимок образца не успел');
   } catch (e) {
     if (e instanceof BrainError && e.kind === 'cancelled') throw e;
-    if (typeof serviceNote === 'function') serviceNote(`Снимок образца не получился — модель видит одну картинку из ${of}`);
+    note(`Снимок образца не получился (${factOnly(e && e.message ? e.message : e)}) — модель видит одну картинку из ${of}`);
     return null;
+  } finally {
+    stop();
+    if (signal) signal.removeEventListener('abort', stop);
   }
   if (!shot || typeof shot.data !== 'string' || !shot.data || shot.cropped || shot.placeholders) return null;
-  if (shot.data.length > REF_IMAGE_MAX_CHARS) return null;
-  return { mime: strOf(shot.mime) || 'image/png', data: shot.data, of, board: true };
+  const mime = strOf(shot.mime) || 'image/png';
+  if (`data:${mime};base64,`.length + shot.data.length > REF_IMAGE_MAX_CHARS) {
+    note(`Снимок образца слишком большой, чтобы показать его модели, — она видит одну картинку из ${of}`);
+    return null;
+  }
+  return { mime, data: shot.data, of, board: true };
 }
 
 /** Круг 53 (SPEC §20): срок на цвета картинок — декодирование и счёт всех картинок команды вместе. */
@@ -13302,10 +13327,12 @@ async function runCommandCore(options = {}) {
         const pictures = await pictureColors(imageColors, doc, selection, signal, serviceNote, geoNow);
         // круг 56 (SPEC §22): модель видит картинки — образец ей показывается самой картинкой
         // отказ модели от картинки помнится на всю команду и её варианты: не повторяем N раз
-        let seen = provider.vision === true && !(visionState && visionState.refused) ? referenceImage(doc, selection, geoNow, utterance) : null;
+        const seen = provider.vision === true && !(visionState && visionState.refused) ? referenceImage(doc, selection, geoNow, utterance) : null;
         // круг 60 (SPEC §22.1): мудборд — модели показывают снимок всей доски, а не одну из картинок
-        if (seen && seen.of > 1) seen = (await moodboardShot({ render, doc, selection, geo: geoNow, signal, serviceNote, of: seen.of })) || seen;
-        const ref = seen && seen.data ? seen : null;
+        if (seen && seen.of > 1 && typeof render === 'function') emit('direct', 'Смотрю на мудборд');
+        const shot = seen && seen.of > 1 ? await moodboardShot({ render, doc, selection, geo: geoNow, signal, serviceNote, of: seen.of, shared: visionState }) : null;
+        const single = seen && seen.data ? seen : null;
+        const ref = shot || single;
         if (seen && seen.skipped === 'big') serviceNote(`Образец слишком большой, чтобы показать его модели${pictures ? ', — образ по его цветам' : ''}`);
         const directMessages = (img) => [
           { role: 'system', content: PROMPTS.direction({
@@ -13324,14 +13351,22 @@ async function runCommandCore(options = {}) {
               + (img.of > 1 ? ` Это одна из ${img.of} картинок образца — цвета остальных в списке цветов картинок выше; образ — по всем вместе.` : ''), img) },
         ];
         const directOpts = { stage: 'direct', temperature: temperature == null ? 0.8 : temperature };
-        if (ref) emit('direct', ref.board ? 'Смотрю на мудборд' : 'Смотрю на образец');
+        if (ref && !ref.board) emit('direct', 'Смотрю на образец');
         let raw;
+        const refusedBy = (e) => e instanceof BrainError && (visionRefusal(e) || (e.kind === 'model' && e.status >= 500));
         try {
-          raw = await ask(SCHEMAS.direction, directMessages(ref), directOpts);
+          try {
+            raw = await ask(SCHEMAS.direction, directMessages(ref), directOpts);
+          } catch (e) {
+            // круг 60: снимок мудборда не принят (например, велик) — ещё раз одной картинкой, она меньше
+            if (!(ref && ref.board && single && refusedBy(e))) throw e;
+            serviceNote(`Модель не приняла снимок мудборда (${factOnly(e.message)}) — показываю одну картинку из ${single.of}`);
+            raw = await ask(SCHEMAS.direction, directMessages(single), directOpts);
+          }
         } catch (e) {
           /* модель не приняла картинку — тот же вызов без неё: образ решается по цветам образца (§20).
            * 5xx с картинкой — тоже: llama.cpp падает на формате, которого не знает (WebP), не 400. */
-          const refused = e instanceof BrainError && (visionRefusal(e) || (e.kind === 'model' && e.status >= 500));
+          const refused = refusedBy(e);
           if (!ref || !refused) throw e;
           if (visionState) visionState.refused = true;
           serviceNote(`Модель не приняла картинку-образец (${factOnly(e.message)})${pictures ? ' — образ по её цветам' : ' — образ без неё'}`);
@@ -15672,6 +15707,8 @@ async function runVariantsCore(options = {}) {
     direction = true, webFonts = true, artOffBy = null,
     // круг 53: цвета картинок — тем же вариантам (кеш по картинке — у того, кто считает)
     imageColors = null,
+    // круг 60: рисовальщик — только для снимка мудборда (§22.1), один на все варианты; критику — нет
+    render = null,
   } = options;
   const count = Math.max(1, Math.min(6, Number(n) || 3));
   const sharedColors = sharedImageColors(imageColors);
@@ -15778,7 +15815,7 @@ async function runVariantsCore(options = {}) {
       insideVariants: true,
       // общий план приходит готовым: стадия «Планирую» модель уже не зовёт
       ...(shared ? { plan: { ...shared, steps: [...(shared.steps || [])], targets: [...(shared.targets || [])] } } : {}),
-      persona, activeArtboardId, history, geo, modelTier, selectionBy, direction, webFonts, artOffBy, imageColors: sharedColors, visionState,
+      persona, activeArtboardId, history, geo, modelTier, selectionBy, direction, webFonts, artOffBy, imageColors: sharedColors, visionState, render,
       temperature: persona.temperature,
       variantHint: total > 1 ? variantInstruction(persona, index, total, [], others) : '',
       stagePrefix: prefix,
