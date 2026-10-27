@@ -9113,6 +9113,28 @@ function boardThemeGroup(node) {
     note.textContent = 'Шрифты из сети выключены — свой шрифт экрана запишется, но доска нарисует его запасным.';
     kids.push(note);
   }
+  // круг 85 (§15.21): цвета кодом тема не перекрасит — предложить привязать их к палитре (вид прежний)
+  const hex = SHELL.boardHexRefs(state.doc, node);
+  if (hex.refs.length) {
+    const layers = new Set(hex.refs.map((r) => r.id)).size;
+    const box = document.createElement('div');
+    box.className = 'theme-hex';
+    const note = document.createElement('div');
+    note.className = 'note';
+    note.textContent = `${layers} ${plural(layers, 'слой окрашен', 'слоя окрашены', 'слоёв окрашены')} кодом цвета — тема экрана и общие цвета их не перекрасят.`;
+    const bind = document.createElement('button');
+    bind.type = 'button';
+    bind.className = 'btn small';
+    bind.textContent = 'Привязать к палитре';
+    bind.title = 'Каждый такой цвет станет цветом палитры с тем же значением — экран не изменится';
+    bind.addEventListener('click', () => {
+      const cur = state.doc.nodes[node.id];
+      const r = cur ? SHELL.bindBoardColorsOps(state.doc, cur) : null;
+      if (r) commit(r.ops, r.label);
+    });
+    box.append(note, bind);
+    kids.push(box);
+  }
   if (t) {
     const btn = document.createElement('button');
     btn.type = 'button';

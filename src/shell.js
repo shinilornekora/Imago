@@ -4792,6 +4792,112 @@ export function themedBoardsIntent(doc) {
   return { kind: 'select', themed: true, ids, say: `${ids.length > 1 ? 'Выделены экраны со своей темой:' : 'Выделен экран со своей темой'} ${shown}${tail}` };
 }
 
+/**
+ * Круг 85 (SPEC §15.21): цвета экрана, записанные кодом (#hex), тема не перекрашивает — слой держит
+ * не токен, а число. Здесь — такие цвета, которые совпадают ровно с одним цветом палитры, какой её
+ * видит этот экран (с его темой): привязка к токену внешний вид экрана не меняет. Совпало с двумя
+ * токенами — неоднозначно, не трогаем; фактуры и градиенты — тоже. Одна частая пара решается по месту:
+ * у текста «текст» и «на акценте» одного цвета — на акцентной подложке это «на акценте», иначе «текст».
+ * @returns {{refs: Array<{id: string, path: string, token: string, value: any}>, ambiguous: number}}
+ */
+const HEX_REFS_MEMO = new WeakMap();   // документ → (доска → ответ): инспектор зовёт на каждой перерисовке
+export function boardHexRefs(doc, board) {
+  if (!doc || !doc.nodes || !board || board.type !== 'frame' || board.parent !== doc.root || board.role === 'library') return { refs: [], ambiguous: 0 };
+  let memo = HEX_REFS_MEMO.get(doc);
+  if (!memo) HEX_REFS_MEMO.set(doc, (memo = new Map()));
+  if (memo.has(board.id) && memo.get(board.id).board === board) return memo.get(board.id).out;
+  const out = hexRefsOf(doc, board);
+  memo.set(board.id, { board, out });
+  return out;
+}
+
+function hexRefsOf(doc, board) {
+  const out = { refs: [], ambiguous: 0 };
+  const scope = typeof CORE_NS.themeScope === 'function' ? CORE_NS.themeScope(doc) : () => doc;
+  const seen = scope(board.id) || doc;
+  const palette = (seen.tokens && isObj(seen.tokens.colors) && seen.tokens.colors) || {};
+  // только имена палитры документа: токен, который завела одна тема экрана, после «Вернуть общее
+  // оформление» или переноса слоя не разрешился бы — слой стал бы прозрачным
+  const docNames = (doc.tokens && isObj(doc.tokens.colors) && doc.tokens.colors) || {};
+  const byHex = new Map();
+  for (const [name, v] of Object.entries(palette)) {
+    if (!Object.prototype.hasOwnProperty.call(docNames, name)) continue;
+    const hex = typeof v === 'string' && CORE_NS.resolveColor ? CORE_NS.resolveColor(seen, v) : null;
+    if (!hex) continue;
+    if (!byHex.has(hex)) byHex.set(hex, []);
+    byHex.get(hex).push(name);
+  }
+  // подложка текста — ближайшая залитая рамка (сам узел или предок)
+  const bgHex = (node, state) => {
+    // у цвета состояния подложка — заливка того же состояния, если она есть
+    const own = state && isObj(node.states) && isObj(node.states[state[1]]) ? node.states[state[1]].fill : undefined;
+    if (own !== undefined) { const c = CORE_NS.resolveColor(seen, own); if (c) return c; }
+    for (let cur = node, g = 0; cur && g < 64; cur = doc.nodes[cur.parent], g++) {
+      const c = cur.fill !== undefined && CORE_NS.resolveColor ? CORE_NS.resolveColor(seen, cur.fill) : null;
+      if (c) return c;
+      if (cur.id === board.id) break;
+    }
+    return null;
+  };
+  const look = (node, path, v) => {
+    // строка «#…» или {color:'#…'}: токен в {token} уже привязан, градиент и фактура — мимо
+    const raw = typeof v === 'string' ? v : isObj(v) && v.token === undefined && typeof v.color === 'string' && !v.gradient && !v.pattern ? v.color : null;
+    if (typeof raw !== 'string' || raw[0] !== '#') return;
+    // #rrggbbaa с прозрачностью — токен её не хранит; полупрозрачный код оставляем как есть
+    if (/^#[0-9a-f]{8}$/i.test(raw) && !/ff$/i.test(raw)) return;
+    const hex = CORE_NS.resolveColor(seen, raw);
+    const names = hex ? byHex.get(hex) : null;
+    if (!names) return;
+    let name = names.length === 1 ? names[0] : null;
+    if (!name && /^(?:states\.\w+\.)?color$/.test(path) && names.includes('text') && names.includes('onAccent')) {
+      const bg = bgHex(node, /^states\.(\w+)\./.exec(path));
+      name = bg && bg === CORE_NS.resolveColor(seen, 'accent') ? 'onAccent' : 'text';
+    }
+    if (!name) { out.ambiguous++; return; }
+    const value = typeof v === 'string' ? name : (() => { const o = { ...v, token: name }; delete o.color; return o; })();
+    out.refs.push({ id: node.id, path, token: name, value });
+  };
+  const stack = [board.id];
+  const seenIds = new Set();
+  while (stack.length) {
+    const id = stack.pop();
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    const node = doc.nodes[id];
+    if (!node) continue;
+    // контуры вектора — свои заливка и обводка (так их пишут пипетки контуров)
+    if (Array.isArray(node.paths)) node.paths.forEach((p, i) => { if (isObj(p)) { look(node, `paths.${i}.fill`, p.fill); look(node, `paths.${i}.stroke`, p.stroke); } });
+    look(node, 'fill', node.fill);
+    look(node, 'color', node.color);
+    if (isObj(node.stroke) && node.stroke.color !== undefined) look(node, 'stroke.color', node.stroke.color);
+    else look(node, 'stroke', node.stroke);
+    if (isObj(node.states)) {
+      for (const s of STATE_KEYS) {
+        const p = node.states[s];
+        if (!isObj(p)) continue;
+        look(node, `states.${s}.fill`, p.fill);
+        look(node, `states.${s}.color`, p.color);
+        if (isObj(p.stroke) && p.stroke.color !== undefined) look(node, `states.${s}.stroke.color`, p.stroke.color);
+        else look(node, `states.${s}.stroke`, p.stroke);
+      }
+    }
+    // экземпляр рисует мастер из библиотеки: его цвета — у мастера, не здесь
+    if (node.type !== 'instance' && Array.isArray(node.children)) for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i]);
+  }
+  return out;
+}
+
+/** Круг 85: привязать цвета-коды экрана к палитре — одна правка, внешний вид прежний. @returns {{ops: object[], label: string}|null} */
+export function bindBoardColorsOps(doc, board) {
+  const { refs } = boardHexRefs(doc, board);
+  if (!refs.length) return null;
+  const n = new Set(refs.map((r) => r.id)).size;
+  return {
+    ops: refs.map((r) => OPS.set(r.id, r.path, r.value)),
+    label: `Экран «${String(board.name || 'Доска').slice(0, 40)}»: цвета ${n} ${plural(n, 'слоя', 'слоёв', 'слоёв')} привязаны к палитре`,
+  };
+}
+
 /* ------------------------- круг 70: тема с другого экрана ------------------------- */
 
 /** Тема для сравнения: ключи по порядку (тема {colors,type} и {type,colors} — одна и та же). */
