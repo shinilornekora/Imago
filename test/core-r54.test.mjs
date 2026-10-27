@@ -65,7 +65,7 @@ function randomOp(r, doc, step) {
   if (k < 0.66) return [{ op: 'create', node: { type: 'instance', id: 'x' + step, parent: 'G', of: 'M' } }];
   if (k < 0.72 && insts.length > 1) return [{ op: 'remove', id: inst() }];
   if (k < 0.78 && insts.length > 1) return [{ op: 'move', id: inst(), parent: 'G', index: Math.floor(r() * insts.length) }];
-  // круг 59: настоящие узлы среди экземпляров — быстрый путь (раскрытие то же)
+  // круг 60: настоящие узлы среди экземпляров — быстрый путь (раскрытие то же)
   const reals = Object.keys(doc.nodes).filter((id) => /^r\d/.test(id));
   if (k < 0.82) return [{ op: 'create', node: { type: 'text', id: 'r' + step, parent: 'G', characters: word() } }];
   if (k < 0.85 && reals.length) return [{ op: 'remove', id: reals[Math.floor(r() * reals.length)] }];
@@ -378,7 +378,7 @@ test('круг54: перенос предка меняет глубину экз
   }
 });
 
-test('круг59: быстрый путь — правка вне экземпляров не раскрывает заново; новый id, совпавший с раскрытым, и solveCarry — обычный путь', () => {
+test('круг60: быстрый путь — правка вне экземпляров не раскрывает заново; новый id, совпавший с раскрытым, и solveCarry — обычный путь', () => {
   const doc = instanceDoc(20);
   const geo = solve(doc, KEPT);
   const op = [{ op: 'set', id: 'note', path: 'characters', value: 'Совсем другая подпись' }];
