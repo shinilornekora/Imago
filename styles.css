@@ -32,6 +32,7 @@
   --ab-shadow: rgba(0, 0, 0, .55);
   --shadow: 0 18px 50px rgba(0, 0, 0, .45);
   --shadow-soft: 0 6px 18px rgba(0, 0, 0, .3);
+  --sheen: #fff;           /* круг 94: блик на круглых кнопках голоса — подмешивается к поверхности, в обеих темах */
   --radius: 12px;
   --radius-sm: 8px;
   --rail-w: 208px;
@@ -946,7 +947,7 @@ button, input, textarea { font: inherit; color: inherit; }
   position: relative; isolation: isolate;
   width: 60px; height: 60px; flex: none; border-radius: 50%; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
-  background: radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--agent) 82%, #fff), var(--agent) 70%);
+  background: radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--agent) 82%, var(--sheen)), var(--agent) 70%);
   border: none; color: var(--agent-ink);
   box-shadow: 0 10px 26px -8px color-mix(in srgb, var(--agent) 70%, transparent), 0 2px 6px rgba(0, 0, 0, .22);
   transition: transform .15s ease, box-shadow .15s ease;
@@ -2034,7 +2035,7 @@ button.t-action:hover { text-decoration: underline; }
    и знак берёт цвет агента; нажатие — и её место занимает включённый микрофон (#voicebar). */
 .zen-mic {
   align-self: flex-end;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, #fff), var(--panel));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, var(--sheen)), var(--panel));
   color: var(--text);
   border: 1px solid var(--line);
   box-shadow: 0 12px 30px -10px rgba(0, 0, 0, .45), 0 2px 6px rgba(0, 0, 0, .14), inset 0 1px 0 rgba(255, 255, 255, .06);
