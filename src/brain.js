@@ -12747,6 +12747,35 @@ export function referenceImage(doc, selection, geo, utterance) {
   return all.length > 1 ? { mime: m[1], data: m[2], of: all.length } : { mime: m[1], data: m[2] };
 }
 
+/** Круг 60 (SPEC §22.1): срок на снимок мудборда — дольше нельзя: арт-директор ждёт его до своего вызова. */
+export const MOODBOARD_SHOT_MS = 8000;
+
+/**
+ * Круг 60 (SPEC §22.1): образец — доска из нескольких картинок (мудборд, §21.6). Модели со зрением
+ * показывается снимок всей доски тем же рисовальщиком, что у критика (браузер или сервер). Нет
+ * рисовальщика, снимок не успел, обрезан, с плашками вместо картинок или слишком велик — null:
+ * тогда показывается одна картинка с пометкой «одна из N» (§22).
+ * @returns {Promise<{mime: string, data: string, of: number, board: true}|null>}
+ */
+async function moodboardShot({ render, doc, selection, geo, signal, serviceNote, of }) {
+  if (typeof render !== 'function') return null;
+  const first = asArray(selection).find((id) => nodeOf(doc, id));
+  const boardId = first ? artboardOf(doc, first) || first : null;
+  if (!boardId || !picturesOnly(doc, [boardId])) return null;
+  let shot = null;
+  try {
+    shot = await raceAbort(Promise.resolve(render({ doc, geo, artboardId: boardId, signal })), signal, MOODBOARD_SHOT_MS,
+      'Снимок образца не успел');
+  } catch (e) {
+    if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+    if (typeof serviceNote === 'function') serviceNote(`Снимок образца не получился — модель видит одну картинку из ${of}`);
+    return null;
+  }
+  if (!shot || typeof shot.data !== 'string' || !shot.data || shot.cropped || shot.placeholders) return null;
+  if (shot.data.length > REF_IMAGE_MAX_CHARS) return null;
+  return { mime: strOf(shot.mime) || 'image/png', data: shot.data, of, board: true };
+}
+
 /** Круг 53 (SPEC §20): срок на цвета картинок — декодирование и счёт всех картинок команды вместе. */
 export const IMAGE_COLORS_MS = 4000;
 
@@ -13273,7 +13302,9 @@ async function runCommandCore(options = {}) {
         const pictures = await pictureColors(imageColors, doc, selection, signal, serviceNote, geoNow);
         // круг 56 (SPEC §22): модель видит картинки — образец ей показывается самой картинкой
         // отказ модели от картинки помнится на всю команду и её варианты: не повторяем N раз
-        const seen = provider.vision === true && !(visionState && visionState.refused) ? referenceImage(doc, selection, geoNow, utterance) : null;
+        let seen = provider.vision === true && !(visionState && visionState.refused) ? referenceImage(doc, selection, geoNow, utterance) : null;
+        // круг 60 (SPEC §22.1): мудборд — модели показывают снимок всей доски, а не одну из картинок
+        if (seen && seen.of > 1) seen = (await moodboardShot({ render, doc, selection, geo: geoNow, signal, serviceNote, of: seen.of })) || seen;
         const ref = seen && seen.data ? seen : null;
         if (seen && seen.skipped === 'big') serviceNote(`Образец слишком большой, чтобы показать его модели${pictures ? ', — образ по его цветам' : ''}`);
         const directMessages = (img) => [
@@ -13285,12 +13316,15 @@ async function runCommandCore(options = {}) {
             variantHint,
             fontsLocked: webFonts === false,
           }) },
-          { role: 'user', content: img ? imageTurn(`${userTurn}\n\nОбразец приложен картинкой: палитру, материалы и настроение бери с него`
-            + ' (что на нём изображено — не предмет макета, если об этом не просили).'
-            + (img.of > 1 ? ` Это одна из ${img.of} картинок образца — цвета остальных в списке цветов картинок выше; образ — по всем вместе.` : ''), img) : userTurn },
+          { role: 'user', content: !img ? userTurn : img.board
+            ? imageTurn(`${userTurn}\n\nОбразец приложен снимком доски из ${img.of} картинок (мудборд): палитру, материалы и настроение`
+              + ' бери со всех вместе (что на них изображено — не предмет макета, если об этом не просили).', img)
+            : imageTurn(`${userTurn}\n\nОбразец приложен картинкой: палитру, материалы и настроение бери с него`
+              + ' (что на нём изображено — не предмет макета, если об этом не просили).'
+              + (img.of > 1 ? ` Это одна из ${img.of} картинок образца — цвета остальных в списке цветов картинок выше; образ — по всем вместе.` : ''), img) },
         ];
         const directOpts = { stage: 'direct', temperature: temperature == null ? 0.8 : temperature };
-        if (ref) emit('direct', 'Смотрю на образец');
+        if (ref) emit('direct', ref.board ? 'Смотрю на мудборд' : 'Смотрю на образец');
         let raw;
         try {
           raw = await ask(SCHEMAS.direction, directMessages(ref), directOpts);
