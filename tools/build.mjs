@@ -46,7 +46,7 @@ const defaultsFor = (serverMode) => (serverMode
 </script>
 `);
 /** Модули клиента: всё, что app.js импортирует из src/ (test/deploy.test.mjs сверяет список). */
-const SRC_MODULES = ['core.js', 'brain.js', 'fonts.js', 'sync.js', 'agent.js', 'shell.js'];
+const SRC_MODULES = ['core.js', 'brain.js', 'fonts.js', 'swatches.js', 'sync.js', 'agent.js', 'shell.js'];
 writeFileSync(join(dist, 'index.html'), fullDoc({ top: defaultsFor(false) }), 'utf8');
 for (const f of ['styles.css', 'app.js']) copyFileSync(join(root, f), join(dist, f));
 for (const f of SRC_MODULES) copyFileSync(join(root, 'src', f), join(dist, 'src', f));

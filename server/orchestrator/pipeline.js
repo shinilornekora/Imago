@@ -467,7 +467,10 @@ export function createPipeline(deps) {
           }
           // круг 47: модель отвергла запрос со снимком — картинок она не видит, больше не шлём
           if (hasImage(messages) && visionRefusal(e)) {
-            adminHint('vision', 'модель отвергла запрос со снимком доски — самопроверка идёт по приметам шаблона; если модель картинок не видит, задайте LLM_VISION=0');
+            // круг 56: картинку шлёт и арт-директор (образец), не только критик (снимок доски)
+            adminHint('vision', opts && opts.stage === 'direct'
+              ? 'модель отвергла запрос с картинкой-образцом — арт-директор решает образ по её цветам; если модель картинок не видит, задайте LLM_VISION=0'
+              : 'модель отвергла запрос со снимком доски — самопроверка идёт по приметам шаблона; если модель картинок не видит, задайте LLM_VISION=0');
           }
           // наружу из главного потока — только очищенный текст
           throw Object.assign(new Error(llm.redact(e && e.message ? e.message : 'Сбой модели')), {
@@ -639,7 +642,11 @@ export function createPipeline(deps) {
     /* Круг 47 (SPEC §14.5): решение арт-директора — в трассу при записи (роль → #rrggbb, шрифты): цвета
        образа лежат в узлах без роли, и теме на доску (круг 48) понадобится, какой hex какой роли. */
     if (result.direction) trace.art = { tx_id: out.tx_id, palette: result.direction.palette, fonts: result.direction.fonts };
-    if (result.critique) trace.critique = { seen: result.critique.seen, score: result.critique.score, revised: !!result.critique.revised };
+    if (result.critique) {
+      const c = result.critique;
+      trace.critique = { seen: c.seen, score: c.score, revised: !!c.revised,
+        ...(c.after && Number.isFinite(c.after.score) ? { after_score: c.after.score } : {}), ...(c.recheck ? { recheck: c.recheck } : {}) };
+    }
     sink.send('result', result);
   }
 

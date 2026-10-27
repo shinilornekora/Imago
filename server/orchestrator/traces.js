@@ -72,6 +72,9 @@ export function createTraces({ doc: net, token = '', path = '/api/internal/trace
         seen: t.critique.seen === 'image' ? 'image' : 'signals',
         score: Number.isFinite(t.critique.score) ? t.critique.score : null,
         revised: !!t.critique.revised,
+        // круг 52: второй взгляд на доработку
+        ...(Number.isFinite(t.critique.after_score) ? { after_score: t.critique.after_score } : {}),
+        ...(['better', 'same', 'worse', 'unchecked'].includes(t.critique.recheck) ? { recheck: t.critique.recheck } : {}),
       } } : {}),
     };
   }
