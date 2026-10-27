@@ -4167,7 +4167,7 @@ function offerStaleHex(prevDoc, extra = {}) {
   const words = SHELL.staleHexPhrase(stale, SWATCH_NAMES);
   // тостом, не сообщением дока: у правки агента док занят её итогом
   if (staleHexToast) staleHexToast.remove();
-  staleHexToast = toastAction(`${words.text}. Привязать их к палитре — и они пойдут за новым цветом.`, 'Перекрасить и их', () => {
+  staleHexToast = toastAction(`${words.text}. ${words.offer}`, words.action, () => {
     staleHexToast = null;
     const again = SHELL.staleHexRefs(prevDoc, state.doc);
     if (again) {
@@ -4179,6 +4179,7 @@ function offerStaleHex(prevDoc, extra = {}) {
   staleHexToast.classList.add('stale-hex');
 }
 let staleHexToast = null;
+function dropStaleHexToast() { if (staleHexToast) { staleHexToast.remove(); staleHexToast = null; } }
 
 /** С какого числа затронутых узлов ручная правка считается крупной. */
 const LOUD_NODES = 4;
@@ -4389,6 +4390,7 @@ function serverCommitDoc(nextDoc, label, humanText, who = 'human') {
  * повтора — чем снова отменить. Подтверждение сервера уточняет и то и другое (settleHistory).
  */
 function serverStep(back, { quiet = false } = {}) {
+  dropStaleHexToast();   // круг 89: шаг истории — прежнее предложение перекрасить уже не о том
   const what = back ? 'Отмена' : 'Повтор';
   let guard = state.history.length + 1;
   while (guard-- > 0) {
@@ -4577,6 +4579,7 @@ function docStamp(doc) {
 }
 
 function stepHistory(back, { quiet = false } = {}) {
+  dropStaleHexToast();   // круг 89: шаг истории — прежнее предложение перекрасить уже не о том
   // Круг 22: отмена в серверном режиме — новая транзакция с undo_of, а не откат журнала
   if (server) return serverStep(back, { quiet });
   if (back ? state.cursor === 0 : state.cursor >= state.history.length) return false;

@@ -41,6 +41,13 @@ test('круг89: тема экрана сменила акцент — слои
   const w = staleHexPhrase(st, { accent: 'Акцент' });
   assert.equal(w.text, '1 слой на экране «Итог» окрашен кодом прежнего цвета «Акцент» — новый цвет его не перекрасил');
   assert.equal(w.label, 'Цвета 1 слоя на экране «Итог» привязаны к палитре — пошли за новым цветом');
+  // критик: об одном слое — «его / он пойдёт», о многих и о нескольких цветах — во множественном
+  assert.equal(w.offer, 'Привязать его к палитре — и он пойдёт за новым цветом.');
+  assert.equal(w.action, 'Перекрасить и его');
+  const two = staleHexPhrase({ layers: 21, boards: [{ id: 'A', name: 'Оплата', n: 21 }], tokens: ['accent', 'text'] });
+  assert.equal(two.text, '21 слой на экране «Оплата» окрашен кодами прежних цветов «accent», «text» — новые цвета их не перекрасили');
+  assert.equal(two.offer, 'Привязать их к палитре — и они пойдут за новыми цветами.');
+  assert.equal(two.action, 'Перекрасить и их');
   // привязали — слой взял новый акцент
   const after = core.applyOps(next, st.ops).doc;
   assert.equal(core.resolveColor(core.themeScope(after)('B'), after.nodes.b1.fill), core.resolveColor(core.themeScope(after)('B'), 'accent'));
@@ -79,7 +86,7 @@ function serve() {
   return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve(srv)));
 }
 
-test('круг89: в браузере — цвет экрана в инспекторе → тост «Перекрасить и их» → слой с новым цветом', { skip: !chromium && 'нет Playwright', timeout: 90000 }, async () => {
+test('круг89: в браузере — цвет экрана в инспекторе → тост «Перекрасить и его» → слой с новым цветом', { skip: !chromium && 'нет Playwright', timeout: 90000 }, async () => {
   const srv = await serve();
   const browser = await chromium.launch();
   try {
@@ -100,6 +107,12 @@ test('круг89: в браузере — цвет экрана в инспек�
     const t = page.locator('.toast.stale-hex');
     await t.waitFor({ timeout: 5000 });
     assert.match(await t.innerText(), /1 слой на экране «Итог» окрашен кодом прежнего цвета «[^»]+» — новый цвет его не перекрасил/);
+    assert.equal(await t.locator('button.t-action').innerText(), 'Перекрасить и его');
+    // критик: отмена закрывает открытое предложение; правка снова — предложение снова
+    await say('отмени');
+    await page.waitForFunction(() => !document.querySelector('.toast.stale-hex'), null, { timeout: 5000 });
+    await row.evaluate((el) => { el.value = '#2255ff'; el.dispatchEvent(new Event('change', { bubbles: true })); });
+    await t.waitFor({ timeout: 5000 });
     await t.locator('button.t-action').click();
     await page.waitForFunction(() => /пошли за новым цветом/.test(document.body.innerText), null, { timeout: 5000 });
     assert.equal(await page.locator('.toast.stale-hex').count(), 0);
