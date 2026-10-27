@@ -1856,6 +1856,11 @@ const RE_SHOW = /^(?:покажи|покажите|показать|открой
 /** Слово-род артборда: «второй ЭКРАН», «следующую СТРАНИЦУ» — оно ничего не различает. */
 /* Круг 18, п.5: «доска» — слово человека, и оно понимается наравне с прежними. */
 const AB_KIND = '(?:доск[а-яё]*|артборд[а-яё]*|экран[а-яё]*|макет[а-яё]*|страниц[а-яё]*|вкладк[а-яё]*|лист[а-яё]*)';
+/* Круг 83 (SPEC §15.19): «выдели экраны со своей темой», «какие экраны в своей теме» — экраны, у которых
+   оформление своё (метка §15.17), выделяются разом; без этого RE_PICK искал бы слой с именем «экраны…». */
+const RE_THEMED_PICK = new RegExp('^(?:выдели(?:ть|те)?|выбери(?:те)?|покажи(?:те)?|найди(?:те)?|какие)\\s+(?:вс[её]\\s+)?(?:экраны|доски)\\s+'
+  + '(?:со\\s+сво(?:ей|им|ими)\\s+(?:тем(?:ой|ами)|оформлением|цветами)|в\\s+сво(?:ей|их)\\s+тем(?:е|ах)|с\\s+(?:собственн|отдельн)\\p{L}*\\s+(?:тем(?:ой|ами)|оформлением))$', 'u');
+const RE_THEMED_ASK = /^у\s+каких\s+(?:экранов|досок)\s+сво(?:я|и)\s+(?:тема|темы|оформление)$/u;
 const RE_PICK = /^(?:выдели|выделить|выделите|выбери|выбрать|укажи|отметь)\s+(?:слой\s+|узел\s+|элемент\s+)?(.+)$/;
 /* Круг 18, п.5. Раз интерфейс зовёт их досками, сказать «новая доска» человек вправе
    ожидать. Модель этого слова не знает (её словарь — «экран», «артборд»), поэтому
@@ -1993,6 +1998,9 @@ export function shellIntent(said, ctx = {}) {
     if (/^(json|джейсон|документ)$/.test(what)) return { kind: 'export', what: 'json' };
   }
 
+  /* — круг 83: экраны со своей темой — */
+  if (RE_THEMED_PICK.test(t) || RE_THEMED_ASK.test(t)) return themedBoardsIntent(doc);
+
   /* — выделение по имени — */
   if (/^(сними выделение|снять выделение|убери выделение|ничего не выделяй)$/.test(t)) return { kind: 'select', ids: [] };
   const pick = RE_PICK.exec(t);
@@ -2107,6 +2115,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'select-children', group: 'Выделение', title: 'Выделить детей', hint: 'Слои внутри выделенной рамки', slash: ['дети', 'children'], phrases: ['выдели детей', 'на уровень ниже'], needs: 'selection' },
   { id: 'select-next', group: 'Выделение', title: 'Следующий сосед', hint: 'Следующий слой в том же родителе', slash: ['следующий', 'next'], phrases: ['следующий слой', 'выдели следующий'], needs: 'selection' },
   { id: 'select-prev', group: 'Выделение', title: 'Предыдущий сосед', hint: 'Предыдущий слой в том же родителе', slash: ['предыдущий', 'prev'], phrases: ['предыдущий слой', 'выдели предыдущий'], needs: 'selection' },
+  { id: 'select-themed', group: 'Выделение', title: 'Выделить экраны со своей темой', hint: 'Экраны, у которых оформление не как в документе', slash: ['свои темы', 'themed'], phrases: ['выдели экраны со своей темой', 'какие экраны в своей теме'] },
   { id: 'select-name', group: 'Выделение', title: 'Выделить по имени', hint: 'Слой, чьё имя похоже на сказанное', slash: ['выделить', 'select'], args: [{ name: 'имя', kind: 'text' }], example: '/выделить заголовок', phrases: ['выдели заголовок экрана'] },
 
   /* — Правка: обычные транзакции, отмена одним шагом — */
@@ -2345,6 +2354,10 @@ const SLASH_ARGS = {
     const mode = argPick(rest, THEME_WORDS);
     return mode ? { kind: 'theme', mode } : bad(cmd, 'Тема: тёмная, светлая или системная');
   },
+  'select-themed'(rest, raw, ctx, cmd) {
+    if (rest) return bad(cmd, `У команды ${slashOf(cmd)} нет аргументов`);
+    return themedBoardsIntent(ctx.doc);
+  },
   'select-name'(rest, raw, ctx, cmd) {
     if (!rest) return bad(cmd, 'Скажите, какой слой выделить');
     if (!ctx.doc) return { kind: 'select-name', name: cleanText(raw) };
@@ -2543,7 +2556,7 @@ export function commandIdOf(intent) {
     case 'preview': return 'preview';
     case 'theme': return 'theme';
     case 'select-all': return 'select-all';
-    case 'select': return (intent.ids || []).length || intent.name ? 'select-name' : 'deselect';
+    case 'select': return intent.themed ? 'select-themed' : (intent.ids || []).length || intent.name ? 'select-name' : 'deselect';
     case 'select-name': return 'select-name';
     case 'select-rel': return { parent: 'select-parent', children: 'select-children', next: 'select-next', prev: 'select-prev' }[intent.rel] || null;
     case 'delete': return 'delete';
@@ -4761,6 +4774,22 @@ export function boardThemeBadge(doc, node) {
     styles.length ? `шрифты ${styles.length} ${plural(styles.length, 'стиля', 'стилей', 'стилей')}` : '',
   ].filter(Boolean).join(', ');
   return { swatch: swatch || null, colors: colors.length, styles: styles.length, title: `Своя тема экрана: ${bits} — щелчок откроет её в инспекторе` };
+}
+
+/**
+ * Круг 83 (SPEC §15.19): выделить экраны со своей темой. Ни одного — выделение не трогаем, только говорим.
+ * @returns {{kind: 'select', themed: true, ids: string[], say: string, keep?: boolean}}
+ */
+export function themedBoardsIntent(doc) {
+  const root = doc && doc.nodes && doc.nodes[doc.root];
+  const ids = (root && Array.isArray(root.children) ? root.children : [])
+    .filter((id) => doc.nodes[id] && boardThemeBadge(doc, doc.nodes[id]));
+  if (!ids.length) return { kind: 'select', themed: true, ids: [], keep: true, say: 'Своей темы нет ни у одного экрана — все в оформлении документа' };
+  const names = ids.map((id) => `«${cutText(String(doc.nodes[id].name || 'Доска'), 40, { ellipsis: true })}»`);
+  const shown = names.length > 3 ? `${names.slice(0, 3).join(', ')} и ещё ${names.length - 3}` : names.join(', ');
+  const broken = ids.filter((id) => boardThemeBadge(doc, doc.nodes[id]).broken).length;
+  const tail = broken ? ` (${broken === ids.length && ids.length === 1 ? 'тема повреждена' : `повреждена у ${broken}`})` : '';
+  return { kind: 'select', themed: true, ids, say: `${ids.length > 1 ? 'Своя тема у экранов' : 'Своя тема у экрана'} ${shown}${tail}` };
 }
 
 /* ------------------------- круг 70: тема с другого экрана ------------------------- */
