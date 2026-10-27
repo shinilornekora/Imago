@@ -304,8 +304,10 @@ let loggedOnce = new Set();
 /** Предел памяти логгера: ключи включают id узлов, за долгую сессию их набегает сколько угодно. */
 const LOG_KEY_LIMIT = 400;
 /** Логируем каждую уникальную ошибку один раз — не глотаем и не спамим. */
+/** Круг 45: >0 — логгер молчит (прогон проб отпечатка формата: тысячи заведомых отказов). */
+let logQuiet = 0;
 function logOnce(key, ...args) {
-  if (loggedOnce.has(key)) return;
+  if (logQuiet > 0 || loggedOnce.has(key)) return;
   // старые ключи вытесняются по одному: множество не растёт, а редкая повторная
   // запись через сотни разных ошибок — меньшее зло, чем утечка на весь сеанс
   while (loggedOnce.size >= LOG_KEY_LIMIT) {
@@ -1063,6 +1065,8 @@ const MOTION_REF_RE = /^motion\.(fast|base|slow)$/;
 const SHADOW_REF_RE = /^shadow\.(sm|md|lg)$/;
 /** Длина описания тени: длиннее — не тень, а мусор. */
 const SHADOW_DESC_MAX = 120;
+/** Круг 45 (code-r45 Д3): пределы тени — таблицей, чтобы граница попадала в корпус проб отпечатка. */
+const SHADOW_LIMITS = Object.freeze({ maxOffset: 200, maxBlur: 200, maxDesc: SHADOW_DESC_MAX });
 const SHADOW_LEN_RE = /^-?(\d+(\.\d+)?|\.\d+)(px)?$/;
 const SHADOW_COLOR_RE = /^(#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*(0|1|0?\.\d+|1\.0+)\s*)?\))$/;
 
@@ -1082,7 +1086,7 @@ function parseShadow(v) {
   const lens = [m[1], m[2], m[3]];
   if (!lens.every((x) => SHADOW_LEN_RE.test(x))) return null;
   const [dx, dy, blur] = lens.map((x) => parseFloat(x));
-  if (Math.abs(dx) > 200 || Math.abs(dy) > 200 || blur < 0 || blur > 200) return null;
+  if (Math.abs(dx) > SHADOW_LIMITS.maxOffset || Math.abs(dy) > SHADOW_LIMITS.maxOffset || blur < 0 || blur > SHADOW_LIMITS.maxBlur) return null;
   const color = m[4].trim();
   if (!SHADOW_COLOR_RE.test(color)) return null;
   return { dx, dy, blur, color };
@@ -1186,7 +1190,8 @@ const VECTOR_LIMITS = Object.freeze({
   maxStrokeWidth: 64,       // толщина обводки контура, ед. viewBox
   maxStops: 16,             // стопов градиента
   heavyCommands: 5000,      // больше команд на узел — path-heavy (info)
-  maxCoord: 1e6             // |число| в пути
+  maxCoord: 1e6,            // |число| в пути
+  maxPathName: 200          // символов в имени контура (круг 45: таблицей — для корпуса проб)
 });
 const GRADIENT_KINDS = Object.freeze(['linear', 'radial']);
 const GRADIENT_KIND_SET = new Set(GRADIENT_KINDS);
@@ -1419,7 +1424,7 @@ function vpathProblem(p, what) {
   if (typeof p.d !== 'string') return `${what}.d: нужен путь SVG строкой`;
   const pc = pathCheck(p.d, p);
   if (pc.err) return `${what}.d: ${pc.err} (символ ${pc.at})`;
-  if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 200)) return `${what}.name: строка до 200 символов`;
+  if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > VECTOR_LIMITS.maxPathName)) return `${what}.name: строка до ${VECTOR_LIMITS.maxPathName} символов`;
   for (const k of ['fill', 'stroke']) {
     if (p[k] === undefined) continue;
     const err = paintProblem(p[k], `${what}.${k}`);
@@ -4848,20 +4853,492 @@ function formatSignature() {
     tokens: { groups: sortedList(Object.keys(TOKEN_RULES)), scales: sortedList(Object.keys(SCALE_NAMES)), motionSteps: MOTION_STEPS.slice(), shadowSteps: SHADOW_STEPS.slice() },
     ops: sortedList(OP_NAMES),
     paths: { commands: { ...PATH_ARGS }, number: PATH_NUM_RE.source },
-    limits: { maxSize: MAX_SIZE, maxDepth: MAX_DEPTH, plainDepth: PLAIN_DEPTH, rotate: ROTATE_LIMIT, instanceDepth: MAX_INSTANCE_DEPTH, vector, state: STATE_LIMITS }
+    limits: { maxSize: MAX_SIZE, maxDepth: MAX_DEPTH, plainDepth: PLAIN_DEPTH, rotate: ROTATE_LIMIT, instanceDepth: MAX_INSTANCE_DEPTH, vector, state: STATE_LIMITS, shadow: SHADOW_LIMITS }
   };
+}
+
+/* ---------------------- поведенческий отпечаток (круг 45) ---------------------- *
+ * Таблицы ловят новое поле, тип, значение перечисления. Изменение ВНУТРИ функции
+ * проверки (opacity 0..1 → 0..2, pos без y, защищённый путь, любое значение
+ * props, угол градиента) таблицы не меняет — его ловит корпус проб: фиксированный
+ * детерминированный набор значений, прогнанный через НАСТОЯЩИЕ проверки
+ * (fieldProblem, checkNode, tokenWriteProblem, parsePath, applyOps), и вектор
+ * «принял/отказал» по семействам хэшируется в раздел `behavior`.
+ *
+ * Корпус строится из таблиц: каждое поле FIELD_RULES/STRING_FIELDS/BOOL_FIELDS
+ * получает всю палитру на каждом типе узла (новое поле — пробы сами), каждый
+ * ключ составных полей (pos, override, size, layout, padding, stroke, style,
+ * краска, градиент, стоп, viewBox, контур, состояние, motion, пропс компонента) —
+ * палитру, снятие и лишний ключ; числа палитры — плотная сетка плюс каждая граница
+ * из таблиц пределов ± шаг. Плюс явный список особых проб (структура узла,
+ * пути set, операции, пути SVG, токены).
+ * ------------------------------------------------------------------------------- */
+
+/** Числа палитры: сетка и границы из таблиц пределов (±0,001 и ±1). */
+function probeNumbers() {
+  const base = [0, 0.001, 0.01, 0.1, 0.5, 0.79, 0.8, 0.99, 0.999, 1, 1.001, 1.01, 1.2, 1.21, 1.5, 2, 3, 8, 10, 16, 23.99, 24, 24.01,
+    100, 99.99, 100.01, 359, 359.99, 360, 360.01, 361, 600, 720, 899, 900, 901, 999, 1000, 1000.01, 1001, 2000, 2001, 1e5, 1e5 + 0.01, 1e6, 1e6 + 1, 1e9];
+  const lim = [];
+  const walk = (v) => {
+    if (isNum(v)) lim.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (isObj(v)) Object.keys(v).sort().forEach((k) => walk(v[k]));
+  };
+  walk([MAX_SIZE, MAX_DEPTH, PLAIN_DEPTH, ROTATE_LIMIT, MAX_INSTANCE_DEPTH, STATE_LIMITS, TEXT_STYLE_FIELDS, STROKE_FIELDS, SHADOW_LIMITS]);
+  const vec = { ...VECTOR_LIMITS };
+  delete vec.heavyCommands;
+  walk(vec);
+  const out = new Set();
+  for (const n of base.concat(lim)) for (const d of [0, 0.001, -0.001, 1, -1]) { out.add(n + d); out.add(-(n + d)); }
+  return [...out].filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+}
+
+/** Строки палитры: значения всех перечислений формата и особые строки. */
+function probeStrings() {
+  const set = new Set(['', 'x', 'bogus', 'accent', 'surface', '#000000', '#ff000080', '#fff', 'rgba(0,0,0,0.5)', 'red',
+    'spacing.0', 'spacing.1', 'spacing.99', 'spacing.-1', 'radii.0', 'radii.1', 'radii.99', 'motion.fast', 'motion.bogus',
+    'shadow.sm', 'shadow.xl', '0 1px 2px #000000', '0 1 2 rgba(0,0,0,0.5)', 'none', 'M0 0 L1 1', 'M0 0 Q', '10', '1e3', 'true',
+    'm_probe', 'pm', 'pmt', 'pt', 'body', 'title']);
+  for (const it of [NODE_TYPES, LAYOUT_MODES, ALIGNS, JUSTIFIES, SIZE_MODES, TEXT_ALIGNS, PROP_KINDS, FILL_RULES, LINE_CAPS, LINE_JOINS,
+    GRADIENT_KINDS, Object.keys(EASINGS), MOTION_FOLLOW, STATE_NAMES, STATE_KEYS, MOTION_STEPS, SHADOW_STEPS, Object.keys(TOKEN_RULES)]) {
+    for (const v of it) set.add(String(v));
+  }
+  /* Круг 45 (code-r45 Д3): строки на краях пределов длины и тени на краях пределов смещения и
+     размытия — из таблиц (литерал внутри проверки граница не получает; поэтому он в таблице). */
+  for (const n of [VECTOR_LIMITS.maxPathName, SHADOW_LIMITS.maxDesc]) for (const d of [-1, 0, 1]) set.add('x'.repeat(n + d));
+  const { maxOffset: o, maxBlur: b } = SHADOW_LIMITS;
+  for (const [dx, dy, bl] of [[o, 0, 0], [o + 1, 0, 0], [-o, 0, 0], [-o - 1, 0, 0], [0, o, 0], [0, o + 1, 0], [0, -o - 1, 0], [0, 0, b], [0, 0, b + 1], [0, 0, -1]]) {
+    set.add(`${dx}px ${dy}px ${bl}px #000000`);
+    set.add(`${dx} ${dy} ${bl} rgba(0,0,0,0.5)`);
+  }
+  return [...set].sort();
+}
+
+/** Составные значения палитры. */
+function probeObjects() {
+  const deep = (n) => { let o = 1; for (let i = 0; i < n; i++) o = { a: o }; return o; };
+  const grad = { kind: 'linear', stops: [{ at: 0, color: '#000000' }, { at: 1, color: '#ffffff' }] };
+  return [null, true, false, [], [0], ['x'], [0, 0, 0, 0], [1, 2], [{ d: 'M0 0 L1 1' }], {}, { x: 0 }, { y: 0 }, { x: 0, y: 0 },
+    { x: 0, y: 0, w: 1, h: 1 }, { x: 0, y: 0, w: -1 }, { w: 1, h: 1 }, { x: '1', y: 0 }, { mode: 'fixed', value: 10 }, { mode: 'hug' },
+    { w: { mode: 'fixed', value: 10 }, h: { mode: 'hug' } }, { w: { mode: 'fill' } }, { color: '#000000' }, { token: 'accent' },
+    { value: 'x' }, { color: 1 }, { gradient: grad }, { gradient: { ...grad, kind: 'conic' } }, { hover: { opacity: 0.5 } },
+    { duration: 100 }, { name: 'K', props: [] }, { mode: 'row', gap: 8 }, { a: { b: 1 } }, deep(PLAIN_DEPTH - 1), deep(PLAIN_DEPTH + 1)];
+}
+
+let probeCache = null;
+
+/** Палитра: строки, числа, составные; детерминированный порядок. */
+function probePalette() {
+  return probeStrings().concat(probeNumbers(), probeObjects());
+}
+
+/** Минимальный годный узел каждого типа (база для проб checkNode). */
+function probeNode(type) {
+  const sz = { w: { mode: 'fixed', value: 10 }, h: { mode: 'fixed', value: 10 } };
+  switch (type) {
+    case 'page': return { id: 'p_page', type, children: [] };
+    case 'frame': return { id: 'p_frame', type, parent: 'q', children: [], size: sz, layout: { mode: 'none' } };
+    case 'text': return { id: 'p_text', type, parent: 'q', characters: 'a', size: sz };
+    case 'instance': return { id: 'p_inst', type, parent: 'q', of: 'm_probe' };
+    case 'vector': return { id: 'p_vec', type, parent: 'q', size: sz, viewBox: { w: 1, h: 1 }, paths: [] };
+    default: return { id: 'p_' + type, type, parent: 'q', size: sz };
+  }
+}
+
+/** Документ для проб через applyOps: свободная доска, текст, прямоугольник, вектор, мастер с пропсом, экземпляр. */
+function probeDoc() {
+  const d = createDoc('empty');
+  const lib = libraryNode(d);
+  const sz = { w: { mode: 'fixed', value: 100 }, h: { mode: 'fixed', value: 100 } };
+  const r = applyOps(d, [
+    { op: 'create', node: { type: 'frame', id: 'pb', parent: d.root, name: 'Доска', children: [], layout: { mode: 'none' }, size: sz, pos: { x: 0, y: 0 } } },
+    { op: 'create', node: { type: 'text', id: 'pt', parent: 'pb', characters: 'т', pos: { x: 1, y: 1 }, size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+    { op: 'create', node: { type: 'rect', id: 'pr', parent: 'pb', pos: { x: 2, y: 2 }, size: sz } },
+    { op: 'create', node: { type: 'vector', id: 'pv', parent: 'pb', pos: { x: 3, y: 3 }, size: sz, viewBox: { w: 10, h: 10 }, paths: [{ d: 'M0 0 L1 1' }, { d: 'M1 1 L2 2' }] } },
+    { op: 'create', node: { type: 'frame', id: 'pm', parent: lib.id, name: 'K', children: [], layout: { mode: 'column' }, size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+    { op: 'create', node: { type: 'text', id: 'pmt', parent: 'pm', characters: 'k', size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+    { op: 'create', node: { type: 'rect', id: 'pmr', parent: 'pm', size: { w: { mode: 'fixed', value: 10 }, h: { mode: 'fixed', value: 10 } } } },
+    /* круг 45 (arch-r45 Д1): пропсы ВСЕХ видов — проверка значения пропса (propValue) в корпусе */
+    { op: 'set', id: 'pm', path: 'component', value: { name: 'K', props: [
+      { name: 'p', kind: 'text', target: 'pmt', path: 'characters' },
+      { name: 'e', kind: 'enum', target: 'pmr', path: 'fill', values: ['accent', 'surface'] },
+      { name: 'c', kind: 'color', target: 'pmr', path: 'fill' },
+      { name: 'n', kind: 'number', target: 'pmr', path: 'opacity' },
+      { name: 'b', kind: 'bool', target: 'pmr', path: 'visible' }
+    ] } },
+    { op: 'create', node: { type: 'instance', id: 'pi', parent: 'pb', of: 'pm', pos: { x: 4, y: 4 } } }
+  ], { checkExpand: false });
+  if (r.error) throw new Error('probeDoc: ' + r.error.message);
+  return r.doc;
+}
+
+/**
+ * Прогон корпуса: семейство → строка «1/0» (принял/отказал) по пробам в
+ * детерминированном порядке. Считается один раз на процесс (лениво).
+ * @returns {Record<string,string>}
+ */
+function formatBehavior() {
+  if (probeCache) return probeCache;
+  logQuiet++;
+  try {
+    const pal = probePalette();
+    const types = sortedList(NODE_TYPES);
+    const fields = sortedList(new Set([...STRING_FIELDS, ...BOOL_FIELDS, ...Object.keys(FIELD_RULES), 'zz_unknown']));
+    const out = {};
+    const bit = (fn) => { try { return fn() ? '1' : '0'; } catch (_) { return 'x'; } };
+
+    // 1. каждое поле × каждый тип × палитра: fieldProblem и checkNode
+    let a = '';
+    for (const t of types) {
+      const base = probeNode(t);
+      for (const k of fields) {
+        for (const v of pal) {
+          a += bit(() => fieldProblem({ id: 'p', type: t, parent: 'q', [k]: v }, k) === null);
+          a += bit(() => checkNode({ ...base, [k]: v }, null, false) === null);
+        }
+      }
+    }
+    out.fields = a;
+
+    // 2. ключи составных полей: палитра в каждый ключ, снятие ключа, лишний ключ
+    const grad = (g) => ({ gradient: g });
+    const stop1 = { at: 1, color: '#ffffff' };
+    const families = [
+      ['frame', 'pos', { x: 0, y: 0 }, POS_AXES],
+      ['frame', 'override', { x: 0, y: 0, w: 1, h: 1 }, POS_AXES.concat(SIZE_AXES)],
+      ['frame', 'size', { w: { mode: 'fixed', value: 1 }, h: { mode: 'hug' } }, SIZE_AXES],
+      ['frame', 'size', { mode: 'fixed', value: 1 }, ['mode', 'value'], (o) => ({ w: o, h: { mode: 'hug' } })],
+      ['frame', 'layout', { mode: 'row' }, LAYOUT_KEYS],
+      ['frame', 'layout', { t: 0, r: 0, b: 0, l: 0 }, PAD_KEYS, (o) => ({ mode: 'row', padding: o })],
+      ['rect', 'stroke', { color: '#000000', width: 1 }, Object.keys(STROKE_FIELDS)],
+      ['text', 'style', {}, Object.keys(TEXT_STYLE_FIELDS)],
+      ['rect', 'fill', { color: '#000000' }, PAINT_WRAP_KEYS.concat(['gradient'])],
+      ['rect', 'fill', { kind: 'linear', angle: 0, stops: [{ at: 0, color: '#000000' }, stop1] }, [...GRADIENT_KEYS], grad],
+      ['rect', 'fill', { at: 0, color: '#000000' }, [...STOP_KEYS], (o) => grad({ kind: 'linear', stops: [o, stop1] })],
+      ['rect', 'fill', { kind: 'radial', cx: 0.5, cy: 0.5, r: 0.5, stops: [{ at: 0, color: '#000000' }, stop1] }, ['cx', 'cy', 'r'], grad],
+      ['vector', 'viewBox', { x: 0, y: 0, w: 1, h: 1 }, VIEWBOX_KEYS],
+      ['vector', 'paths', { d: 'M0 0 L1 1' }, [...VPATH_KEYS], (o) => [o]],
+      ['rect', 'states', {}, STATE_KEYS, (o) => ({ hover: o })],
+      ['rect', 'states', { hover: { opacity: 0.5 } }, STATE_NAMES.concat(['bogus'])],
+      ['rect', 'motion', {}, [...MOTION_KEYS]],
+      ['frame', 'component', { name: 'p', kind: 'text', target: 't', path: 'characters' }, ['name', 'kind', 'target', 'path', 'values'], (o) => ({ name: 'K', props: [o] })],
+      ['frame', 'component', { name: 'p', kind: 'enum', target: 't', path: 'fill', values: ['a'] }, ['values'], (o) => ({ name: 'K', props: [o] })],
+      ['frame', 'component', { name: 'K', props: [] }, ['name', 'props']],
+      ['instance', 'props', {}, ['p', 'zz']],
+      ['instance', 'size', { w: { mode: 'fixed', value: 1 } }, SIZE_AXES]
+    ];
+    let b = '';
+    for (const [t, field, base0, keys, wrap] of families) {
+      const node = probeNode(t);
+      const run = (o) => bit(() => checkNode({ ...node, [field]: wrap ? wrap(o) : o }, null, false) === null);
+      b += run(base0);
+      for (const k of keys) {
+        const without = { ...base0 };
+        delete without[k];
+        b += run(without);
+        for (const v of pal) b += run({ ...base0, [k]: v });
+      }
+      b += run({ ...base0, zz_unknown: 1 });
+    }
+    // счёт: стопов, контуров, длина пути
+    for (const n of [0, 1, 2, VECTOR_LIMITS.maxStops, VECTOR_LIMITS.maxStops + 1]) {
+      const stops = Array.from({ length: n }, (_, i) => ({ at: n > 1 ? i / (n - 1) : 0, color: '#000000' }));
+      b += bit(() => checkNode({ ...probeNode('rect'), fill: { gradient: { kind: 'linear', stops } } }, null, false) === null);
+    }
+    for (const n of [0, 1, VECTOR_LIMITS.maxPaths, VECTOR_LIMITS.maxPaths + 1]) {
+      b += bit(() => checkNode({ ...probeNode('vector'), paths: Array.from({ length: n }, () => ({ d: 'M0 0' })) }, null, false) === null);
+    }
+    for (const len of [VECTOR_LIMITS.maxD, VECTOR_LIMITS.maxD + 1]) {
+      const d = ('M0 0' + ' L1 1'.repeat(Math.ceil(len / 5))).slice(0, len).replace(/[ L.]+$/, '').padEnd(len, ' ');
+      b += bit(() => checkNode({ ...probeNode('vector'), paths: [{ d }] }, null, false) === null);
+    }
+    {
+      const d = 'M0 0' + ' L1 1'.repeat(3990);
+      const k = Math.ceil(VECTOR_LIMITS.maxTotalD / d.length);
+      for (const n of [k - 1, k]) b += bit(() => checkNode({ ...probeNode('vector'), paths: Array.from({ length: n }, () => ({ d })) }, null, false) === null);
+    }
+    out.nested = b;
+
+    // 3. структура узла (checkNode): особые пробы
+    const nodeProbes = [
+      { ...probeNode('instance'), children: [] }, { ...probeNode('instance'), children: ['a'] }, { ...probeNode('instance'), children: {} },
+      { ...probeNode('instance'), of: 'p_inst' }, { ...probeNode('instance'), of: '' }, { ...probeNode('instance'), of: undefined },
+      { ...probeNode('page'), parent: 'r' }, { ...probeNode('page'), parent: 'r', role: LIBRARY_ROLE }, { ...probeNode('page'), parent: 5, role: LIBRARY_ROLE },
+      { ...probeNode('page'), parent: null }, { ...probeNode('page'), children: undefined },
+      { ...probeNode('text'), children: [] }, { ...probeNode('text'), children: ['a'] }, { ...probeNode('rect'), children: {} },
+      { ...probeNode('frame'), children: undefined }, { ...probeNode('frame'), children: [1] }, { ...probeNode('frame'), children: 'a' },
+      { ...probeNode('frame'), parent: undefined }, { ...probeNode('frame'), parent: 5 }, { ...probeNode('frame'), id: '' },
+      { ...probeNode('frame'), id: 'constructor' }, { ...probeNode('frame'), id: 5 }, { ...probeNode('frame'), type: 'bogus' },
+      { ...probeNode('frame'), size: undefined }, { ...probeNode('text'), size: undefined }, { ...probeNode('vector'), size: undefined },
+      { ...probeNode('vector'), viewBox: undefined }, { ...probeNode('vector'), paths: undefined }, { ...probeNode('text'), characters: undefined },
+      { ...probeNode('frame'), layout: { mode: 'row', align: 'stretch', justify: 'between', gap: 'spacing.1', padding: { t: 'spacing.0' } } },
+      { ...probeNode('frame'), layout: { mode: 'row', gap: 'radii.1' } }, { ...probeNode('frame'), radius: [0, 'radii.1', 2, 3] },
+      { ...probeNode('frame'), radius: [0, 1, 2] }, { ...probeNode('frame'), radius: 'spacing.1' }
+    ];
+    for (const t of types) nodeProbes.push(probeNode(t));
+    for (const pk of PROTO_KEYS) nodeProbes.push({ ...probeNode('frame'), [pk]: 1 });
+    let c = '';
+    for (const n of nodeProbes) c += bit(() => checkNode(n, null, false) === null);
+    out.nodes = c;
+
+    // 4. токены: каждая группа (и чужая) × пути × палитра
+    let tk = '';
+    const tokens = DEFAULT_TOKENS;
+    const groups = sortedList(Object.keys(TOKEN_RULES)).concat(['zz_other']);
+    const seconds = sortedList(new Set(['0', '1', '7', '99', '01', 'body', 'title', 'accent', 'bogus', ...MOTION_STEPS, ...SHADOW_STEPS]));
+    const tpal = pal.concat([undefined]);
+    for (const g of groups) {
+      const paths = [[g]].concat(seconds.map((x) => [g, x]), Object.keys(TEXT_STYLE_FIELDS).map((k) => [g, 'body', k]), [[g, 'body', 'fontSize', 'x']]);
+      for (const parts of paths) for (const v of tpal) tk += bit(() => tokenWriteProblem(parts, v, tokens) === null);
+    }
+    out.tokens = tk;
+
+    // 5. пути SVG: по команде — меньше, ровно и больше аргументов; формы чисел; особые строки
+    let ps = '';
+    const dList = ['', ' ', 'M', 'M0', 'M0 0', 'm0 0', 'L0 0', 'M0 0 Z', 'M0 0 z m1 1', 'M0 0 Z 1 1', 'M0,0', 'M0,,0', 'M0 0,', 'M.5.5', 'M-.5-.5',
+      'M1e3 1E-3', 'M1e 3', 'M+1 +1', 'M1. 1.', 'M0 0 A1 1 0 1 1 2 2', 'M0 0 A1 1 0 11 2 2', 'M0 0 A1 1 0 2 1 2 2', 'M0 0 X1 1', 'M0 0 L1 1 2 2',
+      `M${VECTOR_LIMITS.maxCoord} 0`, `M${VECTOR_LIMITS.maxCoord + 1} 0`, `M0 0 l${VECTOR_LIMITS.maxCoord} 0 l${VECTOR_LIMITS.maxCoord} 0 l${VECTOR_LIMITS.maxCoord} 0`, 'M0 0 L1 NaN', 'M0 0 L1 Infinity'];
+    for (const c0 of Object.keys(PATH_ARGS).sort()) {
+      const n = PATH_ARGS[c0];
+      for (const cc of [c0, c0.toLowerCase()]) {
+        for (const m of [n - 1, n, n + 1, 2 * n]) {
+          if (m < 0) continue;
+          const args = Array.from({ length: m }, (_, i) => (c0 === 'A' && (i % 7 === 3 || i % 7 === 4) ? '1' : String(i + 1)));
+          dList.push(`M0 0 ${cc}${args.join(' ')}`);
+        }
+      }
+    }
+    for (const d of dList) ps += bit(() => parsePath(d).ok);
+    out.svg = ps;
+
+    // 6. настоящие операции (applyOps): пути set, операции, создание, перемещение
+    const doc = probeDoc();
+    let op = '';
+    /* Круг 45 (arch-r45 Д1): кроме «принял/отказал» — и ЧТО получилось: отпечаток документа после
+       каждой принятой пробы (семейство `results`). Иначе изменение семантики применения (индекс
+       `create` через floor вместо round, иное приведение значения), принимаемое обоими, проходило
+       мимо отпечатка, и экземпляры одной версии строили из одного журнала разные документы.
+       Хэшируются хранимые `nodes` и `tokens`; раскрытие экземпляров (propValue при показе) в них не
+       входит — оно не хранится и журналом не переигрывается (критик кода r45b R2). */
+    let res = '';
+    const rootId = doc.root;
+    const libId = libraryNode(doc).id;
+    const tryOps = (list, base = doc) => bit(() => {
+      const r = applyOps(base, deepClone(list));
+      if (r.error) return false;
+      // id корня и библиотеки у документа-пробы случайны (createDoc) — в отпечаток идут именами
+      res += fnv64(stableJSON({ nodes: r.doc.nodes, tokens: r.doc.tokens }).split(rootId).join('ROOT').split(libId).join('LIB')).slice(0, 6);
+      return true;
+    });
+    const pathCands = sortedList(new Set([...PROTECTED_PATHS, ...UNSAFE_KEYS, ...PROTO_KEYS, 'name', 'a.b', 'a..b', '.a', 'a.', '',
+      'layout.__proto__', 'layout.prototype', 'layout.constructor', 'props.toString', 'props.p', 'props.zz', 'paths.0.d', 'paths.1', 'paths.2',
+      'paths.5', 'paths.-1', 'paths.01', 'paths.length', 'paths.0.fill', 'size.w.value', 'pos.x', 'pos.z', 'states.hover.opacity',
+      'component.name', 'component.props.0.name', 'of', 'characters', 'style.fontSize', 'layout.padding.t', 'viewBox.w']));
+    const setProbes = [];   // те же пробы — ещё раз с exact (семейство exact)
+    for (const id of ['pb', 'pt', 'pr', 'pv', 'pm', 'pi']) {
+      for (const path of pathCands) for (const v of [1, 'x', 0.5, { x: 1, y: 1 }, undefined]) { const l = [{ op: 'set', id, path, value: v }]; setProbes.push(l); op += tryOps(l); }
+    }
+    // каждое поле таблиц через set на каждом узле — короткая палитра (applyOps: keepFieldForm, checkNode, черновик)
+    const short = [null, true, 'x', '#000000', -1, 0, 0.5, 1, 1.5, 2, 361, 1e9, [], {}, { x: 1 }, { x: 1, y: 1 }, undefined];
+    for (const id of ['pb', 'pt', 'pr', 'pv', 'pi']) {
+      for (const k of fields) for (const v of short) { const l = [{ op: 'set', id, path: k, value: v }]; setProbes.push(l); op += tryOps(l); }
+    }
+    const sz = { w: { mode: 'fixed', value: 5 }, h: { mode: 'fixed', value: 5 } };
+    const opProbes = [
+      [{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pb', size: sz } }],
+      [{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pt', size: sz } }],
+      [{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pi', size: sz } }],
+      [{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pr', size: sz } }],
+      [{ op: 'create', node: { type: 'rect', id: 'pt', parent: 'pb', size: sz } }],
+      [{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'nope', size: sz } }],
+      [{ op: 'create', node: { type: 'page', id: 'n1', children: [] } }],
+      [{ op: 'create', node: { type: 'frame', id: 'n1', parent: 'pb', children: ['pt'], size: sz } }],
+      [{ op: 'create', node: { type: 'frame', id: 'n1', parent: 'pb', children: ['nope'], size: sz } }],
+      [{ op: 'create', node: { type: 'instance', id: 'n1', parent: 'pb', of: 'pm' } }],
+      [{ op: 'create', node: { type: 'instance', id: 'n1', parent: 'pm', of: 'pm' } }],
+      [{ op: 'create', node: { type: 'instance', id: 'n1', parent: 'pb', of: 'pr' } }],
+      [{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pb', size: sz }, index: 0 }],
+      [{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pb', size: sz }, index: -1 }],
+      [{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pb', size: sz }, index: 99 }],
+      [{ op: 'remove', id: 'pt' }], [{ op: 'remove', id: 'nope' }], [{ op: 'remove', id: doc.root }], [{ op: 'remove', id: libraryNode(doc).id }],
+      [{ op: 'move', id: 'pt', parent: 'pb', index: 0 }], [{ op: 'move', id: 'pb', parent: 'pt' }], [{ op: 'move', id: 'pt', parent: 'pr' }],
+      [{ op: 'move', id: 'pb', parent: 'pb' }], [{ op: 'move', id: 'pt', parent: 'pi' }], [{ op: 'move', id: 'pt', parent: 'pm' }],
+      [{ op: 'move', id: doc.root, parent: 'pb' }], [{ op: 'move', id: 'pt', parent: 'pb', index: 'a' }],
+      [{ op: 'setToken', path: 'colors.accent', value: '#000000' }], [{ op: 'setToken', path: 'colors', value: 'x' }],
+      [{ op: 'setToken', path: '', value: 1 }], [{ op: 'setToken', path: '__proto__.x', value: 1 }], [{ op: 'setToken', path: 'spacing.0', value: 4 }],
+      [{ op: 'set', id: 'pm', path: 'component', value: { name: 'K', props: [{ name: 'q', kind: 'text', target: 'pt', path: 'characters' }] } }],
+      [{ op: 'set', id: 'pm', path: 'component', value: { name: 'K', props: [{ name: 'q', kind: 'text', target: 'pmt', path: 'id' }] } }],
+      [{ op: 'set', id: 'pi', path: 'of', value: 'pi' }], [{ op: 'set', id: 'pi', path: 'of', value: 'nope' }],
+      [{ op: 'set', id: 'pb', path: 'layout', value: { mode: 'row', gap: 'spacing.99' } }], [{ op: 'set', id: 'pb', path: 'radius', value: 'radii.99' }]
+    ];
+    for (const name of sortedList(new Set([...OP_NAMES, 'copy', '', 'SET', 'delete', 'toString']))) {
+      opProbes.push([{ op: name, id: 'pt', path: 'name', value: 'x', parent: 'pb', index: 0, node: { type: 'rect', id: 'n2', parent: 'pb', size: sz } }]);
+    }
+    // круг 45 (code-r45 Д3): путь пропса компонента — те же кандидаты, что у set (ключи прототипа в середине, пустые сегменты)
+    for (const path of pathCands.concat(['a.__proto__.b', 'a.prototype', 'a..b', 'fill.', '.fill', 'style.constructor.x'])) {
+      opProbes.push([{ op: 'set', id: 'pm', path: 'component', value: { name: 'K', props: [{ name: 'q', kind: 'text', target: 'pmt', path }] } }]);
+    }
+    // круг 45: значения пропсов экземпляра по видам; дробные и крайние индексы create/move
+    const propVals = short.concat(['a', 'accent', 'surface', 'bogus', '#ff0000', { token: 'accent' }, { color: '#000000' }, false, 'true', '1']);
+    for (const name of ['p', 'e', 'c', 'n', 'b', 'zz']) for (const v of propVals) opProbes.push([{ op: 'set', id: 'pi', path: 'props.' + name, value: v }]);
+    for (const index of [0.4, 0.5, 0.6, 1.5, -0.5, 2.5, 3, 4, -2, 1e9, NaN, '1']) {
+      opProbes.push([{ op: 'create', node: { type: 'rect', id: 'n1', parent: 'pb', size: sz }, index }]);
+      opProbes.push([{ op: 'move', id: 'pr', parent: 'pb', index }]);
+    }
+    for (const list of opProbes) op += tryOps(list);
+    out.ops = op;
+
+    /* Круг 45, проход 2 (arch-r45b Д1′): «одетые» поля — объект и ссылки на шкалы. На голых узлах
+       пробы ветви keepFieldForm (строка поверх объекта, число поверх ссылки радиуса, отступа,
+       зазора, подъёма) не исполнялись: правка «сохранения формы» проходила мимо отпечатка. Узлы
+       создаются в той же пачке, что и правка: документ-проба и прежние пробы не меняются. */
+    let dr = '';
+    const dressed = [
+      { op: 'create', node: { type: 'frame', id: 'nd', parent: 'pb', children: [], size: sz, stroke: { color: 'accent', width: 3 },
+        fill: { token: 'surface', opacity: 0.5 }, radius: 'radii.2', states: { hover: { lift: 'spacing.1' } },
+        layout: { mode: 'column', gap: 'spacing.4', padding: { t: 'spacing.2', r: 'spacing.2', b: 'spacing.2', l: 'spacing.2' } } } },
+      { op: 'create', node: { type: 'frame', id: 'nq', parent: 'pb', children: [], size: sz, stroke: 'accent', fill: 'surface',
+        radius: ['radii.1', 'radii.1', 'radii.2', 'radii.2'], layout: { mode: 'row', gap: 8, padding: 'spacing.2' } } },
+      { op: 'create', node: { type: 'text', id: 'nt', parent: 'nd', characters: 'т', style: { token: 'body', fontSize: 20 }, color: { token: 'text' },
+        size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+      // скругление другой длины, чем у присланного массива: поэлементно — только при равной длине
+      { op: 'create', node: { type: 'rect', id: 'nr', parent: 'pb', size: sz, radius: ['radii.1', 'radii.1'] } }
+    ];
+    const dressedSets = [
+      ['stroke', ['accent', 'line', { color: 'accent' }, { color: 'accent', width: 1 }, { token: 'accent' }]],
+      ['fill', ['surface', 'accent', { token: 'surface' }, { color: 'surface' }, { value: 'surface' }]],
+      ['color', ['text', { token: 'text' }, 'muted']],
+      ['style', ['body', { token: 'body' }, 'title']],
+      ['radius', [0, 4, 8, 12, 'radii.2', 'radii.99', -1, [4, 4], [4, 20], [4, 4, 20, 20], [4, 4, 8, 8], [4, 4, 8, 9], [8, 8, 8, 8]]],
+      ['layout', [{ mode: 'column', gap: 4 }, { mode: 'column', gap: 8, padding: 4 }, { mode: 'column', gap: 6, padding: { t: 4, r: 2 } }]],
+      ['layout.gap', [4, 8, 6, 'spacing.3', 'spacing.99', -1]], ['layout.padding', [4, 8, { t: 4 }, [4, 2], [4, 2, 4, 2]]], ['layout.padding.t', [4, 6]],
+      ['states', [{ hover: { lift: 2 } }, { hover: { lift: 4, opacity: 0.9 } }]], ['states.hover', [{ lift: 2 }, { lift: 6 }]], ['states.hover.lift', [2, 4]]
+    ];
+    for (const id of ['nd', 'nq', 'nt', 'nr']) {
+      for (const [path, vals] of dressedSets) for (const value of vals) dr += tryOps([...dressed, { op: 'set', id, path, value }]);
+    }
+    out.dressed = dr;
+
+    /* Круг 45, проход 3 (arch-r45c Д1″): операции отмены (`exact: true`, invertOps) лежат в журнале и
+       переигрываются экземплярами — их ветви (без сохранения формы, мягкая проверка узла, мёртвые
+       ссылки шкал) тоже в отпечатке. Те же «одетые» правки и пробы set с exact, плюс create с exact. */
+    let ex = '';
+    for (const id of ['nd', 'nq', 'nt', 'nr']) {
+      for (const [path, vals] of dressedSets) for (const value of vals) ex += tryOps([...dressed, { op: 'set', id, path, value, exact: true }]);
+    }
+    for (const id of ['pb', 'pt', 'pr', 'pi']) {
+      for (const path of ['radius', 'layout', 'layout.gap', 'states.hover.lift', 'props.n', 'props.e', 'of', 'name']) {
+        for (const v of ['radii.99', 'spacing.99', { mode: 'row', gap: 'spacing.99' }, { hover: { lift: 'spacing.99' } }, 'nope', 2, 'bogus']) {
+          ex += tryOps([{ op: 'set', id, path, value: v, exact: true }]);
+        }
+      }
+    }
+    const exactCreates = [
+      { type: 'rect', id: 'n1', parent: 'pb', size: sz, radius: 'radii.99' },
+      { type: 'frame', id: 'n1', parent: 'pb', children: [], size: sz, layout: { mode: 'row', gap: 'spacing.99', padding: { t: 'spacing.99' } } },
+      { type: 'frame', id: 'n1', parent: 'pb', children: [], size: sz, states: { hover: { lift: 'spacing.99' } } },
+      { type: 'instance', id: 'n1', parent: 'pb', of: 'pm', props: { n: 2, e: 'bogus', zz: 1 } },
+      { type: 'instance', id: 'n1', parent: 'pb', of: 'nope' },
+      { type: 'frame', id: 'n1', parent: libId, children: [], size: sz, component: { name: 'Z', props: [{ name: 'q', kind: 'text', target: 'n2', path: 'characters' }] } },
+      { type: 'rect', id: 'n1', parent: 'pb', size: sz, stroke: { color: 'bogus', width: 3 }, fill: { token: 'nope' } },
+      { type: 'rect', id: 'n1', parent: 'nope', size: sz }
+    ];
+    for (const node of exactCreates) {
+      ex += tryOps([{ op: 'create', node, exact: true }]);
+      ex += tryOps([{ op: 'create', node }]);
+    }
+    /* Проход 4 (arch-r45d Д1‴): не выборочно, а ВСЕ пробы set и операций корпуса `ops` — ещё раз с
+       exact (мягкая проверка узла в set, ветвь withoutBadFields); и узлы, которые уже негодны до
+       правки: цель пропса вынесена из мастера (move его не перепроверяет), поле прежней формы. */
+    const withExact = (list) => list.map((o) => (o && typeof o === 'object' ? { ...o, exact: true } : o));
+    for (const list of setProbes) ex += tryOps(withExact(list));
+    for (const list of opProbes) ex += tryOps(withExact(list));
+    const broken = [
+      { op: 'create', node: { type: 'frame', id: 'nm', parent: libId, name: 'M', children: [], size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+      { op: 'create', node: { type: 'text', id: 'nmt', parent: 'nm', characters: 'x', size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } },
+      { op: 'set', id: 'nm', path: 'component', value: { name: 'M', props: [{ name: 'label', kind: 'text', target: 'nmt', path: 'characters' }] } },
+      { op: 'move', id: 'nmt', parent: 'pb', index: 0 }
+    ];
+    const brokenSets = [
+      ['nm', 'component', { name: 'M', props: [{ name: 'title', kind: 'text', target: 'nmt', path: 'characters' }] }],
+      ['nm', 'component', { name: 'M', props: [] }],
+      ['nm', 'component', { name: 'M2', props: [{ name: 'label', kind: 'text', target: 'nmt', path: 'characters' }] }],
+      ['nm', 'name', 'M3'], ['nm', 'clip', true], ['nm', 'opacity', 0.5], ['nm', 'opacity', 2]
+    ];
+    for (const [id, path, value] of brokenSets) {
+      ex += tryOps([...broken, { op: 'set', id, path, value }]);
+      ex += tryOps([...broken, { op: 'set', id, path, value, exact: true }]);
+    }
+    /* поля прежней формы у узла (документ прежних кругов: `clip: 1`, объект в style.token — операцией
+       их уже не положить, кладём прямо в копию документа-пробы) — правка соседнего поля с exact и без
+       (ветвь withoutBadFields) */
+    const legacyDoc = deepClone(doc);
+    Object.assign(legacyDoc.nodes.pr, { clip: 1, radius: 'radii.99' });
+    Object.assign(legacyDoc.nodes.pt, { style: { token: { x: 1 } } });
+    for (const id of ['pr', 'pt']) {
+      for (const [path, value] of [['name', 'z'], ['opacity', 0.5], ['clip', true], ['clip', 2], ['radius', 4], ['fill', 'accent'], ['opacity', 3], ['style', 'body'], ['characters', 'y']]) {
+        ex += tryOps([{ op: 'set', id, path, value }], legacyDoc);
+        ex += tryOps([{ op: 'set', id, path, value, exact: true }], legacyDoc);
+      }
+    }
+    /* Проход 5 (arch-r45e): оба условия разом — мастер с целью пропса вне себя (строгая проверка его
+       отвергает) и с полем прежней формы. Ветвь «проба без негодных полей» и «прежняя причина» мягкие
+       только при exact — правка с exact и без. */
+    const rb = applyOps(doc, deepClone(broken));
+    if (!rb.error) {
+      const comboDoc = deepClone(rb.doc);
+      Object.assign(comboDoc.nodes.nm, { clip: 1, opacity: 7 });
+      for (const [path, value] of [['name', 'M4'], ['clip', true], ['opacity', 0.5], ['opacity', 3], ['visible', false],
+        ['component', { name: 'M', props: [{ name: 'title', kind: 'text', target: 'nmt', path: 'characters' }] }]]) {
+        ex += tryOps([{ op: 'set', id: 'nm', path, value }], comboDoc);
+        ex += tryOps([{ op: 'set', id: 'nm', path, value, exact: true }], comboDoc);
+      }
+      /* и причина не по полю (висячий parent, вектор без viewBox — сырой документ: на сервере createDoc
+         такие узлы чинит до движка, проба держит ветвь на любом входе ядра): прежний узел негоден
+         и мягко, и строго, но по-разному — ветвь «прежняя причина» зависит от строгости (код r45f) */
+      // и вектор прежних кругов без viewBox; каждый — с полем прежней формы и без
+      for (const bad of [(n) => { n.parent = 'ghost'; }, (n) => { n.parent = 'ghost'; n.clip = 1; },
+        (n) => { n.type = 'vector'; delete n.children; n.paths = []; n.clip = 1; }]) {
+        const ghostDoc = deepClone(rb.doc);
+        bad(ghostDoc.nodes.nm);
+        for (const [path, value] of [['name', 'M5'], ['clip', true], ['opacity', 0.5],
+          ['component', { name: 'M', props: [{ name: 'title', kind: 'text', target: 'nmt', path: 'characters' }] }]]) {
+          ex += tryOps([{ op: 'set', id: 'nm', path, value }], ghostDoc);
+          ex += tryOps([{ op: 'set', id: 'nm', path, value, exact: true }], ghostDoc);
+        }
+      }
+    } else ex += 'x';
+    out.exact = ex;
+    out.results = res;
+    probeCache = out;
+    return out;
+  } finally {
+    logQuiet--;
+  }
 }
 
 /**
  * Хэш отпечатка: целиком и по разделам (по разделам — чтобы тест назвал, ЧТО
- * изменилось). Считается при загрузке модуля.
+ * изменилось); `behavior.<семейство>` — корпус проб (formatBehavior). Считается
+ * лениво при первом обращении: корпус — десятки тысяч проверок, загрузке модуля
+ * они ни к чему.
  */
-const FORMAT_SIGNATURE = (() => {
+let formatSigCache = null;
+function formatSignatureHash() {
+  if (formatSigCache) return formatSigCache;
   const sig = formatSignature();
   const sections = {};
   for (const k of Object.keys(sig).sort()) sections[k] = fnv64(stableJSON(sig[k]));
-  return Object.freeze({ hash: fnv64(stableJSON(sig)), sections: Object.freeze(sections) });
-})();
+  const beh = formatBehavior();
+  for (const k of Object.keys(beh).sort()) sections['behavior.' + k] = fnv64(beh[k]);
+  formatSigCache = Object.freeze({ hash: fnv64(stableJSON(sections)), sections: Object.freeze(sections) });
+  return formatSigCache;
+}
+const FORMAT_SIGNATURE = Object.freeze({
+  get hash() { return formatSignatureHash().hash; },
+  get sections() { return formatSignatureHash().sections; },
+  toJSON() { return formatSignatureHash(); }
+});
 
 /* Надгробия (круг 27, I1). Внутри core — словарь id удалённого узла → его
    последний родитель (Map или объект). В снимке — один из форматов:
@@ -12073,7 +12550,7 @@ export {
   /* Круг 39 (N1): какие версии движка этот читает — */
   ENGINE_MIN_READ, engineReadable,
   /* Круг 43: отпечаток формата — тест держит правило «формат — только с ENGINE_VERSION» — */
-  formatSignature, FORMAT_SIGNATURE,
+  formatSignature, FORMAT_SIGNATURE, formatBehavior,
   /* Круг 25: строки для документа и журнала — обрезка по кодовым точкам, санитайзер;
      годность id узла (непустая строка, не ключ Object.prototype) — */
   cutText, cleanText, isNodeId,

@@ -659,12 +659,22 @@ export function createSequencer({
       // хвост от снимка рос бы без предела). Голова «с пропуском» (снимков не пишет никогда) —
       // только если версия записи неизвестна: её мог бы применить движок новее (запись движка
       // новее своего сюда не доходит — это отказ «устарел», goOutdated).
+      // Круг 45 (arch-r44 Д1): наследная — только движка СТРОГО НИЖЕ своего. Запись своей версии,
+      // которую ядро не приняло, значит одно из двух: формат изменили без подъёма ENGINE_VERSION
+      // (её писал экземпляр с более широкой проверкой той же версии) или журнал испорчен. В обоих
+      // случаях снимок без неё — тихая потеря у всех, поэтому голова «с пропуском» и громкий лог:
+      // ошибка процесса стоит скорости (переигрывание с журнала), а не данных.
       if (err) {
-        const known = Number.isInteger(page[i].engine) && page[i].engine <= engine;
+        const known = Number.isInteger(page[i].engine) && page[i].engine < engine;
+        const own = page[i].engine === engine;
         const first = !head.holey && !head.legacySkips;
         if (known) {
           head.legacySkips = (head.legacySkips || 0) + 1;
           log.warn(`[document/dslts] ${projectId}: seq ${page[i].seq} не применяется: ${err.message} — наследная запись движка ${page[i].engine}, пропускается всеми одинаково${first ? '; снимки пишутся' : ''}`);
+        } else if (own) {
+          log.warn(`[document/dslts] ${projectId}: seq ${page[i].seq} не применяется: ${err.message} — ГРОМКО: запись СВОЕЙ версии движка ${engine} отвергнута: формат изменился без подъёма ENGINE_VERSION? Голова с пропуском, снимков с неё не пишу`);
+          head.holey = true;
+          head.ownRejects = (head.ownRejects || 0) + 1;
         } else {
           log.warn(`[document/dslts] ${projectId}: seq ${page[i].seq} не применяется: ${err.message}${head.holey ? '' : ' — версия записи неизвестна: голова с пропуском, снимков с неё не пишу'}`);
           head.holey = true;
@@ -793,7 +803,11 @@ export function createSequencer({
         throw notFound();
       }
       const latest = await viaStorage(storage.latestSnapshot(projectId));
-      if (!latest) throw noSnapshot(storage);
+      if (!latest) {
+        // arch-r45 Д2: между чтением проекта и снимка проект удалили (DELETE пустой сироты) — это 404, а не порча
+        if (!(await viaStorage(storage.getProject(projectId)))) { emit({ kind: 'missing', projectId }); throw notFound(); }
+        throw noSnapshot(storage);
+      }
       // круг 39: снимок движка, которого этот экземпляр не читает, — не «предупреждение», а отказ
       // проекту (снимок прежней версии, которую движок читает, — как раньше: формат совместим)
       if (engineUnreadable(latest.engine, engine)) throw goOutdated(projectId, latest.engine, `снимок seq ${latest.seq}`);
@@ -968,6 +982,9 @@ export function createSequencer({
       if (heads.has(msg.p)) scheduleSync(msg.p);
     } else if (msg.k === 'epoch') {
       onEpochNotice(msg.p, msg.e);
+    } else if (msg.k === 'missing') {
+      // круг 45: пустую сироту удалили на другом экземпляре — голову снять, сокеты закрыть
+      lost(msg.p);
     } else if (msg.k === 'project') {
       // I4: проект переименовали на другом экземпляре — сокетам здесь
       const project = projectOfBus(msg);
@@ -1425,6 +1442,24 @@ export function createSequencer({
     /** Выгрузить голову сейчас (тесты выгрузки по бездействию не ждут 10 минут). */
     async unload(projectId) {
       return withLock(projectId, () => dropHead(projectId));
+    },
+
+    /**
+     * Круг 45: удалить пустую сироту спасения — под замком проекта (здесь запись не вклинится),
+     * голова снимается; на других экземплярах запись отменит само условие хранилища.
+     */
+    async deleteEmpty(projectId, createId) {
+      return withLock(projectId, async () => {
+        const r = await storage.deleteEmptyProject(projectId, createId);
+        if (r.status === 'deleted') {
+          // arch-r45 Д2: сокеты проекта закрываются сразу (4404) — здесь и, по шине, на других экземплярах
+          lost(projectId);
+          if (typeof storage.publish === 'function') {
+            try { storage.publish({ k: 'missing', p: projectId, i: instanceId }); } catch (e) { log.warn('[document/dslts] шина: удаление проекта не разослано:', e && e.message); }
+          }
+        }
+        return r;
+      });
     },
 
     /** Сверить все головы с базой сейчас и дождаться (тестам; в работе — таймер и уведомления). */

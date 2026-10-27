@@ -21,18 +21,31 @@ const { ENGINE_VERSION, ENGINE_MIN_READ, FORMAT_SIGNATURE, formatSignature, crea
  */
 const FORMAT_HISTORY = {
   1: null,
+  // круг 45: в отпечаток добавлен поведенческий корпус (behavior.*, results — что получилось), пределы тени и
+  // имени контура — таблицами (limits.shadow, vector.maxPathName); проход 2 — «одетые» поля (behavior.dressed),
+  // проход 3–4 — операции отмены (behavior.exact: все пробы set и операций ещё раз с exact);
+  // формат тот же, состав отпечатка шире
   2: {
-    hash: 'dc721f14a5316a5a-2ck',
+    hash: '88865043fcdd1989-hl',
     sections: {
       enums: '3d5f4badd56fba2b-fk',
       fields: 'c19ec158ee571d7a-br',
       keys: '9d176db7128ae455-ov',
-      limits: 'a8d4d0e8a9a15076-7k',
+      limits: '69fee4a20d4db0c8-9l',
       nodes: '7dc93e5430fcaa92-3o',
       ops: 'ed069dfdf38ec707-17',
       paths: 'b234b2d53b1b8147-3p',
       refs: 'eec439faf7e0f954-9k',
-      tokens: '64506054ac161ae6-4h'
+      tokens: '64506054ac161ae6-4h',
+      'behavior.dressed': 'c6092bb5cc3d0433-5o',
+      'behavior.exact': '678beb549aca1b82-3ku',
+      'behavior.fields': 'b776fa05a7074603-5r28',
+      'behavior.nested': '8d622e246577c17e-14s9',
+      'behavior.nodes': 'f67d12ae3ab43950-1i',
+      'behavior.ops': '6eeb8110c37a3706-364',
+      'behavior.results': 'f8b39ecb3d7ddb95-bbo',
+      'behavior.svg': '3d023ee1e6c9c4bb-2z',
+      'behavior.tokens': 'cd226f5ed7cee580-25s0'
     }
   }
 };
@@ -40,7 +53,7 @@ const FORMAT_HISTORY = {
 test('круг43: формат документа привязан к ENGINE_VERSION — отпечаток совпадает с таблицей версий', () => {
   const now = FORMAT_SIGNATURE;
   const want = FORMAT_HISTORY[ENGINE_VERSION];
-  const show = JSON.stringify(now, null, 2);
+  const show = JSON.stringify({ hash: now.hash, sections: now.sections }, null, 2);
   assert.ok(want !== undefined,
     `ENGINE_VERSION = ${ENGINE_VERSION}: в FORMAT_HISTORY (test/core-r43.test.mjs) нет строки этой версии — добавьте её:\n  ${ENGINE_VERSION}: ${show}`);
   assert.ok(want, `ENGINE_VERSION = ${ENGINE_VERSION}: отпечаток не записан`);
@@ -67,6 +80,16 @@ test('круг43: отпечаток — простые данные из таб
   assert.deepEqual(a, b);
   assert.deepEqual(JSON.parse(JSON.stringify(a)), a, 'без функций и undefined');
   assert.ok(Object.isFrozen(FORMAT_SIGNATURE));
+  assert.ok(Object.isFrozen(FORMAT_SIGNATURE.sections));
+  // поведенческий корпус: детерминирован, без исключений, и в нём есть и приёмы, и отказы
+  const beh = core.formatBehavior();
+  for (const [k, bits] of Object.entries(beh)) {
+    // круг 45: results — отпечатки документов после принятых проб (по 6 знаков), не биты
+    if (k === 'results') { assert.match(bits, /^[0-9a-z]+$/); assert.equal(bits.length % 6, 0); continue; }
+    assert.match(bits, /^[01]+$/, `behavior.${k}: проба бросила исключение`);
+    assert.ok(bits.includes('0') && bits.includes('1'), `behavior.${k}: вырожденный корпус`);
+    assert.equal(FORMAT_SIGNATURE.sections['behavior.' + k] !== undefined, true);
+  }
   // разделы на месте и содержательны
   for (const k of ['nodes', 'fields', 'enums', 'keys', 'refs', 'tokens', 'ops', 'paths', 'limits']) assert.ok(a[k], k);
   assert.ok(a.nodes.types.includes('vector'));

@@ -442,7 +442,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
     const parts = url.pathname.split('/').filter(Boolean);
 
     if (method === 'OPTIONS') {
-      res.writeHead(204, { Allow: 'GET, HEAD, POST, PATCH, OPTIONS' });
+      res.writeHead(204, { Allow: 'GET, HEAD, POST, PATCH, DELETE, OPTIONS' });
       res.end();
       return;
     }
@@ -527,7 +527,7 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
 
     const id = parts[2];
 
-    // GET|PATCH /api/projects/:id   (?head=1 — только голова; ?lean=1[&since=] — без документа снимка)
+    // GET|PATCH|DELETE /api/projects/:id   (?head=1 — только голова; ?lean=1[&since=] — без документа снимка)
     if (parts.length === 3) {
       if (method === 'GET') {
         if (flag(url, 'head')) {
@@ -565,6 +565,29 @@ export function createRequestHandler({ dslr, dslts, storage, staticDir, internal
           // I4: живое имя — сокетам проекта на всех экземплярах
           if (typeof dslts.projectChanged === 'function') dslts.projectChanged(projectSummary(project));
           sendJSON(res, 200, { id: project.id, name: project.name, kind: project.kind, head_seq: project.head_seq });
+        }, MAX_TRACE_BYTES);
+        return;
+      }
+      if (method === 'DELETE') {
+        // круг 45 (§9.19): удалить можно только пустую сироту спасения — тело {create_id} того
+        // создания, без единой записи журнала; любой другой проект этим путём не удаляется
+        await writeRoute(req, async (body) => {
+          // ключ — в теле или в `?create_id=` (часть прокси режет тело у DELETE); оба — должны совпасть
+          if (body !== null && body !== undefined && (typeof body !== 'object' || Array.isArray(body))) throw badRequest('тело: объект {create_id}');
+          if (body && body.create_id !== undefined && (typeof body.create_id !== 'string' || !body.create_id)) {
+            throw badRequest('create_id: строка', { detail: { param: 'create_id' } });
+          }
+          const fromBody = body && typeof body === 'object' && typeof body.create_id === 'string' ? body.create_id : '';
+          const fromQuery = url.searchParams.get('create_id') || '';
+          if (fromBody && fromQuery && fromBody !== fromQuery) throw badRequest('create_id в теле и в адресе разные', { detail: { param: 'create_id' } });
+          const cid = fromBody || fromQuery;
+          if (!cid) throw badRequest('create_id: строка — удаляется только пустой проект своего создания', { detail: { param: 'create_id' } });
+          const r = await viaStorage(dslts.deleteEmpty(id, cid));
+          if (r.status === 'not_found') throw notFound();
+          if (r.status === 'create_id') throw new DocError(409, 'conflict', 'проект создан не этим create_id или это не макет (библиотека) — удалить его так нельзя', { retryable: false, detail: { cause: 'create_id', param: 'create_id' } });
+          if (r.status === 'not_empty') throw new DocError(409, 'conflict', 'в проекте уже есть правки или на него ссылается импорт — пустым он не считается и не удаляется', { retryable: false, detail: { cause: 'not_empty' } });
+          res.writeHead(204, { 'Cache-Control': 'no-store' });
+          res.end();
         }, MAX_TRACE_BYTES);
         return;
       }

@@ -102,6 +102,8 @@ test('очередь пула: событие queued {scope:workers}, преде
   assert.ok(le, late.text);
   assert.equal(le.data.code, 'busy');
   assert.match(le.data.message, /ждала расчёта/);
+  // круг 45 (arch-r44): причина — в detail, как у очереди чтений
+  assert.deepEqual(le.data.detail, { cause: 'agent', queue: 'workers' });
   assert.ok(late.events.some((e) => e.event === 'queued' && e.data.scope === 'workers'));
   g2.open();
   await a2.until((e) => e.event === 'done');
