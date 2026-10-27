@@ -21,7 +21,7 @@ import {
 } from './core.js';
 // круг 25: cutText/cleanText появляются в core параллельно — берём оттуда, если уже есть
 import * as CORE_NS from './core.js';
-import { recognizeAction, RE_IMAGE_REF, textRole } from './brain.js';
+import { recognizeAction, RE_IMAGE_REF, textRole, ruToken } from './brain.js';
 import { catalogFont, nearestWeight, FONT_CATALOG } from './fonts.js';
 // круг 41: причины отброшенного — одна истина со словами реплики (§9.10)
 import { DROP_WORDS } from './sync.js';
@@ -4603,6 +4603,102 @@ export function themeFontOps(doc, board, role, family) {
 export function fontChoices() {
   const kinds = [['sans', 'Гротески'], ['serif', 'Антиквы'], ['slab', 'Брусковые'], ['display', 'Акцидентные'], ['script', 'Рукописные']];
   return kinds.map(([k, title]) => ({ title, families: FONT_CATALOG.filter((f) => f.kind === k).map((f) => f.family) })).filter((g) => g.families.length);
+}
+
+/* ------------------------- круг 73: шрифт отдельного стиля экрана ------------------------- */
+
+/**
+ * Круг 73 (SPEC §15.10): строки «По стилям» — каждый стиль ролей (§15.7) отдельно: каким шрифтом и
+ * насыщенностью доска его видит, что в документе, что своё у экрана и какие насыщенности есть у
+ * видимого шрифта (вне набора — только записанная).
+ * @returns {{style: string, title: string, role: string, font: string, docFont: string, ownFont: boolean,
+ *   weight: number, docWeight: number, ownWeight: boolean, weights: number[]}[]}
+ */
+export function boardStyleFontRows(doc, board) {
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
+  const tt = isObj(theme.type) ? theme.type : {};
+  const types = (doc && doc.tokens && isObj(doc.tokens.type)) ? doc.tokens.type : {};
+  const roles = fontRoleStyles(doc);
+  const out = [];
+  for (const role of ['display', 'text']) {
+    for (const style of roles[role]) {
+      const base = types[style];
+      const mine = isObj(tt[style]) ? tt[style] : {};
+      const docFont = String(base.font || '');
+      const docWeight = typeof base.fontWeight === 'number' ? base.fontWeight : 400;
+      const font = mine.font || docFont;
+      const weight = typeof mine.fontWeight === 'number' ? mine.fontWeight : docWeight;
+      const fam = catalogFont(font);
+      const weights = fam ? [...fam.weights] : [weight];
+      out.push({ style, title: ruToken('type', style), role, font, docFont, ownFont: !!mine.font,
+        weight, docWeight, ownWeight: typeof mine.fontWeight === 'number', weights });
+    }
+  }
+  return out;
+}
+
+/**
+ * Круг 73 (SPEC §15.10): шрифт и/или насыщенность одного стиля у экрана — одна операция
+ * `theme.type.<стиль>`. `change.font`: семейство набора или null («как в документе»); `change.fontWeight`:
+ * число или null («как в документе»); не названное — как есть. Новый шрифт без названной насыщенности
+ * берёт ближайшую к своей (записанной) или к документу; записывается то, что отличается от документа.
+ * Опустела запись — снимается; опустели шрифты — `theme.type` пустым; опустела тема — `theme` пустым.
+ * @returns {{ops: object[], label: string}|null}
+ */
+export function themeStyleFontOps(doc, board, style, change = {}) {
+  if (!board || !board.id || !isObj(change)) return null;
+  const types = (doc && doc.tokens && isObj(doc.tokens.type)) ? doc.tokens.type : {};
+  if (!fontRoleStyles(doc).display.concat(fontRoleStyles(doc).text).includes(style)) return null;
+  const base = types[style];
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
+  const type = { ...(isObj(theme.type) ? theme.type : {}) };
+  const was = isObj(type[style]) ? type[style] : {};
+  const docW = typeof base.fontWeight === 'number' ? base.fontWeight : 400;
+  let font = was.font;
+  if (Object.prototype.hasOwnProperty.call(change, 'font')) {
+    if (change.font == null) font = undefined;
+    else {
+      const fam = catalogFont(change.font);
+      if (!fam) return null;
+      font = famKey(fam.family) === famKey(base.font) ? undefined : fam.family;
+    }
+  }
+  const seenFont = font || base.font;
+  let weight = was.fontWeight;
+  if (Object.prototype.hasOwnProperty.call(change, 'fontWeight')) {
+    if (change.fontWeight == null) weight = undefined;
+    else {
+      const w = Number(change.fontWeight);
+      if (!Number.isFinite(w) || w < 100 || w > 900) return null;
+      weight = nearestWeight(seenFont, w);
+    }
+  } else if (font !== was.font && catalogFont(seenFont)) {
+    // шрифт сменился, насыщенность не названа — ближайшая у нового к своей насыщенности стиля; своя —
+    // только не та, что сами подобрали прежнему шрифту (ближайшая к документу, как в круге 68)
+    const autoW = was.font && typeof was.fontWeight === 'number' ? nearestWeight(was.font, docW) : null;
+    const ownW = typeof was.fontWeight === 'number' && was.fontWeight !== autoW ? was.fontWeight : null;
+    weight = nearestWeight(seenFont, ownW != null ? ownW : docW);
+  }
+  if (weight === docW) weight = undefined;
+  const entry = {};
+  if (font) entry.font = font;
+  if (weight !== undefined) entry.fontWeight = weight;
+  const next = Object.keys(entry).length ? entry : undefined;
+  if (JSON.stringify(type[style]) === JSON.stringify(next)) return null;
+  if (next) type[style] = next; else delete type[style];
+  const whole = { ...theme };
+  if (Object.keys(type).length) whole.type = type; else delete whole.type;
+  const value = Object.keys(whole).length ? whole : undefined;
+  if (value !== undefined && CORE_NS.themeProblem && CORE_NS.themeProblem(value)) return null;
+  const ops = value === undefined ? [OPS.set(board.id, 'theme', undefined)]
+    : !whole.type ? [OPS.set(board.id, 'theme.type', undefined)]
+      : [OPS.set(board.id, `theme.type.${style}`, next)];
+  const screen = `«${String(board.name || 'Доска').slice(0, 40)}»`;
+  const what = `стиль «${ruToken('type', style)}»`;
+  const label = value === undefined ? `Экран ${screen} вернулся к оформлению документа`
+    : next ? `Экран ${screen}, ${what}: ${[next.font || base.font, next.fontWeight || docW].filter(Boolean).join(' ')}`
+      : `Экран ${screen}, ${what} — как в документе`;
+  return { ops, label };
 }
 
 /* ------------------------- круг 70: тема с другого экрана ------------------------- */

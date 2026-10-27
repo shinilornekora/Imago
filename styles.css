@@ -1865,6 +1865,13 @@ button.t-action:hover { text-decoration: underline; }
 .theme-color-mark { display: block; font-size: 11px; font-weight: 400; color: var(--accent); }
 .theme-font-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
 .theme-font-select { flex: 1 1 auto; min-width: 0; }
+/* круг 73: шрифты по стилям */
+.theme-styles { margin: 6px 0; }
+.theme-styles > summary { cursor: pointer; font-size: 12px; color: var(--muted, inherit); }
+.theme-style-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.theme-style-row .theme-color-name { flex: 0 0 34%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.theme-style-font { flex: 1 1 auto; min-width: 0; }
+.theme-style-weight { flex: 0 0 auto; width: 6.5em; }
 .theme-color-note { font-size: var(--t-sm); color: var(--muted); }
 .paint-color-input {
   flex: none; width: 30px; height: 28px; padding: 2px; border: 1px solid var(--line-strong);

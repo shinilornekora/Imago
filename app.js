@@ -8846,6 +8846,7 @@ function tokenType(token, node) {
  * снимает его с темы. У доски без темы список свёрнут.
  */
 const themeColorsOpen = new Map();   // доска → раскрыт ли список (выбор человека переживает перерисовку)
+const themeStylesOpen = new Map();   // круг 73: то же для «Шрифты по стилям»
 function boardThemeGroup(node) {
   if (!node || node.type !== 'frame' || node.parent !== state.doc.root || typeof CORE.boardTheme !== 'function') return null;
   const t = CORE.boardTheme(node);
@@ -8859,7 +8860,8 @@ function boardThemeGroup(node) {
     // шрифты: строкой — то, что выбором не показано (моно, стиль вне ролей, только насыщенность)
     const covered = new Set(fontRows.flatMap((r) => r.styles));
     for (const [k, v] of Object.entries(t.type || {})) {
-      const shown = covered.has(k) ? [v.fontWeight] : [v.font, v.fontWeight];
+      // круг 73: шрифт и насыщенность стилей ролей видны в «Шрифты по стилям» — здесь только прочие
+      const shown = covered.has(k) ? [] : [v.font, v.fontWeight];
       if (shown.some(Boolean)) bits.push(`${k} — ${shown.filter(Boolean).join(' ')}`);
     }
     if (bits.length || (!t.colors && !t.type)) {
@@ -8979,6 +8981,65 @@ function boardThemeGroup(node) {
     });
     line.append(name, sel);
     kids.push(line);
+  }
+  // круг 73 (§15.10): шрифт и насыщенность каждого стиля отдельно — под раскрывашкой
+  const styleRows = SHELL.boardStyleFontRows(state.doc, node);
+  if (styleRows.length) {
+    const d = document.createElement('details');
+    d.className = 'theme-styles';
+    const ownCount = styleRows.filter((r) => r.ownFont || r.ownWeight).length;
+    // по умолчанию раскрыто, когда своё у стилей не сводится к ролям (разные шрифты в роли, своя насыщенность)
+    const mixed = fontRows.some((fr) => !fr.font) || styleRows.some((r) => r.ownWeight);
+    d.open = themeStylesOpen.has(node.id) ? themeStylesOpen.get(node.id) : mixed;
+    d.addEventListener('toggle', () => themeStylesOpen.set(node.id, d.open));
+    const sum = document.createElement('summary');
+    sum.textContent = ownCount ? `Шрифты по стилям · своих ${ownCount}` : 'Шрифты по стилям';
+    d.appendChild(sum);
+    const opt = (value, text, o = {}) => { const e = document.createElement('option'); e.value = value; e.textContent = text; Object.assign(e, o); return e; };
+    const apply = (style, change) => {
+      const cur = state.doc.nodes[node.id];
+      const r = cur ? SHELL.themeStyleFontOps(state.doc, cur, style, change) : null;
+      if (r) commit(r.ops, r.label);
+    };
+    for (const r of styleRows) {
+      const line = document.createElement('div');
+      line.className = 'theme-style-row' + (r.ownFont || r.ownWeight ? ' own' : '');
+      line.dataset.style = r.style;
+      const name = document.createElement('span');
+      name.className = 'theme-color-name';
+      name.textContent = r.title;
+      if (r.ownFont || r.ownWeight) {
+        const mark = document.createElement('small');
+        mark.className = 'theme-color-mark';
+        mark.textContent = 'своё';
+        name.appendChild(mark);
+      }
+      const fontSel = document.createElement('select');
+      fontSel.className = 'field theme-style-font';
+      fontSel.appendChild(opt('', `как в документе${r.docFont ? ` — ${r.docFont}` : ''}`));
+      for (const g of SHELL.fontChoices()) {
+        const og = document.createElement('optgroup');
+        og.label = g.title;
+        for (const f of g.families) og.appendChild(opt(f, f));
+        fontSel.appendChild(og);
+      }
+      const inSet = r.ownFont && catalogFont(r.font) ? catalogFont(r.font).family : null;
+      if (r.ownFont && !inSet) fontSel.insertBefore(opt('!', `${r.font} — нет в наборе`, { disabled: true }), fontSel.children[1] || null);
+      fontSel.value = r.ownFont ? (inSet || '!') : '';
+      fontSel.setAttribute('aria-label', `Шрифт стиля «${r.title}» экрана`);
+      fontSel.addEventListener('change', () => apply(r.style, { font: fontSel.value || null }));
+      const wSel = document.createElement('select');
+      wSel.className = 'field theme-style-weight';
+      wSel.appendChild(opt('', `как в документе — ${r.docWeight}`));
+      for (const w of r.weights) wSel.appendChild(opt(String(w), String(w)));
+      if (r.ownWeight && !r.weights.includes(r.weight)) wSel.appendChild(opt(String(r.weight), String(r.weight)));
+      wSel.value = r.ownWeight ? String(r.weight) : '';
+      wSel.setAttribute('aria-label', `Насыщенность стиля «${r.title}» экрана`);
+      wSel.addEventListener('change', () => apply(r.style, { fontWeight: wSel.value ? Number(wSel.value) : null }));
+      line.append(name, fontSel, wSel);
+      d.appendChild(line);
+    }
+    kids.push(d);
   }
   // круг 70 (§15.8): тема другого экрана — копией этой доске
   const sources = SHELL.themeSources(state.doc, node);
