@@ -1861,8 +1861,12 @@ const AB_KIND = '(?:доск[а-яё]*|артборд[а-яё]*|экран[а-я
 const RE_THEMED_PICK = new RegExp('^(?:выдели(?:ть|те)?|выбери(?:те)?|покажи(?:те)?|найди(?:те)?|какие)\\s+(?:вс[её]\\s+)?(?:экраны?|доск[аи]|артборды?|макеты?)\\s+'
   + '(?:со\\s+сво(?:ей|им|ими)\\s+(?:тем(?:ой|ами)|оформлением|цветами)|в\\s+сво(?:ей|их)\\s+тем(?:е|ах)|с\\s+(?:собственн|отдельн)\\p{L}*\\s+(?:тем(?:ой|ами)|оформлением))$', 'u');
 /* Круг 86 (SPEC §15.22): «привяжи цвета экрана к палитре» — то же, что кнопка §15.21, словами. */
-const RE_BIND_COLORS = new RegExp('^(?:привяжи(?:те)?|привязать|переведи(?:те)?|перевести)\\s+(?:все\\s+)?(?:коды\\s+)?цвет(?:а|ов)?'
-  + '(?:\\s+(?:этого\\s+)?(?:экрана|доски|макета))?\\s+(?:к|в|на)\\s+(?:(?:палитр[еуы]|токен(?:ы|ам))(?:\\s+(?:документа|палитры))?|цвет(?:а|ам)\\s+(?:документа|палитры))$', 'u');
+const BIND_HEAD = '^(?:привяжи(?:те)?|привязать|переведи(?:те)?|перевести)\\s+(?:все\\s+)?(?:коды\\s+)?цвет(?:а|ов)?';
+const BIND_TAIL = '\\s+(?:к|в|на)\\s+(?:(?:палитр[еуы]|токен(?:ы|ам))(?:\\s+(?:документа|палитры))?|цвет(?:а|ам)\\s+(?:документа|палитры))$';
+const RE_BIND_COLORS = new RegExp(BIND_HEAD + '(?:\\s+(?:этого\\s+)?(?:экрана|доски|макета))?' + BIND_TAIL, 'u');
+/* Круг 87 (SPEC §15.23): то же на всех экранах разом — «привяжи цвета всех экранов к палитре». */
+const RE_BIND_ALL = new RegExp(BIND_HEAD + '\\s+(?:(?:(?:на|во|у)\\s+)?(?:всех|всем)\\s+(?:экран(?:ов|ах|ам)|дос(?:ок|ках|кам)|макет(?:ов|ах|ам)|артборд(?:ов|ах|ам))'
+  + '|(?:всего\\s+)?документа|во\\s+вс[её]м\\s+документе)' + BIND_TAIL, 'u');
 const RE_THEMED_ASK = /^у\s+каких\s+(?:экранов|досок|артбордов|макетов)\s+сво(?:я|и)\s+(?:тема|темы|оформление)$/u;
 const RE_PICK = /^(?:выдели|выделить|выделите|выбери|выбрать|укажи|отметь)\s+(?:слой\s+|узел\s+|элемент\s+)?(.+)$/;
 /* Круг 18, п.5. Раз интерфейс зовёт их досками, сказать «новая доска» человек вправе
@@ -2004,6 +2008,7 @@ export function shellIntent(said, ctx = {}) {
   /* — круг 83: экраны со своей темой — */
   if (RE_THEMED_PICK.test(t) || RE_THEMED_ASK.test(t)) return themedBoardsIntent(doc);
   if (RE_BIND_COLORS.test(t)) return { kind: 'bind-colors' };
+  if (RE_BIND_ALL.test(t)) return { kind: 'bind-colors', all: true };
 
   /* — выделение по имени — */
   if (/^(сними выделение|снять выделение|убери выделение|ничего не выделяй)$/.test(t)) return { kind: 'select', ids: [] };
@@ -2141,6 +2146,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'gap-more', group: 'Правка', title: 'Зазор больше', hint: 'Зазор между детьми рамки — на шаг шкалы отступов больше', slash: ['зазор больше', 'зазор+', 'gap+'], phrases: ['увеличь зазор', 'зазор больше'], edit: true, needs: 'selection' },
   { id: 'gap-less', group: 'Правка', title: 'Зазор меньше', hint: 'Зазор между детьми рамки — на шаг шкалы отступов меньше', slash: ['зазор меньше', 'зазор-', 'gap-'], phrases: ['уменьши зазор', 'зазор меньше'], edit: true, needs: 'selection' },
   { id: 'bind-colors', group: 'Правка', title: 'Привязать цвета экрана к палитре', hint: 'Цвета кодом, равные цветам палитры, — к токенам: тема их перекрасит', slash: ['привязать цвета', 'bind colors'], phrases: ['привяжи цвета к палитре', 'переведи цвета экрана в токены'], edit: true },
+  { id: 'bind-colors-all', group: 'Правка', title: 'Привязать цвета всех экранов к палитре', hint: 'То же на каждом экране документа — одной правкой', slash: ['привязать все цвета', 'bind all colors'], phrases: ['привяжи цвета всех экранов к палитре', 'переведи цвета документа в токены'], edit: true },
 
   /* — Доски — */
   { id: 'board', group: 'Доски', title: 'К доске', hint: 'Доска по номеру или имени — с ней работает агент', slash: ['доска', 'board'], args: [{ name: 'номер или имя', kind: 'text' }], example: '/доска 2', phrases: ['покажи второй экран', 'открой маршрут дня'] },
@@ -2290,6 +2296,7 @@ export const ALIGN_HOW_WORDS = Object.freeze({ left: 'влево', center: 'по
 const PLAIN_INTENTS = {
   'zoom-in': () => ({ kind: 'zoom', by: 1.25 }),
   'bind-colors': () => ({ kind: 'bind-colors' }),
+  'bind-colors-all': () => ({ kind: 'bind-colors', all: true }),
   'zoom-out': () => ({ kind: 'zoom', by: 1 / 1.25 }),
   'zoom-reset': () => ({ kind: 'zoom', to: 1 }),
   fit: () => ({ kind: 'fit' }),
@@ -2564,7 +2571,7 @@ export function commandIdOf(intent) {
     case 'select-all': return 'select-all';
     case 'select': return intent.themed ? 'select-themed' : (intent.ids || []).length || intent.name ? 'select-name' : 'deselect';
     case 'select-name': return 'select-name';
-    case 'bind-colors': return 'bind-colors';
+    case 'bind-colors': return intent.all ? 'bind-colors-all' : 'bind-colors';
     case 'select-rel': return { parent: 'select-parent', children: 'select-children', next: 'select-next', prev: 'select-prev' }[intent.rel] || null;
     case 'delete': return 'delete';
     case 'duplicate': return 'duplicate';
@@ -4903,6 +4910,32 @@ export function bindBoardColorsOps(doc, board) {
     ops: refs.map((r) => OPS.set(r.id, r.path, r.value)),
     label: `Экран «${String(board.name || 'Доска').slice(0, 40)}»: цвета ${n} ${plural(n, 'слоя', 'слоёв', 'слоёв')} привязаны к палитре`,
   };
+}
+
+/**
+ * Круг 87 (SPEC §15.23): привязка §15.21 на всех экранах документа (библиотека — не экран) — одной
+ * правкой, одна отмена. Каждый экран — со своей палитрой (с его темой).
+ * @returns {{ops: object[], label: string, boards: Array<{id: string, name: string, n: number}>, ambiguous: number}}
+ *   ops пусты — привязывать нечего ни на одном экране
+ */
+export function bindAllColorsOps(doc) {
+  const names = boardLabels(doc);
+  const ops = [];
+  const boards = [];
+  let ambiguous = 0;
+  for (const [id, name] of names) {
+    const { refs, ambiguous: a } = boardHexRefs(doc, doc.nodes[id]);
+    ambiguous += a || 0;
+    if (!refs.length) continue;
+    for (const r of refs) ops.push(OPS.set(r.id, r.path, r.value));
+    boards.push({ id, name, n: new Set(refs.map((r) => r.id)).size });
+  }
+  const total = boards.reduce((k, b) => k + b.n, 0);
+  const shown = boards.slice(0, 3).map((b) => `«${b.name.slice(0, 40)}»`).join(', ') + (boards.length > 3 ? ` и ещё ${boards.length - 3}` : '');
+  const label = boards.length === 1
+    ? `Экран «${boards[0].name.slice(0, 40)}»: цвета ${total} ${plural(total, 'слоя', 'слоёв', 'слоёв')} привязаны к палитре`
+    : `Цвета ${total} ${plural(total, 'слоя', 'слоёв', 'слоёв')} на ${boards.length} ${plural(boards.length, 'экране', 'экранах', 'экранах')} привязаны к палитре: ${shown}`;
+  return { ops, label, boards, ambiguous };
 }
 
 /* ------------------------- круг 70: тема с другого экрана ------------------------- */
