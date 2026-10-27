@@ -6793,6 +6793,24 @@ function renderLayers() {
       add.addEventListener('click', (e) => { e.stopPropagation(); placeInstance(r.id); });
       row.appendChild(add);
     }
+    // круг 81 (§15.17): у экрана своя тема — метка с её цветом
+    const themed = !r.lib && SHELL.boardThemeBadge(state.doc, n);
+    if (themed) {
+      const t = document.createElement('span');
+      t.className = 'tagpill theme' + (themed.broken ? ' warn' : '');
+      // узкая, как метка состояний: кружок цвета темы; одни шрифты — «Аа», повреждённая — «!»
+      if (themed.swatch) {
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.style.background = themed.swatch;
+        t.appendChild(dot);
+      } else t.textContent = themed.broken ? '!' : 'Аа';
+      t.title = themed.title;
+      t.setAttribute('role', 'img');
+      t.setAttribute('aria-label', themed.title);
+      row.dataset.theme = 'on';
+      row.appendChild(t);
+    }
     if (n.override) {
       const t = document.createElement('span');
       t.className = 'tagpill'; t.textContent = 'вручную';
