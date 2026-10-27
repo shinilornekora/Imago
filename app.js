@@ -12117,6 +12117,21 @@ function applyShellIntent(intent, said) {
       openExport();
       return true;
     }
+    case 'bind-colors': {
+      // круг 86 (§15.22): экран — активная доска (у выделения — его доска)
+      const id = activeArtboardId();
+      const board = id && state.doc.nodes[id];
+      if (!board) { toast('Экрана нет — привязывать нечего.', 'plain', 5000); return true; }
+      const r = SHELL.bindBoardColorsOps(state.doc, board);
+      if (!r) {
+        const { ambiguous } = SHELL.boardHexRefs(state.doc, board);
+        toast(`На экране «${clip(board.name || 'Доска', 40)}» нет цветов кодом, равных цветам палитры${ambiguous ? ` (неоднозначных — ${ambiguous}: у палитры два цвета с таким значением)` : ''}.`, 'plain', 6000);
+        return true;
+      }
+      commit(r.ops, r.label);
+      toast(r.label, 'plain', 5000);
+      return true;
+    }
     case 'select': {
       const ids = (intent.ids || []).filter((id) => state.doc.nodes[id]);
       // круг 83 (§15.19): «выдели экраны со своей темой» — своя фраза; никого — выделение не трогаем

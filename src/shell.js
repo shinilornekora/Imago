@@ -1860,6 +1860,9 @@ const AB_KIND = '(?:доск[а-яё]*|артборд[а-яё]*|экран[а-я
    оформление своё (метка §15.17), выделяются разом; без этого RE_PICK искал бы слой с именем «экраны…». */
 const RE_THEMED_PICK = new RegExp('^(?:выдели(?:ть|те)?|выбери(?:те)?|покажи(?:те)?|найди(?:те)?|какие)\\s+(?:вс[её]\\s+)?(?:экраны?|доск[аи]|артборды?|макеты?)\\s+'
   + '(?:со\\s+сво(?:ей|им|ими)\\s+(?:тем(?:ой|ами)|оформлением|цветами)|в\\s+сво(?:ей|их)\\s+тем(?:е|ах)|с\\s+(?:собственн|отдельн)\\p{L}*\\s+(?:тем(?:ой|ами)|оформлением))$', 'u');
+/* Круг 86 (SPEC §15.22): «привяжи цвета экрана к палитре» — то же, что кнопка §15.21, словами. */
+const RE_BIND_COLORS = new RegExp('^(?:привяжи(?:те)?|привязать|переведи(?:те)?|перевести)\\s+(?:все\\s+)?(?:коды\\s+)?цвет(?:а|ов)?'
+  + '(?:\\s+(?:этого\\s+)?(?:экрана|доски|макета))?\\s+(?:к|в|на)\\s+(?:палитр[еуы]|токен(?:ы|ам)|цвет(?:а|ам)\\s+документа)$', 'u');
 const RE_THEMED_ASK = /^у\s+каких\s+(?:экранов|досок|артбордов|макетов)\s+сво(?:я|и)\s+(?:тема|темы|оформление)$/u;
 const RE_PICK = /^(?:выдели|выделить|выделите|выбери|выбрать|укажи|отметь)\s+(?:слой\s+|узел\s+|элемент\s+)?(.+)$/;
 /* Круг 18, п.5. Раз интерфейс зовёт их досками, сказать «новая доска» человек вправе
@@ -2000,6 +2003,7 @@ export function shellIntent(said, ctx = {}) {
 
   /* — круг 83: экраны со своей темой — */
   if (RE_THEMED_PICK.test(t) || RE_THEMED_ASK.test(t)) return themedBoardsIntent(doc);
+  if (RE_BIND_COLORS.test(t)) return { kind: 'bind-colors' };
 
   /* — выделение по имени — */
   if (/^(сними выделение|снять выделение|убери выделение|ничего не выделяй)$/.test(t)) return { kind: 'select', ids: [] };
@@ -2115,6 +2119,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'select-children', group: 'Выделение', title: 'Выделить детей', hint: 'Слои внутри выделенной рамки', slash: ['дети', 'children'], phrases: ['выдели детей', 'на уровень ниже'], needs: 'selection' },
   { id: 'select-next', group: 'Выделение', title: 'Следующий сосед', hint: 'Следующий слой в том же родителе', slash: ['следующий', 'next'], phrases: ['следующий слой', 'выдели следующий'], needs: 'selection' },
   { id: 'select-prev', group: 'Выделение', title: 'Предыдущий сосед', hint: 'Предыдущий слой в том же родителе', slash: ['предыдущий', 'prev'], phrases: ['предыдущий слой', 'выдели предыдущий'], needs: 'selection' },
+  { id: 'bind-colors', group: 'Правка', title: 'Привязать цвета экрана к палитре', hint: 'Цвета кодом, равные цветам палитры, — к токенам: тема их перекрасит', slash: ['привязать цвета', 'bind colors'], phrases: ['привяжи цвета к палитре', 'переведи цвета экрана в токены'], edit: true },
   { id: 'select-themed', group: 'Выделение', title: 'Выделить экраны со своей темой', hint: 'Экраны, у которых оформление не как в документе', slash: ['свои темы', 'themed'], phrases: ['выдели экраны со своей темой', 'какие экраны в своей теме'] },
   { id: 'select-name', group: 'Выделение', title: 'Выделить по имени', hint: 'Слой, чьё имя похоже на сказанное', slash: ['выделить', 'select'], args: [{ name: 'имя', kind: 'text' }], example: '/выделить заголовок', phrases: ['выдели заголовок экрана'] },
 
@@ -2284,6 +2289,7 @@ export const ALIGN_HOW_WORDS = Object.freeze({ left: 'влево', center: 'по
 /** Намерение по записи таблицы без аргументов (id → то, что исполняет оболочка). */
 const PLAIN_INTENTS = {
   'zoom-in': () => ({ kind: 'zoom', by: 1.25 }),
+  'bind-colors': () => ({ kind: 'bind-colors' }),
   'zoom-out': () => ({ kind: 'zoom', by: 1 / 1.25 }),
   'zoom-reset': () => ({ kind: 'zoom', to: 1 }),
   fit: () => ({ kind: 'fit' }),
@@ -2558,6 +2564,7 @@ export function commandIdOf(intent) {
     case 'select-all': return 'select-all';
     case 'select': return intent.themed ? 'select-themed' : (intent.ids || []).length || intent.name ? 'select-name' : 'deselect';
     case 'select-name': return 'select-name';
+    case 'bind-colors': return 'bind-colors';
     case 'select-rel': return { parent: 'select-parent', children: 'select-children', next: 'select-next', prev: 'select-prev' }[intent.rel] || null;
     case 'delete': return 'delete';
     case 'duplicate': return 'duplicate';
