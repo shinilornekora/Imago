@@ -145,7 +145,9 @@ test('круг48: «сделай только этот экран тёмным»
   assert.match(provider.calls[1].messages[0].content, /board:true/);
   // повтор поверх — новая тема на основе прежней; сброс — снимает
   const again = themeToOps({ doc: after, theme: { board: true, colors: [{ name: 'accent', value: '#ff4f6d' }] }, engine: core, warn: () => {}, scope: { ids: ['pay_t'] } });
-  assert.deepEqual(again[0].value.colors, { canvas: '#101418', text: '#e8eaf0', accent: '#ff4f6d' });
+  // круг 69: у экрана уже есть тема — правка по пути цвета, а не всей темой
+  assert.deepEqual(again.map((o) => [o.path, o.value]), [['theme.colors.accent', '#ff4f6d']]);
+  assert.deepEqual(core.applyOps(after, again).doc.nodes.pay.theme.colors, { canvas: '#101418', text: '#e8eaf0', accent: '#ff4f6d' });
   const reset = themeToOps({ doc: after, theme: { board: true, reset: true }, engine: core, warn: () => {}, scope: { ids: ['pay'] } });
   assert.equal(reset[0].path, 'theme');
   assert.equal(reset[0].value, undefined);
