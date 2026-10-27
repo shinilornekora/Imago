@@ -71,3 +71,16 @@ test('круг79: без модели — «верни экрану цвета �
   for (const u of ['верни кнопке цвет как в документе', 'верни кнопке на экране цвет', 'сбрось цвета кнопки', 'верни экрану Итог кнопку синей'])
     assert.notEqual(classifyUtterance(u).intent, 'theme', u);
 });
+
+test('круг79, критик: «прежние цвета» — не тема; несколько экранов и «кроме» — тема; повреждённая тема — заметка', () => {
+  for (const u of ['верни экрану Итог прежние цвета', 'верни экрану Итог старые цвета'])
+    assert.notEqual(classifyUtterance(u).intent, 'theme', u);
+  for (const u of ['верни экранам Оплата и Итог цвета документа', 'верни всем экранам, кроме Оплаты, цвета документа', 'верни экрану Старт цвета документа'])
+    assert.equal(classifyUtterance(u).intent, 'theme', u);
+  const doc = structuredClone(screens());
+  doc.nodes.plain.theme = { colors: { accent: 'не цвет' }, type: { title: { font: 'Prata' } } };   // как из старого файла
+  assert.equal(core.boardTheme(doc.nodes.plain), null);
+  const notes = [];
+  assert.deepEqual(run(doc, { boardName: 'Профиль', resetPart: 'colors' }, notes).map((o) => o.path), ['theme']);
+  assert.ok(notes.some((m) => /«Профиль» была повреждена — снята целиком/.test(m)), notes.join(' | '));
+});

@@ -2631,7 +2631,7 @@ const RE = {
     rx(R76.notOn + R76.det + R76.scr + R76.name + R76.and + String.raw`\s+(?:в|с)\s+\p{L}+\s+акцент(?:ом|е)` + R76.end),
     // круг 79 (SPEC §15.16): «верни экрану Итог цвета документа», «сбрось свои цвета экрана», «цвета экрана — как
     // в документе» — снять с экрана свои цвета; «верни кнопке цвет» (не экран) — как было
-    rx(String.raw`(?:верни|сбрось|сними)\s+` + R76.det + R76.scr + R76.name + String.raw`\s+(?:(?:общ|сво)\p{L}*\s+)?цвет\p{L}*(?:\s+(?:документа|как\s+в\s+документе))?` + R76.end),
+    rx(String.raw`(?![^.!?]*(?:прежн|стар(?:ые|ых|ым|ыми)|исходн|бывш)\p{L}*\s+цвет)(?:верни|сбрось|сними)\s+(?:всем\s+)?` + R76.det + R76.scr + R76.name + R76.and + String.raw`,?\s+(?:(?:общ|сво)\p{L}*\s+)?цвет\p{L}*(?:\s+(?:документа|как\s+в\s+документе))?` + R76.end),
     rx(String.raw`(?:сбрось|сними)\s+(?:сво\p{L}*\s+)?цвет\p{L}*\s+(?:у\s+)?(?:этого\s+)?` + R76.det + R76.scr + R76.name + R76.end),
     rx(String.raw`цвет\p{L}*\s+` + R76.det + R76.scr + R76.name + String.raw`\s*[—:-]?\s*как\s+в\s+документе` + R76.end),
     rx(String.raw`(?:перекрась|покрась|затемни|осветли)\s+` + R76.det + R76.scr + R76.name + R76.and + String.raw`(?=\s*(?:$|[.!?]|\s+в\s))`),
@@ -11354,6 +11354,7 @@ function oneBoardThemeOps({ doc, theme, engine, note, boardId, byName, label, sa
     // круг 79 (SPEC §15.16): только цвета или только шрифты; другая часть остаётся своей
     const part = theme.resetPart === 'colors' || theme.resetPart === 'type' ? theme.resetPart : null;
     const now = part && engine && engine.boardTheme ? engine.boardTheme(board) : null;
+    if (part && !now) note(`Тема экрана «${label(boardId)}» была повреждена — снята целиком`);
     if (now) {
       const has = (k) => now[k] && typeof now[k] === 'object' && Object.keys(now[k]).length > 0;
       const what = part === 'colors' ? 'цветов' : 'шрифтов';
