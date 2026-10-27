@@ -4281,11 +4281,11 @@ export function moodboardOps(doc, o) {
 
 /**
  * Круг 59: что из брошенного или вставленного не легло в мудборд — словами, у каждой причины своя фраза.
- * @param {{images: number, taken: number, failed: number, other: number}} c картинок всего, взято (до max),
- *   из взятых не открылось, файлов не-картинок
+ * @param {{images: number, taken: number, failed: number, other: number, into?: 'reference'|'board'}} c картинок
+ *   всего, взято (до max), из взятых не открылось, файлов не-картинок; куда кладутся — образцом или на холст
  * @returns {string} '' — легло всё
  */
-export function moodboardLeftover({ images = 0, taken = 0, failed = 0, other = 0 } = {}) {
+export function moodboardLeftover({ images = 0, taken = 0, failed = 0, other = 0, into = 'reference' } = {}) {
   const pl = (n, one, few, many) => {
     const a = Math.abs(n) % 100;
     const b = a % 10;
@@ -4293,7 +4293,9 @@ export function moodboardLeftover({ images = 0, taken = 0, failed = 0, other = 0
   };
   const out = [];
   const over = Math.max(0, images - taken);
-  if (over) out.push(`Ещё ${over} ${pl(over, 'картинка не вошла', 'картинки не вошли', 'картинок не вошли')}: в образец идёт до ${MOODBOARD.max}.`);
+  // круг 63: не образец (брошены на холст) — тот же предел, но словами «за раз»
+  const cap = into === 'reference' ? `в образец идёт до ${MOODBOARD.max}` : `за раз кладу до ${MOODBOARD.max}`;
+  if (over) out.push(`Ещё ${over} ${pl(over, 'картинка не вошла', 'картинки не вошли', 'картинок не вошли')}: ${cap}.`);
   if (failed > 0) out.push(`${failed} ${pl(failed, 'картинка не открылась', 'картинки не открылись', 'картинок не открылись')}.`);
   if (other > 0) out.push(`${other} ${pl(other, 'файл — не картинка', 'файла — не картинки', 'файлов — не картинки')}.`);
   return out.join(' ');

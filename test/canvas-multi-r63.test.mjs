@@ -10,7 +10,7 @@ import { join, dirname, normalize, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import * as core from '../src/core.js';
-import { moodboardOps } from '../src/shell.js';
+import { moodboardOps, moodboardLeftover } from '../src/shell.js';
 
 test('круг63: имя доски мудборда — своё или «Образец»', () => {
   const doc = (() => { const w = console.warn; console.warn = () => {}; try { return core.createDoc('empty'); } finally { console.warn = w; } })();
@@ -21,6 +21,9 @@ test('круг63: имя доски мудборда — своё или «Об�
   assert.equal(named.ops[0].node.name, 'Картинки');
   assert.equal(moodboardOps(doc, { images, at: { x: 0, y: 0 }, ids }).ops[0].node.name, 'Образец');
   assert.equal(moodboardOps(doc, { images, at: { x: 0, y: 0 }, ids, name: '  ' }).ops[0].node.name, 'Образец');
+  // не образец — предел словами «за раз»
+  assert.equal(moodboardLeftover({ images: 6, taken: 4, into: 'board' }), 'Ещё 2 картинки не вошли: за раз кладу до 4.');
+  assert.equal(moodboardLeftover({ images: 6, taken: 4 }), 'Ещё 2 картинки не вошли: в образец идёт до 4.');
 });
 
 /* ── в настоящем браузере ───────────────────────────────────────────────── */
@@ -49,9 +52,11 @@ test('круг63: в браузере — две картинки мимо до�
     await page.goto(`http://127.0.0.1:${srv.address().port}/`);
     await page.waitForSelector('#command', { timeout: 30000 });
     await page.waitForTimeout(1200);
-    const drop = (where) => page.evaluate(async (where) => {
+    const drop = (where, extra = 0) => page.evaluate(async ([where, extra]) => {
       const dt = new DataTransfer();
-      for (const [name, color] of [['зал.png', '#3b2418'], ['стол.png', '#c9a77c']]) {
+      const list = [['зал.png', '#3b2418'], ['стол.png', '#c9a77c']];
+      for (let i = 0; i < extra; i++) list.push([`ещё${i}.png`, '#2f6f62']);
+      for (const [name, color] of list) {
         const c = document.createElement('canvas'); c.width = 60; c.height = 40;
         const g = c.getContext('2d'); g.fillStyle = color; g.fillRect(0, 0, 60, 40);
         const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
@@ -71,7 +76,7 @@ test('круг63: в браузере — две картинки мимо до�
       canvas.dispatchEvent(new DragEvent('dragover', at));
       canvas.dispatchEvent(new DragEvent('drop', at));
       return !!document.querySelector('.imago-ab');
-    }, where);
+    }, [where, extra]);
     const layers = () => page.locator('#layers').innerText();
     const before = await page.inputValue('#command');
     await drop('empty');
@@ -92,6 +97,10 @@ test('круг63: в браузере — две картинки мимо до�
     await page.waitForTimeout(400);
     tree = await layers();
     assert.ok(!/зал/.test(tree) && !/стол/.test(tree), 'обе ушли одной отменой');
+    // больше четырёх мимо досок — лишнее словами «за раз», без слова «образец»
+    await drop('empty', 4);
+    await page.waitForFunction(() => /4 картинки легли одной доской/.test(document.body.innerText), null, { timeout: 10000 });
+    assert.match(await page.evaluate(() => document.body.innerText), /Ещё 2 картинки не вошли: за раз кладу до 4\./);
     assert.deepEqual(errors, [], 'ошибок страницы нет');
   } finally {
     await browser.close();
