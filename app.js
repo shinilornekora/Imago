@@ -9113,6 +9113,11 @@ function boardThemeGroup(node) {
     note.textContent = 'Шрифты из сети выключены — свой шрифт экрана запишется, но доска нарисует его запасным.';
     kids.push(note);
   }
+  // кнопки привязки пропадают вместе с блоком: фокус — на панель, а не на <body> (там Backspace удалил бы экран)
+  const hexFocusBack = () => {
+    const a = document.activeElement;
+    if ((!a || a === document.body) && dom.inspector && !dom.inspector.hidden) { try { dom.inspector.focus({ preventScroll: true }); } catch { /* без фокуса */ } }
+  };
   // круг 85 (§15.21): цвета кодом тема не перекрасит — предложить привязать их к палитре (вид прежний)
   const hex = SHELL.boardHexRefs(state.doc, node);
   if (hex.refs.length) {
@@ -9131,6 +9136,7 @@ function boardThemeGroup(node) {
       const cur = state.doc.nodes[node.id];
       const r = cur ? SHELL.bindBoardColorsOps(state.doc, cur) : null;
       if (r) commit(r.ops, r.label);
+      hexFocusBack();
     });
     const acts = document.createElement('div');
     acts.className = 'theme-hex-actions';
@@ -9146,7 +9152,10 @@ function boardThemeGroup(node) {
       every.title = `Цвета кодом на ${all.boards.length} ${plural(all.boards.length, 'экране', 'экранах', 'экранах')} — ${n} ${plural(n, 'слой', 'слоя', 'слоёв')} — к палитре одной правкой; экраны не изменятся`;
       every.addEventListener('click', () => {
         const r = SHELL.bindAllColorsOps(state.doc);
-        if (r.ops.length) commit(r.ops, r.label);
+        // правка легла и на экраны вне взгляда — тост их называет (как у команды словами, §15.23)
+        const res = r.ops.length ? commit(r.ops, r.label, 'human', { quiet: true }) : null;
+        if (res && res.ok !== false) toast(r.label, 'plain', 6000);
+        hexFocusBack();
       });
       acts.append(every);
     }

@@ -10,6 +10,7 @@ import { join, dirname, normalize, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import * as core from '../src/core.js';
+import { boardHexRefs } from '../src/shell.js';
 
 const quiet = (fn) => { const w = console.warn; console.warn = () => {}; try { return fn(); } finally { console.warn = w; } };
 function screens() {
@@ -28,6 +29,26 @@ function screens() {
   assert.equal(r.error, undefined, JSON.stringify(r.error));
   return r.doc;
 }
+
+test('круг88, критик: ответ прошлого документа — только если поддерево экрана то же', () => {
+  const doc = screens();
+  const a0 = boardHexRefs(doc, doc.nodes.A);
+  // правка на другом экране — ответ «Оплаты» тот же объект, без обхода
+  const d1 = core.applyOps(doc, [core.ops.set('b2', 'fill', '#000000')]).doc;
+  assert.equal(boardHexRefs(d1, d1.nodes.A), a0);
+  // правка ребёнка «Оплаты» — пересчёт
+  const d2 = core.applyOps(d1, [core.ops.set('a1', 'fill', '#123456')]).doc;
+  assert.deepEqual(boardHexRefs(d2, d2.nodes.A).refs.map((r) => r.id).sort(), ['A', 'a2']);
+  // новый ребёнок с кодом — пересчёт
+  const d3 = core.applyOps(d2, [core.ops.create({ id: 'a3', type: 'frame', name: 'Новый', parent: 'A', fill: '#FF6B3D', children: [] })]).doc;
+  assert.ok(boardHexRefs(d3, d3.nodes.A).refs.some((r) => r.id === 'a3'));
+  // палитра сменилась — пересчёт: код старого акцента больше не равен палитре
+  const r4 = core.applyOps(d3, [core.ops.setToken('colors.accent', '#00AA00')]);
+  assert.equal(r4.error, undefined, JSON.stringify(r4.error));
+  const d4 = r4.doc;
+  assert.notEqual(d4.tokens, d3.tokens);
+  assert.ok(!boardHexRefs(d4, d4.nodes.A).refs.some((r) => r.id === 'a3'));
+});
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 let chromium = null;
@@ -65,6 +86,9 @@ test('круг88: кнопка «На всех экранах» — есть п�
     assert.match(await btns.nth(1).getAttribute('title'), /на 2 экранах — 4 слоя — к палитре одной правкой/);
     await btns.nth(1).click();
     await page.waitForFunction(() => !document.querySelector('#inspector .theme-hex'), null, { timeout: 5000 });
+    // критик: тост называет экраны, фокус — на панели, не на <body>
+    await page.waitForFunction(() => /Цвета 4 слоёв на 2 экранах привязаны к палитре: «Оплата», «Итог»/.test(document.body.innerText), null, { timeout: 5000 });
+    assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'inspector');
     await page.locator('#layers .layer[data-id="B"]').click();
     await page.waitForTimeout(300);
     assert.equal(await page.locator('#inspector .theme-hex').count(), 0, 'и на «Итоге» привязано');

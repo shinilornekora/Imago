@@ -4820,12 +4820,23 @@ export function boardHexRefs(doc, board) {
   let memo = HEX_REFS_MEMO.get(doc);
   if (!memo) HEX_REFS_MEMO.set(doc, (memo = new Map()));
   if (memo.has(board.id) && memo.get(board.id).board === board) return memo.get(board.id).out;
-  const out = hexRefsOf(doc, board);
+  /* Круг 88: каждая правка — новый документ, а «На всех экранах» (§15.24) спрашивает все экраны на каждой
+     перерисовке инспектора. Ответ прошлого документа годен, если палитра та же и все узлы поддерева
+     экрана — те же объекты (сменились дети — сменился и объект родителя): сверка дешевле обхода. */
+  const last = HEX_REFS_LAST.get(board.id);
+  let out;
+  if (last && last.tokens === doc.tokens && last.nodes.every((n) => doc.nodes[n.id] === n)) out = last.out;
+  else {
+    const nodes = [];
+    out = hexRefsOf(doc, board, nodes);
+    HEX_REFS_LAST.set(board.id, { tokens: doc.tokens, nodes, out });
+  }
   memo.set(board.id, { board, out });
   return out;
 }
+const HEX_REFS_LAST = new Map();   // id экрана → ответ последнего документа, где его считали
 
-function hexRefsOf(doc, board) {
+function hexRefsOf(doc, board, visited = []) {
   const out = { refs: [], ambiguous: 0 };
   const scope = typeof CORE_NS.themeScope === 'function' ? CORE_NS.themeScope(doc) : () => doc;
   const seen = scope(board.id) || doc;
@@ -4879,6 +4890,7 @@ function hexRefsOf(doc, board) {
     seenIds.add(id);
     const node = doc.nodes[id];
     if (!node) continue;
+    visited.push(node);
     // контуры вектора — свои заливка и обводка (так их пишут пипетки контуров)
     if (Array.isArray(node.paths)) node.paths.forEach((p, i) => { if (isObj(p)) { look(node, `paths.${i}.fill`, p.fill); look(node, `paths.${i}.stroke`, p.stroke); } });
     look(node, 'fill', node.fill);
