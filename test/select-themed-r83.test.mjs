@@ -26,11 +26,13 @@ const DARK = { colors: { canvas: '#101418' } };
 test('круг83: фразы и слэш — выделение экранов со своей темой', () => {
   const doc = screens({ 'Оплата': DARK, 'Итог': null, 'Профиль': { type: { title: { font: 'Prata' } } } });
   for (const u of ['выдели экраны со своей темой', 'Выдели все экраны со своим оформлением', 'какие экраны в своей теме?',
-    'у каких экранов своя тема', 'покажи экраны с отдельной темой', 'выбери доски со своими цветами', '/свои темы']) {
+    'у каких экранов своя тема', 'покажи экраны с отдельной темой', 'выбери доски со своими цветами', '/свои темы',
+    // критик: единственное число и другие имена досок
+    'выдели экран со своей темой', 'какие экраны со своей темой', 'выдели артборды со своей темой', 'у каких макетов своя тема']) {
     const it = shellIntent(u, { doc });
     assert.deepEqual([it && it.kind, it && it.themed, it && it.ids], ['select', true, ['b0', 'b2']], u);
   }
-  assert.equal(shellIntent('выдели экраны со своей темой', { doc }).say, 'Своя тема у экранов «Оплата», «Профиль»');
+  assert.equal(shellIntent('выдели экраны со своей темой', { doc }).say, 'Выделены экраны со своей темой: «Оплата», «Профиль»');
   // соседние фразы — как были
   assert.notEqual((shellIntent('выдели экран Итог', { doc }) || {}).themed, true);
   assert.equal(shellIntent('сделай экраны со своей темой тёмными', { doc }), null);
@@ -39,12 +41,14 @@ test('круг83: фразы и слэш — выделение экранов �
 test('круг83: ни одного — выделение не трогаем; один; больше трёх; повреждённая тема', () => {
   const none = themedBoardsIntent(screens({ 'Оплата': null }));
   assert.deepEqual([none.ids, none.keep, none.say], [[], true, 'Своей темы нет ни у одного экрана — все в оформлении документа']);
-  assert.equal(themedBoardsIntent(screens({ 'Оплата': DARK, 'Итог': null })).say, 'Своя тема у экрана «Оплата»');
+  assert.equal(themedBoardsIntent(screens({ 'Оплата': DARK, 'Итог': null })).say, 'Выделен экран со своей темой «Оплата»');
   const many = themedBoardsIntent(screens({ A: DARK, B: DARK, C: DARK, D: DARK, E: DARK }));
-  assert.equal(many.say, 'Своя тема у экранов «A», «B», «C» и ещё 2');
+  assert.equal(many.say, 'Выделены экраны со своей темой: «A», «B», «C» и ещё 2');
   const doc = structuredClone(screens({ 'Оплата': DARK, 'Итог': null }));
   doc.nodes.b1.theme = { colors: { canvas: 'не цвет' } };
-  assert.equal(themedBoardsIntent(doc).say, 'Своя тема у экранов «Оплата», «Итог» (повреждена у 1)');
+  assert.equal(themedBoardsIntent(doc).say, 'Выделены экраны со своей темой: «Оплата», «Итог» (повреждена у 1)');
+  doc.nodes.b0.theme = { colors: { canvas: 'нет' } };
+  assert.match(themedBoardsIntent(doc).say, /\(у всех повреждена\)$/);
   assert.equal(themedBoardsIntent(null).ids.length, 0);
 });
 
@@ -93,7 +97,7 @@ test('круг83: в браузере — команда выделяет экр
     await say('выдели экраны со своей темой');
     await page.waitForFunction((a) => document.querySelector(`#layers .layer[data-id="${a}"]`).getAttribute('aria-selected') === 'true', a, { timeout: 5000 });
     assert.equal(await page.locator(`#layers .layer[data-id="${b}"]`).getAttribute('aria-selected'), 'false');
-    await page.waitForFunction(() => /Своя тема у экрана «/.test(document.body.innerText), null, { timeout: 5000 });
+    await page.waitForFunction(() => /Выделен экран со своей темой «/.test(document.body.innerText), null, { timeout: 5000 });
     assert.deepEqual(errors, [], 'ошибок страницы нет');
   } finally {
     await browser.close();
