@@ -76,12 +76,14 @@ test('круг48 (долг): $theme от модели не принимаетс�
   assert.ok(ops2[0].node.theme && ops2[0].node.theme.colors.canvas, 'тема арт-директора — на доске');
 });
 
-test('круг48 (долг): экран по имени, снятие темы словами, отказ на выделении двух экранов', async () => {
+test('круг48 (долг): экран по имени, снятие темы словами, правка обоим на выделении двух экранов', async () => {
   const doc = twoScreens();
   const named = themeToOps({ doc, theme: { board: true, boardName: 'экран «Оплата»', colors: [{ name: 'canvas', value: '#101418' }, { name: 'text', value: '#e8eaf0' }] }, engine: core, warn: () => {} });
   assert.deepEqual(named.map((o) => [o.id, o.path]), [['pay', 'theme']]);
   assert.throws(() => themeToOps({ doc, theme: { board: true, boardName: 'Профиль', colors: [{ name: 'canvas', value: '#101418' }] }, engine: core, warn: () => {} }), /Экран «Профиль» не найден/);
-  assert.throws(() => themeToOps({ doc, theme: { board: true, colors: [{ name: 'canvas', value: '#101418' }] }, engine: core, warn: () => {}, scope: { ids: ['sum_t', 'pay_t'] } }), /нескольких экранах/);
+  // круг 72 (SPEC §15.9): выделение на двух экранах — правка обоим (раньше — отказ)
+  const both = themeToOps({ doc, theme: { board: true, colors: [{ name: 'canvas', value: '#101418' }] }, engine: core, warn: () => {}, scope: { ids: ['sum_t', 'pay_t'] } });
+  assert.equal(new Set(both.map((o) => o.id)).size, 2);
   const after = core.applyOps(doc, named).doc;
   // слова истории
   assert.match(describeChange(named, doc, after, core), /^Своя тема экрана «Оплата»: .*#101418/);
