@@ -4566,13 +4566,20 @@ export function themeFontOps(doc, board, role, family) {
   for (const name of styles) {
     const base = types[name];
     const docW = typeof base.fontWeight === 'number' ? base.fontWeight : 400;
+    const was = type[name];
+    // насыщенность, записанная темой (агентом), — своя: шрифт её не стирает и берёт за образец
+    // как у арт-директора (§15.3): «heading» в роли текста — не тоньше 600
+    const roleW = role === 'text' && /head/i.test(name) ? Math.max(docW, 600) : docW;
+    // ближайшая к стилю у прежнего шрифта (её писали сами — при смене шрифта считается заново)
+    const autoW = isObj(was) && was.font ? nearestWeight(was.font, roleW) : null;
+    const ownW = isObj(was) && typeof was.fontWeight === 'number' && was.fontWeight !== autoW ? was.fontWeight : null;
     let entry;
-    if (!fam || famKey(base.font) === famKey(fam.family)) entry = undefined;
+    if (!fam || famKey(base.font) === famKey(fam.family)) entry = ownW != null && ownW !== docW ? { fontWeight: ownW } : undefined;
     else {
-      const w = nearestWeight(fam.family, docW);
+      const want = ownW != null ? ownW : roleW;
+      const w = nearestWeight(fam.family, want);
       entry = w !== docW ? { font: fam.family, fontWeight: w } : { font: fam.family };
     }
-    const was = type[name];
     if (JSON.stringify(was) === JSON.stringify(entry)) continue;
     if (entry === undefined) delete type[name]; else type[name] = entry;
     changed.push(name);

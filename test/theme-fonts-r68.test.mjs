@@ -112,3 +112,29 @@ test('круг68: в браузере — шрифт заголовков экр
     srv.close();
   }
 });
+
+test('круг68: насыщенность темы своя — шрифт её не стирает; heading в тексте — не тоньше 600; разные', () => {
+  let doc = docWith({ type: { heading: { fontWeight: 800 } } });
+  const r = themeFontOps(doc, doc.nodes.B, 'text', 'Manrope');
+  doc = apply(doc, r);
+  assert.deepEqual(core.boardTheme(doc.nodes.B).type.heading, { font: 'Manrope', fontWeight: 800 });
+  doc = apply(doc, themeFontOps(doc, doc.nodes.B, 'text', null));
+  assert.deepEqual(core.boardTheme(doc.nodes.B).type, { heading: { fontWeight: 800 } }, '«как в документе» снимает шрифт, насыщенность остаётся');
+  // heading документа 500 — в роли текста не тоньше 600, как у арт-директора
+  let d2 = docWith(null);
+  d2 = { ...d2, tokens: { ...d2.tokens, type: { ...d2.tokens.type, heading: { ...d2.tokens.type.heading, fontWeight: 500 } } } };
+  d2 = apply(d2, themeFontOps(d2, d2.nodes.B, 'text', 'Manrope'));
+  assert.equal(core.boardTheme(d2.nodes.B).type.heading.fontWeight, 600);
+  // разные шрифты у стилей роли — font null
+  const d3 = docWith({ type: { display: { font: 'Prata' } } });
+  const row = boardFontRows(d3, d3.nodes.B).find((x) => x.role === 'display');
+  assert.deepEqual([row.font, row.own], [null, true]);
+});
+
+test('круг68: шрифт темы вне набора — свой, и «как в документе» его снимает', () => {
+  let doc = docWith({ type: { display: { font: 'Foo Sans' }, title: { font: 'Foo Sans' } } });
+  const row = boardFontRows(doc, doc.nodes.B)[0];
+  assert.deepEqual([row.font, row.own], ['Foo Sans', true]);
+  doc = apply(doc, themeFontOps(doc, doc.nodes.B, 'display', null));
+  assert.equal(doc.nodes.B.theme, undefined);
+});

@@ -8856,7 +8856,12 @@ function boardThemeGroup(node) {
     // цвета и шрифты — в списках ниже; строкой — только то, чему списка нет
     const bits = [];
     if (!rows.length) for (const [k, v] of Object.entries(t.colors || {})) bits.push(`${SWATCH_NAMES[k] || k} ${String(v).toUpperCase()}`);
-    if (!fontRows.length) for (const [k, v] of Object.entries(t.type || {})) bits.push(`${k} — ${[v.font, v.fontWeight].filter(Boolean).join(' ')}`);
+    // шрифты: строкой — то, что выбором не показано (моно, стиль вне ролей, только насыщенность)
+    const covered = new Set(fontRows.flatMap((r) => r.styles));
+    for (const [k, v] of Object.entries(t.type || {})) {
+      const shown = covered.has(k) ? [v.fontWeight] : [v.font, v.fontWeight];
+      if (shown.some(Boolean)) bits.push(`${k} — ${shown.filter(Boolean).join(' ')}`);
+    }
     if (bits.length || (!t.colors && !t.type)) {
       const line = document.createElement('div');
       line.className = 'note';
@@ -8962,8 +8967,10 @@ function boardThemeGroup(node) {
       for (const f of g.families) og.appendChild(opt(f, f));
       sel.appendChild(og);
     }
-    sel.value = !fr.font ? '*' : fr.own ? fr.font : '';
-    if (sel.value !== (!fr.font ? '*' : fr.own ? fr.font : '')) sel.value = '';
+    // шрифт темы — как он записан в наборе; вне набора — отдельной строкой, чтобы «как в документе» сработало
+    const inSet = fr.font && catalogFont(fr.font) ? catalogFont(fr.font).family : null;
+    if (fr.own && fr.font && !inSet) sel.insertBefore(opt('!', `${fr.font} — нет в наборе`, { disabled: true }), sel.children[1] || null);
+    sel.value = !fr.font ? '*' : fr.own ? (inSet || '!') : '';
     sel.setAttribute('aria-label', `${fr.title} экрана${fr.own ? ' (своё у экрана)' : ''}`);
     sel.addEventListener('change', () => {
       const cur = state.doc.nodes[node.id];
@@ -8972,6 +8979,12 @@ function boardThemeGroup(node) {
     });
     line.append(name, sel);
     kids.push(line);
+  }
+  if (fontRows.length && settings.webFonts === false) {
+    const note = document.createElement('div');
+    note.className = 'note';
+    note.textContent = 'Шрифты из сети выключены — свой шрифт экрана запишется, но доска нарисует его запасным.';
+    kids.push(note);
   }
   if (t) {
     const btn = document.createElement('button');
