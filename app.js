@@ -12097,6 +12097,12 @@ function applyShellIntent(intent, said) {
     }
     case 'select': {
       const ids = (intent.ids || []).filter((id) => state.doc.nodes[id]);
+      // круг 83 (§15.19): «выдели экраны со своей темой» — своя фраза; никого — выделение не трогаем
+      if (intent.themed) {
+        if (!intent.keep) setSelection(ids);
+        toast(intent.say, 'plain', 5000);
+        return true;
+      }
       setSelection(ids);
       if (!ids.length) { toast('Выделение снято', 'plain', 3000); return true; }
       const many = ids.length > 1 ? ` и ещё ${ids.length - 1}` : '';
