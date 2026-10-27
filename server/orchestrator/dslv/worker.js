@@ -16,7 +16,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { getHeapStatistics } from 'node:v8';
 import * as core from '../../../src/core.js';
 import { runCommand, runVariants, BrainError, SCHEMAS, raceAbort, INTERNAL_MESSAGE, expandOverflow } from '../../../src/brain.js';
-import { createRenderer } from '../render.js';
+import { createRenderer, createImageColors } from '../render.js';
 
 const testHooks = !!(workerData && workerData.testHooks);
 // проверка: медленный старт воркера (загрузка модулей под нагрузкой) — круг 29
@@ -29,6 +29,8 @@ const calls = new Map();     // callId → {resolve, reject}
 let callSeq = 0;
 /** Круг 47 (SPEC §14.4): снимки досок для критика — один рендер (и кеш шрифтов) на воркер. */
 let renderer = null;
+/** Круг 53 (SPEC §20): цвета картинок документа для арт-директора — один счётчик (и кеш) на воркер. */
+let imageColors = null;
 /** Снимок — ожидание сети, а не счёт: пул на это время часы задания не ведёт (круг 47). */
 const renderFor = (id) => async (args) => {
   parentPort.postMessage({ type: 'io', id, on: true });
@@ -173,6 +175,7 @@ async function run(id, job) {
         // проверка: снимок без resvg и сети — готовый PNG (круг 47)
         : testHooks && typeof art.fakeShot === 'string' ? async () => ({ mime: 'image/png', data: art.fakeShot, width: 8, height: 8 })
           : art.render !== false ? renderFor(id) : null,
+      imageColors: art.direction === false ? null : (imageColors || (imageColors = createImageColors())),
       activeArtboardId: job.activeArtboardId || null, history: job.history || null,
       library: job.library || null,
       selectionBy: job.selectionBy || 'human',
