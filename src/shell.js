@@ -2159,6 +2159,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'history', group: 'Панели', title: 'История правок', hint: 'Все правки с отменой до любой из них', slash: ['история', 'history'], keys: 'H', phrases: ['история', 'что менялось'] },
   { id: 'chat', group: 'Панели', title: 'Диалог с агентом', hint: 'Что вы сказали и что ответил агент', slash: ['диалог', 'chat'], phrases: ['покажи диалог', 'переписка'] },
   { id: 'scales', group: 'Панели', title: 'Шкалы и токены', hint: 'Шаги отступов и скруглений документа', slash: ['шкалы', 'токены', 'scales'], phrases: ['шкалы', 'покажи токены'] },
+  { id: 'doc-colors', group: 'Панели', title: 'Цвета документа', hint: 'Палитра: правка цвета и новый цвет', slash: ['цвета документа', 'палитра', 'colors'], phrases: ['покажи цвета документа', 'открой палитру'] },
   { id: 'settings', group: 'Панели', title: 'Настройки агента', hint: '', slash: ['настройки', 'settings'], phrases: ['настройки', 'открой настройки'] },
 
   /* — Файл — */
@@ -2328,6 +2329,7 @@ const PLAIN_INTENTS = {
   history: () => ({ kind: 'sheet', what: 'history', tab: 'edits' }),
   chat: () => ({ kind: 'sheet', what: 'history', tab: 'chat' }),
   scales: () => ({ kind: 'sheet', what: 'scales' }),
+  'doc-colors': () => ({ kind: 'sheet', what: 'colors' }),
   settings: () => ({ kind: 'sheet', what: 'settings' }),
   import: () => ({ kind: 'import' }),
   'new-board': () => ({ kind: 'new-board' }),
@@ -2500,6 +2502,7 @@ const NATURAL = [
   ['inspector', /^(?:(?:покажи|открой|показать|открыть) )?инспектор$/, () => ({ kind: 'inspector', on: true })],
   ['inspector', /^(?:скрой|скрыть|спрячь|спрятать|закрой|закрыть|убери|сверни) инспектор$/, () => ({ kind: 'inspector', on: false })],
   ['scales', /^(?:(?:покажи|открой|показать|открыть) )?(?:шкалы|токены|шкалы отступов)$/],
+  ['doc-colors', /^(?:(?:покажи|открой|показать|открыть) )?(?:цвета документа|палитр[уа](?: документа)?)$/],
   ['import', /^(?:импорт|импортировать|импортируй)(?: файл| json| документ)?$|^(?:загрузи|загрузить) файл$/],
   ['projects', /^(?:(?:покажи|открой|показать|открыть) )?(?:мои |все )?проекты$|^список проектов$/],
   ['project-new', /^(?:(?:создай|создать|сделай|сделать|заведи|завести|начни|начать|открой|открыть) )?(?:новый|чистый|пустой) (?:проект|документ|файл)$/, () => ({ kind: 'project-new' })],
@@ -2594,6 +2597,7 @@ export function commandIdOf(intent) {
     case 'sheet':
       if (intent.what === 'settings') return 'settings';
       if (intent.what === 'scales') return 'scales';
+      if (intent.what === 'colors') return 'doc-colors';
       return intent.tab === 'chat' ? 'chat' : 'history';
     case 'export': return 'export';
     case 'import': return 'import';
@@ -4534,6 +4538,119 @@ export function themeColorOps(doc, board, name, hex, { title } = {}) {
     }
   }
   return { ops, label, warnings };
+}
+
+/* ------------------------- круг 96: цвета документа в шторке ------------------------- */
+
+/**
+ * Круг 96 (SPEC §15.30): сколько слоёв ссылается на каждый цвет палитры — по имени токена в краске:
+ * строка-имя, `{token}`, стоп градиента `{token}`, цвет и подложка фактуры; заливка, цвет текста,
+ * обводка, состояния и контуры вектора. Библиотека тоже считается: её мастера рисуют экземпляры.
+ * @returns {Map<string, Set<string>>} имя → id слоёв
+ */
+export function colorTokenUsers(doc) {
+  const out = new Map();
+  if (!doc || !doc.nodes) return out;
+  const names = (doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  const hit = (id, name) => {
+    if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(names, name)) return;
+    if (!out.has(name)) out.set(name, new Set());
+    out.get(name).add(id);
+  };
+  const paint = (id, v) => {
+    if (typeof v === 'string') { hit(id, v); return; }
+    if (!isObj(v)) return;
+    if (typeof v.token === 'string') hit(id, v.token);
+    if (isObj(v.gradient) && Array.isArray(v.gradient.stops)) for (const st of v.gradient.stops) if (isObj(st)) hit(id, st.token);
+    if (isObj(v.pattern)) { hit(id, v.pattern.color); hit(id, v.pattern.bg); }
+  };
+  const part = (id, o) => {
+    if (!isObj(o)) return;
+    paint(id, o.fill);
+    paint(id, o.color);
+    if (isObj(o.stroke) && o.stroke.color !== undefined && !o.stroke.gradient && !o.stroke.pattern && o.stroke.token === undefined) paint(id, o.stroke.color);
+    else paint(id, o.stroke);
+  };
+  for (const [id, n] of Object.entries(doc.nodes)) {
+    if (!isObj(n)) continue;
+    part(id, n);
+    if (isObj(n.states)) for (const k of STATE_KEYS) part(id, n.states[k]);
+    if (Array.isArray(n.paths)) for (const p of n.paths) if (isObj(p)) { paint(id, p.fill); paint(id, p.stroke); }
+  }
+  return out;
+}
+
+/**
+ * Круг 96: строки шторки «Цвета документа» — каждый цвет палитры документа: `hex` — непрозрачный код для
+ * поля выбора (null — задан не кодом без прозрачности: ссылкой на другой цвет или с прозрачностью),
+ * `raw` — как записан, `users` — сколько слоёв на него ссылается.
+ * @returns {{name: string, raw: string, hex: string|null, alpha: boolean, users: number}[]}
+ */
+export function docColorRows(doc) {
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  const users = colorTokenUsers(doc);
+  return Object.keys(base).map((name) => {
+    const raw = String(base[name]);
+    const hex = opaqueHex(raw);
+    return { name, raw, hex, alpha: !hex && /^#(?:[0-9a-f]{4}|[0-9a-f]{8})$/i.test(raw.trim()), users: users.has(name) ? users.get(name).size : 0 };
+  });
+}
+
+/** Контраст общей палитры после правки цвета `name` (только пары, которые он задел). */
+function docContrastWarnings(colors, name) {
+  if (!CORE_NS.contrastRatio) return [];
+  const pairs = [['text', 'canvas', 4.5, 'текст на фоне читается'], ['muted', 'canvas', 3, 'подписи на фоне читаются'],
+    ['text', 'surface', 4.5, 'текст на карточках читается'], ['onAccent', 'accent', 4.5, 'текст на акценте читается']];
+  const out = [];
+  for (const [fg, bg, min, ru] of pairs) {
+    if (fg !== name && bg !== name) continue;
+    const a = opaqueHex(colors[fg]); const b = opaqueHex(colors[bg]);
+    if (!a || !b) continue;
+    const r = CORE_NS.contrastRatio(a, b);
+    if (r < min) out.push(`В документе ${ru} плохо: контраст ${(Math.floor(r * 10) / 10).toFixed(1)}:1 (нужно от ${min}:1)`);
+  }
+  return out;
+}
+
+/**
+ * Круг 96 (SPEC §15.30): правка цвета палитры документа из шторки — `setToken colors.<имя>`. Тот же код
+ * — правки нет; не код — null. Экраны со своим цветом этого имени его не увидят — это говорит `screens`.
+ * @returns {{ops: object[], label: string, warnings: string[], screens: string[]}|null}
+ */
+export function docColorOps(doc, name, hex, { title } = {}) {
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(base, name)) return null;
+  const want = toHex6(hex);
+  if (!want || toHex6(base[name]) === want) return null;
+  const said = typeof title === 'string' && title.trim() ? title.trim().slice(0, 40) : name;
+  const screens = [...boardLabels(doc)].filter(([id]) => {
+    const t = CORE_NS.boardTheme ? CORE_NS.boardTheme(doc.nodes[id]) : null;
+    return t && isObj(t.colors) && Object.prototype.hasOwnProperty.call(t.colors, name);
+  }).map(([, n]) => n);
+  return {
+    ops: [OPS.setToken(`colors.${name}`, want)],
+    label: `Цвет документа: ${said} ${want.toUpperCase()}`,
+    warnings: docContrastWarnings({ ...base, [name]: want }, name),
+    screens,
+  };
+}
+
+/**
+ * Круг 96: новый цвет палитры документа. Имя — латиницей (как у темы экрана, §15.6: иначе тема его не
+ * переопределит), не занятое (и без учёта регистра — «Accent» рядом с «accent» путает). Пустой ответ с
+ * `error` — почему нельзя.
+ * @returns {{ops: object[], label: string}|{error: string}}
+ */
+export function newDocColorOps(doc, name, hex) {
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  const n = String(name == null ? '' : name).trim();
+  if (!n) return { error: 'Назовите цвет — латиницей, например brand' };
+  if (!THEME_COLOR_NAME_RE.test(n)) return { error: 'Имя цвета — латиница, цифры, «-» и «_», с буквы, до 40 знаков: например brand или accent-2' };
+  const taken = Object.keys(base).find((k) => k.toLowerCase() === n.toLowerCase());
+  if (taken) return { error: `Цвет «${taken}» в документе уже есть — поправьте его в списке` };
+  const want = toHex6(hex);
+  if (!want) return { error: 'Цвет пишется кодом: #F4A261' };
+  return { ops: [OPS.setToken(`colors.${n}`, want)], label: `Новый цвет документа: ${n} ${want.toUpperCase()}` };
 }
 
 /* ------------------------- круг 68: шрифты экрана в инспекторе ------------------------- */
