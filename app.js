@@ -255,7 +255,7 @@ async function boot() {
   // документ придёт из журнала или от сервера, а до того холст пуст
   serverBooting = serverAnticipated();
   state.doc = serverBooting ? createDoc('empty') : createDoc();
-  state.geo = solve(state.doc);
+  state.geo = solveKept(state.doc);
 
   /* Круг 39 (N3, N6в): Ctrl/⌘+A и Ctrl/⌘+D — команды таблицы оболочки («Выделить всё на доске»,
      «Дублировать»), откуда бы ни нажали: с холста, из списка слоёв, с кнопки. Ловим их на окне
@@ -820,7 +820,7 @@ function startListWait(e) {
   // демо-макету здесь не место: правки в нём никуда бы не сохранились
   if (SHELL.userNodeCount(state.doc) > 0 || artboards(state.doc).length) {
     state.doc = createDoc('empty');
-    state.geo = solve(state.doc);
+    state.geo = solveKept(state.doc);
     state.selection = [];
     state.history = [];
     state.cursor = 0;
@@ -959,7 +959,7 @@ function openProject(project) {
   hideMsg();
   // до открытия холст пуст: документ придёт из журнала или от сервера, демо здесь не место
   state.doc = createDoc('empty');
-  state.geo = solve(state.doc);
+  state.geo = solveKept(state.doc);
   renderAll();
   setDocNameText(docTitle());
   renderSyncStatus();
@@ -1054,7 +1054,7 @@ function onSyncChange(view, info = {}) {
   switch (info.reason) {
     case 'open': {
       state.doc = view;
-      state.geo = solve(view);
+      state.geo = solveKept(view);
       adoptJournalExtra(info.extra);
       if (server.waiting) {
         server.waiting = false;
@@ -1082,7 +1082,7 @@ function onSyncChange(view, info = {}) {
       settleWrapWords(info);
       // сервер применил ровно то, что мы предсказали, — геометрия та же, рисовать нечего
       if (info.same) { refreshSheet(); return; }
-      state.geo = solve(view);
+      state.geo = solveKept(view);
       pruneSelection();
       renderAll();
       refreshSheet();
@@ -1111,7 +1111,7 @@ function onSyncChange(view, info = {}) {
       }
       const caught = flushCatchupTimer();
       // чужое переименование геометрию не трогает — решатель не зовём (круг 27, п.8)
-      state.geo = !caught && info.tx && Array.isArray(info.tx.ops) ? geoAfter(info.tx.ops, prevDoc, view, prevGeo) : solve(view);
+      state.geo = !caught && info.tx && Array.isArray(info.tx.ops) ? geoAfter(info.tx.ops, prevDoc, view, prevGeo) : solveKept(view);
       pruneSelection();
       const diff = !caught && info.tx && Array.isArray(info.tx.ops) ? diffOf(info.tx.ops, prevGeo) : null;
       renderAll(diff ? { diff, prevGeo } : {});
@@ -1123,7 +1123,7 @@ function onSyncChange(view, info = {}) {
     }
     default: {
       state.doc = view;
-      state.geo = solve(view);
+      state.geo = solveKept(view);
       pruneSelection();
       renderAll();
       refreshSheet();
@@ -1140,7 +1140,7 @@ function holdCatchup() {
   catchupTimer = setTimeout(() => {
     catchupTimer = null;
     if (!server || !state.doc) return;
-    state.geo = solve(state.doc);
+    state.geo = solveKept(state.doc);
     pruneSelection();
     renderAll();
     refreshSheet();
@@ -3991,10 +3991,22 @@ function geometryNeutral(opsList, doc) {
   return true;
 }
 
-/** Геометрия после правки: прежняя, если правка её не меняет, иначе — решатель. */
+/**
+ * Геометрия после правки: прежняя, если правка её не меняет, иначе — решатель.
+ * Круг 51 (SPEC §18): раскладка по месту правки (CORE.solveAfter) — что изменилось, она узнаёт
+ * по самим документам, поэтому годится и для чужой транзакции; нельзя — сама сделает полную.
+ */
 function geoAfter(opsList, prevDoc, nextDoc, prevGeo) {
-  if (prevGeo && prevGeo.rects && geometryNeutral(opsList, prevDoc)) return prevGeo;
-  return solve(nextDoc);
+  if (prevGeo && prevGeo.rects && geometryNeutral(opsList, prevDoc)) {
+    return typeof CORE.solveCarry === 'function' ? CORE.solveCarry(prevGeo, prevDoc, nextDoc) : prevGeo;
+  }
+  if (typeof CORE.solveAfter === 'function') return CORE.solveAfter(prevGeo, prevDoc, nextDoc, opsList);
+  return solveKept(nextDoc);
+}
+
+/** Геометрия состояния: с памятью для следующей раскладки по месту правки (SPEC §18). */
+function solveKept(doc) {
+  return solve(doc, { incremental: true });
 }
 
 let issuesTimer = null;
@@ -4427,7 +4439,7 @@ function commitDoc(nextDoc, nextGeo, label, humanText, who = 'human') {
   // сами и только вверх; заодно у документа меняется id — сверяем и его (п.4)
   const doc = { ...nextDoc, version: Math.max(Number(nextDoc.version) || 0, (Number(before && before.version) || 0) + 1) };
   state.doc = doc;
-  state.geo = nextGeo || solve(doc);
+  state.geo = nextGeo || solveKept(doc);
   state.history.length = state.cursor;
   const tx = {
     id: txId(), kind: 'doc', ops: [], inverse: [],
@@ -4473,7 +4485,7 @@ function stepHistory(back, { quiet = false } = {}) {
   } else {
     const res = applyOps(state.doc, back ? tx.inverse : tx.ops);
     if (res.error) { showMsg('error', `${what} не удался: ${opError(res.error)}`); return false; }
-    state.doc = res.doc; state.geo = solve(state.doc);
+    state.doc = res.doc; state.geo = solveKept(state.doc);
   }
   tx.undone = back;
   state.cursor += back ? -1 : 1;
@@ -14514,7 +14526,7 @@ async function initSoloProjects() {
   if (!migrated && !list.length) restored = db ? await restoreFromDb() : await restoreFromLocal();
   // прежний документ не открылся — человек решает его судьбу; проект заведём после решения
   if (state.saveBlocked) return false;
-  if (migrated || list.length) { state.doc = createDoc('empty'); state.geo = solve(state.doc); state.history = []; state.cursor = 0; state.chat = []; state.pairs = []; }
+  if (migrated || list.length) { state.doc = createDoc('empty'); state.geo = solveKept(state.doc); state.history = []; state.cursor = 0; state.chat = []; state.pairs = []; }
   const name = migrated || list.length ? SHELL.freshSoloName(store.list()) : docName(state.doc);
   const entry = await store.create({ name, payload: savePayload() });
   try { const ls = lsOrNull(); if (ls) ls.setItem(SOLO_MIGRATED_KEY, entry.id); } catch { /* метка не легла — индекс всё равно не пуст */ }

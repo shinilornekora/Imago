@@ -6561,10 +6561,24 @@ function textWrapWidth(mode, w, natural) {
  * @param {'w'|'h'|null} [stretch] ось, которую контейнер растягивает по своей
  *   рамке: hug по этой оси работает как fill (align:'stretch' у родителя).
  */
+/* Круг 51 (SPEC §18): кеши мер и потоков — по узлу (id → ключ ограничений → результат), чтобы
+   раскладка по месту правки снимала записи ровно изменённых узлов и их предков. */
+function cacheGet(cache, id, key) {
+  const m = cache.get(id);
+  return m ? m.get(key) : undefined;
+}
+const CACHE_KEYS_PER_NODE = 12;  // цепочка solveAfter несёт кеши дальше: старые ограничения чистых узлов не копятся
+function cacheSet(cache, id, key, v) {
+  let m = cache.get(id);
+  if (!m) { m = new Map(); cache.set(id, m); }
+  else if (m.size >= CACHE_KEYS_PER_NODE && !m.has(key)) m.delete(m.keys().next().value);
+  m.set(key, v);
+}
+
 function measureNode(ctx, node, availW, availH, stretch) {
-  const key = node.id + '#' + (availW === null ? '-' : r2(availW)) + '#' + (availH === null ? '-' : r2(availH))
+  const key = (availW === null ? '-' : r2(availW)) + '#' + (availH === null ? '-' : r2(availH))
     + '#' + (stretch || '-');
-  const hit = ctx.measCache.get(key);
+  const hit = cacheGet(ctx.measCache, node.id, key);
   if (hit) return hit;
   // узел уже меряется выше по стеку (цикл) либо дерево слишком глубокое — не уходим в рекурсию
   if (ctx.stack.has(node.id)) {
@@ -6617,7 +6631,7 @@ function measureNodeInner(ctx, node, availW, availH, key, stretch) {
     const h = sh.mode === 'fixed' ? fixedSize(sh) : (byBoxH ? availH : (vb ? vb.h : 0));
     res = { w: r2(Math.max(0, w)), h: r2(Math.max(0, h)) };
   }
-  ctx.measCache.set(key, res);
+  cacheSet(ctx.measCache, node.id, key, res);
   return res;
 }
 
@@ -6626,8 +6640,8 @@ function measureNodeInner(ctx, node, availW, availH, key, stretch) {
  * @returns {{w:number,h:number,items:Array,layout:object}}
  */
 function flowLayout(ctx, node, boxW, boxH) {
-  const key = node.id + '@' + (boxW === null ? '-' : r2(boxW)) + '@' + (boxH === null ? '-' : r2(boxH));
-  const hit = ctx.flowCache.get(key);
+  const key = (boxW === null ? '-' : r2(boxW)) + '@' + (boxH === null ? '-' : r2(boxH));
+  const hit = cacheGet(ctx.flowCache, node.id, key);
   if (hit) return hit;
   // круг 20 (SPEC §6.3): ссылки на шаги шкалы становятся числами здесь, на входе
   // решателя, и только через resolveLayout — раскрытые узлы экземпляров идут
@@ -6813,7 +6827,7 @@ function flowLayout(ctx, node, boxW, boxH) {
     h: boxH === null ? r2(contentH + pad.t + pad.b) : r2(boxH),
     items, layout: L
   };
-  ctx.flowCache.set(key, res);
+  cacheSet(ctx.flowCache, node.id, key, res);
   return res;
 }
 
@@ -6827,8 +6841,16 @@ function placeNode(ctx, node, x, y, w, h, depth) {
     logOnce('place:deep', `solve: глубже ${MAX_DEPTH} узлов — размещение ветки «${node.id}» остановлено`);
     return;
   }
+  // круг 51: чистое поддерево (ни оно, ни потомки не правились) того же размера — прежняя
+  // геометрия со сдвигом, без обхода раскладки (см. solveAfter)
+  if (ctx.prev && !ctx.dirty.has(node.id)) {
+    const pr = ownNode(ctx.prev.rects, node.id);
+    const sp = ctx.prevSpan.get(node.id);
+    if (pr && sp && pr.w === r2(w) && pr.h === r2(h) && copyPlaced(ctx, sp, r2(x) - pr.x, r2(y) - pr.y)) return;
+  }
   ctx.placed.add(node.id);
   ctx.rects[node.id] = { x: r2(x), y: r2(y), w: r2(w), h: r2(h) };
+  const start = ctx.order.length;
   /* Круг 19, п.4: в geo.order только узлы САМОГО документа. Порядок читают
      хит-тест и выбор верхнего узла (Stage._topUnder), а раскрытые узлы выделять
      нельзя — экземпляр берётся и таскается как один узел (SPEC §5, п.5 задания).
@@ -6844,6 +6866,33 @@ function placeNode(ctx, node, x, y, w, h, depth) {
     const flow = flowLayout(ctx, node, w, h);
     for (const it of flow.items) placeNode(ctx, it.node, x + it.x, y + it.y, it.w, it.h, d + 1);
   }
+  // отрезок geo.order, занятый поддеревом (узел первым) — по нему solveAfter копирует чистое
+  if (ctx.doc.nodes[node.id]) ctx.span.set(node.id, [start, ctx.order.length]);
+}
+
+/**
+ * Круг 51: поддерево из прежней геометрии — прямоугольники со сдвигом (dx, dy), строки текста,
+ * порядок и отрезки. false — копировать нельзя (узел уже размещён: двойной родитель) — тогда
+ * обычный обход, он и скажет о беде.
+ */
+function copyPlaced(ctx, sp, dx, dy) {
+  const prev = ctx.prev;
+  const [a, b] = sp;
+  for (let i = a; i < b; i++) if (ctx.placed.has(prev.order[i])) return false;
+  const base = ctx.order.length - a;
+  const ddx = r2(dx);
+  const ddy = r2(dy);
+  for (let i = a; i < b; i++) {
+    const id = prev.order[i];
+    const r = prev.rects[id];
+    ctx.placed.add(id);
+    ctx.rects[id] = ddx || ddy ? { x: r2(r.x + ddx), y: r2(r.y + ddy), w: r.w, h: r.h } : r;
+    if (hasOwnProp.call(prev.lines, id)) ctx.lines[id] = prev.lines[id];
+    ctx.order.push(id);
+    const s2 = ctx.prevSpan.get(id);
+    if (s2) ctx.span.set(id, [s2[0] + base, s2[1] + base]);
+  }
+  return true;
 }
 
 let selfTestState = 0; // 0 — не запускался, 1 — идёт, 2 — пройден
@@ -6854,16 +6903,27 @@ let selfTestState = 0; // 0 — не запускался, 1 — идёт, 2 —
  * @returns {{rects:Record<string,{x:number,y:number,w:number,h:number}>, lines:Record<string,string[]>, order:string[]}}
  */
 function solve(doc, opts) {
+  return solveWith(doc, opts, null);
+}
+
+/** Круг 51: что раскладка оставляет для следующей по месту правки (geo → кеши, отрезки, условия). */
+const SOLVE_MEMO = new WeakMap();
+
+function solveWith(doc, opts, seed) {
   const options = opts || {};
   const ctx = {
     doc,
     nodes: (doc && doc.nodes) || {},
     m: makeMeasurer(options),
-    measCache: new Map(),
-    flowCache: new Map(),
+    measCache: seed ? seed.meas : new Map(),
+    flowCache: seed ? seed.flow : new Map(),
     stack: new Set(),   // узлы, которые меряются прямо сейчас — ловит циклы
     placed: new Set(),  // уже размещённые — ловит узел с двумя родителями
-    rects: {}, lines: {}, order: []
+    rects: {}, lines: {}, order: [],
+    span: new Map(),    // круг 51: id → [начало, конец) отрезка поддерева в order
+    prev: seed ? seed.geo : null,
+    prevSpan: seed ? seed.span : null,
+    dirty: seed ? seed.dirty : null,
   };
   const geo = { rects: ctx.rects, lines: ctx.lines, order: ctx.order, expanded: {} };
   if (!doc || !doc.nodes || !doc.nodes[doc.root]) {
@@ -6892,8 +6952,12 @@ function solve(doc, opts) {
     placeNode(ctx, child, r2(pos.x), r2(pos.y), m.w, m.h);
   }
   ctx.doc = doc;
+  // круг 51: заготовка для следующей раскладки по месту правки — по просьбе (incremental) и без экземпляров
+  if (!ex.count && (options.incremental === true || seed)) {
+    SOLVE_MEMO.set(geo, { doc, fn: options.measureText || null, epoch: measureEpochValue, meas: ctx.measCache, flow: ctx.flowCache, span: ctx.span });
+  }
   const forced = options.selfTest === true;
-  if ((selfTestState === 0 || forced) && !options.__inSelfTest) {
+  if ((selfTestState === 0 || forced) && !options.__inSelfTest && !seed) {
     const prev = selfTestState;
     selfTestState = 1;
     try {
@@ -6908,6 +6972,95 @@ function solve(doc, opts) {
     }
   }
   return geo;
+}
+
+/**
+ * Круг 51 (SPEC §18): раскладка ПО МЕСТУ ПРАВКИ. Полная раскладка после каждой правки держит
+ * бюджет кадра (16 мс) лишь до ~750 слоёв (пилот). Здесь пересчитывается
+ * только изменённое: узлы правки и их предки (в прежнем и новом документе) теряют записи кешей
+ * мер и потоков; остальное меряется из кеша, а чистое поддерево того же размера переносится из
+ * прежней геометрии со сдвигом. Что изменилось — по самим документам (dirtyAfter), операции —
+ * только для вызывающего. Результат — тот же, что у solve(nextDoc) (тесты на случайных правках).
+ * Когда так нельзя — честно полная раскладка:
+ *   • prevGeo не от solve этого же prevDoc (или уже использована) или другой измеритель/эпоха шрифтов;
+ *   • изменились токены, тема доски, узел перешёл на другую доску;
+ *   • в прежнем документе были экземпляры компонентов (раскрытие — отдельная история, открыто).
+ * prevGeo после этого — использованная: её кеши перешли новой геометрии.
+ * @param {object} prevGeo @param {object} prevDoc @param {object} nextDoc @param {object[]} [opsList]
+ * @param {{measureText?:Function}} [opts]
+ * @returns {object} geo
+ */
+function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
+  const options = opts || {};
+  const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
+  const dirty = memo && memo.doc === prevDoc && memo.fn === (options.measureText || null) && memo.epoch === measureEpochValue
+    ? dirtyAfter(prevDoc, nextDoc) : null;
+  if (!dirty) return solve(nextDoc, { ...options, incremental: true });
+  SOLVE_MEMO.delete(prevGeo);
+  for (const id of dirty) { memo.meas.delete(id); memo.flow.delete(id); }
+  return solveWith(nextDoc, { ...options, __inSelfTest: true }, { meas: memo.meas, flow: memo.flow, geo: prevGeo, span: memo.span, dirty });
+}
+
+/**
+ * Круг 51: правка не тронула геометрию (имя, замок…) — та же geo годится и для nextDoc; память
+ * раскладки переходит к nextDoc, чтобы следующая правка снова шла по месту, а не полностью.
+ * @returns {object} geo
+ */
+function solveCarry(geo, prevDoc, nextDoc) {
+  const memo = geo ? SOLVE_MEMO.get(geo) : null;
+  if (memo && memo.doc === prevDoc) memo.doc = nextDoc;
+  return geo;
+}
+
+/**
+ * Узлы, чья раскладка могла измениться, — по самим документам, а не по операциям: applyOps делит
+ * неизменённые узлы между версиями, поэтому изменённый узел — тот, чей объект другой (или его нет
+ * в одной из версий). Так верно и для чужой транзакции поверх своих неподтверждённых правок, и
+ * для починки при применении. Плюс все предки — до и после. null — только полная раскладка.
+ */
+function dirtyAfter(prevDoc, nextDoc) {
+  if (!prevDoc || !nextDoc || !isObj(prevDoc.nodes) || !isObj(nextDoc.nodes)) return null;
+  if (prevDoc.tokens !== nextDoc.tokens || prevDoc.root !== nextDoc.root) return null;
+  const P = prevDoc.nodes;
+  const N = nextDoc.nodes;
+  const root = nextDoc.root;
+  const boardOfIn = (nodes, id) => {
+    let cur = id;
+    for (let guard = 0; typeof cur === 'string' && guard <= MAX_DEPTH + 2; guard++) {
+      const n = ownNode(nodes, cur);
+      if (!n) return null;
+      if (n.parent === root) return cur;
+      cur = n.parent;
+    }
+    return null;
+  };
+  const changed = [];
+  for (const id of Object.keys(N)) if (ownNode(P, id) !== N[id]) changed.push(id);
+  for (const id of Object.keys(P)) if (!hasOwnProp.call(N, id)) changed.push(id);
+  const dirty = new Set();
+  const up = (nodes, id) => {
+    let cur = id;
+    for (let guard = 0; typeof cur === 'string' && guard <= MAX_DEPTH + 2; guard++) {
+      if (dirty.has(cur) && nodes === N) return;   // предки уже отмечены этим же проходом
+      dirty.add(cur);
+      const n = ownNode(nodes, cur);
+      if (!n) return;
+      cur = n.parent;
+    }
+  };
+  for (const id of changed) {
+    const a = ownNode(P, id);
+    const b = ownNode(N, id);
+    if (a && b) {
+      // тема доски меняет меры всех её текстов — только полная
+      if (b.parent === root && JSON.stringify(a.theme) !== JSON.stringify(b.theme)) return null;
+      // перенос между досками: поддерево меряется другой темой — только полная
+      if (a.parent !== b.parent && boardOfIn(P, id) !== boardOfIn(N, id)) return null;
+    }
+    up(P, id);
+    up(N, id);
+  }
+  return dirty;
 }
 
 /**
@@ -12927,7 +13080,7 @@ async function boardPNG(doc, artboardId, opts = {}) {
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
   /* Круг 47 (SPEC §14.4): SVG доски без страницы — снимок для критика агента — */
-  renderSVG, boardPNG,
+  renderSVG, boardPNG, solveAfter, solveCarry,
   /* Круг 31 (K1): большая отмена/правка — пачками в пределах транзакции — */
   splitOps, SPLIT_MAX_OPS, SPLIT_MAX_BYTES,
   /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */
