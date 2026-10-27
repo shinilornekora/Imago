@@ -2,7 +2,9 @@
  * Круг 51 (SPEC §18): замер раскладки после одной правки — полная (solve) и по месту правки
  * (solveAfter), круг 57 — и отмена той же правки (solveNext). Документ: одна доска, карточки по 4 слоя (рамка, заголовок, текст, плашка),
  * сеткой с переносом; правка — текст карточки в середине. Медиана из --runs прогонов.
- *   node tools/bench-layout.mjs [--nodes 1000,5000] [--runs 30] [--json]
+ * Круг 66: --shape nested — вложенный макет (доска-колонка → секции → ряды с переносом → карточки →
+ * тексты, глубина 5, как лендинг), правка — текст карточки в средней секции.
+ *   node tools/bench-layout.mjs [--nodes 1000,5000] [--runs 30] [--shape flat|nested] [--json]
  */
 import * as core from '../src/core.js';
 import { performance } from 'node:perf_hooks';
@@ -11,6 +13,7 @@ const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ?
 const SIZES = String(arg('nodes', '1000,5000')).split(',').map(Number).filter((n) => n > 0);
 const RUNS = Number(arg('runs', 30));
 const JSON_OUT = process.argv.includes('--json');
+const SHAPE = String(arg('shape', 'flat'));
 const quiet = (fn) => { const w = console.warn; console.warn = () => {}; try { return fn(); } finally { console.warn = w; } };
 // измеритель без холста: приближение ширины (в браузере — canvas; здесь важна доля раскладки)
 const measureText = (text, style) => String(text || '').length * (style.fontSize || 16) * 0.52;
@@ -37,11 +40,47 @@ export function boardDoc(n) {
   return { doc: r.doc, mid: `c${Math.floor(cards / 2)}b`, count: Object.keys(r.doc.nodes).length };
 }
 
+/** Круг 66: вложенный макет — секции по 4 ряда, ряд — 6 карточек, карточка — рамка, заголовок, текст. */
+export function nestedDoc(n) {
+  const base = quiet(() => core.createDoc());
+  const doc = { ...base, nodes: { [base.root]: { ...base.nodes[base.root], children: [] } } };
+  const pad = (v) => ({ t: v, r: v, b: v, l: v });
+  const list = [core.ops.create({ id: 'b', type: 'frame', name: 'Лендинг', parent: doc.root, pos: { x: 0, y: 0 },
+    size: { w: { mode: 'fixed', value: 1440 }, h: { mode: 'hug' } }, fill: 'canvas',
+    layout: { mode: 'column', gap: 48, padding: pad(48), align: 'stretch', justify: 'start', wrap: false }, children: [] })];
+  const perCard = 3, perRow = 6, perSection = 4;
+  const cardsTotal = Math.max(1, Math.floor((n - 1) / (perCard + 1 / perRow + 1 / (perRow * perSection))));
+  const sections = Math.max(1, Math.ceil(cardsTotal / (perRow * perSection)));
+  let made = 0;
+  for (let s = 0; s < sections && made < cardsTotal; s++) {
+    list.push(core.ops.create({ id: `s${s}`, type: 'frame', name: `Секция ${s}`, parent: 'b', fill: 'surface', size: { w: { mode: 'fill' }, h: { mode: 'hug' } },
+      layout: { mode: 'column', gap: 24, padding: pad(32), align: 'stretch', justify: 'start', wrap: false }, children: [] }));
+    for (let r = 0; r < perSection && made < cardsTotal; r++) {
+      const row = `s${s}r${r}`;
+      list.push(core.ops.create({ id: row, type: 'frame', name: `Ряд ${r}`, parent: `s${s}`, size: { w: { mode: 'fill' }, h: { mode: 'hug' } },
+        layout: { mode: 'row', gap: 16, padding: pad(0), align: 'start', justify: 'start', wrap: true }, children: [] }));
+      for (let k = 0; k < perRow && made < cardsTotal; k++, made++) {
+        const c = `c${made}`;
+        list.push(
+          core.ops.create({ id: c, type: 'frame', name: `Карточка ${made}`, parent: row, size: { w: { mode: 'fixed', value: 200 }, h: { mode: 'hug' } },
+            layout: { mode: 'column', gap: 8, padding: pad(12), align: 'stretch', justify: 'start', wrap: false }, children: [] }),
+          core.ops.create({ id: `${c}t`, type: 'text', name: 'Заголовок', parent: c, characters: `Пункт ${made}`, style: 'title', size: { w: { mode: 'fill' }, h: { mode: 'hug' } } }),
+          core.ops.create({ id: `${c}b`, type: 'text', name: 'Текст', parent: c, characters: 'Описание, которое переносится на пару строк.', style: 'body', size: { w: { mode: 'fill' }, h: { mode: 'hug' } } }),
+        );
+      }
+    }
+  }
+  const r = core.applyOps(doc, list);
+  if (r.error) throw new Error(JSON.stringify(r.error));
+  return { doc: r.doc, mid: `c${Math.floor(made / 2)}b`, count: Object.keys(r.doc.nodes).length, cards: made };
+}
+
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
 
 const rows = [];
 for (const n of SIZES) {
-  const { doc, mid, count } = boardDoc(n);
+  const built = SHAPE === 'nested' ? nestedDoc(n) : boardDoc(n);
+  const { doc, mid, count } = built;
   const opts = { measureText };
   let cur = doc;
   let geo = core.solve(cur, { ...opts, incremental: true });
@@ -75,7 +114,7 @@ for (const n of SIZES) {
   // круг 57: кадр догона — геометрия отстала на 5 правок в разных карточках
   const catchup = [];
   if (typeof core.solveNext === 'function') {
-    const cards = Math.max(1, Math.floor((n - 1) / 4));
+    const cards = built.cards || Math.max(1, Math.floor((n - 1) / 4));
     for (let i = 0; i < RUNS; i++) {
       let next = cur;
       for (let k = 0; k < 5; k++) {
@@ -88,7 +127,7 @@ for (const n of SIZES) {
       geo = g; cur = next;
     }
   }
-  rows.push({ nodes: count, fullMs: +median(full).toFixed(2), incrementalMs: inc.length ? +median(inc).toFixed(2) : null,
+  rows.push({ shape: SHAPE, nodes: count, fullMs: +median(full).toFixed(2), incrementalMs: inc.length ? +median(inc).toFixed(2) : null,
     undoMs: undo.length ? +median(undo).toFixed(2) : null, catchupMs: catchup.length ? +median(catchup).toFixed(2) : null });
 }
 if (JSON_OUT) console.log(JSON.stringify(rows));
