@@ -1855,6 +1855,15 @@ button.t-action:hover { text-decoration: underline; }
 .paint-body { display: flex; flex-direction: column; gap: 8px; padding: 2px 8px 9px; }
 .paint-body > .swatch-groups { padding: 0; }
 .paint-color { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+/* круг 67: цвета экрана в группе «Тема экрана» */
+.theme-colors > summary { cursor: pointer; font-size: var(--t-sm); color: var(--muted); margin: 4px 0; }
+.theme-color-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.theme-color-name { flex: 0 0 84px; font-size: var(--t-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-color-row.own .theme-color-name { font-weight: 600; }
+.theme-color-back { flex: none; padding: 2px 8px; }
+.theme-colors-group { font-size: var(--t-sm); color: var(--muted); margin: 8px 0 2px; }
+.theme-color-mark { display: block; font-size: 11px; font-weight: 400; color: var(--accent); }
+.theme-color-note { font-size: var(--t-sm); color: var(--muted); }
 .paint-color-input {
   flex: none; width: 30px; height: 28px; padding: 2px; border: 1px solid var(--line-strong);
   border-radius: 7px; background: var(--panel-2); cursor: pointer;

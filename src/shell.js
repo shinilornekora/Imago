@@ -4408,3 +4408,100 @@ export function imageInsertOps(doc, o) {
   };
   return { ops: [{ op: 'create', node: board }, { op: 'create', node: { ...image, parent: board.id } }], select: [image.id], into: null };
 }
+
+/* ------------------------- круг 67: цвета экрана в инспекторе ------------------------- */
+
+/** Имя цвета, которое тема доски принимает (как `THEME_NAME_RE` ядра): «__proto__» ключом не пишется. */
+const THEME_COLOR_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** Цвет кодом без прозрачности ('#abc' | '#aabbcc') → '#aabbcc'; иначе null (с прозрачностью — не равен никакому выбору). */
+function opaqueHex(c) {
+  const v = String(c == null ? '' : c).trim();
+  return /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(v) ? toHex6(v) : null;
+}
+
+/**
+ * Круг 67 (SPEC §15.6): строки «Цвета экрана» — каждый цвет документа (и имена темы, которых в
+ * документе нет) с тем, что видит доска: `hex` — действующий (для поля выбора; null — цвет задан не
+ * кодом), `own` — свой у экрана, `docHex` — общий без прозрачности (null — нет такого или он не код
+ * без прозрачности), `alpha` — общий с прозрачностью, `editable` — тема примет этот цвет.
+ * @returns {{name: string, hex: string|null, own: boolean, docHex: string|null, alpha: boolean, editable: boolean}[]}
+ */
+export function boardColorRows(doc, board) {
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
+  const own = isObj(theme.colors) ? theme.colors : {};
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  const limit = (CORE_NS.THEME_LIMITS && CORE_NS.THEME_LIMITS.colors) || 64;
+  const room = Object.keys(own).length < limit;
+  const rows = [];
+  for (const name of [...Object.keys(base), ...Object.keys(own).filter((k) => !Object.prototype.hasOwnProperty.call(base, k))]) {
+    const mine = Object.prototype.hasOwnProperty.call(own, name) ? toHex6(own[name]) : null;
+    const docHex = opaqueHex(base[name]);
+    const shown = mine || toHex6(base[name]);
+    rows.push({ name, hex: shown, own: !!mine, docHex, alpha: !mine && !docHex && !!shown,
+      editable: THEME_COLOR_NAME_RE.test(name) && (!!mine || room) });
+  }
+  return rows;
+}
+
+/** Фон, на котором читается текст доски: её заливка-токен, иначе холст. */
+function boardGround(board, base) {
+  const f = board && board.fill;
+  const t = typeof f === 'string' ? f : (isObj(f) && typeof f.token === 'string' ? f.token : null);
+  return t && Object.prototype.hasOwnProperty.call(base, t) ? t : 'canvas';
+}
+
+/**
+ * Круг 67 (SPEC §15.6): правка цвета экрана из инспектора — операция по пути `theme.colors.<имя>`
+ * (две правки разных цветов одной доски с двух вкладок не затирают друг друга). `hex` null или
+ * равный общему цвету документа — цвет снимается с темы; тема опустела — снимается вся (цвета
+ * опустели, шрифты есть — снимаются только цвета). Шрифты темы не трогаются. Ничего не меняется,
+ * имя не по ядру или тема не годится — null. `title` — имя цвета человеку («акцент») для истории.
+ * @returns {{ops: object[], label: string, warnings: string[]}|null}
+ */
+export function themeColorOps(doc, board, name, hex, { title } = {}) {
+  if (!board || !board.id || typeof name !== 'string' || !THEME_COLOR_NAME_RE.test(name)) return null;
+  const want = hex == null ? null : toHex6(hex);
+  if (hex != null && !want) return null;
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  const colors = { ...(isObj(theme.colors) ? theme.colors : {}) };
+  const docHex = opaqueHex(base[name]);
+  const had = Object.prototype.hasOwnProperty.call(colors, name);
+  if (want === null || want === docHex) {
+    if (!had) return null;
+    delete colors[name];
+  } else {
+    if (had && toHex6(colors[name]) === want) return null;
+    colors[name] = want;
+  }
+  const next = { ...theme };
+  if (Object.keys(colors).length) next.colors = colors; else delete next.colors;
+  const value = Object.keys(next).length ? next : undefined;
+  if (value !== undefined && CORE_NS.themeProblem && CORE_NS.themeProblem(value)) return null;
+  const ops = value === undefined ? [OPS.set(board.id, 'theme', undefined)]
+    : !next.colors ? [OPS.set(board.id, 'theme.colors', undefined)]
+      : [OPS.set(board.id, `theme.colors.${name}`, colors[name])];
+  const screen = `«${String(board.name || 'Доска').slice(0, 40)}»`;
+  const said = typeof title === 'string' && title.trim() ? title.trim().slice(0, 40) : name;
+  const label = value === undefined ? `Экран ${screen} вернулся к оформлению документа`
+    : colors[name] ? `Свой цвет экрана ${screen}: ${said} ${want.toUpperCase()}`
+      : `Экран ${screen}: ${said} — как в документе`;
+  // контраст после правки — по тому, что увидит доска; фон — её заливка (часто карточка, не холст)
+  const ground = boardGround(board, base);
+  const pairs = [['text', ground, 4.5, 'текст на фоне экрана читается'], ['muted', ground, 3, 'подписи на фоне экрана читаются'],
+    ['text', 'surface', 4.5, 'текст на карточках читается'], ['onAccent', 'accent', 4.5, 'текст на акценте читается']]
+    .filter(([fg, bg], i, all) => all.findIndex(([f, b]) => f === fg && b === bg) === i);
+  const warnings = [];
+  const seen = (k) => opaqueHex((value && value.colors && value.colors[k]) || base[k]);
+  if (CORE_NS.contrastRatio) {
+    for (const [fg, bg, min, ru] of pairs) {
+      if (fg !== name && bg !== name) continue;
+      const a = seen(fg); const b = seen(bg);
+      if (!a || !b) continue;
+      const r = CORE_NS.contrastRatio(a, b);
+      // вниз до десятых: 2.96 — не «3.0 при нужных 3»
+      if (r < min) warnings.push(`На экране ${screen} ${ru} плохо: контраст ${(Math.floor(r * 10) / 10).toFixed(1)}:1 (нужно от ${min}:1)`);
+    }
+  }
+  return { ops, label, warnings };
+}
