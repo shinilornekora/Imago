@@ -27,7 +27,7 @@
 | 6c. Микроанимации | 4161 | `STATE_*`, `MOTION_*`, `normalizeMotionPath`, `recognizeMotionClear` (§11) |
 | 6b'. Иллюстрации | 5015 | `ART_LIMITS`, `parseArtPath`/`formatArtPath` (зеркало `core.parsePath`), тона и узоры, `compileIllustration` (спецификация → свободная рамка с векторами), `mergeIllustration`, правка иллюстраций (§12) |
 | Выжимка документа | ≈6540 | `DIGEST_LIMIT`, легенды, **`describeDoc`** (≈6816), `describeHistory` |
-| 8. Материализация | 7157 | `parsePx`, `colorFromWord`, `normalizeTree`, **`treeToOps`** (≈8143), разрешение целей (`resolveRef(s)`, ≈8177–8700), пути (`normalizePath`, `adjustSetPath`, `ALLOWED_PATH_HEADS`), `coerceValue`, `sameAsNow`, **`patchToOps`** (≈10116), **`themeToOps`** (≈10795; тема доски по путям — круг 69, копия с другого экрана `likeBoard` — круг 71; несколько экранов — `boardThemeOps` → `oneBoardThemeOps` на каждый, `boardNames`/выделение, круг 72; «все, кроме» — `exceptBoards`, круг 74: не найденное исключение — отказ) |
+| 8. Материализация | 7157 | `parsePx`, `colorFromWord`, `normalizeTree`, **`treeToOps`** (≈8143), разрешение целей (`resolveRef(s)`, ≈8177–8700), пути (`normalizePath`, `adjustSetPath`, `ALLOWED_PATH_HEADS`), `coerceValue`, `sameAsNow`, **`patchToOps`** (≈10116), **`themeToOps`** (≈10795; тема доски по путям — круг 69, копия с другого экрана `likeBoard` — круг 71; несколько экранов — `boardThemeOps` → `oneBoardThemeOps` на каждый, `boardNames`/выделение, круг 72; «все, кроме» — `exceptBoards`, круг 74: не найденное исключение — отказ; имена по основам слов — `matchBoards`, «все экраны оплаты» — `boardGroup`, круг 75) |
 | 7a. Названия по-русски | 9148 | `PATH_RU`, `ruPath`, `ruToken`, `ruEnum`; зеркала `core.keepFieldForm` (≈9560, ≈9620) |
 | 9. Конвейер | 11171 | `warningRank`, `CALL_TIMEOUT_MS`, `overflowWords`, `describeViolations`; внешняя библиотека DUIL (≈11702: `libraryDocOf`, `externalLibraryPlan`, `withExternalLibrary`) |
 | 13. Живой дизайн | 11979 | арт-направление (`normalizeDirection`, `directionBrief`, `readDirection` §17.1, `directionTheme`, `applyDirection`), критик (`templateSignals`, `normalizeCritique`, `visionRefusal`, `imageTurn`, `recheckVerdict` — второй взгляд §19), образец (`referenceImage` §22, снимок мудборда `MOODBOARD_SHOT_*` §22.1–§22.2), цвета картинок (`IMAGE_COLORS_MS` §20) |
@@ -54,7 +54,7 @@
 - `downgradeSchema` — для провайдеров, которые не принимают полную JSON Schema (LM Studio): проверяй оба пути.
 
 ## Отладка
-`node --test test/brain.test.mjs test/brain-r36.test.mjs test/brain-r47.test.mjs test/brain-r52.test.mjs`; темы — `test/theme-paths-r69`, `theme-like-r71`, `theme-many-r72`, `theme-except-r74`; образец — `reference-r56`, `moodboard-shot-r60`. В браузере — `dev.html` с `tools/stub.js`.
+`node --test test/brain.test.mjs test/brain-r36.test.mjs test/brain-r47.test.mjs test/brain-r52.test.mjs`; темы — `test/theme-paths-r69`, `theme-like-r71`, `theme-many-r72`, `theme-except-r74`, `board-names-r75`; образец — `reference-r56`, `moodboard-shot-r60`. В браузере — `dev.html` с `tools/stub.js`.
 
 ## Ссылки
 - SPEC: §1.6, §5, §6, §7, §10.6, §11, §12, §14, §15.3, §17, §19, §20, §21, §22

@@ -1181,6 +1181,8 @@ export const SCHEMAS = {
         boardName: { type: 'string', maxLength: 80 },
         /* Круг 72 (SPEC §15.9): та же правка нескольким экранам — их имена. */
         boardNames: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 80 } },
+        /* Круг 75 (SPEC §15.12): «все экраны оплаты» — все экраны, в имени которых это слово. */
+        boardGroup: { type: 'string', maxLength: 80 },
         /* Круг 74 (SPEC §15.11): «все экраны, кроме «Оплата»» — та же правка всем, кроме названных. */
         exceptBoards: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 80 } },
         reset: { type: 'boolean' },
@@ -1242,6 +1244,7 @@ export const SCHEMAS = {
   boardName?: string, // с board:true — имя экрана, если человек его назвал («экран Оплата»); иначе не пиши
   boardNames?: string[], // с board:true — имена НЕСКОЛЬКИХ экранов, если та же правка нужна им всем
   exceptBoards?: string[], // с board:true — «все экраны, кроме …»: имена экранов, которые НЕ трогать
+  boardGroup?: string, // с board:true — «все экраны оплаты»: слово из имён экранов, правка — всем таким
   likeBoard?: string, // с board:true — имя экрана-образца: «сделай как экран X»
   reset?: boolean,   // с board:true — снять тему доски целиком (вернуть ей оформление документа)
   colors?: [{name: string, value: "#rrggbb"}],
@@ -2276,7 +2279,8 @@ export const PROMPTS = {
   Назвал экран по имени — boardName: "<имя>"; назвал несколько («экраны Оплата и Итог тёмными») — boardNames:
   ["<имя>", "<имя>"]: та же правка ляжет темой каждому; «РАБОТАЕМ С:» на нескольких экранах и просят «эти экраны» —
   board:true без имён, правка ляжет каждому. «Все экраны, кроме «Оплата»» — {board:true, exceptBoards:["Оплата"]}
-  (НЕ токены документа: они перекрасили бы и «Оплату»). «Сделай этот экран как «Оплата»», «оформи так же, как
+  (НЕ токены документа: они перекрасили бы и «Оплату»). «Все экраны оплаты тёмными» — {board:true,
+  boardGroup:"оплата"}: правка всем экранам, в имени которых это слово. «Сделай этот экран как «Оплата»», «оформи так же, как
   экран X» — {board:true, likeBoard:"<имя экрана-образца>"}: его тема ляжет копией (colors и type к ней
   добавляй, только если просят что-то ещё; reset с likeBoard не пиши). Тёмный (или иной) экран — ПОЛНАЯ палитра: canvas,
   surface, surfaceAlt, text, muted, line, accentSoft, onAccent (те, что есть в документе), не один фон:
@@ -10797,7 +10801,9 @@ export function failureHint(said) {
  * раз так, человек обязан узнать, что изменилось всё.
  */
 /** Круг 74: в ответе тематизатора есть «все, кроме …». */
-const hasExcept = (theme) => Array.isArray(theme && theme.exceptBoards) && theme.exceptBoards.some((x) => typeof x === 'string' && x.trim());
+const hasExcept = (theme) => (Array.isArray(theme && theme.exceptBoards) && theme.exceptBoards.some((x) => typeof x === 'string' && x.trim()))
+  // круг 75: и «все экраны оплаты» (boardGroup)
+  || (typeof (theme && theme.boardGroup) === 'string' && theme.boardGroup.trim() !== '');
 
 export function themeToOps({ doc, theme, engine, warn, scope = null }) {
   const note = warn || (() => {});
@@ -11031,13 +11037,26 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const all = boardIds(doc);
   const label = (id) => cutText(strOf(nodeOf(doc, id) && nodeOf(doc, id).name) || 'Доска', 40);
   // имя как есть → без «экран(а/у/е/ом)» перед ним → вхождение (раньше «экран» срезался и с «Экранной формы»)
-  const byName = (asked) => {
-    const nameOf = (id) => strOf(nodeOf(doc, id).name).trim().toLowerCase();
-    const plain = asked.toLowerCase().replace(/[«»"]/g, '').trim();
-    const bare = asked.toLowerCase().replace(/^экран(?:а|у|е|ом)?\s+/u, '').replace(/[«»"]/g, '').trim();
-    return all.find((id) => nameOf(id) === plain) || all.find((id) => nameOf(id) === bare)
-      || all.find((id) => bare && nameOf(id).includes(bare)) || null;
+  // круг 75 (SPEC §15.12): имя экрана — как есть, без «экран(а/у/е/ом)» перед ним, по основам слов
+  // («Оплаты», «Итогу» — падежи), затем вхождением; все совпавшие на первом сработавшем шаге
+  const kids = kidsOf(nodeOf(doc, doc.root)).filter((id) => nodeOf(doc, id) && nodeOf(doc, id).type === 'frame');
+  const nameOf = (id) => strOf(nodeOf(doc, id).name).trim().toLowerCase().replace(/[«»"]/g, '').replace(/\s+/g, ' ');
+  const stemWord = (w) => (w.length >= 4 ? w.replace(/(?:ой|ей|ом|ем|ам|ям|ах|ях|ы|и|у|ю|е|а|я|о|ь)$/u, '') : w);
+  const stems = (x) => x.split(' ').map(stemWord).join(' ');
+  const matchBoards = (asked, pool = kids) => {
+    const plain = String(asked).toLowerCase().replace(/[«»"]/g, '').replace(/\s+/g, ' ').trim();
+    const bare = plain.replace(/^экран(?:а|у|е|ом|ы|ов|ам|ами|ах)?\s+/u, '').trim();
+    if (!bare) return [];
+    const passes = [
+      (id) => nameOf(id) === plain || nameOf(id) === bare,
+      (id) => stems(nameOf(id)) === stems(bare),
+      (id) => nameOf(id).includes(bare),
+      (id) => stems(nameOf(id)).includes(stems(bare)),
+    ];
+    for (const ok of passes) { const hit = pool.filter(ok); if (hit.length) return hit; }
+    return [];
   };
+  const byName = (asked) => matchBoards(asked, all)[0] || null;
   // круг 72 (SPEC §15.9): экраны правки — названные списком, одно имя или выделение (и на нескольких досках)
   const names = (Array.isArray(theme.boardNames) ? theme.boardNames : [])
     .filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
@@ -11049,7 +11068,11 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   let targets = [];
   const missed = [];
   const later = [];                                 // заметки, которые верны, только если правка легла
-  if (except.length && !names.length) {
+  const group = typeof theme.boardGroup === 'string' ? theme.boardGroup.trim() : '';
+  if (group && !names.length) {
+    targets = matchBoards(group, all);
+    if (!targets.length) throw ERR('schema', `Экранов со словом «${cutText(group, 40)}» в имени нет — назовите экраны, как на холсте`);
+  } else if (except.length && !names.length) {
     targets = all.slice();
   } else if (names.length) {
     for (const n of names) {
@@ -11083,16 +11106,9 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
     // исключение — строже имени правки: не нашли — отказ (иначе исключённый экран перекрасится);
     // равные имена — все такие; иначе — по основе слова («кроме Оплаты»), затем вхождением, все совпавшие
     if (!all.length) throw ERR('schema', 'На странице нет экранов — только библиотека компонентов');
-    const kids = kidsOf(nodeOf(doc, doc.root)).filter((id) => nodeOf(doc, id) && nodeOf(doc, id).type === 'frame');
-    const nameOf = (id) => strOf(nodeOf(doc, id).name).trim().toLowerCase().replace(/[«»"]/g, '');
-    const stem = (x) => (x.length >= 4 ? x.replace(/[аыуеоияюь]$/u, '') : x);
     const out = [];
     for (const n of except) {
-      const plain = n.toLowerCase().replace(/[«»"]/g, '').trim();
-      const bare = plain.replace(/^экран(?:а|у|е|ом|ы|ов)?\s+/u, '').trim();
-      let hit = kids.filter((id) => nameOf(id) === plain || nameOf(id) === bare);
-      if (!hit.length && bare) hit = kids.filter((id) => stem(nameOf(id)) === stem(bare));
-      if (!hit.length && bare) hit = kids.filter((id) => nameOf(id).includes(stem(bare)));
+      const hit = matchBoards(n);
       if (!hit.length) throw ERR('schema', `Экран «${cutText(n, 40)}» не найден — не знаю, какой не трогать; назовите его, как на холсте`);
       const screens = hit.filter((id) => all.includes(id));
       if (hit.length > 1 && screens.length > 1) later.push(`«${cutText(n, 40)}» — не тронуты экраны ${screens.slice(0, 4).map((id) => `«${label(id)}»`).join(', ')}`);
@@ -11105,9 +11121,11 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
         : 'Исключены все экраны правки — менять нечего; назовите, какие экраны оформить');
     }
     targets = kept;
-    // «все, кроме …, как «Оплата»» — образец сам себя не оформляет: без заметки
+  }
+  // «все, кроме …» / «все экраны оплаты» «как «Оплата»» — образец сам себя не оформляет: без заметки
+  if (!names.length && (group || except.length)) {
     const likeName = typeof theme.likeBoard === 'string' ? theme.likeBoard.trim() : '';
-    const likeHere = likeName && !names.length ? byName(likeName) : null;
+    const likeHere = likeName ? byName(likeName) : null;
     if (likeHere && targets.length > 1) targets = targets.filter((id) => id !== likeHere);
   }
   if (targets.length === 1) {
