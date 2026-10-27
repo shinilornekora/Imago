@@ -41,3 +41,24 @@ test('круг77: экраны выделения — по именам досо
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   assert.ok(stages.some((e) => e.stage === 'materialize' && e.detail === 'Меняю оформление экрана «Итог»'), JSON.stringify(stages));
 });
+
+test('круг77, критики: выделение как у boardThemeOps, группа с именами, повторы, длинные имена и «:»', () => {
+  const quiet = (fn) => { const w = console.warn; console.warn = () => {}; try { return fn(); } finally { console.warn = w; } };
+  const base = quiet(() => core.createDoc('empty'));
+  const mk = (id, name, x, role) => core.ops.create({ id, type: 'frame', name, parent: base.root, pos: { x, y: 0 },
+    size: { w: { mode: 'fixed', value: 300 }, h: { mode: 'fixed', value: 200 } }, fill: 'canvas', ...(role ? { role } : {}), children: [] });
+  let doc = core.applyOps(base, [mk('pay', 'Оплата', 0), mk('sum', 'Итог', 400), mk('lib', 'Компоненты', 800, 'library')]).doc;
+  assert.equal(themeStageLine({ board: true }, doc, { ids: ['pay', 'lib'] }), 'Меняю оформление экрана «Оплата»');
+  assert.equal(themeStageLine({ board: true }, doc, { containerId: 'sum' }), 'Меняю оформление экрана «Итог»');
+  doc = { ...doc, meta: { ...(doc.meta || {}), activeArtboard: 'sum' } };
+  assert.equal(themeStageLine({ board: true }, doc, { ids: ['pay', 'sum'], selectionBy: 'agent' }), 'Меняю оформление экрана «Итог»');
+  assert.equal(themeStageLine({ board: true }, doc, null), 'Меняю оформление выбранного экрана');
+  assert.equal(themeStageLine({ board: true, reset: true }, doc, null), 'Возвращаю выбранному экрану общее оформление');
+  assert.equal(themeStageLine({ board: true, boardName: 'Итог', boardGroup: 'оплата' }, EMPTY, null), 'Меняю оформление экранов со словом «оплата» и экрана «Итог»');
+  assert.equal(themeStageLine({ board: true, reset: true, boardNames: ['Итог', 'Профиль'], boardGroup: 'оплата' }, EMPTY, null),
+    'Возвращаю экранам со словом «оплата» и экранам «Итог», «Профиль» общее оформление');
+  assert.equal(themeStageLine({ board: true, boardName: 'Итог', boardNames: ['итог', ' Итог'] }, EMPTY, null), 'Меняю оформление экрана «Итог»');
+  assert.equal(themeStageLine({ board: true, boardName: 'Очень длинное имя экрана, которое не влезает' }, EMPTY, null), 'Меняю оформление экрана «Очень длинное имя экрана, кот…»');
+  assert.equal(themeStageLine({ board: true, boardName: 'Checkout: Card' }, EMPTY, null), 'Меняю оформление экрана «Checkout — Card»');
+  assert.equal(themeStageLine({ board: true, boardNames: ['«»', 'Итог'] }, EMPTY, null), 'Меняю оформление экрана «Итог»');
+});
