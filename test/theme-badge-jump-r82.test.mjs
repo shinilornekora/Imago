@@ -52,17 +52,37 @@ test('круг82: в браузере — щелчок по метке темы 
     assert.equal(await page.locator('#inspector .theme-colors').evaluate((d) => d.open), false);
     await page.locator(`#layers .layer[data-id="${b}"]`).click();
     await page.waitForFunction((b) => document.querySelector(`#layers .layer[data-id="${b}"]`).getAttribute('aria-selected') === 'true', b);
-    await page.evaluate(() => { document.getElementById('inspector').scrollTop = 0; });
+    // прокручивается тело инспектора: в начало — группа темы вне вида (иначе проверка ничего не доказывает)
+    const inView = () => page.evaluate(() => {
+      const body = document.getElementById('insp-body');
+      const g = document.querySelector('#inspector [data-group="theme"]');
+      if (!body || !g) return null;
+      const box = body.getBoundingClientRect(), r = g.getBoundingClientRect();
+      return r.top >= box.top - 1 && r.top < box.bottom;
+    });
+    await page.evaluate(() => { document.getElementById('insp-body').scrollTop = 0; });
+    assert.equal(await inView(), false, 'у второго экрана — тоже группа темы, и она ниже края');
     await pill.click();
     await page.waitForFunction((a) => document.querySelector(`#layers .layer[data-id="${a}"]`).getAttribute('aria-selected') === 'true', a, { timeout: 5000 });
     assert.equal(await page.locator('#inspector .theme-colors').evaluate((d) => d.open), true, 'метка раскрывает свои цвета');
     assert.equal(await page.locator('#inspector [data-group="theme"]').count(), 1);
     await page.waitForFunction(() => {
-      const box = document.getElementById('inspector').getBoundingClientRect();
+      const box = document.getElementById('insp-body').getBoundingClientRect();
       const g = document.querySelector('#inspector [data-group="theme"]').getBoundingClientRect();
-      return g.top < box.bottom && g.bottom > box.top;
+      return g.top >= box.top - 1 && g.top < box.bottom;
     }, null, { timeout: 5000 });
     assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.closest('#layers') !== null), true, 'фокус — в рельсе, на строке экрана');
+    // критик: с клавиатуры — метка в табуляции за своей строкой, Enter ведёт туда же
+    await page.locator(`#layers .layer[data-id="${b}"]`).click();
+    await page.locator('#inspector .theme-colors > summary').click().catch(() => {});
+    await page.locator(`#layers .layer[data-id="${a}"]`).focus();
+    await page.keyboard.press('ArrowUp');   // первая строка — фокус остаётся на ней, выделение — на втором экране
+    const tab = await page.evaluate((a) => document.querySelector(`#layers .layer[data-id="${a}"] .tagpill.theme`).tabIndex, a);
+    assert.equal(tab, 0, 'метка строки в фокусе — в табуляции');
+    assert.equal(await page.locator(`#layers .layer[data-id="${a}"]`).getAttribute('aria-selected'), 'false');
+    await pill.focus();
+    await page.keyboard.press('Enter');
+    await page.waitForFunction((a) => document.querySelector(`#layers .layer[data-id="${a}"]`).getAttribute('aria-selected') === 'true', a, { timeout: 5000 });
     assert.deepEqual(errors, [], 'ошибок страницы нет');
   } finally {
     await browser.close();

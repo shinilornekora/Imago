@@ -6796,7 +6796,10 @@ function renderLayers() {
     // круг 81 (§15.17): у экрана своя тема — метка с её цветом
     const themed = !r.lib && SHELL.boardThemeBadge(state.doc, n);
     if (themed) {
-      const t = document.createElement('span');
+      // кнопка, а не метка: щелчок и Enter ведут к теме (круг 82); в табуляции — за своей строкой, как «+»
+      const t = document.createElement('button');
+      t.type = 'button';
+      t.tabIndex = r.id === state.railFocus ? 0 : -1;
       t.className = 'tagpill theme' + (themed.broken ? ' warn' : '');
       // узкая, как метка состояний: кружок цвета темы; одни шрифты — «Аа», повреждённая — «!»
       if (themed.swatch) {
@@ -6806,7 +6809,6 @@ function renderLayers() {
         t.appendChild(dot);
       } else t.textContent = themed.broken ? '!' : 'Аа';
       t.title = themed.title;
-      t.setAttribute('role', 'img');
       t.setAttribute('aria-label', themed.title);
       // круг 82 (§15.18): щелчок по метке — экран выделен, его тема раскрыта и видна в инспекторе
       t.addEventListener('click', (e) => { e.stopPropagation(); openBoardTheme(r.id, themed); });
@@ -6900,8 +6902,7 @@ function updateLayerSelection() {
     const focus = row.dataset.id === state.railFocus;
     if ((row.tabIndex === 0) !== focus) row.tabIndex = focus ? 0 : -1;
     // «+» компонента ходит в табуляции за своей строкой (круг 19, п.4)
-    const add = row.querySelector('.layer-add');
-    if (add && (add.tabIndex === 0) !== focus) add.tabIndex = focus ? 0 : -1;
+    for (const add of row.querySelectorAll('.layer-add, .tagpill.theme')) if ((add.tabIndex === 0) !== focus) add.tabIndex = focus ? 0 : -1;
   }
   return true;
 }
@@ -6950,8 +6951,8 @@ function onLayerKey(e, rows, cur) {
     for (const el2 of dom.layers.querySelectorAll('.layer')) {
       const on = el2.dataset.id === r.id;
       el2.tabIndex = on ? 0 : -1;
-      const add = el2.querySelector('.layer-add');
-      if (add) add.tabIndex = on ? 0 : -1;   // «+» следует за своей строкой (круг 19, п.4)
+      // «+» и метка темы следуют за своей строкой (круг 19, п.4; круг 82)
+      for (const add of el2.querySelectorAll('.layer-add, .tagpill.theme')) add.tabIndex = on ? 0 : -1;
     }
     const el2 = dom.layers.querySelector(`.layer[data-id="${CSS.escape(r.id)}"]`);
     if (el2) { el2.focus(); el2.scrollIntoView({ block: 'nearest' }); }
@@ -7000,8 +7001,7 @@ function focusLayerRow(id) {
   if (!el2) return;
   for (const other of dom.layers.querySelectorAll('.layer')) {
     other.tabIndex = other === el2 ? 0 : -1;
-    const add = other.querySelector('.layer-add');
-    if (add) add.tabIndex = other === el2 ? 0 : -1;
+    for (const add of other.querySelectorAll('.layer-add, .tagpill.theme')) add.tabIndex = other === el2 ? 0 : -1;
   }
   try { el2.focus({ preventScroll: true }); } catch { el2.focus(); }
 }
@@ -8859,12 +8859,8 @@ function tokenType(token, node) {
   return (d.tokens.type && d.tokens.type[token]) || { fontSize: 16, fontWeight: 400 };
 }
 
-/**
- * Круг 48 (SPEC §15): тема выделенной доски — строка «что своё» и кнопка «Вернуть общее
- * оформление». Круг 67 (§15.6): цвета экрана правятся здесь же — каждый цвет документа, каким его
- * видит доска; правка ложится в тему доски (свой цвет только у этого экрана), «как в документе» —
- * снимает его с темы. У доски без темы список свёрнут.
- */
+const themeColorsOpen = new Map();   // доска → раскрыт ли список (выбор человека переживает перерисовку)
+const themeStylesOpen = new Map();   // круг 73: то же для «Шрифты по стилям»
 /** Круг 82 (§15.18): выделить экран и показать его «Тему экрана» — раскрыть список своего, прокрутить к нему. */
 function openBoardTheme(id, badge) {
   if (badge && !badge.broken) (badge.colors ? themeColorsOpen : themeStylesOpen).set(id, true);
@@ -8876,8 +8872,13 @@ function openBoardTheme(id, badge) {
     if (g) g.scrollIntoView({ block: 'nearest' });
   });
 }
-const themeColorsOpen = new Map();   // доска → раскрыт ли список (выбор человека переживает перерисовку)
-const themeStylesOpen = new Map();   // круг 73: то же для «Шрифты по стилям»
+
+/**
+ * Круг 48 (SPEC §15): тема выделенной доски — строка «что своё» и кнопка «Вернуть общее
+ * оформление». Круг 67 (§15.6): цвета экрана правятся здесь же — каждый цвет документа, каким его
+ * видит доска; правка ложится в тему доски (свой цвет только у этого экрана), «как в документе» —
+ * снимает его с темы. У доски без темы список свёрнут.
+ */
 function boardThemeGroup(node) {
   if (!node || node.type !== 'frame' || node.parent !== state.doc.root || typeof CORE.boardTheme !== 'function') return null;
   const t = CORE.boardTheme(node);
