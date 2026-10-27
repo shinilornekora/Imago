@@ -21,7 +21,8 @@ import {
 } from './core.js';
 // круг 25: cutText/cleanText появляются в core параллельно — берём оттуда, если уже есть
 import * as CORE_NS from './core.js';
-import { recognizeAction, RE_IMAGE_REF } from './brain.js';
+import { recognizeAction, RE_IMAGE_REF, textRole } from './brain.js';
+import { catalogFont, nearestWeight, FONT_CATALOG } from './fonts.js';
 // круг 41: причины отброшенного — одна истина со словами реплики (§9.10)
 import { DROP_WORDS } from './sync.js';
 
@@ -4504,4 +4505,95 @@ export function themeColorOps(doc, board, name, hex, { title } = {}) {
     }
   }
   return { ops, label, warnings };
+}
+
+/* ------------------------- круг 68: шрифты экрана в инспекторе ------------------------- */
+
+const FONT_ROLE_WORDS = { display: 'заголовков', text: 'текста' };
+const famKey = (f) => String(f || '').replace(/["']/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+/** Стили текста документа, которые тема доски может перекрасить шрифтом, по ролям (как у арт-директора). */
+function fontRoleStyles(doc) {
+  const types = (doc && doc.tokens && isObj(doc.tokens.type)) ? doc.tokens.type : {};
+  const out = { display: [], text: [] };
+  for (const name of Object.keys(types)) {
+    if (!THEME_COLOR_NAME_RE.test(name) || !isObj(types[name])) continue;
+    const role = textRole(doc, name, 0);
+    if (role) out[role].push(name);
+  }
+  return out;
+}
+
+/**
+ * Круг 68 (SPEC §15.7): строки «Шрифты экрана» — две роли, как у арт-директора (§15.3): заголовки
+ * (display/title/hero и кегль от 24) и текст (прочие, кроме моно). `font` — шрифт, каким доска видит
+ * стили роли (разные — null), `own` — у какого-то стиля роли шрифт свой у экрана, `docFont` —
+ * общий шрифт роли в документе (разные — null).
+ * @returns {{role: 'display'|'text', title: string, styles: string[], font: string|null, own: boolean, docFont: string|null}[]}
+ */
+export function boardFontRows(doc, board) {
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
+  const tt = isObj(theme.type) ? theme.type : {};
+  const types = (doc && doc.tokens && isObj(doc.tokens.type)) ? doc.tokens.type : {};
+  const roles = fontRoleStyles(doc);
+  const one = (list) => (list.length && list.every((f) => famKey(f) === famKey(list[0])) ? list[0] : null);
+  return ['display', 'text'].filter((r) => roles[r].length).map((role) => {
+    const styles = roles[role];
+    const docFonts = styles.map((n) => types[n].font || '');
+    const seen = styles.map((n, i) => (isObj(tt[n]) && tt[n].font) || docFonts[i]);
+    return { role, title: `Шрифт ${FONT_ROLE_WORDS[role]}`, styles, font: one(seen), own: styles.some((n) => isObj(tt[n]) && !!tt[n].font), docFont: one(docFonts) };
+  });
+}
+
+/**
+ * Круг 68 (SPEC §15.7): шрифт роли у одного экрана — по операции на стиль по пути `theme.type.<стиль>`
+ * (`{font, fontWeight?}`: насыщенность — ближайшая у семейства к стилю документа, пишется, только если
+ * отличается). Шрифт стиля в документе тот же — запись стиля снимается; `family` null — снимаются все
+ * стили роли. Опустели шрифты, цвета есть — `set theme.type` пустым; опустела тема — `set theme` пустым.
+ * Только семейства набора (`FONT_CATALOG`). Ничего не меняется — null.
+ * @returns {{ops: object[], label: string}|null}
+ */
+export function themeFontOps(doc, board, role, family) {
+  if (!board || !board.id || !FONT_ROLE_WORDS[role]) return null;
+  const fam = family == null ? null : catalogFont(family);
+  if (family != null && !fam) return null;
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
+  const types = (doc && doc.tokens && isObj(doc.tokens.type)) ? doc.tokens.type : {};
+  const type = { ...(isObj(theme.type) ? theme.type : {}) };
+  const styles = fontRoleStyles(doc)[role];
+  if (!styles.length) return null;
+  const changed = [];
+  for (const name of styles) {
+    const base = types[name];
+    const docW = typeof base.fontWeight === 'number' ? base.fontWeight : 400;
+    let entry;
+    if (!fam || famKey(base.font) === famKey(fam.family)) entry = undefined;
+    else {
+      const w = nearestWeight(fam.family, docW);
+      entry = w !== docW ? { font: fam.family, fontWeight: w } : { font: fam.family };
+    }
+    const was = type[name];
+    if (JSON.stringify(was) === JSON.stringify(entry)) continue;
+    if (entry === undefined) delete type[name]; else type[name] = entry;
+    changed.push(name);
+  }
+  if (!changed.length) return null;
+  const next = { ...theme };
+  if (Object.keys(type).length) next.type = type; else delete next.type;
+  const value = Object.keys(next).length ? next : undefined;
+  if (value !== undefined && CORE_NS.themeProblem && CORE_NS.themeProblem(value)) return null;
+  const ops = value === undefined ? [OPS.set(board.id, 'theme', undefined)]
+    : !next.type ? [OPS.set(board.id, 'theme.type', undefined)]
+      : changed.map((n) => OPS.set(board.id, `theme.type.${n}`, type[n]));
+  const screen = `«${String(board.name || 'Доска').slice(0, 40)}»`;
+  const label = value === undefined ? `Экран ${screen} вернулся к оформлению документа`
+    : fam && changed.some((n) => type[n]) ? `Шрифт ${FONT_ROLE_WORDS[role]} экрана ${screen}: ${fam.family}`
+      : `Экран ${screen}: шрифт ${FONT_ROLE_WORDS[role]} — как в документе`;
+  return { ops, label };
+}
+
+/** Круг 68: семейства набора для выбора шрифта — по видам, как в меню арт-директора. */
+export function fontChoices() {
+  const kinds = [['sans', 'Гротески'], ['serif', 'Антиквы'], ['slab', 'Брусковые'], ['display', 'Акцидентные'], ['script', 'Рукописные']];
+  return kinds.map(([k, title]) => ({ title, families: FONT_CATALOG.filter((f) => f.kind === k).map((f) => f.family) })).filter((g) => g.families.length);
 }
