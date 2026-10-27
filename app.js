@@ -8980,6 +8980,38 @@ function boardThemeGroup(node) {
     line.append(name, sel);
     kids.push(line);
   }
+  // круг 70 (§15.8): тема другого экрана — копией этой доске
+  const sources = SHELL.themeSources(state.doc, node);
+  if (sources.length) {
+    const line = document.createElement('label');
+    line.className = 'theme-font-row theme-copy-row';
+    const name = document.createElement('span');
+    name.className = 'theme-color-name';
+    name.textContent = 'как у экрана';
+    const sel = document.createElement('select');
+    sel.className = 'field theme-font-select theme-copy-select';
+    const first = document.createElement('option');
+    first.value = '';
+    first.textContent = 'выбрать экран…';
+    first.disabled = true;
+    first.selected = true;
+    sel.appendChild(first);
+    for (const src of sources) {
+      const o = document.createElement('option');
+      o.value = src.id;
+      o.textContent = src.name;
+      sel.appendChild(o);
+    }
+    sel.addEventListener('change', () => {
+      const cur = state.doc.nodes[node.id];
+      const r = cur && sel.value ? SHELL.copyThemeOps(state.doc, cur, sel.value) : null;
+      if (!r) { sel.value = ''; return; }
+      commit(r.ops, r.label);
+      if (r.replaced) toast(`${r.label}. Вернуть прежнюю — Ctrl+Z.`, 'plain', 6000);
+    });
+    line.append(name, sel);
+    kids.push(line);
+  }
   if (fontRows.length && settings.webFonts === false) {
     const note = document.createElement('div');
     note.className = 'note';
