@@ -12774,16 +12774,40 @@ async function moodboardShot({ render, doc, selection, geo, signal, serviceNote,
   return promise;
 }
 
+/** Круг 65 (SPEC §22.2): снимок мудборда больше предела образца — одна попытка уже, но не уже этого. */
+export const MOODBOARD_SHOT_MIN_W = 256;
+/** Круг 65: меньше этого до конца срока — вторую попытку не начинаем. */
+export const MOODBOARD_SHOT_RETRY_MIN_MS = 500;
+
 async function takeMoodboardShot({ render, doc, geo, boardId, signal, serviceNote, of }) {
   const note = (m) => { if (typeof serviceNote === 'function') serviceNote(m); };
   // свой сигнал: срок вышел — рисование прерывается, а не идёт впустую в фоне
   const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
   const stop = () => { if (ctrl) ctrl.abort(); };
   if (signal) { if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true }); }
+  const until = Date.now() + MOODBOARD_SHOT_MS;   // срок — на обе попытки вместе
+  const take = (maxWidth) => raceAbort(Promise.resolve(render({ doc, geo, artboardId: boardId, signal: ctrl ? ctrl.signal : signal, pictures: true, ...(maxWidth ? { maxWidth } : {}) })),
+    signal, Math.max(1, until - Date.now()), 'Снимок образца не успел');
+  const sizeOf = (shot) => `data:${strOf(shot.mime) || 'image/png'};base64,`.length + shot.data.length;
+  const usable = (shot) => shot && typeof shot.data === 'string' && shot.data && !shot.cropped && !shot.placeholders;
   let shot = null;
   try {
-    shot = await raceAbort(Promise.resolve(render({ doc, geo, artboardId: boardId, signal: ctrl ? ctrl.signal : signal, pictures: true })),
-      signal, MOODBOARD_SHOT_MS, 'Снимок образца не успел');
+    shot = await take(0);
+    // круг 65: снимок фотографий в PNG легко больше предела — второй раз уже, по доле лишнего
+    // (вес снимка растёт примерно как площадь, то есть как квадрат ширины), с запасом
+    if (usable(shot) && sizeOf(shot) > REF_IMAGE_MAX_CHARS && Number(shot.width) > MOODBOARD_SHOT_MIN_W) {
+      const w = Math.max(MOODBOARD_SHOT_MIN_W, Math.floor(Number(shot.width) * Math.sqrt(REF_IMAGE_MAX_CHARS / sizeOf(shot)) * 0.85));
+      // времени почти не осталось — второй снимок не успеет: сразу «слишком большой»
+      if (w < Number(shot.width) && until - Date.now() >= MOODBOARD_SHOT_RETRY_MIN_MS) {
+        try {
+          const small = await take(w);
+          if (usable(small)) shot = small;
+        } catch (e) {
+          // вторая попытка не вышла — остаётся первый снимок (и одна заметка о размере ниже)
+          if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+        }
+      }
+    }
   } catch (e) {
     if (e instanceof BrainError && e.kind === 'cancelled') throw e;
     note(`Снимок образца не получился (${factOnly(e && e.message ? e.message : e)}) — модель видит одну картинку из ${of}`);
@@ -12792,9 +12816,9 @@ async function takeMoodboardShot({ render, doc, geo, boardId, signal, serviceNot
     stop();
     if (signal) signal.removeEventListener('abort', stop);
   }
-  if (!shot || typeof shot.data !== 'string' || !shot.data || shot.cropped || shot.placeholders) return null;
+  if (!usable(shot)) return null;
   const mime = strOf(shot.mime) || 'image/png';
-  if (`data:${mime};base64,`.length + shot.data.length > REF_IMAGE_MAX_CHARS) {
+  if (sizeOf(shot) > REF_IMAGE_MAX_CHARS) {
     note(`Снимок образца слишком большой, чтобы показать его модели, — она видит одну картинку из ${of}`);
     return null;
   }

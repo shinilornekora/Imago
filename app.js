@@ -243,9 +243,10 @@ function pixelColors(src) {
   });
 }
 
-async function renderForCritic({ doc, geo, artboardId, pictures = false }) {
-  // круг 60 (SPEC §22.1): доска из одних картинок (мудборд) — ни шрифтов, ни перемера не нужно
-  if (pictures) return CORE.boardPNG(doc, artboardId, { geo, fonts: false });
+async function renderForCritic({ doc, geo, artboardId, pictures = false, maxWidth }) {
+  // круг 60 (SPEC §22.1): доска из одних картинок (мудборд) — ни шрифтов, ни перемера не нужно;
+  // круг 65 (§22.2): фотографии — JPEG (PNG снимка фото легко больше предела образца), ширина — по просьбе
+  if (pictures) return CORE.boardPNG(doc, artboardId, { geo, fonts: false, mime: 'image/jpeg', ...(maxWidth > 0 ? { maxWidth } : {}) });
   ensureDocFonts(doc);
   // раскладку черновика считали до прихода новых гарнитур: дождаться их и перемерить, иначе снимок
   // рисует настоящий шрифт в чужих переносах строк
