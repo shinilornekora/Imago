@@ -73,6 +73,26 @@ test('круг85: неоднозначный код не трогаем; экз�
   assert.equal(bindBoardColorsOps(doc, null), null);
 });
 
+test('круг85, критик: токен только из темы — нет; #rrggbbaa — нет; контуры вектора — да; обводка не «текст»', () => {
+  const doc = screen({ colors: { brand: '#123456' } }, [
+    core.ops.create({ id: 'semi', type: 'frame', name: 'Полупрозрачный', parent: 'B', fill: '#FF6B3DCC', children: [] }),
+    core.ops.create({ id: 'opaque', type: 'frame', name: 'Непрозрачный', parent: 'B', fill: '#FFE7DEFF', children: [] }),
+    core.ops.create({ id: 'v', type: 'vector', name: 'Значок', parent: 'B', viewBox: { w: 10, h: 10 }, paths: [{ d: 'M0 0L10 10', fill: '#FF6B3D' }] }),
+    core.ops.create({ id: 'ln', type: 'frame', name: 'Рамка', parent: 'B', stroke: { color: '#14161C', width: 1 }, children: [] }),
+  ]);
+  const by = Object.fromEntries(boardHexRefs(doc, doc.nodes.B).refs.map((r) => [r.id + ':' + r.path, r.token]));
+  assert.equal(by['odd:fill'], undefined, '#123456 = brand только в теме — не привязываем');
+  assert.equal(by['semi:fill'], undefined);
+  assert.equal(by['opaque:fill'], 'accentSoft');
+  assert.equal(by['v:paths.0.fill'], 'accent');
+  assert.equal(by['ln:stroke.color'], undefined, 'обводка цвета текста — неоднозначна, не «текст»');
+  const after = core.applyOps(doc, bindBoardColorsOps(doc, doc.nodes.B).ops);
+  assert.equal(after.error, undefined, JSON.stringify(after.error));
+  assert.equal(after.doc.nodes.v.paths[0].fill, 'accent');
+  // тот же документ — тот же ответ (память на перерисовки инспектора)
+  assert.equal(boardHexRefs(doc, doc.nodes.B), boardHexRefs(doc, doc.nodes.B));
+});
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 let chromium = null;
 try { ({ chromium } = createRequire(import.meta.url)('playwright')); } catch { chromium = null; }
