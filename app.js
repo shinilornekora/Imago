@@ -1118,6 +1118,7 @@ function onSyncChange(view, info = {}) {
   const prevGeo = state.geo;
   switch (info.reason) {
     case 'open': {
+      dropStaleHexToast();   // круг 90: другой проект — предложение §15.25 не о нём
       state.doc = view;
       state.geo = solveKept(view);
       adoptJournalExtra(info.extra);
@@ -1184,7 +1185,11 @@ function onSyncChange(view, info = {}) {
       renderAll(diff ? { diff, prevGeo } : {});
       refreshSheet();
       // круг 23: транзакция агента с сервера — уже применена репликой; здесь только итог
-      if (info.tx && info.tx.author_kind === 'agent') onAgentTx(info.tx, prevDoc, diff, !!info.mine);
+      if (info.tx && info.tx.author_kind === 'agent') {
+        onAgentTx(info.tx, prevDoc, diff, !!info.mine);
+        // круг 90: правка агента на сервере минует commit — предложение §15.25 и здесь, только своей вкладке
+        if (info.mine && !backlog) offerStaleHex(prevDoc);
+      }
       if (!backlog && info.tx && !info.mine && (info.tx.undo_of || info.tx.redo_of) && !overwritten) noteRemoteRewind(info.tx);
       return;
     }
@@ -4160,7 +4165,9 @@ function commit(opsList, label, who = 'human', extra = {}) {
  * служебные правки и сама привязка — мимо.
  */
 function offerStaleHex(prevDoc, extra = {}) {
-  if (extra.system || extra.doc || extra.noStale || prevDoc === state.doc) return;
+  // документ заменили целиком — прежнее предложение уже о другом документе (круг 90)
+  if (extra.system || extra.doc) { dropStaleHexToast(); return; }
+  if (extra.noStale || prevDoc === state.doc) return;
   let stale = null;
   try { stale = SHELL.staleHexRefs(prevDoc, state.doc); } catch { stale = null; }
   if (!stale) return;
@@ -4543,6 +4550,7 @@ function dropHistoryEntry(i) {
 function commitDoc(nextDoc, nextGeo, label, humanText, who = 'human') {
   // Круг 22: в серверном режиме документ целиком не заменить — только операциями (SPEC §8.3)
   if (server) return serverCommitDoc(nextDoc, label, humanText, who);
+  dropStaleHexToast();   // круг 90: документ целиком другой — предложение §15.25 не о нём
   const before = state.doc;
   // версия приходит из файла и бывает любой — вплоть до меньшей, чем текущая. Проверка
   // «документ изменился, пока агент работал» опирается на неё, поэтому версию выдаём
@@ -9170,7 +9178,9 @@ function boardThemeGroup(node) {
     bind.addEventListener('click', () => {
       const cur = state.doc.nodes[node.id];
       const r = cur ? SHELL.bindBoardColorsOps(state.doc, cur) : null;
-      if (r) commit(r.ops, r.label);
+      // круг 90: как команда §15.22 и соседняя кнопка — тихая правка и один тост
+      const res = r ? commit(r.ops, r.label, 'human', { quiet: true }) : null;
+      if (res && res.ok !== false) toast(r.label, 'plain', 5000);
       hexFocusBack();
     });
     const acts = document.createElement('div');
@@ -15434,6 +15444,7 @@ function viewSnapshot() {
  * вид из индекса. Ничего не пишет. false — тело не прочиталось (сказано словами).
  */
 async function loadSoloProject(id, { first = false } = {}) {
+  dropStaleHexToast();   // круг 90: другой проект — предложение §15.25 не о нём
   const store = solo.store;
   const entry = store.entry(id);
   let payload = null;
