@@ -7,3 +7,9 @@ dist
 dev.html
 .env
 test
+
+# Сайдкары для LLM и Spec Kit — заметки разработчика, образам не нужны
+**/*.llm.md
+.specify
+.claude
+specs
