@@ -41,7 +41,7 @@ test('круг67: свой цвет — тема доски; повтор — н
   let doc = docWith(null);
   const r1 = themeColorOps(doc, doc.nodes.B, 'accent', '#C0392B');
   assert.equal(r1.ops.length, 1);
-  assert.deepEqual([r1.ops[0].op, r1.ops[0].path], ['set', 'theme']);
+  assert.deepEqual([r1.ops[0].op, r1.ops[0].path], ['set', 'theme.colors.accent'], 'правка — по пути цвета, не всей темой');
   assert.equal(r1.label, 'Свой цвет экрана «Оплата»: accent #C0392B');
   doc = apply(doc, r1);
   assert.equal(hex(core.boardTheme(doc.nodes.B).colors.accent), '#c0392b');
@@ -57,6 +57,7 @@ test('круг67: свой цвет — тема доски; повтор — н
   doc = apply(doc, r3);
   assert.deepEqual(Object.keys(core.boardTheme(doc.nodes.B).colors), ['canvas']);
   const r4 = themeColorOps(doc, doc.nodes.B, 'canvas', null);
+  assert.deepEqual(r4.ops.map((o) => [o.path, o.value]), [['theme', undefined]], 'последний цвет — снимается вся тема');
   assert.equal(r4.label, 'Экран «Оплата» вернулся к оформлению документа');
   doc = apply(doc, r4);
   assert.equal(doc.nodes.B.theme, undefined, 'пустая тема снята целиком');
@@ -67,6 +68,7 @@ test('круг67: шрифты темы остаются; отмена — пр�
   let doc = docWith({ colors: { accent: '#2f6f62' }, type: { title: { font: 'Prata' } } });
   const before = doc;
   const r = themeColorOps(doc, doc.nodes.B, 'accent', null);
+  assert.deepEqual(r.ops.map((o) => o.path), ['theme.colors'], 'цвета опустели, шрифты есть — снимаются только цвета');
   doc = apply(doc, r);
   assert.deepEqual(core.boardTheme(doc.nodes.B), { type: { title: { font: 'Prata' } } });
   const back = core.applyOps(doc, core.invertOps(before, r.ops)).doc;
@@ -80,9 +82,37 @@ test('круг67: мусор — null; контраст после правки 
   assert.equal(themeColorOps(doc, doc.nodes.B, '', '#000000'), null);
   for (const bad of ['__proto__', 'constructor', '1x', 'с пробелом']) assert.equal(themeColorOps(doc, doc.nodes.B, bad, '#000000'), null, bad);
   const dark = themeColorOps(doc, doc.nodes.B, 'canvas', doc.tokens.colors.text);
-  assert.ok(dark.warnings.some((w) => /текст на фоне читается плохо/.test(w)), JSON.stringify(dark.warnings));
-  const fine = themeColorOps(doc, doc.nodes.B, 'accent', '#2f6f62');
-  assert.deepEqual(fine.warnings, [], 'акцент в проверяемые пары не входит');
+  assert.ok(dark.warnings.some((w) => /текст на фоне экрана читается плохо/.test(w)), JSON.stringify(dark.warnings));
+  const fine = themeColorOps(doc, doc.nodes.B, 'line', '#000000');
+  assert.deepEqual(fine.warnings, [], 'линия в проверяемые пары не входит');
+  const onAccent = themeColorOps(doc, doc.nodes.B, 'accent', doc.tokens.colors.onAccent);
+  assert.ok(onAccent.warnings.some((w) => /текст на акценте читается плохо/.test(w)), JSON.stringify(onAccent.warnings));
+});
+
+test('круг67: фон контраста — заливка доски; правки двух цветов с двух вкладок не затирают друг друга', () => {
+  // доска залита карточкой: холст на ней не виден — о нём не предупреждаем
+  let doc = core.applyOps(docWith(null), [core.ops.set('B', 'fill', 'surface')]).doc;
+  assert.deepEqual(themeColorOps(doc, doc.nodes.B, 'canvas', doc.tokens.colors.text).warnings, []);
+  assert.ok(themeColorOps(doc, doc.nodes.B, 'surface', doc.tokens.colors.text).warnings.some((w) => /на фоне экрана/.test(w)));
+  // две вкладки от одного документа: правки по путям сходятся в одну тему
+  const a = themeColorOps(doc, doc.nodes.B, 'accent', '#c0392b');
+  const b = themeColorOps(doc, doc.nodes.B, 'text', '#101010');
+  doc = apply(apply(doc, a), b);
+  assert.deepEqual(core.boardTheme(doc.nodes.B).colors, { accent: '#c0392b', text: '#101010' });
+});
+
+test('круг67: общий цвет с прозрачностью не равен выбору; не кодом и не латиницей — без поля', () => {
+  let doc = docWith(null);
+  const toks = { ...doc.tokens.colors, accentSoft: '#ff000080', фон: '#123456', named: 'red' };
+  doc = { ...doc, tokens: { ...doc.tokens, colors: toks } };
+  const rows = boardColorRows(doc, doc.nodes.B);
+  const soft = rows.find((r) => r.name === 'accentSoft');
+  assert.deepEqual([soft.hex, soft.docHex, soft.alpha, soft.editable], ['#ff0000', null, true, true]);
+  const r = themeColorOps(doc, doc.nodes.B, 'accentSoft', '#ff0000');
+  assert.ok(r && r.ops[0].value === '#ff0000', 'непрозрачный — свой цвет, а не «как в документе»');
+  assert.equal(rows.find((x) => x.name === 'фон').editable, false);
+  assert.equal(rows.find((x) => x.name === 'named').hex, null);
+  assert.equal(themeColorOps(doc, doc.nodes.B, 'фон', '#000000'), null);
 });
 
 /* ── в настоящем браузере ───────────────────────────────────────────────── */
@@ -118,27 +148,35 @@ test('круг67: в браузере — цвет экрана из инспе�
     assert.equal(await own(), 0, 'у демо-доски своей темы нет');
     await page.locator('#inspector .theme-colors > summary').click();
     const set = (name, hex) => page.evaluate(([name, hex]) => {
-      const row = [...document.querySelectorAll('#inspector .theme-color-row')].find((r) => r.querySelector('.theme-color-name').title.startsWith(name + ':'));
-      const inp = row.querySelector('input[type=color]');
+      const inp = document.querySelector(`#inspector .theme-color-row[data-token="${name}"] input[type=color]`);
       inp.value = hex;
       inp.dispatchEvent(new Event('change', { bubbles: true }));
     }, [name, hex]);
     await set('accent', '#c0392b');
     await page.waitForFunction(() => document.querySelectorAll('#inspector .theme-color-row.own').length === 1, null, { timeout: 5000 });
     assert.match(await page.locator('#inspector .theme-colors > summary').innerText(), /своих 1/);
-    assert.match(await page.locator('#inspector').innerText(), /Своё у экрана: accent #c0392b/);
+    assert.equal(await page.locator('#inspector .theme-colors').evaluate((d) => d.open), true, 'после правки список раскрыт');
+    assert.match(await page.locator('#inspector .theme-color-row.own').innerText(), /акцент\s*своё/);
+    assert.equal(await page.locator('#inspector .theme-color-row.own').getAttribute('data-token'), 'accent');
     // общий цвет фона — тексту, контраст — предупреждением
-    const text = await page.evaluate(() => [...document.querySelectorAll('#inspector .theme-color-row')]
-      .find((r) => r.querySelector('.theme-color-name').title.startsWith('text:')).querySelector('input[type=color]').value);
-    await set('canvas', text);
-    await page.waitForFunction(() => /текст на фоне читается плохо/.test(document.body.innerText), null, { timeout: 5000 });
+    // фон демо-доски — карточка: её и красим цветом текста
+    const text = await page.locator('#inspector .theme-color-row[data-token="text"] input[type=color]').inputValue();
+    await set('surface', text);
+    await page.waitForFunction(() => /текст на фоне экрана читается плохо/.test(document.body.innerText), null, { timeout: 5000 });
+    // свёрнутый человеком список остаётся свёрнутым после правки
+    await page.locator('#inspector .theme-colors > summary').click();
+    assert.equal(await page.locator('#inspector .theme-colors').evaluate((d) => d.open), false);
     await page.keyboard.press('Escape');
     await page.locator('#layers .layer[data-id]').first().click();
     await page.keyboard.press('Control+z');
     await page.waitForTimeout(300);
     await page.keyboard.press('Control+z');
     await page.waitForFunction(() => document.querySelectorAll('#inspector .theme-color-row.own').length === 0
-      && !/Своё у экрана/.test(document.getElementById('inspector').innerText), null, { timeout: 5000 });
+      && !/Вернуть общее оформление/.test(document.getElementById('inspector').innerText), null, { timeout: 5000 });
+    assert.equal(await page.locator('#inspector .theme-colors').evaluate((d) => d.open), false, 'выбор «свёрнуто» помнится');
+    // повтор — цвет снова свой
+    await page.keyboard.press('Control+Shift+z');
+    await page.waitForFunction(() => document.querySelectorAll('#inspector .theme-color-row.own').length === 1, null, { timeout: 5000 });
     assert.deepEqual(errors, [], 'ошибок страницы нет');
   } finally {
     await browser.close();
