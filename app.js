@@ -8876,8 +8876,9 @@ function boardThemeGroup(node) {
     d.className = 'theme-colors';
     const ownCount = rows.filter((r) => r.own).length;
     d.open = themeColorsOpen.has(node.id) ? themeColorsOpen.get(node.id) : ownCount > 0;
-    d.addEventListener('toggle', () => themeColorsOpen.set(node.id, d.open));
     const sum = document.createElement('summary');
+    // круг 73: запоминаем только щелчок человека (toggle приходит и от d.open по умолчанию)
+    sum.addEventListener('click', () => themeColorsOpen.set(node.id, !d.open));
     sum.textContent = ownCount ? `Цвета экрана · своих ${ownCount}` : 'Цвета экрана — только у этого экрана';
     d.appendChild(sum);
     const pick = (name, hex) => {
@@ -8989,11 +8990,12 @@ function boardThemeGroup(node) {
     d.className = 'theme-styles';
     const ownCount = styleRows.filter((r) => r.ownFont || r.ownWeight).length;
     // по умолчанию раскрыто, когда своё у стилей не сводится к ролям (разные шрифты в роли, своя насыщенность)
-    const mixed = fontRows.some((fr) => !fr.font) || styleRows.some((r) => r.ownWeight);
+    const mixed = fontRows.some((fr) => fr.own && !fr.font) || styleRows.some((r) => r.ownWeight);
     d.open = themeStylesOpen.has(node.id) ? themeStylesOpen.get(node.id) : mixed;
-    d.addEventListener('toggle', () => themeStylesOpen.set(node.id, d.open));
     const sum = document.createElement('summary');
-    sum.textContent = ownCount ? `Шрифты по стилям · своих ${ownCount}` : 'Шрифты по стилям';
+    // запоминаем только щелчок человека: toggle приходит и от d.open по умолчанию
+    sum.addEventListener('click', () => themeStylesOpen.set(node.id, !d.open));
+    sum.textContent = ownCount ? `Шрифты по стилям · своё: ${ownCount}` : 'Шрифты по стилям';
     d.appendChild(sum);
     const opt = (value, text, o = {}) => { const e = document.createElement('option'); e.value = value; e.textContent = text; Object.assign(e, o); return e; };
     const apply = (style, change) => {
@@ -9030,9 +9032,9 @@ function boardThemeGroup(node) {
       fontSel.addEventListener('change', () => apply(r.style, { font: fontSel.value || null }));
       const wSel = document.createElement('select');
       wSel.className = 'field theme-style-weight';
-      wSel.appendChild(opt('', `как в документе — ${r.docWeight}`));
-      for (const w of r.weights) wSel.appendChild(opt(String(w), String(w)));
-      if (r.ownWeight && !r.weights.includes(r.weight)) wSel.appendChild(opt(String(r.weight), String(r.weight)));
+      wSel.appendChild(opt('', `как в документе — ${r.autoWeight}`));
+      const ws = [...new Set([...r.weights, ...(r.ownWeight ? [r.weight] : [])])].sort((a, b) => a - b);
+      for (const w of ws) wSel.appendChild(opt(String(w), String(w)));
       wSel.value = r.ownWeight ? String(r.weight) : '';
       wSel.setAttribute('aria-label', `Насыщенность стиля «${r.title}» экрана`);
       wSel.addEventListener('change', () => apply(r.style, { fontWeight: wSel.value ? Number(wSel.value) : null }));

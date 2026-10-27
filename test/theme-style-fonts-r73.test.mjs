@@ -83,6 +83,29 @@ test('круг73: правка роли (круг 68) поверх своего 
   assert.equal(doc.nodes.B.theme.type.title.fontWeight, 700);
   assert.equal(doc.nodes.B.theme.type.title.font, 'Golos Text');
 });
+test('круг73, критики: подобранная насыщенность не своя; сброс шрифта вне набора; «как в документе» у Prata; heading в тексте', () => {
+  // роль заголовков → Prata: 400 подобрана, не своя
+  let doc = docWith(null);
+  doc = apply(doc, themeFontOps(doc, doc.nodes.B, 'display', 'Prata'));
+  const t = boardStyleFontRows(doc, doc.nodes.B).find((r) => r.style === 'title');
+  assert.deepEqual([t.ownFont, t.ownWeight, t.autoWeight], [true, false, 400]);
+  assert.match(t.title, /^\p{Lu}/u, 'имя стиля с прописной');
+  // насыщенность «как в документе» у Prata — 400 остаётся, подпись не врёт
+  assert.equal(themeStyleFontOps(doc, doc.nodes.B, 'title', { fontWeight: null }), null, 'и так подобранная');
+  // шрифт документа вне набора: Prata → как в документе — насыщенность документа
+  let odd = docWith(null);
+  odd = { ...odd, tokens: { ...odd.tokens, type: { ...odd.tokens.type, title: { ...odd.tokens.type.title, font: 'Helvetica Neue', fontWeight: 600 } } } };
+  odd = apply(odd, themeStyleFontOps(odd, odd.nodes.B, 'title', { font: 'Prata' }));
+  const back = themeStyleFontOps(odd, odd.nodes.B, 'title', { font: null });
+  assert.deepEqual(back.ops.map((o) => [o.path, o.value]), [['theme', undefined]], JSON.stringify(back.ops));
+  // heading в роли текста при документе 400 — как у роли: не тоньше 600
+  let h = docWith(null);
+  h = { ...h, tokens: { ...h.tokens, type: { ...h.tokens.type, heading: { ...h.tokens.type.heading, fontWeight: 400 } } } };
+  const byRole = themeFontOps(h, h.nodes.B, 'text', 'Golos Text').ops.find((o) => o.path === 'theme.type.heading').value;
+  const byStyle = themeStyleFontOps(h, h.nodes.B, 'heading', { font: 'Golos Text' }).ops[0].value;
+  assert.deepEqual(byStyle, byRole);
+});
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 let chromium = null;
 try { ({ chromium } = createRequire(import.meta.url)('playwright')); } catch { chromium = null; }

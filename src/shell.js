@@ -4512,6 +4512,12 @@ export function themeColorOps(doc, board, name, hex, { title } = {}) {
 const FONT_ROLE_WORDS = { display: 'заголовков', text: 'текста' };
 const famKey = (f) => String(f || '').replace(/["']/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 
+/** Насыщенность, которую сами подбираем стилю роли (как арт-директор, §15.3): «heading» в тексте — не тоньше 600. */
+function roleWeight(base, name, role) {
+  const docW = isObj(base) && typeof base.fontWeight === 'number' ? base.fontWeight : 400;
+  return role === 'text' && /head/i.test(name) ? Math.max(docW, 600) : docW;
+}
+
 /** Стили текста документа, которые тема доски может перекрасить шрифтом, по ролям (как у арт-директора). */
 function fontRoleStyles(doc) {
   const types = (doc && doc.tokens && isObj(doc.tokens.type)) ? doc.tokens.type : {};
@@ -4569,7 +4575,7 @@ export function themeFontOps(doc, board, role, family) {
     const was = type[name];
     // насыщенность, записанная темой (агентом), — своя: шрифт её не стирает и берёт за образец
     // как у арт-директора (§15.3): «heading» в роли текста — не тоньше 600
-    const roleW = role === 'text' && /head/i.test(name) ? Math.max(docW, 600) : docW;
+    const roleW = roleWeight(base, name, role);
     // ближайшая к стилю у прежнего шрифта (её писали сами — при смене шрифта считается заново)
     const autoW = isObj(was) && was.font ? nearestWeight(was.font, roleW) : null;
     const ownW = isObj(was) && typeof was.fontWeight === 'number' && was.fontWeight !== autoW ? was.fontWeight : null;
@@ -4630,8 +4636,12 @@ export function boardStyleFontRows(doc, board) {
       const weight = typeof mine.fontWeight === 'number' ? mine.fontWeight : docWeight;
       const fam = catalogFont(font);
       const weights = fam ? [...fam.weights] : [weight];
-      out.push({ style, title: ruToken('type', style), role, font, docFont, ownFont: !!mine.font,
-        weight, docWeight, ownWeight: typeof mine.fontWeight === 'number', weights });
+      // своя — не та, что сами подобрали шрифту (ближайшая к стилю роли, как в круге 68)
+      const autoWeight = nearestWeight(font, roleWeight(base, style, role));
+      const ownWeight = typeof mine.fontWeight === 'number' && !(mine.font && mine.fontWeight === autoWeight);
+      const ru = ruToken('type', style);
+      out.push({ style, title: ru.charAt(0).toUpperCase() + ru.slice(1), role, font, docFont, ownFont: !!mine.font,
+        weight, docWeight, autoWeight, ownWeight, weights });
     }
   }
   return out;
@@ -4648,8 +4658,11 @@ export function boardStyleFontRows(doc, board) {
 export function themeStyleFontOps(doc, board, style, change = {}) {
   if (!board || !board.id || !isObj(change)) return null;
   const types = (doc && doc.tokens && isObj(doc.tokens.type)) ? doc.tokens.type : {};
-  if (!fontRoleStyles(doc).display.concat(fontRoleStyles(doc).text).includes(style)) return null;
+  const roles = fontRoleStyles(doc);
+  const role = roles.display.includes(style) ? 'display' : roles.text.includes(style) ? 'text' : null;
+  if (!role) return null;
   const base = types[style];
+  const rw = roleWeight(base, style, role);
   const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || {};
   const type = { ...(isObj(theme.type) ? theme.type : {}) };
   const was = isObj(type[style]) ? type[style] : {};
@@ -4666,18 +4679,20 @@ export function themeStyleFontOps(doc, board, style, change = {}) {
   const seenFont = font || base.font;
   let weight = was.fontWeight;
   if (Object.prototype.hasOwnProperty.call(change, 'fontWeight')) {
-    if (change.fontWeight == null) weight = undefined;
+    // «как в документе» — ближайшая у видимого шрифта к стилю (у Prata — 400, а не несуществующие 600)
+    if (change.fontWeight == null) weight = nearestWeight(seenFont, rw);
     else {
       const w = Number(change.fontWeight);
       if (!Number.isFinite(w) || w < 100 || w > 900) return null;
       weight = nearestWeight(seenFont, w);
     }
-  } else if (font !== was.font && catalogFont(seenFont)) {
+  } else if (font !== was.font) {
     // шрифт сменился, насыщенность не названа — ближайшая у нового к своей насыщенности стиля; своя —
-    // только не та, что сами подобрали прежнему шрифту (ближайшая к документу, как в круге 68)
-    const autoW = was.font && typeof was.fontWeight === 'number' ? nearestWeight(was.font, docW) : null;
+    // только не та, что сами подобрали прежнему шрифту (ближайшая к стилю роли, как в круге 68);
+    // шрифт вне набора — nearestWeight отдаёт просимое
+    const autoW = was.font && typeof was.fontWeight === 'number' ? nearestWeight(was.font, rw) : null;
     const ownW = typeof was.fontWeight === 'number' && was.fontWeight !== autoW ? was.fontWeight : null;
-    weight = nearestWeight(seenFont, ownW != null ? ownW : docW);
+    weight = nearestWeight(seenFont, ownW != null ? ownW : rw);
   }
   if (weight === docW) weight = undefined;
   const entry = {};
@@ -4694,7 +4709,8 @@ export function themeStyleFontOps(doc, board, style, change = {}) {
     : !whole.type ? [OPS.set(board.id, 'theme.type', undefined)]
       : [OPS.set(board.id, `theme.type.${style}`, next)];
   const screen = `«${String(board.name || 'Доска').slice(0, 40)}»`;
-  const what = `стиль «${ruToken('type', style)}»`;
+  const ru = ruToken('type', style);
+  const what = `стиль «${ru.charAt(0).toUpperCase() + ru.slice(1)}»`;
   const label = value === undefined ? `Экран ${screen} вернулся к оформлению документа`
     : next ? `Экран ${screen}, ${what}: ${[next.font || base.font, next.fontWeight || docW].filter(Boolean).join(' ')}`
       : `Экран ${screen}, ${what} — как в документе`;
