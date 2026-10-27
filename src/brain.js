@@ -11032,31 +11032,78 @@ function boardIds(doc) {
  * документа: на них ссылаются слои) и шрифт/насыщенность стилей; прежняя тема доски — основа
  * (новое поверх). Кегли, интерлиньяж, шкалы, движение, тени у доски свои не бывают — со словами мимо.
  */
+/* Круг 75 (SPEC §15.12): имена экранов по словам — падежи без словаря, по окончаниям. */
+const BOARD_WORD_ENDS = ['ами', 'ями', 'ого', 'его', 'ому', 'ему', 'ой', 'ей', 'ом', 'ем', 'ам', 'ям', 'ах', 'ях', 'ов', 'ев',
+  'ий', 'ый', 'ая', 'яя', 'ое', 'ее', 'ую', 'юю', 'ых', 'их', 'ек', 'а', 'я', 'ы', 'и', 'у', 'ю', 'е', 'о', 'ь', 'й'];
+const boardWords = (x) => String(x == null ? '' : x).toLowerCase().replace(/ё/g, 'е').split(/[\s\p{P}]+/u).filter(Boolean);
+/** Основы слова: само слово и оно без окончания (основа — от 3 букв); слова с цифрами — только целиком. */
+function wordStems(w) {
+  const out = new Set([w]);
+  if (/\d/.test(w) || w.length < 4) return out;
+  for (const e of BOARD_WORD_ENDS) if (w.endsWith(e) && w.length - e.length >= 3) out.add(w.slice(0, -e.length));
+  return out;
+}
+/** Близость слов: 3 — равны, 2 — одно из другого окончанием, 1 — общая основа, 0 — разные. */
+function wordNear(a, b) {
+  if (a === b) return 3;
+  const sa = wordStems(a); const sb = wordStems(b);
+  if (sa.has(b) || sb.has(a)) return 2;
+  for (const x of sa) if (sb.has(x)) return 1;
+  return 0;
+}
+/**
+ * Экраны пула по имени: все самые близкие. Ступени: имя целиком; те же слова (падежи); названные слова
+ * есть в имени. Внутри ступени — по сумме близости слов; несколько с равной — `tied` у ответа.
+ */
+function boardsByName(asked, pool, nameOf) {
+  const words = boardWords(String(asked).replace(/[«»"]/g, ''));
+  const bare = words[0] && /^экран(?:а|у|е|ом|ы|ов|ам|ами|ах)?$/u.test(words[0]) && words.length > 1 ? words.slice(1) : words;
+  if (!bare.length) return Object.assign([], { tied: false });
+  const scored = [];
+  for (const id of pool) {
+    const nw = boardWords(nameOf(id));
+    let level = 0; let score = 0;
+    for (const q of [words, bare]) {
+      if (nw.length === q.length && nw.every((w, i) => w === q[i])) { level = 3; score = 0; break; }
+    }
+    if (!level && nw.length === bare.length) {
+      const near = bare.map((w, i) => wordNear(w, nw[i]));
+      if (near.every((n) => n > 0)) { level = 2; score = near.reduce((x, y) => x + y, 0); }
+    }
+    if (!level) {
+      // каждое названное слово — среди слов имени (короткие и с цифрами — только равные)
+      const near = bare.map((w) => Math.max(0, ...nw.map((n) => (w.length < 4 || /\d/.test(w) ? (w === n ? 3 : 0) : wordNear(w, n)))));
+      if (near.every((n) => n > 0)) { level = 1; score = near.reduce((x, y) => x + y, 0); }
+    }
+    if (level) scored.push({ id, level, score });
+  }
+  if (!scored.length) return Object.assign([], { tied: false });
+  const top = Math.max(...scored.map((x) => x.level));
+  const at = scored.filter((x) => x.level === top);
+  const best = Math.max(...at.map((x) => x.score));
+  const hits = at.filter((x) => x.score === best).map((x) => x.id);
+  // одинаковые имена целиком — не спор (их не назвать точнее): первый, как раньше
+  return Object.assign(hits, { tied: hits.length > 1 && top < 3, any: scored.map((x) => x.id) });
+}
+
 function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const note = warn;
   const all = boardIds(doc);
   const label = (id) => cutText(strOf(nodeOf(doc, id) && nodeOf(doc, id).name) || 'Доска', 40);
-  // имя как есть → без «экран(а/у/е/ом)» перед ним → вхождение (раньше «экран» срезался и с «Экранной формы»)
-  // круг 75 (SPEC §15.12): имя экрана — как есть, без «экран(а/у/е/ом)» перед ним, по основам слов
-  // («Оплаты», «Итогу» — падежи), затем вхождением; все совпавшие на первом сработавшем шаге
+  // круг 75 (SPEC §15.12): имя экрана — по словам. Как есть (и без «экран(а/у/…)» перед ним) → те же слова
+  // в падежах («Оплаты» = «Оплата», «Альбома» = «Альбом») → названные слова есть в имени («Оплата» —
+  // «Оплата картой»). Вхождения внутри слова нет («меню» — не «Изменение»), слова с цифрами — целиком.
   const kids = kidsOf(nodeOf(doc, doc.root)).filter((id) => nodeOf(doc, id) && nodeOf(doc, id).type === 'frame');
-  const nameOf = (id) => strOf(nodeOf(doc, id).name).trim().toLowerCase().replace(/[«»"]/g, '').replace(/\s+/g, ' ');
-  const stemWord = (w) => (w.length >= 4 ? w.replace(/(?:ой|ей|ом|ем|ам|ям|ах|ях|ы|и|у|ю|е|а|я|о|ь)$/u, '') : w);
-  const stems = (x) => x.split(' ').map(stemWord).join(' ');
-  const matchBoards = (asked, pool = kids) => {
-    const plain = String(asked).toLowerCase().replace(/[«»"]/g, '').replace(/\s+/g, ' ').trim();
-    const bare = plain.replace(/^экран(?:а|у|е|ом|ы|ов|ам|ами|ах)?\s+/u, '').trim();
-    if (!bare) return [];
-    const passes = [
-      (id) => nameOf(id) === plain || nameOf(id) === bare,
-      (id) => stems(nameOf(id)) === stems(bare),
-      (id) => nameOf(id).includes(bare),
-      (id) => stems(nameOf(id)).includes(stems(bare)),
-    ];
-    for (const ok of passes) { const hit = pool.filter(ok); if (hit.length) return hit; }
-    return [];
+  const nameOf = (id) => strOf(nodeOf(doc, id).name);
+  const matchBoards = (asked, pool = kids) => boardsByName(asked, pool, nameOf);
+  // одиночное поле (boardName, likeBoard): несколько одинаково близких — назвать точнее, а не первый попавшийся
+  const byName = (asked) => {
+    const hit = matchBoards(asked, all);
+    if (hit.length > 1 && hit.tied) {
+      throw ERR('schema', `«${cutText(asked, 40)}» — подходят экраны ${hit.slice(0, 3).map((id) => `«${label(id)}»`).join(', ')}: назовите точнее, как на холсте`);
+    }
+    return hit[0] || null;
   };
-  const byName = (asked) => matchBoards(asked, all)[0] || null;
   // круг 72 (SPEC §15.9): экраны правки — названные списком, одно имя или выделение (и на нескольких досках)
   const names = (Array.isArray(theme.boardNames) ? theme.boardNames : [])
     .filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
@@ -11069,9 +11116,17 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const missed = [];
   const later = [];                                 // заметки, которые верны, только если правка легла
   const group = typeof theme.boardGroup === 'string' ? theme.boardGroup.trim() : '';
-  if (group && !names.length) {
-    targets = matchBoards(group, all);
-    if (!targets.length) throw ERR('schema', `Экранов со словом «${cutText(group, 40)}» в имени нет — назовите экраны, как на холсте`);
+  if (group) {
+    // группа — все экраны, где названные слова есть (в падежах), а не только самые близкие
+    targets = matchBoards(group, all).any || [];
+    const shown = group.replace(/^\s*(?:все\s+)?экран\S*\s+/iu, '');
+    if (!targets.length) throw ERR('schema', `Экранов со словом «${cutText(shown || group, 40)}» в имени нет — назовите экраны, как на холсте`);
+    // «экраны оплаты и Итог» — группа и названные вместе
+    for (const n of names) {
+      const id = byName(n);
+      if (!id) missed.push(n);
+      else if (!targets.includes(id)) targets.push(id);
+    }
   } else if (except.length && !names.length) {
     targets = all.slice();
   } else if (names.length) {

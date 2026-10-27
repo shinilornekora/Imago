@@ -62,3 +62,33 @@ test('круг75: сквозь команду — «все экраны опла
   assert.equal(res.preview.doc.nodes.b2.theme, undefined);
   assert.match(res.changeSummary, /своя тема экранов «Оплата картой», «Оплата СБП»/i);
 });
+
+test('круг75, критики: группа — все со словом, а не самый близкий; без вхождения внутри слова; спор — назвать точнее', () => {
+  const names = (list) => screens(list);
+  // группа: «Оплата» не забирает себе «Оплата картой» и «Оплата СБП»
+  const pay = names(['Оплата', 'Оплата картой', 'Оплата СБП', 'Итог']);
+  assert.deepEqual(run(pay, { boardGroup: 'оплаты', colors: ACCENT }).map((o) => o.id), ['b0', 'b1', 'b2']);
+  // «вход» — не «Входящие»
+  const enter = names(['Вход по паролю', 'Вход по SMS', 'Входящие сообщения']);
+  assert.deepEqual(run(enter, { boardGroup: 'вход', colors: ACCENT }).map((o) => o.id), ['b0', 'b1']);
+  // группа и названные вместе
+  assert.deepEqual(run(pay, { boardGroup: 'оплата', boardNames: ['Итог'], colors: ACCENT }).map((o) => o.id), ['b0', 'b1', 'b2', 'b3']);
+  // «Альбома» = «Альбом», «Музея» = «Музей», «Итогов» = «Итог», «Главного» = «Главный»
+  const al = names(['Альбом', 'Музей', 'Итог', 'Главный', 'Профиль']);
+  assert.deepEqual(run(al, { exceptBoards: ['Альбома', 'Музея', 'Итогов', 'Главного'], colors: ACCENT }).map((o) => o.id), ['b4']);
+  // вхождения внутри слова нет; слова с цифрами — целиком
+  const mid = names(['Изменение пароля', 'Карточка товара', 'Шаг 10', 'Шаг 2']);
+  assert.throws(() => run(mid, { boardName: 'меню', colors: ACCENT }), /«меню» не найден/);
+  assert.throws(() => run(mid, { boardName: 'Карту', colors: ACCENT }), /не найден/);
+  assert.throws(() => run(mid, { boardName: 'Шага 1', colors: ACCENT }), /не найден/);
+  assert.throws(() => run(mid, { exceptBoards: ['Шага 1'], colors: ACCENT }), /не знаю, какой не трогать/);
+  // «Итогу» при «Итоги» и «Итог» — ближе «Итог»; исключение «Итога» — только «Итог»
+  const it = names(['Итоги', 'Итог', 'Профиль']);
+  assert.deepEqual(run(it, { boardName: 'Итогу', colors: ACCENT }).map((o) => o.id), ['b1']);
+  assert.deepEqual(run(it, { exceptBoards: ['Итога'], colors: ACCENT }).map((o) => o.id), ['b0', 'b2']);
+  // равно близкие — назвать точнее
+  const two = names(['Корзина', 'Корзины']);
+  assert.throws(() => run(two, { boardName: 'Корзине', colors: ACCENT }), /подходят экраны «Корзина», «Корзины»: назовите точнее/);
+  // «экраны оплаты» в отказе — без «экраны»
+  assert.throws(() => run(pay, { boardGroup: 'экраны склада', colors: ACCENT }), /Экранов со словом «склада» в имени нет/);
+});
