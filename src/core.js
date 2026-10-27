@@ -7168,7 +7168,8 @@ function solveWith(doc, opts, seed, pre) {
  * прежней геометрии со сдвигом. Что изменилось — по самим документам (dirtyAfter), операции —
  * только для вызывающего. Результат — тот же, что у solve(nextDoc) (тесты на случайных правках).
  * Когда так нельзя — честно полная раскладка:
- *   • prevGeo не от solve этого же prevDoc (или уже использована) или другой измеритель/эпоха шрифтов;
+ *   • prevGeo без памяти (обычная solve) или уже использована, другой измеритель/эпоха шрифтов;
+ *     prevDoc — только для вызывающего: прежний документ берётся из памяти prevGeo (круг 57);
  *   • изменились токены, тема доски, узел перешёл на другую доску.
  * Круг 54: документы с экземплярами — тоже по месту: грязные ищутся по общей карте «документ +
  * раскрытые узлы»; правка мастера пачкает все его экземпляры, правка вне экземпляров — ни одного.
@@ -7180,7 +7181,10 @@ function solveWith(doc, opts, seed, pre) {
 function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   const options = opts || {};
   const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
-  if (!memo || memo.doc !== prevDoc || memo.fn !== (options.measureText || null) || memo.epoch !== measureEpochValue) {
+  // круг 57: прежний документ — тот, от которого посчитана prevGeo (память), а не слова вызывающего:
+  // изменения ищутся по самим объектам узлов, поэтому так верно всегда, а цепочка не рвётся, когда
+  // документ состояния пересобран с теми же узлами или геометрия отстала на несколько версий
+  if (!memo || memo.fn !== (options.measureText || null) || memo.epoch !== measureEpochValue) {
     return solve(nextDoc, { ...options, incremental: true });
   }
   // круг 54: раскрытие кешировано по объекту экземпляра и его зависимостям (expandCache), поэтому у
@@ -7193,12 +7197,26 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   // грязного больше половины (правка мастера с тысячами экземпляров) — полная раскладка дешевле:
   // ей не нужно ни снимать записи кешей, ни сверять размеры чистых; раскрытие она берёт готовое
   const half = Math.floor(Object.keys(nodes || nextDoc.nodes).length / 2);
-  const dirty = dirtyAfter(prevDoc, nextDoc, memo.nodes, nodes, half);
+  const dirty = dirtyAfter(memo.doc, nextDoc, memo.nodes, nodes, half);
   if (!dirty || dirty.size > half) return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes });
   SOLVE_MEMO.delete(prevGeo);
   for (const id of dirty) { memo.meas.delete(id); memo.flow.delete(id); }
   return solveWith(nextDoc, { ...options, __inSelfTest: true },
     { meas: memo.meas, flow: memo.flow, geo: prevGeo, span: memo.span, seq: memo.seq, dirty, ex, nodes });
+}
+
+/**
+ * Круг 57 (SPEC §18.6): следующая раскладка от той, что уже есть, когда вызывающий не держит
+ * прежний документ: отмена и повтор, подтверждение сервера, отложенный кадр догона. Прежний
+ * документ — тот, от которого geo посчитана (память раскладки); нет памяти — полная раскладка.
+ * Результат тот же, что у solve(nextDoc).
+ * @param {object} prevGeo @param {object} nextDoc @param {{measureText?:Function}} [opts]
+ * @returns {object} geo
+ */
+function solveNext(prevGeo, nextDoc, opts) {
+  const memo = prevGeo ? SOLVE_MEMO.get(prevGeo) : null;
+  if (memo && memo.doc === nextDoc && memo.fn === ((opts && opts.measureText) || null) && memo.epoch === measureEpochValue) return prevGeo;
+  return solveAfter(prevGeo, null, nextDoc, null, opts);
 }
 
 /**
@@ -13289,7 +13307,7 @@ async function boardPNG(doc, artboardId, opts = {}) {
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
   /* Круг 47 (SPEC §14.4): SVG доски без страницы — снимок для критика агента — */
-  renderSVG, boardPNG, solveAfter, solveCarry, solveShapeCopies,
+  renderSVG, boardPNG, solveAfter, solveCarry, solveNext, solveShapeCopies,
   /* Круг 31 (K1): большая отмена/правка — пачками в пределах транзакции — */
   splitOps, SPLIT_MAX_OPS, SPLIT_MAX_BYTES,
   /* Круг 22 (SPEC §8.3, §9.6): версия формата, слияние, надгробия, хэш документа — */
