@@ -1891,6 +1891,7 @@ button.t-action:hover { text-decoration: underline; }
 .theme-style-font { flex: 1 1 auto; min-width: 0; }
 .theme-style-weight { flex: 0 0 auto; width: 6.5em; }
 /* круг 78: вернуть документу часть темы */
+.theme-hex { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin: 6px 0; }
 .theme-part-reset { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
 .theme-color-note { font-size: var(--t-sm); color: var(--muted); }
 .paint-color-input {
