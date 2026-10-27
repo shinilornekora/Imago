@@ -2271,7 +2271,8 @@ export const PROMPTS = {
   слои доски на них уже ссылаются. Кегли, интерлиньяж, шкалы, движение и тени у доски свои не
   бывают — при board:true их не пиши. «Верни этому экрану общее оформление» — {board:true, reset:true}.
   Назвал экран по имени — boardName: "<имя>"; назвал несколько («экраны Оплата и Итог тёмными») — boardNames:
-  ["<имя>", "<имя>"]: та же правка ляжет темой каждому. «Сделай этот экран как «Оплата»», «оформи так же, как
+  ["<имя>", "<имя>"]: та же правка ляжет темой каждому; «РАБОТАЕМ С:» на нескольких экранах и просят «эти экраны» —
+  board:true без имён, правка ляжет каждому. «Сделай этот экран как «Оплата»», «оформи так же, как
   экран X» — {board:true, likeBoard:"<имя экрана-образца>"}: его тема ляжет копией (colors и type к ней
   добавляй, только если просят что-то ещё; reset с likeBoard не пиши). Тёмный (или иной) экран — ПОЛНАЯ палитра: canvas,
   surface, surfaceAlt, text, muted, line, accentSoft, onAccent (те, что есть в документе), не один фон:
@@ -11035,8 +11036,9 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const asked = typeof theme.boardName === 'string' ? theme.boardName.trim() : '';
   if (asked && !names.some((x) => x.toLowerCase() === asked.toLowerCase())) names.unshift(asked);
   let targets = [];
+  const missed = [];
+  const later = [];                                 // заметки, которые верны, только если правка легла
   if (names.length) {
-    const missed = [];
     for (const n of names) {
       const id = byName(n);
       if (!id) missed.push(n);
@@ -11047,33 +11049,80 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
         ? `Экраны ${missed.slice(0, 3).map((n) => `«${cutText(n, 40)}»`).join(', ')} не найдены — назовите их, как на холсте, или выделите доски`
         : `Экран «${cutText(missed[0], 40)}» не найден — назовите его, как на холсте, или выделите доску`);
     }
-    for (const n of missed) note(`Экран «${cutText(n, 40)}» не найден — правка легла на остальные`);
   } else {
     const ids = scope ? [...(Array.isArray(scope.ids) ? scope.ids : []), ...(scope.containerId ? [scope.containerId] : [])] : [];
     const spans = [...new Set(ids.map((id) => artboardOf(doc, id)).filter(Boolean))];
     const libs = spans.filter((id) => nodeOf(doc, id) && nodeOf(doc, id).role === 'library');
     if (libs.length && libs.length === spans.length) throw ERR('schema', 'У библиотеки компонентов своей темы не бывает — выделите экран');
-    if (libs.length) note('У библиотеки компонентов своей темы не бывает — она пропущена');
     targets = spans.filter((id) => !libs.includes(id) && all.includes(id));
+    // выделение, которое оставил агент (затронутое прошлой командой), — не список экранов: «этот экран» — активный
+    if (targets.length > 1 && scope && scope.selectionBy === 'agent') {
+      const active = doc.meta && doc.meta.activeArtboard;
+      if (!targets.includes(active)) throw ERR('schema', 'Выделение прошлой правки — на нескольких экранах: выделите одну доску или назовите экраны');
+      targets = [active];
+    }
     if (!targets.length && !libs.length && all.length === 1) targets = [all[0]];
-    if (!targets.length) throw ERR('schema', 'Тема одного экрана: непонятно, какого — выделите доску или слой на ней');
+    if (!targets.length) throw ERR('schema', 'Тема экрана: непонятно, какого — выделите доску или слой на ней');
+    if (libs.length) later.push('У библиотеки компонентов своей темы не бывает — она пропущена');
   }
-  if (targets.length === 1) return oneBoardThemeOps({ doc, theme, engine, note, boardId: targets[0], byName, label });
-  // круг 72: каждому экрану — своя правка по его теме; отказ одного (уже так, образец — он сам) — заметкой
-  const ops = [];
-  const said = { shared: false };
-  let first = null;
-  for (const id of targets) {
-    try {
-      ops.push(...oneBoardThemeOps({ doc, theme, engine, note, boardId: id, byName, label, said }));
-    } catch (e) {
-      if (!(e instanceof BrainError) || e.kind !== 'schema') throw e;
-      if (!first) first = e;
-      note(`Экран «${label(id)}» пропущен: ${e.message}`);
+  for (const n of missed) later.push(`Экран «${cutText(n, 40)}» не найден — правка легла на остальные`);
+  if (targets.length === 1) {
+    const ops = oneBoardThemeOps({ doc, theme, engine, note, boardId: targets[0], byName, label });
+    later.forEach((m) => note(m));
+    return ops;
+  }
+  // образец — один на все экраны: не найден или повреждён — отказ сразу, а не по строке на экран
+  const like = typeof theme.likeBoard === 'string' ? theme.likeBoard.trim() : '';
+  if (like) {
+    const likeId = byName(like);
+    if (!likeId) throw ERR('schema', `Экран «${cutText(like, 40)}» не найден — назовите образец, как на холсте`);
+    if (engine && engine.boardTheme && !engine.boardTheme(nodeOf(doc, likeId)) && nodeOf(doc, likeId).theme !== undefined) {
+      throw ERR('schema', `Тема экрана «${label(likeId)}» повреждена — взять её нельзя; скажите, какие цвета и шрифты нужны`);
     }
   }
-  if (!ops.length) throw first;
+  // круг 72: каждому экрану — своя правка по его теме; отказ одного (уже так, образец — он сам) — заметкой
+  const ops = [];
+  const said = { what: null, changed: [] };
+  const fails = [];
+  const notes = [];
+  for (const id of targets) {
+    const mine = [];
+    try {
+      const got = oneBoardThemeOps({ doc, theme, engine, note: (m) => mine.push(m), boardId: id, byName, label, said });
+      ops.push(...got);
+      notes.push(...mine);
+      said.changed.push(id);
+    } catch (e) {
+      if (!(e instanceof BrainError) || e.kind !== 'schema') throw e;
+      fails.push({ id, reason: skipReason(e, label(id)) });
+    }
+  }
+  if (!ops.length) {
+    const reasons = [...new Set(fails.map((f) => f.reason))];
+    const who = fails.map((f) => `«${label(f.id)}»`);
+    throw ERR('schema', reasons.length === 1
+      ? `Экраны ${who.slice(0, 3).join(', ')}${who.length > 3 ? ` и ещё ${who.length - 3}` : ''}: ${reasons[0]}`
+      : fails.map((f) => `«${label(f.id)}» — ${f.reason}`).join('; '));
+  }
+  notes.forEach((m) => note(m));
+  for (const f of fails) note(`Экран «${label(f.id)}» пропущен: ${f.reason}`);
+  later.forEach((m) => note(m));
+  if (said.what) {
+    const many = said.what.length > 1;
+    const where = said.changed.map((id) => `«${label(id)}»`).join(', ');
+    note(`У экранов свои только цвета и шрифты: ${said.what.join(', ')} — ${many ? 'общие' : 'общее'} для документа, ${many ? 'пропущены' : 'пропущено'}.`
+      + ` Чтобы поменять ${many ? 'их' : 'это'} на экранах ${where}, скажите, каким слоям`);
+  }
   return ops;
+}
+
+/** Круг 72: причина отказа одного экрана без подлежащего — для «Экран «X» пропущен: <причина>». */
+function skipReason(e, name) {
+  if (e && typeof e.reason === 'string') return e.reason;
+  const msg = String((e && e.message) || '');
+  const own = `Экран «${name}» `;
+  const bare = msg.startsWith(own) ? msg.slice(own.length) : msg;
+  return bare.charAt(0).toLowerCase() + bare.slice(1);
 }
 
 /** Правка темы одного экрана (круги 48, 69, 71): операции `set theme…` доски `boardId`. */
@@ -11100,7 +11149,7 @@ function oneBoardThemeOps({ doc, theme, engine, note, boardId, byName, label, sa
     }
   }
   if (theme.reset === true && !likeId) {
-    if (board.theme === undefined) throw ERR('schema', 'У этого экрана своей темы и так нет — он в оформлении документа');
+    if (board.theme === undefined) throw ERR('schema', 'У этого экрана своей темы и так нет — он в оформлении документа', { reason: 'своей темы и так нет — в оформлении документа' });
     return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: undefined })];
   }
   const mineTheme = engine && engine.boardTheme ? engine.boardTheme(board) : (board.theme && typeof board.theme === 'object' ? board.theme : null);
@@ -11167,8 +11216,10 @@ function oneBoardThemeOps({ doc, theme, engine, note, boardId, byName, label, sa
   }
   const other = ['spacing', 'radii', 'motion', 'shadow'].filter((k) => Array.isArray(theme[k]) && theme[k].length);
   // круг 72: о пропущенном у нескольких экранов — одна заметка (у первого), а не по строке на экран
-  if ((skippedType.size || other.length) && !(said && said.shared)) {
-    if (said) said.shared = true;
+  if ((skippedType.size || other.length) && said) {
+    // круг 72: у нескольких экранов — одна заметка после всех (называет экраны, где правка легла)
+    if (!said.what) said.what = [...skippedType, ...other.map((k) => ({ spacing: 'шкала отступов', radii: 'шкала скруглений', motion: 'скорость анимаций', shadow: 'тени' })[k])];
+  } else if (skippedType.size || other.length) {
     const what = [...skippedType, ...other.map((k) => ({ spacing: 'шкала отступов', radii: 'шкала скруглений', motion: 'скорость анимаций', shadow: 'тени' })[k])];
     const many = what.length > 1;
     note(`У одного экрана свои только цвета и шрифты: ${what.join(', ')} — ${many ? 'общие' : 'общее'} для документа, ${many ? 'пропущены' : 'пропущено'}.`

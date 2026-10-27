@@ -89,3 +89,30 @@ test('круг72: сквозь команду — одна фраза на од�
   assert.equal(res.preview.doc.nodes.pay.theme.colors.accent, undefined);
   assert.match(res.changeSummary, /своя тема экранов «Итог», «Профиль»: акцент #ff4f6d/i);
 });
+
+test('круг72, критики: заметки — только если правка легла; образец проверен один раз; без повторов', () => {
+  const doc = screens();
+  const n1 = [];
+  // имя не найдено, а найденный экран уже такой — отказ без «правка легла на остальные»
+  assert.throws(() => run(doc, { boardNames: ['Оплата', 'Склад'], colors: [{ name: 'canvas', value: '#101418' }] }, [], n1), /уже в этих цветах/);
+  assert.equal(n1.length, 0, n1.join(' | '));
+  // образец не найден — отказ один, без строки на каждый экран
+  const n2 = [];
+  assert.throws(() => run(doc, { boardNames: ['Итог', 'Профиль'], likeBoard: 'Склад' }, [], n2), /«Склад» не найден/);
+  assert.equal(n2.length, 0, n2.join(' | '));
+  // все отказали одной причиной — во множественном числе, без «этого экрана»
+  assert.throws(() => run(doc, { reset: true }, ['sum_t', 'plain']), /^BrainError: Экраны «Итог», «Профиль»: своей темы и так нет/);
+  // пропущенный экран — без повтора имени; заметка о шкалах называет экраны, где правка легла
+  const n3 = [];
+  run(doc, { boardNames: ['Оплата', 'Итог'], colors: [{ name: 'canvas', value: '#101418' }], spacing: [1] }, [], n3);
+  assert.ok(n3.includes('Экран «Оплата» пропущен: уже в этих цветах и шрифтах — менять нечего'), n3.join(' | '));
+  assert.ok(n3.some((m) => /на экранах «Итог», скажите/.test(m)) && !n3.some((m) => /на экран\S* «Оплата»/.test(m)), n3.join(' | '));
+});
+
+test('круг72, критики: выделение, оставленное агентом, — не список экранов', () => {
+  const doc = screens();
+  const agent = (meta) => themeToOps({ doc: { ...doc, meta: { ...(doc.meta || {}), ...meta } }, theme: { board: true, colors: ACCENT }, engine: core, warn: () => {},
+    scope: { ids: ['pay_t', 'sum_t'], kind: 'selection', selectionBy: 'agent' } });
+  assert.deepEqual(agent({ activeArtboard: 'sum' }).map((o) => o.id), ['sum']);
+  assert.throws(() => agent({ activeArtboard: 'plain' }), /Выделение прошлой правки — на нескольких экранах/);
+});
