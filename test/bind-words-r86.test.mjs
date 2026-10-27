@@ -40,6 +40,21 @@ test('круг86: фразы и слэш — привязка цветов; со
   for (const u of ['привяжи кнопку к палитре', 'переведи текст на английский', 'цвета экрана к палитре', 'привяжи цвета кнопки к палитре'])
     assert.notEqual((shellIntent(u, {}) || {}).kind, 'bind-colors', u);
   assert.ok(COMMANDS.some((c) => c.id === 'bind-colors' && c.edit === true));
+  // критик: «к палитре документа», «в токены палитры», «к цветам палитры» — тоже привязка
+  for (const u of ['привяжи цвета к палитре документа', 'переведи цвета в токены палитры', 'привяжи цвета к цветам палитры'])
+    assert.equal((shellIntent(u, {}) || {}).kind, 'bind-colors', u);
+});
+
+test('круг86, критик: в занятом агенте не спрашивает, двойного сообщения нет, библиотека — отказ', async () => {
+  const app = await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'app.js'), 'utf8');
+  assert.match(app, /SHELL_WHILE_BUSY = new Set\([^)]*'bind-colors'/);
+  const body = app.slice(app.indexOf("case 'bind-colors':"), app.indexOf("case 'select': {", app.indexOf("case 'bind-colors':")));
+  assert.match(body, /commit\(r\.ops, r\.label, 'human', \{ quiet: true \}\)/);
+  assert.match(body, /res\.ok === false\) return true/);
+  assert.match(body, /inLibrary\(state\.selection\[0\]\)/);
+  // в группе «Правка» команда не первая
+  const edits = COMMANDS.filter((c) => c.group === 'Правка').map((c) => c.id);
+  assert.ok(edits.indexOf('bind-colors') > edits.indexOf('gap-less'), edits.join(','));
 });
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');

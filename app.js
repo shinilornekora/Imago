@@ -9669,7 +9669,7 @@ function submitCommand(opts = {}) {
    агента правится руками, значит, и командой. */
 const SHELL_WHILE_BUSY = new Set(['stop', 'variants-close', 'fit', 'zoom', 'sheet', 'rail', 'theme', 'export', 'preview',
   'help', 'palette', 'slash-unknown', 'slash-bad', 'fit-selection', 'inspector', 'select', 'select-all', 'select-rel',
-  'delete', 'duplicate', 'rename', 'visible', 'lock', 'order', 'wrap', 'ungroup', 'align', 'direction', 'gap']);
+  'delete', 'duplicate', 'rename', 'visible', 'lock', 'order', 'wrap', 'ungroup', 'align', 'direction', 'gap', 'bind-colors']);
 
 /** Вернуть текст в строку — но только если человек не набрал туда своё (п.8). */
 function restoreCommand(text, { focus = false } = {}) {
@@ -12119,6 +12119,11 @@ function applyShellIntent(intent, said) {
     }
     case 'bind-colors': {
       // круг 86 (§15.22): экран — активная доска (у выделения — его доска)
+      // выделение в библиотеке активной доски не меняет — молча правили бы чужой экран
+      if (state.selection[0] && inLibrary(state.selection[0])) {
+        toast('Выделение — в библиотеке компонентов: привязка к палитре — для экранов. Выделите экран.', 'plain', 6000);
+        return true;
+      }
       const id = activeArtboardId();
       const board = id && state.doc.nodes[id];
       if (!board) { toast('Экрана нет — привязывать нечего.', 'plain', 5000); return true; }
@@ -12128,7 +12133,9 @@ function applyShellIntent(intent, said) {
         toast(`На экране «${clip(board.name || 'Доска', 40)}» нет цветов кодом, равных цветам палитры${ambiguous ? ` (неоднозначных — ${ambiguous}: у палитры два цвета с таким значением)` : ''}.`, 'plain', 6000);
         return true;
       }
-      commit(r.ops, r.label);
+      // quiet: крупная правка иначе прозвучала бы дважды (announceHuman + тост)
+      const res = commit(r.ops, r.label, 'human', { quiet: true });
+      if (res && res.ok === false) return true;
       toast(r.label, 'plain', 5000);
       return true;
     }
