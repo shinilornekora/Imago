@@ -13115,11 +13115,20 @@ function referenceFromFiles(files, total = files.length) {
   insertMoodboard(files, total);
 }
 
+/* Круг 59: картинки мудборда показываются по 240 px — хранить их по 960 px и 600 КБ незачем: четыре такие
+   почти заняли бы предел транзакции сервера (4 МБ). Для цветов и для модели со зрением хватает 480 px. */
+const MOODBOARD_IMAGE = { maxSide: 480, maxBytes: 250 * 1024 };
+
 /** Круг 59: несколько картинок — одной доской-образцом рядом с остальными, выделена целиком. */
 async function insertMoodboard(files, total) {
   if (!state.doc) return;
   const taken = files.slice(0, SHELL.MOODBOARD.max);
-  const ready = (await Promise.all(taken.map((f) => prepareImage(f)))).map((r, i) => (r ? { ...r, fileName: taken[i].name || '' } : null));
+  const ready = (await Promise.all(taken.map((f) => prepareImage(f, MOODBOARD_IMAGE)))).map((r, i) => (r ? { ...r, fileName: taken[i].name || '' } : null));
+  // пока картинки открывались, человек мог отправить команду — тогда не кладём (правка сорвала бы итог)
+  if (state.running || !state.doc) {
+    showMsg('plain', 'Агент уже работает — образец не положил', { note: 'Вставьте картинки снова, когда он закончит.', ms: 7000 });
+    return;
+  }
   const ok = ready.filter(Boolean);
   if (!ok.length) {
     showMsg('error', 'Картинки не удалось открыть', { note: 'Подойдут PNG, JPEG, GIF и WebP.', ms: 7000 });
@@ -13135,10 +13144,11 @@ async function insertMoodboard(files, total) {
   if (!res || !res.ok) return;
   setSelection(r.select);
   fitAfterLayout(r.select);
-  const left = (total - ok.length) + (ready.length - ok.length);
-  offerReferenceWords(ok.length > 1, r.select[0] || null,
-    `${ok.length} ${plural(ok.length, 'картинка', 'картинки', 'картинок')} легли одной доской и выделены: команда возьмёт их цвета, а новый экран встанет рядом.`,
-    left > 0 ? ` ${left} не вошли: в образец идёт до ${SHELL.MOODBOARD.max} картинок.` : '');
+  const notes = SHELL.moodboardLeftover({ images: files.length, taken: taken.length, failed: taken.length - ok.length, other: total - files.length });
+  const lead = ok.length > 1
+    ? `${ok.length} ${plural(ok.length, 'картинка легла', 'картинки легли', 'картинок легли')} одной доской и выделены: команда возьмёт их цвета, а новый экран встанет рядом.`
+    : 'Картинка легла отдельной доской и выделена: команда возьмёт её цвета, а новый экран встанет рядом.';
+  offerReferenceWords(ok.length > 1, r.select[0] || null, lead, notes ? ` ${notes}` : '');
 }
 
 /** Слова об образце в строке команды, фокус, сообщение (круги 58–59). */
@@ -13165,6 +13175,14 @@ function reselectReference(utterance) {
   pendingReference = null;
   if (!ref || !state.doc || !nodeById(state.doc, ref) || !RE_IMAGE_REF.test(utterance)) return;
   if (state.selection.length === 1 && state.selection[0] === ref) return;
+  // круг 59: выбрана картинка внутри мудборда — это выбор человека, не трогаем
+  const boardOf = (id) => {
+    let cur = nodeById(state.doc, id);
+    for (let i = 0; cur && cur.parent !== state.doc.root && i < 64; i++) cur = nodeById(state.doc, cur.parent);
+    return cur ? cur.id : id;
+  };
+  const refBoard = boardOf(ref);
+  if (state.selection.length && state.selection.every((id) => boardOf(id) === refBoard)) return;
   setSelection([ref]);
   toast('Образец снова выделен: команда о нём', 'plain', 4000);
 }
@@ -13192,7 +13210,7 @@ function onImageDrop(e) {
  * (документ ходит транзакциями: тело запроса сервера — 4 МБ). С прозрачностью — PNG, иначе JPEG.
  * Анимация GIF не сохраняется (первый кадр). Не открылась за 8 с — null.
  */
-function prepareImage(file) {
+function prepareImage(file, { maxSide = SHELL.IMAGE_INSERT.maxSide, maxBytes = SHELL.IMAGE_INSERT.maxBytes } = {}) {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -13204,7 +13222,7 @@ function prepareImage(file) {
         const nw = img.naturalWidth;
         const nh = img.naturalHeight;
         if (!(nw > 0 && nh > 0)) { finish(null); return; }
-        let k = Math.min(1, SHELL.IMAGE_INSERT.maxSide / Math.max(nw, nh));
+        let k = Math.min(1, maxSide / Math.max(nw, nh));
         let alpha = null;
         for (let i = 0; i < 6; i++) {
           const w = Math.max(1, Math.round(nw * k));
@@ -13222,7 +13240,7 @@ function prepareImage(file) {
           }
           const src = c.toDataURL(alpha ? 'image/png' : 'image/jpeg', 0.86);
           const bytes = Math.floor(((src.length - src.indexOf(',') - 1) * 3) / 4);
-          if (bytes <= SHELL.IMAGE_INSERT.maxBytes) { finish({ src, width: w, height: h }); return; }
+          if (bytes <= maxBytes) { finish({ src, width: w, height: h }); return; }
           k *= 0.75;
         }
         finish(null);
@@ -13235,6 +13253,11 @@ function prepareImage(file) {
 async function insertImageFile(file, client, { reference = false, more = false } = {}) {
   if (!state.doc) return;
   const ready = await prepareImage(file);
+  // круг 59: пока картинка открывалась, человек мог отправить команду — образец тогда не кладём
+  if (reference && state.running) {
+    showMsg('plain', 'Агент уже работает — образец не положил', { note: 'Вставьте картинку снова, когда он закончит.', ms: 7000 });
+    return;
+  }
   if (!ready) {
     showMsg('error', 'Картинку не удалось открыть', { note: 'Подойдут PNG, JPEG, GIF и WebP.', ms: 7000 });
     return;

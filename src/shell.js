@@ -4231,44 +4231,71 @@ export function artSummary(direction, critique, opts = {}) {
 
 /**
  * Круг 59 (SPEC §21.6): несколько картинок разом — мудборд: одна доска-образец, картинки рядами по
- * MOODBOARD.cell px шириной (до MOODBOARD.perRow в ряд), высота по пропорции. Доска из одних картинок —
- * образец по §21: арт-директор видит цвета всех (до четырёх, §20). Больше MOODBOARD.max — лишние
- * отбрасываются (их число — в `dropped`).
+ * MOODBOARD.perRow (каждый ряд — своя рамка), каждая вписана в клетку MOODBOARD.cell × cell·MOODBOARD.tall
+ * с сохранением пропорций (мелкие — увеличиваются при показе: цвета от этого не меняются). Доска из одних
+ * картинок — образец по §21: арт-директор видит цвета всех (до четырёх, §20). Больше MOODBOARD.max —
+ * лишние не кладутся (их число — в `dropped`). Одна картинка — как imageInsertOps без выделения.
  * @param {object} doc
  * @param {{images: {src: string, width: number, height: number, fileName?: string}[], at: {x: number, y: number},
- *   ids: {board: string, images: string[]}, boards?: number}} o
- * @returns {{ops: object[], select: string[], dropped: number}|{error: string}}
+ *   ids: {board: string, images: string[], rows?: string[]}, boards?: number}} o
+ * @returns {{ops: object[], select: string[], into: null, dropped: number}|{error: string}}
  */
-export const MOODBOARD = { cell: 240, perRow: 2, gap: 12, pad: 12, max: 4 };
+export const MOODBOARD = { cell: 240, tall: 1.5, perRow: 2, gap: 12, pad: 12, max: 4 };
 export function moodboardOps(doc, o) {
   const list = o && Array.isArray(o.images) ? o.images : [];
   if (!list.length) return { error: 'картинок нет' };
   const taken = list.slice(0, MOODBOARD.max);
+  const dropped = list.length - taken.length;
   const made = [];
   for (let i = 0; i < taken.length; i++) {
-    const one = imageInsertOps(doc, { ...taken[i], selection: [], at: o.at, ids: { board: o.ids.board, image: o.ids.images[i] } });
+    const one = imageInsertOps(doc, { ...taken[i], selection: [], at: o.at, ids: { board: o.ids.board, image: o.ids.images[i] }, boards: o.boards });
     if (one.error) return { error: `${taken[i].fileName || `картинка ${i + 1}`}: ${one.error}` };
-    const img = one.ops[1].node;
-    const w = Math.min(MOODBOARD.cell, img.size.w.value);
-    made.push({ ...img, size: { w: { mode: 'fixed', value: w }, h: { mode: 'fixed', value: Math.max(1, Math.round((w * img.size.h.value) / img.size.w.value)) } } });
+    if (taken.length === 1) return { ...one, dropped };
+    const img = one.ops.map((x) => x.node).find((n) => n && n.type === 'image');
+    // вписать в клетку: ширина — клетка, слишком высокая — по высоте клетки
+    const k = Number(taken[i].height) / Number(taken[i].width);
+    let w = MOODBOARD.cell;
+    let h = Math.round(w * k);
+    if (h > MOODBOARD.cell * MOODBOARD.tall) { h = Math.round(MOODBOARD.cell * MOODBOARD.tall); w = Math.max(1, Math.round(h / k)); }
+    made.push({ ...img, size: { w: { mode: 'fixed', value: w }, h: { mode: 'fixed', value: Math.max(1, h) } } });
   }
-  if (made.length === 1) {
-    const one = imageInsertOps(doc, { ...taken[0], selection: [], at: o.at, ids: { board: o.ids.board, image: o.ids.images[0] }, boards: o.boards });
-    return { ...one, dropped: 0 };
-  }
-  const cols = Math.min(MOODBOARD.perRow, made.length);
-  const width = cols * MOODBOARD.cell + (cols - 1) * MOODBOARD.gap + 2 * MOODBOARD.pad;
   const p = MOODBOARD.pad;
+  const cols = Math.min(MOODBOARD.perRow, made.length);
   const board = {
     id: o.ids.board, type: 'frame', name: 'Образец', parent: doc.root, children: [],
     pos: { x: Math.round(Number(o.at && o.at.x) || 0), y: Math.round(Number(o.at && o.at.y) || 0) },
-    size: { w: { mode: 'fixed', value: width }, h: { mode: 'hug' } },
-    layout: { mode: 'row', gap: MOODBOARD.gap, padding: { t: p, r: p, b: p, l: p }, align: 'start', justify: 'start', wrap: true },
+    size: { w: { mode: 'fixed', value: cols * MOODBOARD.cell + (cols - 1) * MOODBOARD.gap + 2 * p }, h: { mode: 'hug' } },
+    layout: { mode: 'column', gap: MOODBOARD.gap, padding: { t: p, r: p, b: p, l: p }, align: 'start', justify: 'start', wrap: false },
   };
-  return {
-    ops: [{ op: 'create', node: board }, ...made.map((n) => ({ op: 'create', node: { ...n, parent: board.id } }))],
-    select: [board.id], into: null, dropped: list.length - taken.length,
+  const ops = [{ op: 'create', node: board }];
+  for (let r = 0; r * MOODBOARD.perRow < made.length; r++) {
+    const rowId = (o.ids.rows && o.ids.rows[r]) || `${o.ids.board}_r${r}`;
+    ops.push({ op: 'create', node: { id: rowId, type: 'frame', name: `Ряд ${r + 1}`, parent: board.id, children: [],
+      size: { w: { mode: 'hug' }, h: { mode: 'hug' } },
+      layout: { mode: 'row', gap: MOODBOARD.gap, padding: { t: 0, r: 0, b: 0, l: 0 }, align: 'center', justify: 'start', wrap: false } } });
+    for (const n of made.slice(r * MOODBOARD.perRow, (r + 1) * MOODBOARD.perRow)) ops.push({ op: 'create', node: { ...n, parent: rowId } });
+  }
+  return { ops, select: [board.id], into: null, dropped };
+}
+
+/**
+ * Круг 59: что из брошенного или вставленного не легло в мудборд — словами, у каждой причины своя фраза.
+ * @param {{images: number, taken: number, failed: number, other: number}} c картинок всего, взято (до max),
+ *   из взятых не открылось, файлов не-картинок
+ * @returns {string} '' — легло всё
+ */
+export function moodboardLeftover({ images = 0, taken = 0, failed = 0, other = 0 } = {}) {
+  const pl = (n, one, few, many) => {
+    const a = Math.abs(n) % 100;
+    const b = a % 10;
+    return a > 10 && a < 20 ? many : b === 1 ? one : b >= 2 && b <= 4 ? few : many;
   };
+  const out = [];
+  const over = Math.max(0, images - taken);
+  if (over) out.push(`Ещё ${over} ${pl(over, 'картинка не вошла', 'картинки не вошли', 'картинок не вошли')}: в образец идёт до ${MOODBOARD.max}.`);
+  if (failed > 0) out.push(`${failed} ${pl(failed, 'картинка не открылась', 'картинки не открылись', 'картинок не открылись')}.`);
+  if (other > 0) out.push(`${other} ${pl(other, 'файл — не картинка', 'файла — не картинки', 'файлов — не картинки')}.`);
+  return out.join(' ');
 }
 
 /**
@@ -4298,13 +4325,16 @@ export function referenceCommandText(value, { many = false } = {}) {
 
 /**
  * Круг 58: текст, который браузер кладёт в буфер вместе с картинкой, — имя файла или адрес, а не
- * слова человека: одна строка, кончается расширением картинки, или один адрес.
+ * слова человека: каждая строка кончается расширением картинки или это адрес (круг 59: несколько строк —
+ * несколько файлов).
  */
 export function clipboardTextIsLabel(text) {
   const t = String(text == null ? '' : text).trim();
-  if (!t || /[\r\n]/.test(t)) return false;
-  if (/^(?:https?:\/\/|data:image\/|file:\/\/)\S+$/iu.test(t)) return true;
-  return /\.(?:png|jpe?g|gif|webp|heic|heif|bmp|tiff?|avif)$/iu.test(t) && t.length <= 255;
+  if (!t) return false;
+  // несколько файлов из файлового менеджера — их имена по строке на файл
+  const lines = t.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  return lines.length <= 32 && lines.every((x) => /^(?:https?:\/\/|data:image\/|file:\/\/)\S+$/iu.test(x)
+    || (/\.(?:png|jpe?g|gif|webp|heic|heif|bmp|tiff?|avif)$/iu.test(x) && x.length <= 255));
 }
 
 /**

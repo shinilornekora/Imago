@@ -12737,12 +12737,14 @@ export const REF_IMAGE_MAX_CHARS = 1100 * 1024;
 export function referenceImage(doc, selection, geo, utterance) {
   if (!RE_IMAGE_REF.test(String(utterance == null ? '' : utterance))) return null;
   // образец — главная (первая) картинка; не подошла — не подменяем её мелкой соседней иконкой
-  const [s] = imageSources(doc, selection, geo);
+  const all = imageSources(doc, selection, geo);
+  const [s] = all;
   if (!s) return null;
   const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(s.src);
   if (!m) return { skipped: 'url' };
   if (s.src.length > REF_IMAGE_MAX_CHARS) return { skipped: 'big' };
-  return { mime: m[1], data: m[2] };
+  // круг 59: мудборд — модели говорят, что она видит одну картинку из нескольких
+  return all.length > 1 ? { mime: m[1], data: m[2], of: all.length } : { mime: m[1], data: m[2] };
 }
 
 /** Круг 53 (SPEC §20): срок на цвета картинок — декодирование и счёт всех картинок команды вместе. */
@@ -13284,7 +13286,8 @@ async function runCommandCore(options = {}) {
             fontsLocked: webFonts === false,
           }) },
           { role: 'user', content: img ? imageTurn(`${userTurn}\n\nОбразец приложен картинкой: палитру, материалы и настроение бери с него`
-            + ' (что на нём изображено — не предмет макета, если об этом не просили).', img) : userTurn },
+            + ' (что на нём изображено — не предмет макета, если об этом не просили).'
+            + (img.of > 1 ? ` Это одна из ${img.of} картинок образца — цвета остальных в списке цветов картинок выше; образ — по всем вместе.` : ''), img) : userTurn },
         ];
         const directOpts = { stage: 'direct', temperature: temperature == null ? 0.8 : temperature };
         if (ref) emit('direct', 'Смотрю на образец');
