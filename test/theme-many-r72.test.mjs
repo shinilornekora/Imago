@@ -70,7 +70,7 @@ test('круг72: образец среди экранов правки — пр
   const notes = [];
   const ops = run(doc, { boardNames: ['Оплата', 'Итог', 'Профиль'], likeBoard: 'Оплата' }, [], notes);
   assert.deepEqual(ops.map((o) => [o.id, o.path]), [['sum', 'theme'], ['plain', 'theme']]);
-  assert.ok(notes.some((m) => /«Оплата» пропущен: .*и есть образец/.test(m)));
+  assert.ok(notes.some((m) => /«Оплата» пропущен: он сам образец$/.test(m)));
   const more = [];
   run(doc, { boardNames: ['Итог', 'Профиль'], colors: ACCENT, spacing: [1, 2] }, [], more);
   assert.equal(more.filter((m) => /свои только цвета и шрифты/.test(m)).length, 1, more.join(' | '));
