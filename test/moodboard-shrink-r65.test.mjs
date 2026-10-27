@@ -112,3 +112,70 @@ test('круг65: сервер рисует снимок шириной maxWidth
   assert.equal(wide.width, full.width, 'шире обычного не бывает');
   assert.ok(small.data.length < full.data.length * 0.6, `вес ${small.data.length} против ${full.data.length}`);
 });
+
+test('круг65: вторая попытка упала — первый снимок и одна заметка; отмена во второй — отмена без заметки', async () => {
+  {
+    const { doc, selection } = moodboard(2);
+    const p = fake();
+    let n = 0;
+    const render = async ({ maxWidth }) => { n++; if (maxWidth) throw new Error('холст сломался'); return big(700); };
+    const res = await runCommand({ doc, selection, utterance: SAID, provider: p, engine: core, critic: false, render });
+    assert.equal(res.error, undefined);
+    assert.equal(n, 2);
+    const notes = (res.serviceNotes || []).filter((m) => /Снимок образца/.test(m));
+    assert.equal(notes.length, 1, JSON.stringify(notes));
+    assert.match(notes[0], /слишком большой/);
+    assert.match(directTurn(p)[0].text, /одна из 2 картинок/);
+  }
+  {
+    const { doc, selection } = moodboard(2);
+    const p = fake();
+    const ctl = new AbortController();
+    const render = async ({ maxWidth, signal }) => {
+      if (!maxWidth) return big(700);
+      ctl.abort();
+      await new Promise((r) => setTimeout(r, 20));
+      assert.ok(signal.aborted, 'рисование второй попытки прервано');
+      return null;
+    };
+    const res = await runCommand({ doc, selection, utterance: SAID, provider: p, engine: core, critic: false, render, signal: ctl.signal })
+      .catch((e) => ({ thrown: e }));
+    const err = res.thrown || res.error;
+    assert.ok(err && (err.kind === 'cancelled' || err.code === 'cancelled'), JSON.stringify(res).slice(0, 200));
+    assert.ok(!(res.serviceNotes || []).some((m) => /Снимок образца/.test(m)));
+  }
+});
+
+test('круг65: boardPNG в браузере — JPEG по просьбе, PNG от холста без JPEG, мусор — null; шире критика нельзя', async () => {
+  const saved = {};
+  for (const k of ['document', 'Image', 'Blob']) saved[k] = globalThis[k];
+  const savedURL = { c: URL.createObjectURL, r: URL.revokeObjectURL };
+  let answer = null;
+  const asked = [];
+  globalThis.Blob = class { constructor() {} };
+  URL.createObjectURL = () => 'blob:x';
+  URL.revokeObjectURL = () => {};
+  globalThis.Image = class { set src(v) { setTimeout(() => this.onload(), 0); } };
+  globalThis.document = {
+    createElement: () => ({ width: 0, height: 0, getContext: () => ({ fillRect() {}, drawImage() {} }),
+      toDataURL(type, q) { asked.push([type, q, this.width]); return answer(type); } }),
+  };
+  try {
+    const { doc } = moodboard(3);
+    answer = (type) => `data:${type};base64,QUJD`;
+    const jpg = await quiet(() => core.boardPNG(doc, 'MB', { fonts: false, mime: 'image/jpeg', maxWidth: 5000 }));
+    assert.ok(jpg, 'снимок есть');
+    assert.equal(jpg.mime, 'image/jpeg');
+    assert.deepEqual(asked.at(-1).slice(0, 2), ['image/jpeg', 0.85]);
+    assert.ok(jpg.width <= 768, `ширина ${jpg.width}`);
+    answer = () => 'data:image/png;base64,QUJD';
+    assert.equal((await core.boardPNG(doc, 'MB', { fonts: false, mime: 'image/jpeg' })).mime, 'image/png');
+    answer = () => 'data:,';
+    assert.equal(await core.boardPNG(doc, 'MB', { fonts: false, mime: 'image/jpeg' }), null);
+    answer = (type) => `data:${type};base64,QUJD`;
+    assert.equal((await core.boardPNG(doc, 'MB', { fonts: false, maxWidth: 200 })).width, 200);
+  } finally {
+    for (const k of Object.keys(saved)) { if (saved[k] === undefined) delete globalThis[k]; else globalThis[k] = saved[k]; }
+    URL.createObjectURL = savedURL.c; URL.revokeObjectURL = savedURL.r;
+  }
+});

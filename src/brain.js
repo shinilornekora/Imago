@@ -12776,6 +12776,8 @@ async function moodboardShot({ render, doc, selection, geo, signal, serviceNote,
 
 /** Круг 65 (SPEC §22.2): снимок мудборда больше предела образца — одна попытка уже, но не уже этого. */
 export const MOODBOARD_SHOT_MIN_W = 256;
+/** Круг 65: меньше этого до конца срока — вторую попытку не начинаем. */
+export const MOODBOARD_SHOT_RETRY_MIN_MS = 500;
 
 async function takeMoodboardShot({ render, doc, geo, boardId, signal, serviceNote, of }) {
   const note = (m) => { if (typeof serviceNote === 'function') serviceNote(m); };
@@ -12795,9 +12797,15 @@ async function takeMoodboardShot({ render, doc, geo, boardId, signal, serviceNot
     // (вес снимка растёт примерно как площадь, то есть как квадрат ширины), с запасом
     if (usable(shot) && sizeOf(shot) > REF_IMAGE_MAX_CHARS && Number(shot.width) > MOODBOARD_SHOT_MIN_W) {
       const w = Math.max(MOODBOARD_SHOT_MIN_W, Math.floor(Number(shot.width) * Math.sqrt(REF_IMAGE_MAX_CHARS / sizeOf(shot)) * 0.85));
-      if (w < Number(shot.width)) {
-        const small = await take(w);
-        if (usable(small)) shot = small;
+      // времени почти не осталось — второй снимок не успеет: сразу «слишком большой»
+      if (w < Number(shot.width) && until - Date.now() >= MOODBOARD_SHOT_RETRY_MIN_MS) {
+        try {
+          const small = await take(w);
+          if (usable(small)) shot = small;
+        } catch (e) {
+          // вторая попытка не вышла — остаётся первый снимок (и одна заметка о размере ниже)
+          if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+        }
       }
     }
   } catch (e) {
