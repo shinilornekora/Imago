@@ -40,10 +40,8 @@ test('круг74: все экраны, кроме «Оплата», — прав
 test('круг74: исключение из списка имён; не найдено — заметка; исключены все — отказ', () => {
   const doc = screens();
   assert.deepEqual(run(doc, { boardNames: ['Итог', 'Профиль'], exceptBoards: ['Профиль'], colors: ACCENT }).map((o) => o.id), ['sum']);
-  const notes = [];
-  const ops = run(doc, { exceptBoards: ['Склад'], colors: ACCENT }, notes);
-  assert.deepEqual(ops.map((o) => o.id), ['pay', 'sum', 'plain']);
-  assert.ok(notes.some((m) => /«Склад» не найден — исключать нечего/.test(m)), notes.join(' | '));
+  // исключение не найдено — отказ: иначе исключённый экран перекрасился бы
+  assert.throws(() => run(doc, { exceptBoards: ['Склад'], colors: ACCENT }), /«Склад» не найден — не знаю, какой не трогать/);
   assert.throws(() => run(doc, { exceptBoards: ['Оплата', 'Итог', 'Профиль'], colors: ACCENT }), /Исключены все экраны правки/);
   assert.throws(() => run(doc, { boardNames: ['Итог'], exceptBoards: ['Итог'], colors: ACCENT }), /Исключены все экраны правки/);
 });
@@ -60,4 +58,38 @@ test('круг74: сквозь команду — одна фраза на дв�
   assert.equal(res.preview.doc.nodes.lib.theme, undefined);
   assert.equal(res.preview.doc.tokens.colors.accent, doc.tokens.colors.accent);
   assert.match(res.changeSummary, /своя тема экранов «Итог», «Профиль»: акцент #ff4f6d/i);
+});
+
+test('круг74, критики: «кроме Оплаты» по основе слова, все совпавшие, библиотека, образец, reset без board', async () => {
+  const doc = screens();
+  assert.deepEqual(run(doc, { exceptBoards: ['Оплаты'], colors: ACCENT }).map((o) => o.id), ['sum', 'plain']);
+  // вхождением — все совпавшие, с заметкой
+  const two = core.applyOps(doc, [core.ops.set('pay', 'name', 'Оплата картой'), core.ops.set('plain', 'name', 'Оплата СБП')]).doc;
+  const notes = [];
+  assert.deepEqual(run(two, { exceptBoards: ['Оплата'], colors: ACCENT }, notes).map((o) => o.id), ['sum']);
+  assert.ok(notes.some((m) => /не тронуты экраны «Оплата картой», «Оплата СБП»/.test(m)), notes.join(' | '));
+  // библиотеку исключать незачем — молча
+  const n2 = [];
+  assert.equal(run(doc, { exceptBoards: ['Компоненты'], colors: ACCENT }, n2).length, 3);
+  assert.equal(n2.length, 0, n2.join(' | '));
+  // «все, кроме Профиля, как «Оплата»» — образец не в правке, без заметки
+  const n3 = [];
+  assert.deepEqual(run(doc, { exceptBoards: ['Профиль'], likeBoard: 'Оплата' }, n3).map((o) => o.id), ['sum']);
+  assert.ok(!n3.some((m) => /образец/.test(m)), n3.join(' | '));
+  // на странице только библиотека
+  const empty = core.applyOps(doc, [core.ops.remove('pay'), core.ops.remove('sum'), core.ops.remove('plain')]).doc;
+  assert.throws(() => run(empty, { exceptBoards: ['Итог'], colors: ACCENT }), /нет экранов — только библиотека/);
+  // boardNames без board:true — по-прежнему не повод уйти от темы документа
+  const docOps = run(doc, { boardNames: ['все экраны'], colors: ACCENT });
+  assert.ok(docOps.every((o) => o.op === 'setToken'), JSON.stringify(docOps));
+  // reset с «все, кроме» без board:true — правка, а не «ничего не предложила»
+  const withThemes = core.applyOps(doc, [core.ops.set('sum', 'theme', { colors: { accent: '#00aa55' } })]).doc;
+  const provider = { name: 'fake', async ready() { return true; }, async complete(m, schema) {
+    return JSON.parse(JSON.stringify({ plan: { intent: 'theme', title: 'Сброс', summary: 'Сброс', steps: ['Тема'] },
+      theme: { exceptBoards: ['Профиль'], reset: true } }[schema.name]));
+  } };
+  const res = await runCommand({ doc: withThemes, selection: [], utterance: 'верни всем экранам, кроме профиля, общее оформление', provider, engine: core });
+  assert.equal(res.error, undefined, JSON.stringify(res.error));
+  assert.equal(res.preview.doc.nodes.sum.theme, undefined);
+  assert.equal(res.preview.doc.nodes.pay.theme, undefined);
 });

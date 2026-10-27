@@ -10796,13 +10796,15 @@ export function failureHint(said) {
  * становилась и сводка, причём молча. Отдельная доска оформлением перекрасить нельзя вовсе;
  * раз так, человек обязан узнать, что изменилось всё.
  */
+/** Круг 74: в ответе тематизатора есть «все, кроме …». */
+const hasExcept = (theme) => Array.isArray(theme && theme.exceptBoards) && theme.exceptBoards.some((x) => typeof x === 'string' && x.trim());
+
 export function themeToOps({ doc, theme, engine, warn, scope = null }) {
   const note = warn || (() => {});
   // круг 48 (SPEC §15): оформление одной доски — её темой
   // круг 71: likeBoard — всегда об одном экране, даже если модель забыла board:true
-  // круг 74: списки экранов (boardNames, exceptBoards) — тоже об экранах, а не о документе
-  const listed = (k) => Array.isArray(theme && theme[k]) && theme[k].some((x) => typeof x === 'string' && x.trim());
-  if (theme && (theme.board === true || (typeof theme.likeBoard === 'string' && theme.likeBoard.trim()) || listed('boardNames') || listed('exceptBoards'))) return boardThemeOps({ doc, theme, engine, warn: note, scope });
+  // круг 74: «все, кроме …» (exceptBoards) — об экранах и без board:true (токены перекрасили бы и исключённый)
+  if (theme && (theme.board === true || (typeof theme.likeBoard === 'string' && theme.likeBoard.trim()) || hasExcept(theme))) return boardThemeOps({ doc, theme, engine, warn: note, scope });
   const ops = [];
   /**
    * Круг 5, п.6: проверялся только TOKEN_PATH_RE, а `[A-Za-z0-9_-]+` покрывает «__proto__» и
@@ -11078,11 +11080,23 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   }
   for (const n of missed) later.push(`Экран «${cutText(n, 40)}» не найден — правка легла на остальные`);
   if (except.length) {
+    // исключение — строже имени правки: не нашли — отказ (иначе исключённый экран перекрасится);
+    // равные имена — все такие; иначе — по основе слова («кроме Оплаты»), затем вхождением, все совпавшие
+    if (!all.length) throw ERR('schema', 'На странице нет экранов — только библиотека компонентов');
+    const kids = kidsOf(nodeOf(doc, doc.root)).filter((id) => nodeOf(doc, id) && nodeOf(doc, id).type === 'frame');
+    const nameOf = (id) => strOf(nodeOf(doc, id).name).trim().toLowerCase().replace(/[«»"]/g, '');
+    const stem = (x) => (x.length >= 4 ? x.replace(/[аыуеоияюь]$/u, '') : x);
     const out = [];
     for (const n of except) {
-      const id = byName(n);
-      if (!id) later.push(`Экран «${cutText(n, 40)}» не найден — исключать нечего, остальные экраны в правке`);
-      else if (!out.includes(id)) out.push(id);
+      const plain = n.toLowerCase().replace(/[«»"]/g, '').trim();
+      const bare = plain.replace(/^экран(?:а|у|е|ом|ы|ов)?\s+/u, '').trim();
+      let hit = kids.filter((id) => nameOf(id) === plain || nameOf(id) === bare);
+      if (!hit.length && bare) hit = kids.filter((id) => stem(nameOf(id)) === stem(bare));
+      if (!hit.length && bare) hit = kids.filter((id) => nameOf(id).includes(stem(bare)));
+      if (!hit.length) throw ERR('schema', `Экран «${cutText(n, 40)}» не найден — не знаю, какой не трогать; назовите его, как на холсте`);
+      const screens = hit.filter((id) => all.includes(id));
+      if (hit.length > 1 && screens.length > 1) later.push(`«${cutText(n, 40)}» — не тронуты экраны ${screens.slice(0, 4).map((id) => `«${label(id)}»`).join(', ')}`);
+      for (const id of screens) if (!out.includes(id)) out.push(id);
     }
     const kept = targets.filter((id) => !out.includes(id));
     if (!kept.length) {
@@ -11091,6 +11105,10 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
         : 'Исключены все экраны правки — менять нечего; назовите, какие экраны оформить');
     }
     targets = kept;
+    // «все, кроме …, как «Оплата»» — образец сам себя не оформляет: без заметки
+    const likeName = typeof theme.likeBoard === 'string' ? theme.likeBoard.trim() : '';
+    const likeHere = likeName && !names.length ? byName(likeName) : null;
+    if (likeHere && targets.length > 1) targets = targets.filter((id) => id !== likeHere);
   }
   if (targets.length === 1) {
     const ops = oneBoardThemeOps({ doc, theme, engine, note, boardId: targets[0], byName, label });
@@ -11162,7 +11180,7 @@ function oneBoardThemeOps({ doc, theme, engine, note, boardId, byName, label, sa
   if (like) {
     likeId = byName(like);
     if (!likeId) throw ERR('schema', `Экран «${cutText(like, 40)}» не найден — назовите образец, как на холсте`);
-    if (likeId === boardId) throw ERR('schema', `Экран «${label(boardId)}» и есть образец — назовите другой, с которого взять оформление`);
+    if (likeId === boardId) throw ERR('schema', `Экран «${label(boardId)}» и есть образец — назовите другой, с которого взять оформление`, { reason: 'он сам образец' });
     likeTheme = engine && engine.boardTheme ? engine.boardTheme(nodeOf(doc, likeId)) : null;
     if (!likeTheme && nodeOf(doc, likeId).theme !== undefined) {
       throw ERR('schema', `Тема экрана «${label(likeId)}» повреждена — взять её нельзя; скажите, какие цвета и шрифты нужны`);
@@ -13987,7 +14005,8 @@ function hasEdits(data, intent) {
   if (intent === 'create') return typeof data.type === 'string' && data.type.trim() !== '';
   if (intent === 'theme') {
     // круг 48: «верни экрану общее оформление» — правка без списков
-    if (data.board === true && data.reset === true) return true;
+    // круг 74: и «все, кроме …» без board:true
+    if ((data.board === true || hasExcept(data)) && data.reset === true) return true;
     // круг 71: «как у экрана X» — тоже правка без списков
     if (typeof data.likeBoard === 'string' && data.likeBoard.trim()) return true;
     return ['colors', 'type', 'spacing', 'radii'].some((k) => Array.isArray(data[k]) && data[k].length > 0);
