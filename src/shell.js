@@ -4727,7 +4727,8 @@ export function themeStyleFontOps(doc, board, style, change = {}) {
  */
 export function themePartResetOps(board, part) {
   if (!board || !board.id || (part !== 'colors' && part !== 'type')) return null;
-  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || (isObj(board.theme) ? board.theme : null);
+  // неверная тема — не «часть»: инспектор кнопок частей тогда не рисует, функция тоже молчит
+  const theme = typeof CORE_NS.boardTheme === 'function' ? CORE_NS.boardTheme(board) : (isObj(board.theme) ? board.theme : null);
   if (!theme || !isObj(theme[part]) || !Object.keys(theme[part]).length) return null;
   const other = part === 'colors' ? 'type' : 'colors';
   const rest = isObj(theme[other]) && Object.keys(theme[other]).length;

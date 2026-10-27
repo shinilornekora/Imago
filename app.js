@@ -9086,10 +9086,11 @@ function boardThemeGroup(node) {
     btn.type = 'button';
     btn.className = 'btn';
     btn.textContent = 'Вернуть общее оформление';
-    btn.addEventListener('click', () => commit([OPS.set(node.id, 'theme', undefined)], 'Тема экрана снята'));
+    btn.addEventListener('click', () => commit([OPS.set(node.id, 'theme', undefined)], `Экран «${String(node.name || 'Доска').slice(0, 40)}» вернулся к оформлению документа`));
     // круг 78 (§15.15): своё и в цветах, и в шрифтах — можно вернуть документу одну часть
     const parts = [['colors', 'Цвета — как в документе'], ['type', 'Шрифты — как в документе']]
       .filter(([k]) => t[k] && typeof t[k] === 'object' && Object.keys(t[k]).length);
+    kids.push(btn);
     if (parts.length === 2) {
       const row = document.createElement('div');
       row.className = 'theme-part-reset';
@@ -9108,7 +9109,6 @@ function boardThemeGroup(node) {
       }
       kids.push(row);
     }
-    kids.push(btn);
   }
   return kids.length ? group('Тема экрана', kids) : null;
 }

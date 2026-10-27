@@ -49,6 +49,10 @@ test('круг78: последняя часть — снимается вся т
   assert.equal(themePartResetOps(docWith(null).nodes.B, 'colors'), null);
   assert.equal(themePartResetOps(docWith({ colors: {}, type: { body: { fontWeight: 500 } } }).nodes.B, 'colors'), null, 'пустая часть — не своя');
   assert.equal(themePartResetOps(null, 'colors'), null);
+  // критик: неверная тема (так её и не рисует инспектор) — не «часть», правки нет
+  const bad = { id: 'X', type: 'frame', name: 'Плохой', theme: { colors: { accent: 'не цвет' }, type: { title: { font: 'Prata' } } } };
+  assert.equal(core.boardTheme(bad), null);
+  assert.equal(themePartResetOps(bad, 'type'), null);
 });
 
 test('круг78: после снятия одной части — отмена возвращает тему целиком', () => {
@@ -98,6 +102,7 @@ test('круг78: в браузере — «Цвета — как в докум�
     await page.locator('#inspector details.theme-styles summary').click();
     await page.locator('#inspector .theme-style-row[data-style="body"] select.theme-style-weight').selectOption('500');
     await page.locator('#inspector .theme-part-reset button[data-part="colors"]').waitFor({ timeout: 5000 });
+    assert.equal(await page.locator('#inspector .theme-part-reset').evaluate((r) => !!r.previousElementSibling && /Вернуть общее оформление/.test(r.previousElementSibling.textContent)), true, 'кнопки частей — под общей');
     await page.locator('#inspector .theme-part-reset button[data-part="colors"]').click();
     await page.waitForFunction(() => document.querySelectorAll('#inspector .theme-color-row.own').length === 0, null, { timeout: 5000 });
     assert.equal(await page.locator('#inspector .theme-style-row[data-style="body"]').evaluate((e) => e.classList.contains('own')), true, 'шрифты остались');
