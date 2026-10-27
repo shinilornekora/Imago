@@ -10824,6 +10824,43 @@ export function failureHint(said) {
  * становилась и сводка, причём молча. Отдельная доска оформлением перекрасить нельзя вовсе;
  * раз так, человек обязан узнать, что изменилось всё.
  */
+/**
+ * Круг 77 (SPEC §15.14): строка стадии «materialize» темы — чьё оформление меняется: документа, экрана
+ * «X», экранов «A», «B», экранов со словом «…», всех экранов, кроме «…». Только слова: экраны не ищутся.
+ */
+export function themeStageLine(data, doc, scope) {
+  const q = (x) => `«${cutText(String(x).trim().replace(/[«»"]/g, ''), 30)}»`;
+  const list = (xs) => (xs.length > 3 ? `${xs.slice(0, 3).map(q).join(', ')} и ещё ${xs.length - 3}` : xs.map(q).join(', '));
+  const strs = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()) : []);
+  const d = data && typeof data === 'object' ? data : {};
+  const like = typeof d.likeBoard === 'string' && d.likeBoard.trim() ? d.likeBoard : '';
+  const boardish = d.board === true || !!like || hasExcept(d);
+  if (!boardish) return 'Меняю оформление документа';
+  const names = [...new Set([...(typeof d.boardName === 'string' && d.boardName.trim() ? [d.boardName] : []), ...strs(d.boardNames)])];
+  const group = typeof d.boardGroup === 'string' && d.boardGroup.trim() ? d.boardGroup : '';
+  const except = strs(d.exceptBoards);
+  const verb = like ? 'Переношу оформление' : 'Меняю оформление';
+  const from = like ? ` с экрана ${q(like)}` : '';
+  const to = like ? ' на ' : ' ';
+  let who;
+  if (group) who = `экранов со словом ${q(group)}`;
+  else if (names.length > 1) who = `экранов ${list(names)}`;
+  else if (names.length === 1) who = `экрана ${q(names[0])}`;
+  else if (except.length) who = 'всех экранов';
+  else {
+    const ids = scope && Array.isArray(scope.ids) ? scope.ids : [];
+    const boards = [...new Set(ids.map((id) => artboardOf(doc, id)).filter(Boolean))];
+    const label = (id) => strOf(nodeOf(doc, id) && nodeOf(doc, id).name) || 'Доска';
+    who = boards.length > 1 ? `экранов ${list(boards.map(label))}` : boards.length === 1 ? `экрана ${q(label(boards[0]))}` : 'экрана';
+  }
+  const but = except.length ? `, кроме ${list(except)}` : '';
+  // падеж меняется у слова «экран», имена — как названы (в кавычках)
+  const as = (forms) => who.replace(/^(?:экрана|экранов|всех экранов)(?=\s|$)/u, (m) => forms[m]);
+  if (like) return `${verb}${from}${to}${as({ 'экрана': 'экран', 'экранов': 'экраны', 'всех экранов': 'все экраны' })}${but}`;
+  if (d.reset === true) return `Возвращаю ${as({ 'экрана': 'экрану', 'экранов': 'экранам', 'всех экранов': 'всем экранам' })}${but}${but ? ',' : ''} общее оформление`;
+  return `${verb} ${who}${but}`;
+}
+
 /** Круг 74: в ответе тематизатора есть «все, кроме …». */
 const hasExcept = (theme) => (Array.isArray(theme && theme.exceptBoards) && theme.exceptBoards.some((x) => typeof x === 'string' && x.trim()))
   // круг 75: и «все экраны оплаты» (boardGroup)
@@ -13810,7 +13847,7 @@ async function runCommandCore(options = {}) {
     data = dressed(await fillArt(data));
     // Нарушения, которые уже были в документе (ручные правки пользователя), агенту не вменяем.
     const baseline = baselineViolations(baseList);
-    emit('materialize', intent === 'theme' ? 'Меняю оформление документа' : intent === 'create' ? 'Ставлю новые слои на место'
+    emit('materialize', intent === 'theme' ? themeStageLine(data, doc, scope) : intent === 'create' ? 'Ставлю новые слои на место'
       : intent === 'illustration' ? 'Собираю детали рисунка' : 'Нахожу слои, которые надо поменять');
     let attempt = materialize({ engine, doc, data, intent, scope, placement, persona, baseline, geo: geoNow, group, said: utterance });
     let repaired = false;
