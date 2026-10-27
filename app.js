@@ -4108,7 +4108,12 @@ function commit(opsList, label, who = 'human', extra = {}) {
   unpeekVariant();
   if (!opsList || !opsList.length) return { ok: true, empty: true };
   // Круг 22: в серверном режиме транзакция уходит в реплику, а не в state.history + scheduleSave
-  if (server) return serverCommit(opsList, label, who, extra);
+  if (server) {
+    const before = state.doc;
+    const r = serverCommit(opsList, label, who, extra);
+    if (r && r.ok !== false) offerStaleHex(before, extra);
+    return r;
+  }
   const prevDoc = state.doc;
   const inverse = invertOps(state.doc, opsList);
   const res = applyOps(state.doc, opsList);
@@ -4145,8 +4150,35 @@ function commit(opsList, label, who = 'human', extra = {}) {
   if (who === 'human' && !extra.quiet) announceHuman(tx, diff);
   scheduleSave();
   refreshSheet();
+  offerStaleHex(prevDoc, extra);
   return { ok: true, tx, diff };
 }
+
+/**
+ * Круг 89 (SPEC §15.25): правка сменила цвет палитры, а слои с кодом прежнего значения остались как были —
+ * сказать об этом и предложить привязать их (тогда они пойдут за новым цветом). Замена документа целиком,
+ * служебные правки и сама привязка — мимо.
+ */
+function offerStaleHex(prevDoc, extra = {}) {
+  if (extra.system || extra.doc || extra.noStale || prevDoc === state.doc) return;
+  let stale = null;
+  try { stale = SHELL.staleHexRefs(prevDoc, state.doc); } catch { stale = null; }
+  if (!stale) return;
+  const words = SHELL.staleHexPhrase(stale, SWATCH_NAMES);
+  // тостом, не сообщением дока: у правки агента док занят её итогом
+  if (staleHexToast) staleHexToast.remove();
+  staleHexToast = toastAction(`${words.text}. Привязать их к палитре — и они пойдут за новым цветом.`, 'Перекрасить и их', () => {
+    staleHexToast = null;
+    const again = SHELL.staleHexRefs(prevDoc, state.doc);
+    if (again) {
+      const label = SHELL.staleHexPhrase(again, SWATCH_NAMES).label;
+      const res = commit(again.ops, label, 'human', { quiet: true, noStale: true });
+      if (res && res.ok !== false) toast(label, 'plain', 5000);
+    } else toast('Перекрашивать уже нечего — цвет вернули или слои поменяли.', 'plain', 5000);
+  }, 12000);
+  staleHexToast.classList.add('stale-hex');
+}
+let staleHexToast = null;
 
 /** С какого числа затронутых узлов ручная правка считается крупной. */
 const LOUD_NODES = 4;
