@@ -4905,6 +4905,8 @@ function hexRefsOf(doc, board, visited = []) {
     const node = doc.nodes[id];
     if (!node) continue;
     visited.push(node);
+    // круг 95: рисунок (role 'illustration') — цвета художника, не роли палитры: белок глаза не темнеет с темой
+    if (node.role === 'illustration') continue;
     // контуры вектора — свои заливка и обводка (так их пишут пипетки контуров)
     if (Array.isArray(node.paths)) node.paths.forEach((p, i) => { if (isObj(p)) { look(node, `paths.${i}.fill`, p.fill); look(node, `paths.${i}.stroke`, p.stroke); } });
     look(node, 'fill', node.fill);
