@@ -4604,3 +4604,40 @@ export function fontChoices() {
   const kinds = [['sans', 'Гротески'], ['serif', 'Антиквы'], ['slab', 'Брусковые'], ['display', 'Акцидентные'], ['script', 'Рукописные']];
   return kinds.map(([k, title]) => ({ title, families: FONT_CATALOG.filter((f) => f.kind === k).map((f) => f.family) })).filter((g) => g.families.length);
 }
+
+/* ------------------------- круг 70: тема с другого экрана ------------------------- */
+
+/**
+ * Круг 70 (SPEC §15.8): экраны, чью тему можно взять для этой доски, — доски страницы с годной своей
+ * темой, кроме самой доски и экранов с той же темой. @returns {{id: string, name: string}[]}
+ */
+export function themeSources(doc, board) {
+  if (!doc || !board) return [];
+  const root = doc.nodes && doc.nodes[doc.root];
+  const mine = JSON.stringify((CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || null);
+  const out = [];
+  for (const id of (root && Array.isArray(root.children) ? root.children : [])) {
+    const n = doc.nodes[id];
+    if (!n || id === board.id || n.type !== 'frame' || n.role === 'library') continue;
+    const t = CORE_NS.boardTheme && CORE_NS.boardTheme(n);
+    if (!t || JSON.stringify(t) === mine) continue;
+    out.push({ id, name: String(n.name || 'Доска').slice(0, 60) });
+  }
+  return out;
+}
+
+/**
+ * Круг 70 (SPEC §15.8): тема экрана `fromId` — этой доске, одной операцией `set theme` (копия:
+ * дальше темы живут порознь). Источник без годной темы, та же доска или та же тема — null.
+ * @returns {{ops: object[], label: string}|null}
+ */
+export function copyThemeOps(doc, board, fromId) {
+  const src = doc && doc.nodes && doc.nodes[fromId];
+  if (!board || !board.id || !src || src.id === board.id) return null;
+  const t = CORE_NS.boardTheme && CORE_NS.boardTheme(src);
+  if (!t) return null;
+  const mine = CORE_NS.boardTheme && CORE_NS.boardTheme(board);
+  if (mine && JSON.stringify(mine) === JSON.stringify(t)) return null;
+  const name = (n) => `«${String(n.name || 'Доска').slice(0, 40)}»`;
+  return { ops: [OPS.set(board.id, 'theme', JSON.parse(JSON.stringify(t)))], label: `Экран ${name(board)} — в теме экрана ${name(src)}` };
+}
