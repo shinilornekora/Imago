@@ -3020,7 +3020,7 @@ function expandDoc(doc) {
   let used = 0;
   const skipped = [];
   const owned = [];   // круг 54: [id, раскрытие, форма, …] — кандидаты в образцы
-  let fresh = 0;      // круг 60: узлов раскрыто заново (мимо expandCache)
+  let fresh = 0;      // круг 61: узлов раскрыто заново (мимо expandCache)
   const all = [];     // круг 54: [id, раскрытие, …] — все записанные в out, для поиска коллизий id
   const skip = (inst) => {
     skipped.push(inst.id);
@@ -7064,7 +7064,7 @@ function copyPlaced(ctx, sp, dx, dy) {
     ctx.seq.push(id);
     if (ctx.seq !== ctx.order && ctx.doc.nodes[id]) ctx.order.push(id);
     const s2 = ctx.prevSpan.get(id);
-    // круг 60: карта отрезков — прежняя, правится на месте; на том же месте seq (base 0) запись уже верна
+    // круг 61: карта отрезков — прежняя, правится на месте; на том же месте seq (base 0) запись уже верна
     if (s2 && base) ctx.span.set(id, [s2[0] + base, s2[1] + base]);
   }
   return true;
@@ -7096,7 +7096,7 @@ function solveWith(doc, opts, seed, pre) {
     stack: new Set(),   // узлы, которые меряются прямо сейчас — ловит циклы
     placed: new Set(),  // уже размещённые — ловит узел с двумя родителями
     rects: {}, lines: {}, order: [],
-    // круг 51: id → [начало, конец) отрезка поддерева в seq. Круг 60: по месту правки — прежняя карта,
+    // круг 51: id → [начало, конец) отрезка поддерева в seq. Круг 61: по месту правки — прежняя карта,
     // правится на месте (память прежней геометрии уже отдана): у перенесённого без сдвига поддерева
     // записи те же. Устаревшие записи (удалённые, скрытые узлы) не читаются: перенос требует
     // прямоугольника узла в прежней геометрии, а он есть только у размещённых в прошлый раз
@@ -7196,7 +7196,7 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   if (!memo || memo.fn !== (options.measureText || null) || memo.epoch !== measureEpochValue) {
     return solve(nextDoc, { ...options, incremental: true });
   }
-  // круг 60: правка вне экземпляров и библиотеки — раскрытие то же, общая карта правится на месте
+  // круг 61: правка вне экземпляров и библиотеки — раскрытие то же, общая карта правится на месте
   const quick = quickAfter(memo, memo.doc, nextDoc);
   if (quick) {
     const half = Math.floor(quick.size / 2);
@@ -7216,7 +7216,7 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
   // коллизия id раскрытия с узлом документа (до или после правки): отрезки поддеревьев не те — полная
   // раскрытие у предела глубины (до или после): обрезка зависит от глубины — тоже полная
   if (ex.collide || memo.collide || ex.deep || memo.deep) return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes });
-  // круг 60: раскрыто заново больше половины всех узлов (правка мастера) — грязного заведомо больше
+  // круг 61: раскрыто заново больше половины всех узлов (правка мастера) — грязного заведомо больше
   // половины: сразу полная, без сравнения по всей общей карте
   if (ex.count && ex.fresh * 2 > ex.used + Object.keys(nextDoc.nodes).length) {
     return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes });
@@ -7247,7 +7247,7 @@ function solveNext(prevGeo, nextDoc, opts) {
 }
 
 /**
- * Круг 60: быстрый путь solveAfter для документа с экземплярами. Если правка не тронула ни одного
+ * Круг 61: быстрый путь solveAfter для документа с экземплярами. Если правка не тронула ни одного
  * экземпляра, ни узла библиотеки (мастеров), ни родителя какого-либо узла, а новые id не совпали с
  * раскрытыми, раскрытие нового документа — то же самое (те же объекты, формы, флаги): expandDoc не
  * зовётся, общая карта «документ + раскрытые» не собирается заново, а правится на месте (она —
