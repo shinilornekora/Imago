@@ -28,7 +28,7 @@ test('круг81: метка темы — цвет фона (или акцент
   let doc = docWith({ colors: { canvas: '#101418', accent: '#ff4f6d', text: '#e8eaf0' }, type: { title: { font: 'Prata' } } });
   let b = boardThemeBadge(doc, doc.nodes.B);
   assert.deepEqual([b.swatch, b.colors, b.styles, !!b.broken], ['#101418', 3, 1, false]);
-  assert.equal(b.title, 'Своя тема экрана: 3 цвета, шрифты 1 стиля — в инспекторе, «Тема экрана»');
+  assert.equal(b.title, 'Своя тема экрана: 3 цвета, шрифты 1 стиля — щелчок откроет её в инспекторе');
   doc = docWith({ colors: { accent: '#ff4f6d' } });
   assert.equal(boardThemeBadge(doc, doc.nodes.B).swatch, '#ff4f6d');
   doc = docWith({ type: { body: { fontWeight: 500 }, title: { font: 'Prata' } } });

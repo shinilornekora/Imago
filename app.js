@@ -6808,6 +6808,8 @@ function renderLayers() {
       t.title = themed.title;
       t.setAttribute('role', 'img');
       t.setAttribute('aria-label', themed.title);
+      // круг 82 (§15.18): щелчок по метке — экран выделен, его тема раскрыта и видна в инспекторе
+      t.addEventListener('click', (e) => { e.stopPropagation(); openBoardTheme(r.id, themed); });
       row.dataset.theme = 'on';
       row.appendChild(t);
     }
@@ -8863,6 +8865,17 @@ function tokenType(token, node) {
  * видит доска; правка ложится в тему доски (свой цвет только у этого экрана), «как в документе» —
  * снимает его с темы. У доски без темы список свёрнут.
  */
+/** Круг 82 (§15.18): выделить экран и показать его «Тему экрана» — раскрыть список своего, прокрутить к нему. */
+function openBoardTheme(id, badge) {
+  if (badge && !badge.broken) (badge.colors ? themeColorsOpen : themeStylesOpen).set(id, true);
+  state.railFocus = id;
+  setSelection([id]);
+  focusLayerRow(id);
+  requestAnimationFrame(() => {
+    const g = dom.inspector && dom.inspector.querySelector('[data-group="theme"]');
+    if (g) g.scrollIntoView({ block: 'nearest' });
+  });
+}
 const themeColorsOpen = new Map();   // доска → раскрыт ли список (выбор человека переживает перерисовку)
 const themeStylesOpen = new Map();   // круг 73: то же для «Шрифты по стилям»
 function boardThemeGroup(node) {
@@ -9128,7 +9141,10 @@ function boardThemeGroup(node) {
       kids.push(row);
     }
   }
-  return kids.length ? group('Тема экрана', kids) : null;
+  if (!kids.length) return null;
+  const g = group('Тема экрана', kids);
+  g.dataset.group = 'theme';   // круг 82: сюда ведёт щелчок по метке темы в списке слоёв
+  return g;
 }
 
 function group(title, children) {
