@@ -8284,7 +8284,25 @@ function listNames(doc, ids) {
  * области — правка ушла в «Показатель · Задач закрыто»»: одно и то же дважды и ни слова
  * о том, на каком экране. Теперь называем экран.
  */
-function outsideNote(doc, scope, id, purpose) {
+/**
+ * Круг 91 (ОТЧЁТ §3, п.4): экран, названный в команде по имени, — не ошибка модели, а просьба человека.
+ * «На экране «Оплата» сделай заголовок красным» при активном «Итоге» давало «Слой … найден вне активной
+ * области» — лишнее: человек сам туда и послал. Названным считаем экран, все слова имени которого (от трёх
+ * букв, по основе) есть в команде: «Оплата картой» — нужны оба слова, «на экране оплаты» — падеж не мешает.
+ */
+function boardNamedIn(doc, boardId, said) {
+  const text = String(said == null ? '' : said).toLowerCase();
+  const node = boardId ? nodeOf(doc, boardId) : null;
+  if (!text || !node || node.type !== 'frame') return false;
+  const stems = (str) => (String(str || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).map((w) => stemRu(w)).filter((w) => w.length >= 3);
+  const want = stems(node.name);
+  if (!want.length) return false;
+  const have = new Set(stems(text));
+  return want.every((w) => have.has(w));
+}
+
+function outsideNote(doc, scope, id, purpose, said = '') {
+  if (said && boardNamedIn(doc, artboardOf(doc, id), said)) return '';
   const where = scope && scope.kind === 'selection' ? 'вне выделения' : 'вне активной области';
   const who = nameOrId(doc, id);
   // Круг 5, п.4: при копировании и переносе «правка ушла туда» — прямая ложь: на «повтори шапку
@@ -8641,7 +8659,7 @@ export function resolveRef(engine, doc, ref, scope, warn, opts = {}) {
         : `правлю ${pick}. Скажите «во всех…», чтобы поправить сразу все`;
     warn(`Под «${raw}» подходит слоёв — ${got.ids.length} (${names}${more}); ${what}.`);
   }
-  if (warn && !got.inScope) { const out = outsideNote(doc, scope, chosen, opts.purpose); if (out) warn(out); }
+  if (warn && !got.inScope) { const out = outsideNote(doc, scope, chosen, opts.purpose, opts.said); if (out) warn(out); }
   return chosen;
 }
 
@@ -8679,7 +8697,7 @@ export function resolveRefs(engine, doc, ref, scope, warn, opts = {}) {
           const tail = family.length > 5 ? ` и ещё ${family.length - 5}` : '';
           warn(`Под «${String(ref).trim()}» нашёлся один слой, а просили про все: рядом такие же —`
             + ` правлю все ${family.length} (${names}${tail}). Нужен один — назовите его или выделите`);
-          if (!got.inScope) { const out = outsideNote(doc, scope, family[0], opts.purpose); if (out) warn(out); }
+          if (!got.inScope) { const out = outsideNote(doc, scope, family[0], opts.purpose, opts.said); if (out) warn(out); }
         }
         return family;
       }
@@ -8690,7 +8708,7 @@ export function resolveRefs(engine, doc, ref, scope, warn, opts = {}) {
       const tail = got.ids.length > 5 ? ` и ещё ${got.ids.length - 5}` : '';
       warn(`Под «${String(ref).trim()}» подходит слоёв — ${got.ids.length}: правлю все (${names}${tail})`);
     }
-    if (warn && !got.inScope) { const out = outsideNote(doc, scope, got.ids[0], opts.purpose); if (out) warn(out); }
+    if (warn && !got.inScope) { const out = outsideNote(doc, scope, got.ids[0], opts.purpose, opts.said); if (out) warn(out); }
     return got.ids;
   }
   /**
@@ -8713,7 +8731,7 @@ export function resolveRefs(engine, doc, ref, scope, warn, opts = {}) {
           warn(`Под «${String(ref).trim()}» подходит слоёв — ${got.ids.length},`
             + ` но в команде назван вмещающий слой — правлю только ${nameOrId(doc, one)}.`
             + ' Нужны все — скажите «во всех…»');
-          if (!got.inScope) { const out = outsideNote(doc, scope, one, opts.purpose); if (out) warn(out); }
+          if (!got.inScope) { const out = outsideNote(doc, scope, one, opts.purpose, opts.said); if (out) warn(out); }
         }
         return [one];
       }
@@ -8723,7 +8741,7 @@ export function resolveRefs(engine, doc, ref, scope, warn, opts = {}) {
         const tail = got.ids.length > 5 ? ` и ещё ${got.ids.length - 5}` : '';
         warn(`Под «${String(ref).trim()}» подходит слоёв — ${got.ids.length}, и это одна колонка одного списка`
           + ` (${names}${tail}): оформление поправил у всех. Нужен один — выделите его и повторите`);
-        if (!got.inScope) { const out = outsideNote(doc, scope, got.ids[0], opts.purpose); if (out) warn(out); }
+        if (!got.inScope) { const out = outsideNote(doc, scope, got.ids[0], opts.purpose, opts.said); if (out) warn(out); }
       }
       return got.ids;
     }
