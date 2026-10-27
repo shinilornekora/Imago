@@ -8851,12 +8851,18 @@ function boardThemeGroup(node) {
   const t = CORE.boardTheme(node);
   const kids = [];
   const rows = SHELL.boardColorRows(state.doc, node);
+  const fontRows = SHELL.boardFontRows(state.doc, node);
   if (t) {
-    // цвета — в списке ниже; строкой — только шрифты (и цвета, если списка нет)
+    // цвета и шрифты — в списках ниже; строкой — только то, чему списка нет
     const bits = [];
     if (!rows.length) for (const [k, v] of Object.entries(t.colors || {})) bits.push(`${SWATCH_NAMES[k] || k} ${String(v).toUpperCase()}`);
-    for (const [k, v] of Object.entries(t.type || {})) bits.push(`${k} — ${[v.font, v.fontWeight].filter(Boolean).join(' ')}`);
-    if (bits.length || !t.colors) {
+    // шрифты: строкой — то, что выбором не показано (моно, стиль вне ролей, только насыщенность)
+    const covered = new Set(fontRows.flatMap((r) => r.styles));
+    for (const [k, v] of Object.entries(t.type || {})) {
+      const shown = covered.has(k) ? [v.fontWeight] : [v.font, v.fontWeight];
+      if (shown.some(Boolean)) bits.push(`${k} — ${shown.filter(Boolean).join(' ')}`);
+    }
+    if (bits.length || (!t.colors && !t.type)) {
       const line = document.createElement('div');
       line.className = 'note';
       line.textContent = bits.length ? `Своё у экрана: ${bits.slice(0, 4).join(', ')}${bits.length > 4 ? ` и ещё ${bits.length - 4}` : ''}` : 'Тема пустая';
@@ -8935,6 +8941,50 @@ function boardThemeGroup(node) {
       for (const row of list) { placed.add(row.name); d.appendChild(rowEl(row)); }
     }
     kids.push(d);
+  }
+  // круг 68 (§15.7): шрифт заголовков и текста — только у этого экрана
+  for (const fr of fontRows) {
+    const line = document.createElement('label');
+    line.className = 'theme-font-row' + (fr.own ? ' own' : '');
+    line.dataset.role = fr.role;
+    const name = document.createElement('span');
+    name.className = 'theme-color-name';
+    name.textContent = fr.title.replace(/^Шрифт /, '');
+    if (fr.own) {
+      const mark = document.createElement('small');
+      mark.className = 'theme-color-mark';
+      mark.textContent = 'своё';
+      name.appendChild(mark);
+    }
+    const sel = document.createElement('select');
+    sel.className = 'field theme-font-select';
+    const opt = (value, text, o = {}) => { const e = document.createElement('option'); e.value = value; e.textContent = text; Object.assign(e, o); return e; };
+    sel.appendChild(opt('', `как в документе${fr.docFont ? ` — ${fr.docFont}` : ''}`));
+    if (!fr.font) sel.appendChild(opt('*', 'у стилей разные', { disabled: true }));
+    for (const g of SHELL.fontChoices()) {
+      const og = document.createElement('optgroup');
+      og.label = g.title;
+      for (const f of g.families) og.appendChild(opt(f, f));
+      sel.appendChild(og);
+    }
+    // шрифт темы — как он записан в наборе; вне набора — отдельной строкой, чтобы «как в документе» сработало
+    const inSet = fr.font && catalogFont(fr.font) ? catalogFont(fr.font).family : null;
+    if (fr.own && fr.font && !inSet) sel.insertBefore(opt('!', `${fr.font} — нет в наборе`, { disabled: true }), sel.children[1] || null);
+    sel.value = !fr.font ? '*' : fr.own ? (inSet || '!') : '';
+    sel.setAttribute('aria-label', `${fr.title} экрана${fr.own ? ' (своё у экрана)' : ''}`);
+    sel.addEventListener('change', () => {
+      const cur = state.doc.nodes[node.id];
+      const r = cur ? SHELL.themeFontOps(state.doc, cur, fr.role, sel.value || null) : null;
+      if (r) commit(r.ops, r.label);
+    });
+    line.append(name, sel);
+    kids.push(line);
+  }
+  if (fontRows.length && settings.webFonts === false) {
+    const note = document.createElement('div');
+    note.className = 'note';
+    note.textContent = 'Шрифты из сети выключены — свой шрифт экрана запишется, но доска нарисует его запасным.';
+    kids.push(note);
   }
   if (t) {
     const btn = document.createElement('button');

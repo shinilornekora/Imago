@@ -12214,7 +12214,7 @@ function tokenSize(doc, token) {
  * 'text' — прочее, null — моно (цифры и код не трогаем). heading (18) — текстом, жирным: акцидентный
  * шрифт на мелком подзаголовке в две строки читается плохо.
  */
-function textRole(doc, token, ownSize) {
+export function textRole(doc, token, ownSize) {
   const name = strOf(token);
   if (/mono/i.test(name)) return null;
   const size = Math.max(tokenSize(doc, name), typeof ownSize === 'number' ? ownSize : 0);
