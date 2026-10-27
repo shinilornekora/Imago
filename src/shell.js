@@ -4237,7 +4237,8 @@ export function artSummary(direction, critique, opts = {}) {
  * лишние не кладутся (их число — в `dropped`). Одна картинка — как imageInsertOps без выделения.
  * @param {object} doc
  * @param {{images: {src: string, width: number, height: number, fileName?: string}[], at: {x: number, y: number},
- *   ids: {board: string, images: string[], rows?: string[]}, boards?: number}} o
+ *   ids: {board: string, images: string[], rows?: string[]}, boards?: number, name?: string}} o — name доски
+ *   (по умолчанию «Образец»; круг 63: брошенные на холст — «Картинки»)
  * @returns {{ops: object[], select: string[], into: null, dropped: number}|{error: string}}
  */
 export const MOODBOARD = { cell: 240, tall: 1.5, perRow: 2, gap: 12, pad: 12, max: 4 };
@@ -4262,7 +4263,7 @@ export function moodboardOps(doc, o) {
   const p = MOODBOARD.pad;
   const cols = Math.min(MOODBOARD.perRow, made.length);
   const board = {
-    id: o.ids.board, type: 'frame', name: 'Образец', parent: doc.root, children: [],
+    id: o.ids.board, type: 'frame', name: typeof o.name === 'string' && o.name.trim() ? o.name.trim().slice(0, 60) : 'Образец', parent: doc.root, children: [],
     pos: { x: Math.round(Number(o.at && o.at.x) || 0), y: Math.round(Number(o.at && o.at.y) || 0) },
     size: { w: { mode: 'fixed', value: cols * MOODBOARD.cell + (cols - 1) * MOODBOARD.gap + 2 * p }, h: { mode: 'hug' } },
     layout: { mode: 'column', gap: MOODBOARD.gap, padding: { t: p, r: p, b: p, l: p }, align: 'start', justify: 'start', wrap: false },
