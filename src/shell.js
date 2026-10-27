@@ -1860,6 +1860,9 @@ const AB_KIND = '(?:доск[а-яё]*|артборд[а-яё]*|экран[а-я
    оформление своё (метка §15.17), выделяются разом; без этого RE_PICK искал бы слой с именем «экраны…». */
 const RE_THEMED_PICK = new RegExp('^(?:выдели(?:ть|те)?|выбери(?:те)?|покажи(?:те)?|найди(?:те)?|какие)\\s+(?:вс[её]\\s+)?(?:экраны?|доск[аи]|артборды?|макеты?)\\s+'
   + '(?:со\\s+сво(?:ей|им|ими)\\s+(?:тем(?:ой|ами)|оформлением|цветами)|в\\s+сво(?:ей|их)\\s+тем(?:е|ах)|с\\s+(?:собственн|отдельн)\\p{L}*\\s+(?:тем(?:ой|ами)|оформлением))$', 'u');
+/* Круг 86 (SPEC §15.22): «привяжи цвета экрана к палитре» — то же, что кнопка §15.21, словами. */
+const RE_BIND_COLORS = new RegExp('^(?:привяжи(?:те)?|привязать|переведи(?:те)?|перевести)\\s+(?:все\\s+)?(?:коды\\s+)?цвет(?:а|ов)?'
+  + '(?:\\s+(?:этого\\s+)?(?:экрана|доски|макета))?\\s+(?:к|в|на)\\s+(?:(?:палитр[еуы]|токен(?:ы|ам))(?:\\s+(?:документа|палитры))?|цвет(?:а|ам)\\s+(?:документа|палитры))$', 'u');
 const RE_THEMED_ASK = /^у\s+каких\s+(?:экранов|досок|артбордов|макетов)\s+сво(?:я|и)\s+(?:тема|темы|оформление)$/u;
 const RE_PICK = /^(?:выдели|выделить|выделите|выбери|выбрать|укажи|отметь)\s+(?:слой\s+|узел\s+|элемент\s+)?(.+)$/;
 /* Круг 18, п.5. Раз интерфейс зовёт их досками, сказать «новая доска» человек вправе
@@ -2000,6 +2003,7 @@ export function shellIntent(said, ctx = {}) {
 
   /* — круг 83: экраны со своей темой — */
   if (RE_THEMED_PICK.test(t) || RE_THEMED_ASK.test(t)) return themedBoardsIntent(doc);
+  if (RE_BIND_COLORS.test(t)) return { kind: 'bind-colors' };
 
   /* — выделение по имени — */
   if (/^(сними выделение|снять выделение|убери выделение|ничего не выделяй)$/.test(t)) return { kind: 'select', ids: [] };
@@ -2136,6 +2140,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'direction', group: 'Правка', title: 'Направление', hint: 'Дети рамки — строкой или колонкой', slash: ['направление', 'поток', 'direction'], args: [{ name: 'как', kind: 'enum', values: ['строка', 'колонка'] }], example: '/направление строка', phrases: ['расположи в строку', 'в колонку'], edit: true, needs: 'selection' },
   { id: 'gap-more', group: 'Правка', title: 'Зазор больше', hint: 'Зазор между детьми рамки — на шаг шкалы отступов больше', slash: ['зазор больше', 'зазор+', 'gap+'], phrases: ['увеличь зазор', 'зазор больше'], edit: true, needs: 'selection' },
   { id: 'gap-less', group: 'Правка', title: 'Зазор меньше', hint: 'Зазор между детьми рамки — на шаг шкалы отступов меньше', slash: ['зазор меньше', 'зазор-', 'gap-'], phrases: ['уменьши зазор', 'зазор меньше'], edit: true, needs: 'selection' },
+  { id: 'bind-colors', group: 'Правка', title: 'Привязать цвета экрана к палитре', hint: 'Цвета кодом, равные цветам палитры, — к токенам: тема их перекрасит', slash: ['привязать цвета', 'bind colors'], phrases: ['привяжи цвета к палитре', 'переведи цвета экрана в токены'], edit: true },
 
   /* — Доски — */
   { id: 'board', group: 'Доски', title: 'К доске', hint: 'Доска по номеру или имени — с ней работает агент', slash: ['доска', 'board'], args: [{ name: 'номер или имя', kind: 'text' }], example: '/доска 2', phrases: ['покажи второй экран', 'открой маршрут дня'] },
@@ -2284,6 +2289,7 @@ export const ALIGN_HOW_WORDS = Object.freeze({ left: 'влево', center: 'по
 /** Намерение по записи таблицы без аргументов (id → то, что исполняет оболочка). */
 const PLAIN_INTENTS = {
   'zoom-in': () => ({ kind: 'zoom', by: 1.25 }),
+  'bind-colors': () => ({ kind: 'bind-colors' }),
   'zoom-out': () => ({ kind: 'zoom', by: 1 / 1.25 }),
   'zoom-reset': () => ({ kind: 'zoom', to: 1 }),
   fit: () => ({ kind: 'fit' }),
@@ -2558,6 +2564,7 @@ export function commandIdOf(intent) {
     case 'select-all': return 'select-all';
     case 'select': return intent.themed ? 'select-themed' : (intent.ids || []).length || intent.name ? 'select-name' : 'deselect';
     case 'select-name': return 'select-name';
+    case 'bind-colors': return 'bind-colors';
     case 'select-rel': return { parent: 'select-parent', children: 'select-children', next: 'select-next', prev: 'select-prev' }[intent.rel] || null;
     case 'delete': return 'delete';
     case 'duplicate': return 'duplicate';
