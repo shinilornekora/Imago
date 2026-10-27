@@ -4717,6 +4717,28 @@ export function themeStyleFontOps(doc, board, style, change = {}) {
   return { ops, label };
 }
 
+/* ------------------------- круг 78: снять часть темы ------------------------- */
+
+/**
+ * Круг 78 (SPEC §15.15): вернуть экрану цвета (`part:'colors'`) или шрифты (`part:'type'`) документа,
+ * не трогая другую часть своей темы. Одна операция: `set theme.<part>` пустым, а если другой части
+ * нет — `set theme` пустым. Части нет — null.
+ * @returns {{ops: object[], label: string}|null}
+ */
+export function themePartResetOps(board, part) {
+  if (!board || !board.id || (part !== 'colors' && part !== 'type')) return null;
+  const theme = (CORE_NS.boardTheme && CORE_NS.boardTheme(board)) || (isObj(board.theme) ? board.theme : null);
+  if (!theme || !isObj(theme[part]) || !Object.keys(theme[part]).length) return null;
+  const other = part === 'colors' ? 'type' : 'colors';
+  const rest = isObj(theme[other]) && Object.keys(theme[other]).length;
+  const screen = `«${String(board.name || 'Доска').slice(0, 40)}»`;
+  if (!rest) return { ops: [OPS.set(board.id, 'theme', undefined)], label: `Экран ${screen} вернулся к оформлению документа` };
+  return {
+    ops: [OPS.set(board.id, `theme.${part}`, undefined)],
+    label: part === 'colors' ? `Экран ${screen}: цвета — как в документе` : `Экран ${screen}: шрифты — как в документе`,
+  };
+}
+
 /* ------------------------- круг 70: тема с другого экрана ------------------------- */
 
 /** Тема для сравнения: ключи по порядку (тема {colors,type} и {type,colors} — одна и та же). */

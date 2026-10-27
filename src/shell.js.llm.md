@@ -26,7 +26,7 @@
 | Соло-хранилище | 3804–4168 | `SOLO_*` ключи localStorage/IndexedDB, `createSoloStore`, `openSoloStore` |
 | Арт-направление | 4168–4245 | `ART_ROLE_WORDS`, `artSummary` (§14.5, §17) |
 | Картинки | 4245–4430 | `MOODBOARD`, `moodboardOps`, `moodboardLeftover` (§21.6–§21.7), `REFERENCE_WORDS`, `referenceCommandText` (§21.5), `clipboardTextIsLabel`, `IMAGE_INSERT`, `imageInsertOps` (§21) |
-| Тема доски | 4430–конец | `boardColorRows`, `themeColorOps` (§15.6), `boardFontRows`, `themeFontOps`, `fontChoices` (§15.7), `boardStyleFontRows`, `themeStyleFontOps` (§15.10; подобранная насыщенность — `roleWeight`, общая с `themeFontOps`), `themeSources`, `copyThemeOps` (§15.8) |
+| Тема доски | 4430–конец | `boardColorRows`, `themeColorOps` (§15.6), `boardFontRows`, `themeFontOps`, `fontChoices` (§15.7), `boardStyleFontRows`, `themeStyleFontOps` (§15.10; подобранная насыщенность — `roleWeight`, общая с `themeFontOps`), `themePartResetOps` (снять одну часть темы; последняя — вся тема, §15.15), `themeSources`, `copyThemeOps` (§15.8) |
 
 ## Инварианты
 - Функции правок не меняют документ: `(doc, ids, …) → {ops, words, ids?|id?}` или `{error}` словами; правка уходит обычной транзакцией, отмена — одним шагом.
