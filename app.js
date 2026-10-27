@@ -9132,7 +9132,25 @@ function boardThemeGroup(node) {
       const r = cur ? SHELL.bindBoardColorsOps(state.doc, cur) : null;
       if (r) commit(r.ops, r.label);
     });
-    box.append(note, bind);
+    const acts = document.createElement('div');
+    acts.className = 'theme-hex-actions';
+    acts.append(bind);
+    // круг 88 (§15.24): такие цвета и на других экранах — привязать везде одной правкой (§15.23)
+    const all = SHELL.bindAllColorsOps(state.doc);
+    if (all.boards.length > 1) {
+      const n = all.boards.reduce((k, b) => k + b.n, 0);
+      const every = document.createElement('button');
+      every.type = 'button';
+      every.className = 'btn small';
+      every.textContent = `На всех экранах (${all.boards.length})`;
+      every.title = `Цвета кодом на ${all.boards.length} ${plural(all.boards.length, 'экране', 'экранах', 'экранах')} — ${n} ${plural(n, 'слой', 'слоя', 'слоёв')} — к палитре одной правкой; экраны не изменятся`;
+      every.addEventListener('click', () => {
+        const r = SHELL.bindAllColorsOps(state.doc);
+        if (r.ops.length) commit(r.ops, r.label);
+      });
+      acts.append(every);
+    }
+    box.append(note, acts);
     kids.push(box);
   }
   if (t) {
