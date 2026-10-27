@@ -11036,6 +11036,8 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const docTypes = (doc.tokens && doc.tokens.type) || {};
   const safe = (name) => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(name) && !UNSAFE_KEYS.has(name);
   let changed = 0;
+  const touchedColors = new Set();
+  const touchedTypes = new Map();   // стиль → поля, которые правка меняет
   for (const c of asArray(theme.colors)) {
     if (!c || !c.name) continue;
     const name = String(c.name).trim();
@@ -11045,7 +11047,10 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
     }
     const value = String(c.value || '').trim();
     if (!HEX_RE.test(value)) { note(`Цвет «${ruToken('colors', name)}»: «${c.value}» — это не цвет вида #rrggbb, правка пропущена`); continue; }
-    next.colors[name] = (value.length === 4 ? '#' + value.slice(1).split('').map((x) => x + x).join('') : value).toLowerCase();
+    const hex = (value.length === 4 ? '#' + value.slice(1).split('').map((x) => x + x).join('') : value).toLowerCase();
+    // круг 69: тот же цвет, что у экрана уже есть, — не правка (ни операции, ни строки итога)
+    if (String(next.colors[name] || '').toLowerCase() !== hex) touchedColors.add(name);
+    next.colors[name] = hex;
     changed++;
   }
   const skippedType = new Set();
@@ -11073,7 +11078,13 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
       } else note(`Стиль «${ruToken('type', name)}», жирность: «${t.fontWeight}» — не число от 100 до 900, пропущено`);
     }
     for (const k of ['fontSize', 'lineHeight', 'letterSpacing']) if (t[k] != null && t[k] !== '') skippedType.add(({ fontSize: 'кегль', lineHeight: 'интерлиньяж', letterSpacing: 'трекинг' })[k]);
-    if (touched) { next.type[name] = entry; changed++; }
+    if (touched) {
+      // круг 69: по полям — насыщенность, поставленная человеком за время команды, не стирается шрифтом
+      const was = next.type[name] || {};
+      const fields = ['font', 'fontWeight'].filter((f) => entry[f] !== undefined && entry[f] !== was[f]);
+      if (fields.length) touchedTypes.set(name, fields);
+      next.type[name] = entry; changed++;
+    }
   }
   const other = ['spacing', 'radii', 'motion', 'shadow'].filter((k) => Array.isArray(theme[k]) && theme[k].length);
   if (skippedType.size || other.length) {
@@ -11091,14 +11102,22 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   if (next.colors) {
     const col = (k) => hexNorm(strOf((next.colors && next.colors[k]) || docColors[k]));
     for (const [fg, bg, min, ru] of [['text', 'canvas', CONTRAST_NORM, 'текст на фоне'], ['text', 'surface', CONTRAST_NORM, 'текст на карточках'], ['muted', 'canvas', 3, 'подписи на фоне']]) {
-      if (!own(docColors, fg) || !own(docColors, bg) || !(own(next.colors, fg) || own(next.colors, bg))) continue;
+      // круг 69: только пары, которые эта правка задела (раньше — любой цвет темы, даже нетронутый)
+      if (!own(docColors, fg) || !own(docColors, bg) || !(touchedColors.has(fg) || touchedColors.has(bg))) continue;
       const a = col(fg); const b = col(bg);
       if (!HEX6.test(a) || !HEX6.test(b)) continue;
       const r = contrastOf(a, b);
       if (r < min) note(`На экране «${label(boardId)}» ${ru} читается плохо: контраст ${r.toFixed(1)}:1 (нужно от ${min}:1) — скажите, каким сделать ${fg === 'text' ? 'текст' : 'подписи'}`);
     }
   }
-  return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: next })];
+  // круг 69 (SPEC §15.4): у экрана уже есть тема — правка по путям (theme.colors.<имя>, theme.type.<стиль>):
+  // правка человека в инспекторе (§15.6) другого цвета той же доски за время команды не затирается
+  if (!cur) return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: next })];
+  if (!touchedColors.size && !touchedTypes.size) throw ERR('schema', `Экран «${label(boardId)}» уже в этих цветах и шрифтах — менять нечего`);
+  return [
+    ...[...touchedColors].map((n) => mkOp(engine, 'set', { id: boardId, path: `theme.colors.${n}`, value: next.colors[n] })),
+    ...[...touchedTypes].flatMap(([n, fields]) => fields.map((f) => mkOp(engine, 'set', { id: boardId, path: `theme.type.${n}.${f}`, value: next.type[n][f] }))),
+  ];
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -15324,11 +15343,15 @@ export function describeChange(ops, doc, after = null, engine = null) {
   phrases.push(...motionChangePhrases(list.filter((o) => o.op === 'set' && o.id && !born.has(o.id)
     && /^(states|motion)(\.|$)/.test(String(o.path || ''))), doc, after, engine, born));
   // круг 48 (SPEC §15): тема доски — «Своя тема экрана «Оплата»: фон #101418, текст #e8eaf0, заголовок — Prata»
+  // круг 69: правка по путям темы (theme.colors.<имя>, theme.type.<стиль>) — одной фразой на экран
+  const themeOps = new Map();
   for (const op of list) {
-    if (op.op !== 'set' || !op.id || born.has(op.id) || String(op.path || '') !== 'theme') continue;
+    if (op.op !== 'set' || !op.id || born.has(op.id) || !/^theme(\.|$)/.test(String(op.path || ''))) continue;
     artSkip.add(op);
-    phrases.push(boardThemePhrase(op, doc, born));
+    if (!themeOps.has(op.id)) themeOps.set(op.id, []);
+    themeOps.get(op.id).push(op);
   }
+  for (const [id, ops] of themeOps) phrases.push(boardThemePhrase(themeOpsValue(id, ops), doc, born));
   // одинаковая правка у нескольких слоёв — одной строкой
   const groups = new Map();
   for (const op of list) {
@@ -15373,6 +15396,24 @@ export function describeChange(ops, doc, after = null, engine = null) {
 }
 
 /** Правка `set theme` доски словами: что задала тема (до четырёх пунктов) или что тема снята. */
+/** Круг 69: операции темы одной доски → одна запись `set theme` для фразы (по путям — только сказанное). */
+function themeOpsValue(id, ops) {
+  const whole = ops.filter((o) => o.path === 'theme').pop();
+  if (whole && ops.length === 1) return whole;
+  const v = whole && whole.value && typeof whole.value === 'object' ? JSON.parse(JSON.stringify(whole.value)) : {};
+  let known = !!whole;
+  for (const o of ops) {
+    const m = /^theme\.(colors|type)\.([^.]+)(?:\.(font|fontWeight))?$/.exec(String(o.path || ''));
+    if (!m || o.value === undefined) continue;
+    known = true;
+    const part = v[m[1]] || (v[m[1]] = {});
+    if (m[3]) (part[m[2]] && typeof part[m[2]] === 'object' ? part[m[2]] : (part[m[2]] = {}))[m[3]] = o.value;
+    else part[m[2]] = o.value;
+  }
+  // снятие частей темы по путям (theme.colors пустым и т. п.) — не «вернулся к оформлению документа»
+  return { op: 'set', id, path: 'theme', value: Object.keys(v).length ? v : known ? undefined : {} };
+}
+
 function boardThemePhrase(op, doc, born) {
   const who = changeName(doc, born, op.id).replace(/^слой /u, '');
   const v = op.value;
