@@ -61,3 +61,30 @@ test('круг71: сквозь команду — экран становитс�
   assert.equal(after.nodes.plain.theme, undefined);
   assert.match(res.changeSummary, /Своя тема экрана «Итог»/);
 });
+
+test('круг71, критики: имя не срезается, board:true не обязателен, reset уступает образцу, тема образца повреждена', async () => {
+  const { classifyUtterance } = await import('../src/brain.js');
+  // «Экранная форма» — не «форма»
+  let doc = screens();
+  doc = core.applyOps(doc, [core.ops.set('plain', 'name', 'Форма'), core.ops.set('pay', 'name', 'Экранная форма')]).doc;
+  assert.deepEqual(run(doc, { likeBoard: 'Экранная форма' })[0].value, doc.nodes.pay.theme);
+  assert.deepEqual(run(doc, { likeBoard: 'экрана «Экранная форма»' })[0].value, doc.nodes.pay.theme);
+  // без board:true — всё равно экран
+  const base = screens();
+  const ops = themeToOps({ doc: base, theme: { likeBoard: 'Оплата' }, engine: core, warn: () => {}, scope: { ids: ['sum_t'] } });
+  assert.deepEqual(ops.map((o) => [o.id, o.path]), [['sum', 'theme']]);
+  // reset вместе с образцом — побеждает образец
+  assert.deepEqual(run(base, { likeBoard: 'Оплата', reset: true })[0].value, base.nodes.pay.theme);
+  // тема образца не по форме — словами
+  const broken = { ...base, nodes: { ...base.nodes, pay: { ...base.nodes.pay, theme: { colors: { canvas: 'red' } } } } };
+  assert.throws(() => run(broken, { likeBoard: 'Оплата' }), /Тема экрана «Оплата» повреждена/);
+  // копия задевает цвета — контраст проверен
+  const dim = core.applyOps(screens(), [core.ops.set('pay', 'theme', { colors: { canvas: '#14161c' } })]).doc;
+  const notes = [];
+  run(dim, { likeBoard: 'Оплата' }, ['sum_t'], notes);
+  assert.ok(notes.some((m) => /контраст/.test(m)), notes.join(' | '));
+  // без модели — оформление, а не правка или создание
+  for (const u of ['сделай этот экран как «Оплата»', 'оформи так же, как экран «Оплата»', 'экран такой же, как у экрана "Оплата"']) {
+    assert.equal(classifyUtterance(u, { hasSelection: true }).intent, 'theme', u);
+  }
+});

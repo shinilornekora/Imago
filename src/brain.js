@@ -1178,10 +1178,10 @@ export const SCHEMAS = {
         summary: { type: 'string' },
         /* Круг 48 (SPEC §15): оформление одной доски — её темой (цвета и шрифты стилей). */
         board: { type: 'boolean' },
-        boardName: { type: 'string' },
+        boardName: { type: 'string', maxLength: 80 },
         reset: { type: 'boolean' },
         /* Круг 71 (SPEC §15.8): «сделай этот экран как «Оплата»» — тема экрана-образца копией. */
-        likeBoard: { type: 'string' },
+        likeBoard: { type: 'string', maxLength: 80 },
         colors: {
           type: 'array',
           maxItems: 24,
@@ -2268,7 +2268,7 @@ export const PROMPTS = {
   бывают — при board:true их не пиши. «Верни этому экрану общее оформление» — {board:true, reset:true}.
   Назвал экран по имени — boardName: "<имя>". «Сделай этот экран как «Оплата»», «оформи так же, как
   экран X» — {board:true, likeBoard:"<имя экрана-образца>"}: его тема ляжет копией (colors и type к ней
-  добавляй, только если просят что-то ещё). Тёмный (или иной) экран — ПОЛНАЯ палитра: canvas,
+  добавляй, только если просят что-то ещё; reset с likeBoard не пиши). Тёмный (или иной) экран — ПОЛНАЯ палитра: canvas,
   surface, surfaceAlt, text, muted, line, accentSoft, onAccent (те, что есть в документе), не один фон:
   иначе карточки и подписи останутся светлыми и текст пропадёт.
 - «Перекрась вот эту карточку, остальное не трогай» (часть экрана, не доска целиком) — НЕ задача
@@ -2584,6 +2584,9 @@ const RE = {
     rx('шкал\\p{L}*\\s+(отступ|скруглен|радиус)'),
     // круг 36 (SPEC §11): «сделай шкалу движения медленнее» — ступени motion.* в токенах
     rx('шкал\\p{L}*\\s+(движени|скорост|анимаци|тен)'),
+    // круг 71 (SPEC §15.8): «сделай этот экран как «Оплата»», «оформи так же, как экран X» — тема образца
+    rx('экран\\p{L}*\\s+(?:так(?:ой)?\\s+же,?\\s+)?как\\s+(?:у\\s+)?(?:экран\\p{L}*\\s+)?[«"]'),
+    rx('(?:так|такой|такими)\\s+же,?\\s+как\\s+(?:у\\s+|на\\s+)?экран'),
   ],
   create: [
     rx('созда(й|ть|йте)'), rx('св[её]рстай'), rx('собери'), rx('построй'),
@@ -10786,7 +10789,8 @@ export function failureHint(said) {
 export function themeToOps({ doc, theme, engine, warn, scope = null }) {
   const note = warn || (() => {});
   // круг 48 (SPEC §15): оформление одной доски — её темой
-  if (theme && theme.board === true) return boardThemeOps({ doc, theme, engine, warn: note, scope });
+  // круг 71: likeBoard — всегда об одном экране, даже если модель забыла board:true
+  if (theme && (theme.board === true || (typeof theme.likeBoard === 'string' && theme.likeBoard.trim()))) return boardThemeOps({ doc, theme, engine, warn: note, scope });
   const ops = [];
   /**
    * Круг 5, п.6: проверялся только TOKEN_PATH_RE, а `[A-Za-z0-9_-]+` покрывает «__proto__» и
@@ -11013,10 +11017,13 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const all = boardIds(doc);
   const label = (id) => cutText(strOf(nodeOf(doc, id) && nodeOf(doc, id).name) || 'Доска', 40);
   let boardId = null;
+  // имя как есть → без «экран(а/у/е/ом)» перед ним → вхождение (раньше «экран» срезался и с «Экранной формы»)
   const byName = (asked) => {
-    const low = asked.toLowerCase().replace(/^экран[а-я]*\s+/u, '').replace(/[«»"]/g, '').trim();
-    return all.find((id) => strOf(nodeOf(doc, id).name).trim().toLowerCase() === low)
-      || all.find((id) => low && strOf(nodeOf(doc, id).name).trim().toLowerCase().includes(low)) || null;
+    const nameOf = (id) => strOf(nodeOf(doc, id).name).trim().toLowerCase();
+    const plain = asked.toLowerCase().replace(/[«»"]/g, '').trim();
+    const bare = asked.toLowerCase().replace(/^экран(?:а|у|е|ом)?\s+/u, '').replace(/[«»"]/g, '').trim();
+    return all.find((id) => nameOf(id) === plain) || all.find((id) => nameOf(id) === bare)
+      || all.find((id) => bare && nameOf(id).includes(bare)) || null;
   };
   const asked = typeof theme.boardName === 'string' ? theme.boardName.trim() : '';
   if (asked) {
@@ -11037,11 +11044,15 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   const like = typeof theme.likeBoard === 'string' ? theme.likeBoard.trim() : '';
   let likeId = null;
   let likeTheme = null;
-  if (like && theme.reset !== true) {
+  // «как у экрана X» сильнее reset: человек назвал образец (сброс — это «как документ»)
+  if (like) {
     likeId = byName(like);
     if (!likeId) throw ERR('schema', `Экран «${cutText(like, 40)}» не найден — назовите образец, как на холсте`);
     if (likeId === boardId) throw ERR('schema', `Экран «${label(boardId)}» и есть образец — назовите другой, с которого взять оформление`);
     likeTheme = engine && engine.boardTheme ? engine.boardTheme(nodeOf(doc, likeId)) : null;
+    if (!likeTheme && nodeOf(doc, likeId).theme !== undefined) {
+      throw ERR('schema', `Тема экрана «${label(likeId)}» повреждена — взять её нельзя; скажите, какие цвета и шрифты нужны`);
+    }
     const extra = asArray(theme.colors).length || asArray(theme.type).length;
     if (!likeTheme && !extra) {
       // образец — в оформлении документа: «как он» значит «верни общее»
@@ -11049,12 +11060,16 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
       return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: undefined })];
     }
   }
-  if (theme.reset === true) {
+  if (theme.reset === true && !likeId) {
     if (board.theme === undefined) throw ERR('schema', 'У этого экрана своей темы и так нет — он в оформлении документа');
     return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: undefined })];
   }
   const mineTheme = engine && engine.boardTheme ? engine.boardTheme(board) : (board.theme && typeof board.theme === 'object' ? board.theme : null);
   const cur = likeId ? likeTheme : mineTheme;
+  // круг 71: копия образца — его цвета, которых у экрана не было, тоже «задеты» (проверка контраста)
+  const copiedColors = likeId && likeTheme && likeTheme.colors
+    ? Object.keys(likeTheme.colors).filter((k) => String((mineTheme && mineTheme.colors && mineTheme.colors[k]) || '').toLowerCase() !== String(likeTheme.colors[k]).toLowerCase())
+    : [];
   const next = { colors: { ...((cur && cur.colors) || {}) }, type: JSON.parse(JSON.stringify((cur && cur.type) || {})) };
   const docColors = (doc.tokens && doc.tokens.colors) || {};
   const docTypes = (doc.tokens && doc.tokens.type) || {};
@@ -11062,6 +11077,7 @@ function boardThemeOps({ doc, theme, engine, warn, scope }) {
   let changed = 0;
   const touchedColors = new Set();
   const touchedTypes = new Map();   // стиль → поля, которые правка меняет
+  for (const k of copiedColors) touchedColors.add(k);
   for (const c of asArray(theme.colors)) {
     if (!c || !c.name) continue;
     const name = String(c.name).trim();
@@ -13855,7 +13871,7 @@ function hasEdits(data, intent) {
     // круг 48: «верни экрану общее оформление» — правка без списков
     if (data.board === true && data.reset === true) return true;
     // круг 71: «как у экрана X» — тоже правка без списков
-    if (data.board === true && typeof data.likeBoard === 'string' && data.likeBoard.trim()) return true;
+    if (typeof data.likeBoard === 'string' && data.likeBoard.trim()) return true;
     return ['colors', 'type', 'spacing', 'radii'].some((k) => Array.isArray(data[k]) && data[k].length > 0);
   }
   if (intent === 'illustration') return [data.parts, data.details, data.shapes].some((v) => Array.isArray(v) && v.length > 0);
