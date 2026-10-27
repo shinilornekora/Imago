@@ -2159,7 +2159,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'history', group: 'Панели', title: 'История правок', hint: 'Все правки с отменой до любой из них', slash: ['история', 'history'], keys: 'H', phrases: ['история', 'что менялось'] },
   { id: 'chat', group: 'Панели', title: 'Диалог с агентом', hint: 'Что вы сказали и что ответил агент', slash: ['диалог', 'chat'], phrases: ['покажи диалог', 'переписка'] },
   { id: 'scales', group: 'Панели', title: 'Шкалы и токены', hint: 'Шаги отступов и скруглений документа', slash: ['шкалы', 'токены', 'scales'], phrases: ['шкалы', 'покажи токены'] },
-  { id: 'doc-colors', group: 'Панели', title: 'Цвета документа', hint: 'Палитра: правка цвета и новый цвет', slash: ['цвета документа', 'палитра', 'colors'], phrases: ['покажи цвета документа', 'открой палитру'] },
+  { id: 'doc-colors', group: 'Панели', title: 'Цвета документа', hint: 'Палитра: правка цвета и новый цвет', slash: ['цвета документа', 'палитра документа', 'colors'], phrases: ['покажи цвета документа', 'открой палитру документа'] },
   { id: 'settings', group: 'Панели', title: 'Настройки агента', hint: '', slash: ['настройки', 'settings'], phrases: ['настройки', 'открой настройки'] },
 
   /* — Файл — */
@@ -2502,7 +2502,8 @@ const NATURAL = [
   ['inspector', /^(?:(?:покажи|открой|показать|открыть) )?инспектор$/, () => ({ kind: 'inspector', on: true })],
   ['inspector', /^(?:скрой|скрыть|спрячь|спрятать|закрой|закрыть|убери|сверни) инспектор$/, () => ({ kind: 'inspector', on: false })],
   ['scales', /^(?:(?:покажи|открой|показать|открыть) )?(?:шкалы|токены|шкалы отступов)$/],
-  ['doc-colors', /^(?:(?:покажи|открой|показать|открыть) )?(?:цвета документа|палитр[уа](?: документа)?)$/],
+  // «палитра» одна — палитра команд (Mod+K); здесь — только с «документа»
+  ['doc-colors', /^(?:(?:покажи|открой|показать|открыть) )?(?:цвета документа|палитр[уа] (?:документа|цветов))$/],
   ['import', /^(?:импорт|импортировать|импортируй)(?: файл| json| документ)?$|^(?:загрузи|загрузить) файл$/],
   ['projects', /^(?:(?:покажи|открой|показать|открыть) )?(?:мои |все )?проекты$|^список проектов$/],
   ['project-new', /^(?:(?:создай|создать|сделай|сделать|заведи|завести|начни|начать|открой|открыть) )?(?:новый|чистый|пустой) (?:проект|документ|файл)$/, () => ({ kind: 'project-new' })],
@@ -4557,18 +4558,22 @@ export function colorTokenUsers(doc) {
     if (!out.has(name)) out.set(name, new Set());
     out.get(name).add(id);
   };
+  // как paintRefs ядра: стоп — token или color, обёртка — token, color или value
   const paint = (id, v) => {
     if (typeof v === 'string') { hit(id, v); return; }
     if (!isObj(v)) return;
-    if (typeof v.token === 'string') hit(id, v.token);
-    if (isObj(v.gradient) && Array.isArray(v.gradient.stops)) for (const st of v.gradient.stops) if (isObj(st)) hit(id, st.token);
-    if (isObj(v.pattern)) { hit(id, v.pattern.color); hit(id, v.pattern.bg); }
+    if (isObj(v.pattern)) { hit(id, v.pattern.color); hit(id, v.pattern.bg); return; }
+    if (isObj(v.gradient)) {
+      if (Array.isArray(v.gradient.stops)) for (const st of v.gradient.stops) if (isObj(st)) hit(id, typeof st.token === 'string' ? st.token : st.color);
+      return;
+    }
+    hit(id, v.token !== undefined ? v.token : v.color !== undefined ? v.color : v.value);
   };
   const part = (id, o) => {
     if (!isObj(o)) return;
     paint(id, o.fill);
     paint(id, o.color);
-    if (isObj(o.stroke) && o.stroke.color !== undefined && !o.stroke.gradient && !o.stroke.pattern && o.stroke.token === undefined) paint(id, o.stroke.color);
+    if (isObj(o.stroke) && !o.stroke.gradient && o.stroke.color !== undefined) paint(id, o.stroke.color);
     else paint(id, o.stroke);
   };
   for (const [id, n] of Object.entries(doc.nodes)) {
@@ -4576,6 +4581,34 @@ export function colorTokenUsers(doc) {
     part(id, n);
     if (isObj(n.states)) for (const k of STATE_KEYS) part(id, n.states[k]);
     if (Array.isArray(n.paths)) for (const p of n.paths) if (isObj(p)) { paint(id, p.fill); paint(id, p.stroke); }
+    // пропс-цвет экземпляра ({bg: 'accent'}) — тоже ссылка
+    if (n.type === 'instance' && isObj(n.props)) {
+      const m = doc.nodes[n.of];
+      const defs = m && isObj(m.component) && Array.isArray(m.component.props) ? m.component.props : [];
+      for (const d of defs) if (isObj(d) && d.kind === 'color' && Object.prototype.hasOwnProperty.call(n.props, d.name)) paint(id, n.props[d.name]);
+    }
+  }
+  // экземпляр рисует поддерево мастера: каждый экземпляр мастера, где цвет есть, — тоже слой с этим цветом
+  const subtreeUses = new Map();
+  const uses = (mid) => {
+    if (subtreeUses.has(mid)) return subtreeUses.get(mid);
+    const got = new Set();
+    subtreeUses.set(mid, got);
+    const stack = [mid];
+    const seen = new Set();
+    while (stack.length) {
+      const cur = stack.pop();
+      if (seen.has(cur) || !doc.nodes[cur]) continue;
+      seen.add(cur);
+      for (const [name, ids] of out) if (ids.has(cur)) got.add(name);
+      const kids = doc.nodes[cur].children;
+      if (Array.isArray(kids)) stack.push(...kids);
+    }
+    return got;
+  };
+  for (const [id, n] of Object.entries(doc.nodes)) {
+    if (!isObj(n) || n.type !== 'instance' || typeof n.of !== 'string') continue;
+    for (const name of uses(n.of)) out.get(name).add(id);
   }
   return out;
 }
@@ -4590,10 +4623,16 @@ export function docColorRows(doc) {
   const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
   const users = colorTokenUsers(doc);
   return Object.keys(base).map((name) => {
-    const raw = String(base[name]);
+    const raw = typeof base[name] === 'string' ? base[name] : '';
     const hex = opaqueHex(raw);
     return { name, raw, hex, alpha: !hex && /^#(?:[0-9a-f]{4}|[0-9a-f]{8})$/i.test(raw.trim()), users: users.has(name) ? users.get(name).size : 0 };
   });
+}
+
+/** Тот же код у другого цвета палитры: привязка кодов (§15.21) такой код уже не решит — он равен двум. */
+function twinWarning(base, name, hex) {
+  const twin = Object.keys(base).find((k) => k !== name && toHex6(base[k]) === hex);
+  return twin ? [`Тот же код у цвета «${twin}» — цвета кодом ${hex.toUpperCase()} к палитре уже не привязать: непонятно, к какому`] : [];
 }
 
 /** Контраст общей палитры после правки цвета `name` (только пары, которые он задел). */
@@ -4630,7 +4669,7 @@ export function docColorOps(doc, name, hex, { title } = {}) {
   return {
     ops: [OPS.setToken(`colors.${name}`, want)],
     label: `Цвет документа: ${said} ${want.toUpperCase()}`,
-    warnings: docContrastWarnings({ ...base, [name]: want }, name),
+    warnings: [...docContrastWarnings({ ...base, [name]: want }, name), ...twinWarning(base, name, want)],
     screens,
   };
 }
@@ -4639,7 +4678,7 @@ export function docColorOps(doc, name, hex, { title } = {}) {
  * Круг 96: новый цвет палитры документа. Имя — латиницей (как у темы экрана, §15.6: иначе тема его не
  * переопределит), не занятое (и без учёта регистра — «Accent» рядом с «accent» путает). Пустой ответ с
  * `error` — почему нельзя.
- * @returns {{ops: object[], label: string}|{error: string}}
+ * @returns {{ops: object[], label: string, warnings: string[]}|{error: string}}
  */
 export function newDocColorOps(doc, name, hex) {
   const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
@@ -4648,9 +4687,11 @@ export function newDocColorOps(doc, name, hex) {
   if (!THEME_COLOR_NAME_RE.test(n)) return { error: 'Имя цвета — латиница, цифры, «-» и «_», с буквы, до 40 знаков: например brand или accent-2' };
   const taken = Object.keys(base).find((k) => k.toLowerCase() === n.toLowerCase());
   if (taken) return { error: `Цвет «${taken}» в документе уже есть — поправьте его в списке` };
+  // «none» и «transparent» в краске значат «нет краски»; токен с таким именем перекрасил бы их все
+  if (/^(?:none|transparent|inherit|currentcolor)$/i.test(n)) return { error: `«${n}» в краске значит «без цвета» — выберите другое имя` };
   const want = toHex6(hex);
   if (!want) return { error: 'Цвет пишется кодом: #F4A261' };
-  return { ops: [OPS.setToken(`colors.${n}`, want)], label: `Новый цвет документа: ${n} ${want.toUpperCase()}` };
+  return { ops: [OPS.setToken(`colors.${n}`, want)], label: `Новый цвет документа: ${n} ${want.toUpperCase()}`, warnings: twinWarning(base, n, want) };
 }
 
 /* ------------------------- круг 68: шрифты экрана в инспекторе ------------------------- */

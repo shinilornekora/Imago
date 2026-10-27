@@ -14546,11 +14546,14 @@ function docColorRow(row) {
     val = colorInput(row.hex, (h) => pickDocColor(row.name, h), `Цвет документа «${human}»`);
     const inp = val.querySelector('input.paint-hex');
     if (inp) inp.dataset.skey = `color|${row.name}`;
+    // и у кружка выбора: после перерисовки фокус остаётся в шторке, а не падает на страницу
+    const pick = val.querySelector('input.paint-color-input');
+    if (pick) pick.dataset.skey = `color-pick|${row.name}`;
   } else {
     // с прозрачностью или ссылкой: поле выбора прозрачность потеряло бы — показываем как есть
     val = document.createElement('span');
     val.className = 'theme-color-note';
-    val.textContent = row.alpha ? `${row.raw.toUpperCase()} — с прозрачностью, правится словами` : `${row.raw} — задан не кодом`;
+    val.textContent = row.alpha ? `${row.raw.toUpperCase()} — с прозрачностью, правится словами` : row.raw ? `${row.raw} — задан не кодом` : 'задан не строкой — правится словами';
   }
   const use = document.createElement('span');
   use.className = 'scale-use';
@@ -14559,6 +14562,9 @@ function docColorRow(row) {
   line.append(name, val, use);
   return line;
 }
+
+/** Набранное в «Новый цвет» переживает перерисовку шторки (подтверждение сервера, правка соавтора). */
+const docColorDraft = { name: '', hex: '#7a5cff' };
 
 function newDocColorForm() {
   const box = document.createElement('form');
@@ -14570,21 +14576,31 @@ function newDocColorForm() {
   name.spellcheck = false;
   name.setAttribute('aria-label', 'Имя нового цвета');
   name.dataset.skey = 'color-new|name';
+  name.value = docColorDraft.name;
+  name.addEventListener('input', () => { docColorDraft.name = name.value; });
   const pick = document.createElement('input');
   pick.type = 'color';
   pick.className = 'paint-color-input';
-  pick.value = '#7a5cff';
+  pick.value = docColorDraft.hex;
   pick.setAttribute('aria-label', 'Новый цвет');
+  pick.dataset.skey = 'color-new|pick';
+  pick.addEventListener('input', () => { docColorDraft.hex = pick.value; });
+  pick.addEventListener('change', () => { docColorDraft.hex = pick.value; });
   const add = document.createElement('button');
   add.type = 'submit';
   add.className = 'btn small';
   add.textContent = 'Добавить цвет';
+  add.dataset.skey = 'color-new|add';
   box.append(name, pick, add);
   box.addEventListener('submit', (e) => {
     e.preventDefault();
     const r = SHELL.newDocColorOps(state.doc, name.value, pick.value);
     if (r.error) { toast(r.error, 'plain', 6000); name.focus(); return; }
-    commit(r.ops, r.label);
+    const res = commit(r.ops, r.label, 'human', { quiet: true });
+    if (res && res.ok === false) return;
+    docColorDraft.name = '';
+    // тихая правка — подтверждение сами (одной строкой с предупреждением, если оно есть)
+    toast([`${r.label}.`, ...r.warnings.map((w) => `${w}.`)].join(' '), 'plain', 6000);
   });
   return box;
 }

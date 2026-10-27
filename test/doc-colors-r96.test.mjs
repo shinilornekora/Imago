@@ -1,7 +1,7 @@
 /**
  * Круг 96 (SPEC §15.30): шторка «Цвета документа» — палитра документа правится в интерфейсе
  * (`setToken colors.<имя>`), у каждого цвета — сколько слоёв на него ссылается, новый цвет — по имени
- * латиницей. Команда `/палитра`, «открой палитру», ссылка из «Цвета экрана».
+ * латиницей. Команда `/цвета документа`, «открой палитру документа», ссылка из «Цвета экрана».
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -49,6 +49,39 @@ test('круг96: кто ссылается на цвет — заливка, о
   assert.equal(rows.find((r) => r.name === 'good').users, 0);
 });
 
+test('круг96 (критик): обёртки {color}/{value}, стоп {color: имя}, пропс-цвет и экземпляры мастера — тоже ссылки', () => {
+  const doc = screens();
+  const lib = core.ensureLibraryOps ? null : null;
+  const r = core.applyOps(doc, [
+    core.ops.create({ id: 'w1', type: 'frame', name: 'Обёртка', parent: 'A', fill: { color: 'good' }, children: [] }),
+    core.ops.create({ id: 'w2', type: 'frame', name: 'Стоп по имени', parent: 'A', children: [],
+      fill: { gradient: { kind: 'linear', stops: [{ at: 0, color: 'warn' }, { at: 1, color: '#000000' }] } } }),
+  ]);
+  assert.equal(r.error, undefined, JSON.stringify(r.error));
+  const u = colorTokenUsers(r.doc);
+  assert.deepEqual([...u.get('good')], ['w1']);
+  assert.deepEqual([...u.get('warn')], ['w2']);
+  void lib;
+  // мастер с заливкой accentSoft и пропсом-цветом подписи; два экземпляра, у одного пропс — good
+  let d = r.doc;
+  d = core.applyOps(d, [
+    core.ops.create({ id: 'm', type: 'frame', name: 'Плашка', parent: 'A', fill: 'accentSoft', children: [] }),
+    core.ops.create({ id: 'mt', type: 'text', name: 'Текст', parent: 'm', characters: 'Новинка', color: 'text' }),
+  ]).doc;
+  const made = core.applyOps(d, core.makeComponentOps(d, 'm', { name: 'Плашка', props: [{ name: 'тон', kind: 'color', target: 'mt', path: 'color' }] }));
+  assert.equal(made.error, undefined, JSON.stringify(made.error));
+  d = made.doc;
+  const more = core.applyOps(d, core.instanceOps(d, { of: 'm', parent: 'B', props: { 'тон': 'good' } }));
+  assert.equal(more.error, undefined, JSON.stringify(more.error));
+  d = more.doc;
+  const insts = Object.values(d.nodes).filter((n) => n.type === 'instance' && n.of === 'm').map((n) => n.id).sort();
+  assert.equal(insts.length, 2);
+  const v = colorTokenUsers(d);
+  assert.deepEqual([...v.get('accentSoft')].sort(), ['m', ...insts].sort(), 'мастер и оба экземпляра');
+  const withProp = insts.find((id) => d.nodes[id].props && d.nodes[id].props['тон']);
+  assert.ok(v.get('good').has(withProp), 'пропс-цвет экземпляра');
+});
+
 test('круг96: правка цвета палитры — setToken; тот же код — нет; экраны со своим цветом названы; контраст', () => {
   const doc = screens();
   const r = docColorOps(doc, 'accent', '#2255FF', { title: 'акцент' });
@@ -77,12 +110,19 @@ test('круг96: новый цвет — имя латиницей, не зан
   assert.match(newDocColorOps(doc, 'бренд', '#000').error, /латиница/);
   assert.match(newDocColorOps(doc, 'Accent', '#000').error, /«accent» в документе уже есть/);
   assert.match(newDocColorOps(doc, 'brand', 'красный').error, /кодом/);
+  // критик: «none» в краске — «без цвета»; токен с таким именем перекрасил бы все такие слои
+  assert.match(newDocColorOps(doc, 'None', '#ff0000').error, /без цвета/);
+  // тот же код, что у другого цвета, — предупреждение: привязка кодов его уже не решит
+  assert.match(newDocColorOps(doc, 'brand', '#FF6B3D').warnings[0], /Тот же код у цвета «accent»/);
+  assert.deepEqual(newDocColorOps(doc, 'brand', '#7A5CFF').warnings, []);
 });
 
 test('круг96: «открой палитру», «цвета документа», /палитра — шторка; «привяжи цвета к палитре» — прежнее', () => {
-  for (const t of ['открой палитру', 'цвета документа', 'палитра', 'покажи цвета документа', '/палитра', '/цвета документа']) {
+  for (const t of ['открой палитру документа', 'цвета документа', 'палитра документа', 'покажи цвета документа', '/палитра документа', '/цвета документа']) {
     assert.deepEqual(shellIntent(t, {}), { kind: 'sheet', what: 'colors' }, t);
   }
+  // критик: «палитра» одна — палитра команд (Mod+K), не эта шторка
+  for (const t of ['открой палитру', 'палитра']) assert.notDeepEqual(shellIntent(t, {}), { kind: 'sheet', what: 'colors' }, t);
   assert.deepEqual(shellIntent('привяжи цвета к палитре', {}), { kind: 'bind-colors' });
 });
 
@@ -116,7 +156,7 @@ test('круг96: в браузере — /палитра → правка ак�
     await say('/импорт');
     await (await chooser).setFiles({ name: 'colors.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(screens())) });
     await page.locator('#layers .layer[data-id="A"]').waitFor({ timeout: 10000 });
-    await say('открой палитру');
+    await say('открой палитру документа');
     const row = page.locator('#sheet-body .doc-color-row[data-token="accent"]');
     await row.waitFor({ timeout: 5000 });
     assert.equal(await row.locator('.scale-use').innerText(), '2 слоя');
