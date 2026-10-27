@@ -2523,14 +2523,14 @@ function depsFresh(doc, deps) {
  *   `out`; кончился — бросается EXPAND_OVER (раскрытие этого экземпляра
  *   отменяется целиком, вместо него заглушка). Страховка: expandDoc сверяется с
  *   expandAnalysis заранее, и в норме счётчик не срабатывает.
- * @param {{nodes:object, deps:Array}} [old] круг 62: прежнее раскрытие ЭТОГО экземпляра (тот же объект,
- *   без вложенных экземпляров): раскрытый узел, чей узел мастера — тот же объект, берётся оттуда
- *   (см. expandDoc)
- * @param {{reused:number, nested:boolean, ids:Map, syn:Array}} [stat] круг 62: сколько узлов взято из old;
- *   были ли вложенные; ids — поддеревья мастеров этого документа (общие на всё раскрытие); syn —
- *   раскрытые узлы по местам списка поддерева (для следующего раскрытия, old.syn)
+ * @param {object} [stat] круг 62, только для верхнего экземпляра (expandDoc):
+ *   - old — прежняя запись кеша ЭТОГО экземпляра (тот же объект) без вложенных экземпляров: раскрытый
+ *     узел, чей узел мастера — тот же объект на том же месте списка поддерева, берётся оттуда;
+ *   - ids — поддеревья мастеров этого документа (общие на всё раскрытие);
+ *   - на выходе: master — мастер, syn — раскрытые узлы по местам списка поддерева (для следующего
+ *     раскрытия), reused — сколько взято из old, nested — были ли вложенные экземпляры.
  */
-function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps, budget, old, stat) {
+function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps, budget, stat) {
   const lib = libraryNode(doc);
   deps.push(lib ? lib.id : '', lib || undefined);
   const master = ownNode(doc.nodes, inst.of);
@@ -2559,8 +2559,11 @@ function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps, budget, 
   const nested = [];
   // круг 62: раскрытый узел — функция от узла мастера, от экземпляра и от пропсов (они — от экземпляра и
   // корня мастера). Экземпляр тот же; корень мастера тот же — тогда тот же узел мастера даёт тот же узел
-  // Узлы мастера сверяются по месту в списке зависимостей: тот же корень и тот же узел на том же месте
-  const was = old && old.deps[3] === master && old.deps[2] === inst.of ? old.deps : null;
+  if (stat) stat.master = master;
+  const old = stat ? stat.old : undefined;
+  // списки зависимостей прежней и новой записи устроены одинаково (библиотека, мастер, поддерево), поэтому
+  // место узла в них совпадает, пока совпадает всё до него
+  const was = old && old.master === master && old.of === inst.of ? old.deps : null;
   let ids = stat ? stat.ids.get(master.id) : undefined;
   if (!ids) { ids = subtreeIds(doc, master.id); if (stat) stat.ids.set(master.id, ids); }
   for (let j = 0; j < ids.length; j++) {
@@ -3061,7 +3064,6 @@ function expandAll(doc, merge) {
   const heights = new Map();   // круг 62: ключ формы → высота поддерева
   const subtrees = new Map();  // круг 62: id мастера → его поддерево в этом документе
   const parts = new Map();
-  const syns = new Map();   // круг 62: id экземпляра → раскрытые узлы по местам списка поддерева (копии образца)
   let merged = null;
   /* Круг 54: форма — свойство раскрытия ЭТОГО документа, а не объекта в кеше. Экземпляр с id «a/x»
      перетирает раскрытого потомка «a/x» экземпляра «a» (и наоборот): у такого экземпляра поддерево
@@ -3094,7 +3096,6 @@ function expandAll(doc, merge) {
     if (hit) {
       if (used + hit.size > MAX_EXPANDED_NODES) { skip(inst); continue; }
       put(inst.id, hit.nodes);
-      if (hit.syn) syns.set(inst.id, hit.syn);
       used += hit.size;
       if (hit.shape) owned.push(inst.id, hit.nodes, hit.shape);
       continue;
@@ -3105,9 +3106,9 @@ function expandAll(doc, merge) {
     // круг 62: прежнее раскрытие того же экземпляра без вложенных — неизменённые узлы мастера дают те же
     // раскрытые узлы (те же объекты): правка одного узла мастера не пересоздаёт остальные
     const was = expandCache.get(inst);
-    const stat = { reused: 0, nested: false, ids: subtrees, syn: [] };
+    const stat = { old: was && was.flat ? was : undefined, ids: subtrees, master: undefined, syn: [], reused: 0, nested: false };
     try {
-      expandOne(doc, inst, inst.id, inst.id, 1, [], local, deps, budget, was && was.flat ? was : undefined, stat);
+      expandOne(doc, inst, inst.id, inst.id, 1, [], local, deps, budget, stat);
       const size = MAX_EXPANDED_NODES - used - budget.left;
       const top = local[inst.id];
       let shape = null;
@@ -3118,8 +3119,7 @@ function expandAll(doc, merge) {
         if (height === undefined) { height = shapeHeight(local, inst.id); heights.set(sig, height); }
         shape = { sig, height };
       }
-      expandCache.set(inst, { deps, nodes: local, size, shape, flat: !stat.nested, syn: stat.syn });
-      syns.set(inst.id, stat.syn);
+      expandCache.set(inst, { deps, nodes: local, size, shape, flat: !stat.nested, of: inst.of, master: stat.master, syn: stat.syn });
       if (shape) owned.push(inst.id, local, shape);
       fresh += size - stat.reused;
     } catch (e) {
@@ -3150,9 +3150,9 @@ function expandAll(doc, merge) {
   if (skipped.length) {
     logOnce('expand:limit', `раскрытие экземпляров дало бы ${bigCount(total)} узлов — больше предела ${MAX_EXPANDED_NODES}: `
       + `${skipped.length} экземпляров не раскрыты`);
-    return { ex: { nodes: out, count, skipped, shapes, collide, deep, fresh, used, parts, syns }, merged };
+    return { ex: { nodes: out, count, skipped, shapes, collide, deep, fresh, used, parts }, merged };
   }
-  return { ex: { nodes: out, count, shapes, collide, deep, fresh, used, parts, syns }, merged };
+  return { ex: { nodes: out, count, shapes, collide, deep, fresh, used, parts }, merged };
 }
 
 /** Круг 54: глубина узла под своей доской (доска — 0, её ребёнок — 1); Infinity — цепочка оборвана. */
@@ -7054,27 +7054,17 @@ function shapeOf(ctx, rootId, start) {
   const rel = [];
   const lines = [];
   const spans = [];
-  // круг 62: место узла в списке поддерева мастера (ex.syns) и его узел мастера — копия берёт готовый id
-  // раскрытого узла, а не склеивает его заново
-  const syn = ctx.syns.get(rootId);
-  const at = new Map();
-  if (syn) for (let j = 0; j < syn.length; j++) if (syn[j]) at.set(syn[j].id, j);
-  const idx = [];
-  const mids = [];
   for (let i = start; i < end; i++) {
     const id = ctx.seq[i];
     if (id !== rootId && !id.startsWith(pre)) return null;
     const r = ctx.rects[id];
     tails.push(id.slice(rootId.length));
-    const j = at.get(id);
-    idx.push(j === undefined ? -1 : j);
-    mids.push(j === undefined ? undefined : syn[j].master);
     rel.push(r2(r.x - root.x), r2(r.y - root.y), r.w, r.h);
     lines.push(hasOwnProp.call(ctx.lines, id) ? ctx.lines[id] : undefined);
     const sp = ctx.span.get(id);
     spans.push(sp ? sp[0] - start : -1, sp ? sp[1] - start : -1);
   }
-  return { tails, rel, lines, spans, idx, mids };
+  return { tails, rel, lines, spans };
 }
 
 let shapeCopies = 0;   // сколько экземпляров разложено копией образца — тестам, без часов
@@ -7085,13 +7075,8 @@ function solveShapeCopies() { return shapeCopies; }
 function copyShape(ctx, t, rootId, x, y) {
   const n = t.tails.length;
   const ids = new Array(n);
-  const syn = ctx.syns.get(rootId);
   for (let i = 0; i < n; i++) {
-    // круг 62: та же форма — тот же список поддерева мастера, поэтому на месте idx — раскрытый узел того
-    // же узла мастера этого экземпляра (instance и master это подтверждают): id тот же, что склеенный
-    const j = t.idx[i];
-    const s = syn && j >= 0 ? syn[j] : undefined;
-    ids[i] = s && s.instance === rootId && s.master === t.mids[i] ? s.id : rootId + t.tails[i];
+    ids[i] = rootId + t.tails[i];
     if (ctx.placed.has(ids[i])) return false;
   }
   const ox = r2(x);
@@ -7099,9 +7084,6 @@ function copyShape(ctx, t, rootId, x, y) {
   const base = ctx.seq.length;
   const { rel, lines, spans } = t;
   const { placed, rects, seq, span } = ctx;
-  // в geo.order — только корень: потомки раскрыты (id узла документа среди них — коллизия, и тогда
-  // образцов нет вовсе)
-  if (ctx.seq !== ctx.order && ctx.doc.nodes[rootId]) ctx.order.push(rootId);
   for (let i = 0; i < n; i++) {
     const id = ids[i];
     const k = i * 4;
@@ -7109,6 +7091,7 @@ function copyShape(ctx, t, rootId, x, y) {
     rects[id] = { x: r2(ox + rel[k]), y: r2(oy + rel[k + 1]), w: rel[k + 2], h: rel[k + 3] };
     if (lines[i] !== undefined) ctx.lines[id] = lines[i];
     seq.push(id);
+    if (seq !== ctx.order && ctx.doc.nodes[id]) ctx.order.push(id);
     if (spans[i * 2] >= 0) span.set(id, [base + spans[i * 2], base + spans[i * 2 + 1]]);
   }
   shapeCopies++;
@@ -7183,7 +7166,6 @@ function solveWith(doc, opts, seed, pre) {
     shapeMeas: options.shapes === false ? null : new Map(),
     shapePlaced: options.shapes === false ? null : new Map(),
     shapes: null,           // круг 54: id экземпляра → ключ формы из expandDoc этого документа
-    syns: null,             // круг 62: id экземпляра → его раскрытые узлы по местам списка поддерева
     dirty: seed ? seed.dirty : null,
   };
   const geo = { rects: ctx.rects, lines: ctx.lines, order: ctx.order, expanded: {} };
@@ -7205,7 +7187,6 @@ function solveWith(doc, opts, seed, pre) {
   if (ex.count) ctx.nodes = given && given.nodes ? given.nodes : merged || { ...doc.nodes, ...ex.nodes };
   ctx.seq = ex.count ? [] : ctx.order;
   ctx.shapes = ex.shapes || new Map();
-  ctx.syns = ex.syns || new Map();
   const root = doc.nodes[doc.root];
   ctx.rects[root.id] = { x: 0, y: 0, w: 0, h: 0 };
   for (const id of kidsOf(root)) {
@@ -7283,66 +7264,31 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
     return solveWith(nextDoc, { ...options, incremental: true }, null, { ex: memo.ex, nodes: memo.nodes, size: quick.size });
   }
   // круг 54: раскрытие кешировано по объекту экземпляра и его зависимостям (expandCache), поэтому у
-  // нетронутых экземпляров раскрытые узлы — те же объекты, и сравнение по тождеству видит только правку
-  // круг 62: общая карта памяти собрана от prevDoc — её правит partsAfter, новая не собирается
+  // нетронутых экземпляров раскрытые узлы — те же объекты, и сравнение по тождеству видит только правку.
+  // Круг 62: общая карта памяти собрана от prevDoc (memo.base) и его раскрытия — новая не собирается:
+  // изменённые id — по частям раскрытия (changedParts), карта правится на месте
   const inPlace = !!(memo.nodes && memo.ex && memo.ex.parts && memo.ex.count && memo.base === prevDoc
     && isObj(prevDoc.nodes) && nextDoc && isObj(nextDoc.nodes));
   const { ex, merged } = expandAll(nextDoc, !inPlace);
-  if (inPlace && ex.count) return partsAfter(prevGeo, memo, prevDoc, nextDoc, ex, options);
-  const nodes = ex.count && isObj(nextDoc && nextDoc.nodes) ? merged : null;
-  // коллизия id раскрытия с узлом документа (до или после правки): отрезки поддеревьев не те — полная
+  const parts = inPlace && ex.count;
+  const full = (nodes, size) => solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes, size });
+  // коллизия id раскрытия с узлом документа (до или после правки): отрезки поддеревьев не те — полная;
   // раскрытие у предела глубины (до или после): обрезка зависит от глубины — тоже полная
-  if (ex.collide || memo.collide || ex.deep || memo.deep) return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes });
+  if (ex.collide || memo.collide || ex.deep || memo.deep) return full(parts ? { ...nextDoc.nodes, ...ex.nodes } : merged);
   // круг 61: раскрыто заново больше половины всех узлов (правка мастера) — грязного заведомо больше
-  // половины: сразу полная, без сравнения по всей общей карте
-  if (ex.count && ex.fresh * 2 > ex.used + Object.keys(nextDoc.nodes).length) {
-    return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes });
+  // половины: сразу полная, без подъёма к предкам
+  const many = ex.count && ex.fresh * 2 > ex.used + Object.keys(nextDoc.nodes).length;
+  if (!parts) {
+    if (many) return full(merged);
+    const half = Math.floor(Object.keys(merged || nextDoc.nodes).length / 2);
+    return afterDirty(prevGeo, memo, nextDoc, options, ex, merged, undefined, dirtyAfter(prevDoc, nextDoc, memo.nodes, merged, half));
   }
-  // грязного больше половины (правка мастера с тысячами экземпляров) — полная раскладка дешевле:
-  // ей не нужно ни снимать записи кешей, ни сверять размеры чистых; раскрытие она берёт готовое
-  const half = Math.floor(Object.keys(nodes || nextDoc.nodes).length / 2);
-  const dirty = dirtyAfter(prevDoc, nextDoc, memo.nodes, nodes, half);
-  if (!dirty || dirty.size > half) return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes });
-  SOLVE_MEMO.delete(prevGeo);
-  for (const id of dirty) { memo.meas.delete(id); memo.flow.delete(id); }
-  return solveWith(nextDoc, { ...options, __inSelfTest: true },
-    { meas: memo.meas, flow: memo.flow, geo: prevGeo, span: memo.span, seq: memo.seq, dirty, ex, nodes });
-}
-
-/**
- * Круг 62: solveAfter с экземплярами, когда общая карта памяти собрана от prevDoc (memo.base) и его
- * раскрытия (memo.ex). Изменённые id — по настоящим узлам и по частям раскрытия (ex.parts: та же
- * запись кеша — экземпляр не изменился; иначе сверка его узлов), а не сравнением общих карт целиком.
- * Карта правится на месте и переходит новой геометрии, прежняя память удаляется. Правка одного узла
- * мастера (expandOne берёт остальные раскрытые узлы из прежнего раскрытия) — это его копии в
- * экземплярах, а не все раскрытые узлы.
- */
-function partsAfter(prevGeo, memo, prevDoc, nextDoc, ex, options) {
-  const P = prevDoc.nodes;
-  const N = nextDoc.nodes;
+  if (prevDoc.tokens !== nextDoc.tokens || prevDoc.root !== nextDoc.root) return full({ ...nextDoc.nodes, ...ex.nodes });
   const M = memo.nodes;
   const out = ex.nodes;
-  const full = (pre) => solveWith(nextDoc, { ...options, incremental: true }, null, pre);
-  // коллизия id, предел глубины, другие токены или корень — полная, с новой картой (память не тронута)
-  if (ex.collide || memo.collide || ex.deep || memo.deep || prevDoc.tokens !== nextDoc.tokens || prevDoc.root !== nextDoc.root) {
-    return full({ ex, nodes: { ...N, ...out } });
-  }
-  const changed = [];
-  for (const id of Object.keys(N)) if (ownNode(P, id) !== N[id]) changed.push(id);
-  for (const id of Object.keys(P)) if (!hasOwnProp.call(N, id)) changed.push(id);
-  const was = memo.ex.parts;
-  for (const [rootId, local] of ex.parts) {
-    const old = was.get(rootId);
-    if (old === local) continue;
-    for (const id in local) if (!old || !hasOwnProp.call(old, id) || old[id] !== local[id]) changed.push(id);
-    if (old) for (const id in old) if (!hasOwnProp.call(local, id)) changed.push(id);
-  }
-  for (const [rootId, old] of was) if (!ex.parts.has(rootId)) for (const id in old) changed.push(id);
-  const getN = (id) => (hasOwnProp.call(out, id) ? out[id] : ownNode(N, id));
-  const half = Math.floor(memo.size / 2);
-  // раскрыто заново больше половины всех узлов или изменённых больше половины — сразу полная
-  const many = ex.fresh * 2 > ex.used + Object.keys(N).length;
-  const dirty = many ? null : dirtyOf(changed, (id) => ownNode(M, id), getN, nextDoc.root, half);
+  const changed = changedParts(memo.ex, prevDoc, nextDoc, ex);
+  const getN = (id) => (hasOwnProp.call(out, id) ? out[id] : ownNode(nextDoc.nodes, id));
+  const dirty = many ? null : dirtyOf(changed, (id) => ownNode(M, id), getN, nextDoc.root, Math.floor(memo.size / 2));
   // карта — под новый документ; прежней геометрии она больше не годится
   SOLVE_MEMO.delete(prevGeo);
   let size = memo.size;
@@ -7352,10 +7298,48 @@ function partsAfter(prevGeo, memo, prevDoc, nextDoc, ex, options) {
     if (n !== undefined) { if (!had) size += 1; M[id] = n; }
     else if (had) { delete M[id]; size -= 1; }
   }
-  if (!dirty || dirty.size > Math.floor(size / 2)) return full({ ex, nodes: M, size });
+  return afterDirty(prevGeo, memo, nextDoc, options, ex, M, size, dirty);
+}
+
+/**
+ * Хвост solveAfter: грязного нет (null) или больше половины общей карты (size; не задан — по ней самой)
+ * — полная раскладка с готовым раскрытием, иначе — по месту от прежней геометрии. Грязного больше
+ * половины (правка мастера с тысячами экземпляров) — полная дешевле: ей не нужно ни снимать записи
+ * кешей, ни сверять размеры чистых.
+ */
+function afterDirty(prevGeo, memo, nextDoc, options, ex, nodes, size, dirty) {
+  const total = isNum(size) ? size : Object.keys(nodes || nextDoc.nodes).length;
+  if (!dirty || dirty.size > Math.floor(total / 2)) {
+    return solveWith(nextDoc, { ...options, incremental: true }, null, { ex, nodes, size });
+  }
+  SOLVE_MEMO.delete(prevGeo);
   for (const id of dirty) { memo.meas.delete(id); memo.flow.delete(id); }
   return solveWith(nextDoc, { ...options, __inSelfTest: true },
-    { meas: memo.meas, flow: memo.flow, geo: prevGeo, span: memo.span, seq: memo.seq, dirty, ex, nodes: M, size });
+    { meas: memo.meas, flow: memo.flow, geo: prevGeo, span: memo.span, seq: memo.seq, dirty, ex, nodes, size });
+}
+
+/**
+ * Круг 62: изменённые id общей карты (без повторов) — по настоящим узлам и по частям раскрытия
+ * (ex.parts: та же запись кеша — экземпляр не изменился, иначе сверка его узлов), а не сравнением двух
+ * общих карт целиком. Правка одного узла мастера (expandOne берёт остальные раскрытые узлы из прежнего
+ * раскрытия) — это его копии в экземплярах, а не все раскрытые узлы.
+ * @returns {Set<string>}
+ */
+function changedParts(prevEx, prevDoc, nextDoc, ex) {
+  const P = prevDoc.nodes;
+  const N = nextDoc.nodes;
+  const changed = new Set();
+  for (const id of Object.keys(N)) if (ownNode(P, id) !== N[id]) changed.add(id);
+  for (const id of Object.keys(P)) if (!hasOwnProp.call(N, id)) changed.add(id);
+  const was = prevEx.parts;
+  for (const [rootId, local] of ex.parts) {
+    const old = was.get(rootId);
+    if (old === local) continue;
+    for (const id in local) if (!old || !hasOwnProp.call(old, id) || old[id] !== local[id]) changed.add(id);
+    if (old) for (const id in old) if (!hasOwnProp.call(local, id)) changed.add(id);
+  }
+  for (const [rootId, old] of was) if (!ex.parts.has(rootId)) for (const id in old) changed.add(id);
+  return changed;
 }
 
 /**
@@ -7457,7 +7441,7 @@ function dirtyAfter(prevDoc, nextDoc, prevNodes, nextNodes, maxChanged) {
 }
 
 /**
- * Круг 62: грязные узлы по готовому списку изменённых id (повторы можно) — изменённые и все их предки
+ * Круг 62: грязные узлы по готовому списку (или множеству) изменённых id — изменённые и все их предки
  * в обеих версиях. getP/getN — узел по id в прежней и новой общей карте. null — только полная раскладка.
  */
 function dirtyOf(changed, getP, getN, root, maxChanged) {
@@ -7471,7 +7455,7 @@ function dirtyOf(changed, getP, getN, root, maxChanged) {
     }
     return null;
   };
-  if (isNum(maxChanged) && changed.length > maxChanged) return null;
+  if (isNum(maxChanged) && (Array.isArray(changed) ? changed.length : changed.size) > maxChanged) return null;
   const dirty = new Set();
   // круг 54: свой «уже пройден» у каждой версии — правка мастера пачкает тысячи раскрытых узлов, и
   // подъём от каждого до корня прежнего документа стоил бы больше самой раскладки
