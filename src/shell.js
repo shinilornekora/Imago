@@ -2373,6 +2373,8 @@ const SLASH_ARGS = {
   },
   'select-name'(rest, raw, ctx, cmd) {
     if (!rest) return bad(cmd, 'Скажите, какой слой выделить');
+    // круг 90: «/выделить экраны со своей темой» — то же, что без слэша (§15.19), а не поиск слоя по имени
+    if (RE_THEMED_PICK.test(`выдели ${rest}`)) return themedBoardsIntent(ctx.doc);
     if (!ctx.doc) return { kind: 'select-name', name: cleanText(raw) };
     const hits = nodesByName(ctx.doc, rest, { activeId: ctx.activeId });
     if (!hits.length) return bad(cmd, `Слоя «${cutText(cleanText(raw), 40, { ellipsis: true })}» не нашёл`);
