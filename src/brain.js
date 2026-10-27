@@ -1186,6 +1186,8 @@ export const SCHEMAS = {
         /* Круг 74 (SPEC §15.11): «все экраны, кроме «Оплата»» — та же правка всем, кроме названных. */
         exceptBoards: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 80 } },
         reset: { type: 'boolean' },
+        /* Круг 79 (SPEC §15.16): с reset — снять только цвета или только шрифты экрана. */
+        resetPart: { type: 'string', enum: ['colors', 'type'] },
         /* Круг 71 (SPEC §15.8): «сделай этот экран как «Оплата»» — тема экрана-образца копией. */
         likeBoard: { type: 'string', maxLength: 80 },
         colors: {
@@ -1247,6 +1249,7 @@ export const SCHEMAS = {
   boardGroup?: string, // с board:true — «все экраны оплаты»: слово из имён экранов, правка — всем таким
   likeBoard?: string, // с board:true — имя экрана-образца: «сделай как экран X»
   reset?: boolean,   // с board:true — снять тему доски целиком (вернуть ей оформление документа)
+  resetPart?: "colors"|"type", // с reset — снять только свои цвета или только свои шрифты экрана
   colors?: [{name: string, value: "#rrggbb"}],
   type?: [{name: string, fontSize?: number, fontWeight?: number, lineHeight?: number, letterSpacing?: number, font?: string}],
   spacing?: number[], radii?: number[],   // шкалы — массивы ТОЙ ЖЕ длины, что сейчас: узлы ссылаются на шаги по номеру
@@ -2275,7 +2278,9 @@ export const PROMPTS = {
   экран X» — верни board:true: colors и font/fontWeight стилей лягут в тему доски из «РАБОТАЕМ С:»,
   остальные доски не изменятся. Имена — ТЕ ЖЕ токены документа (canvas, surface, text, accent…):
   слои доски на них уже ссылаются. Кегли, интерлиньяж, шкалы, движение и тени у доски свои не
-  бывают — при board:true их не пиши. «Верни этому экрану общее оформление» — {board:true, reset:true}.
+  бывают — при board:true их не пиши. «Верни этому экрану общее оформление» — {board:true, reset:true};
+  «верни экрану цвета документа» (только цвета, шрифты пусть остаются свои) — {board:true, reset:true, resetPart:"colors"},
+  только шрифты — resetPart:"type".
   Назвал экран по имени — boardName: "<имя>"; назвал несколько («экраны Оплата и Итог тёмными») — boardNames:
   ["<имя>", "<имя>"]: та же правка ляжет темой каждому; «РАБОТАЕМ С:» на нескольких экранах и просят «эти экраны» —
   board:true без имён, правка ляжет каждому. «Все экраны, кроме «Оплата»» — {board:true, exceptBoards:["Оплата"]}
@@ -2624,6 +2629,11 @@ const RE = {
     rx(String.raw`(?:сделай|оформи|переведи)\s+(?:т[её]мн|светл)\p{L}*\s+` + R76.det + R76.scr + R76.name + R76.end),
     rx(R76.notOn + R76.det + R76.scr + R76.name + R76.and + String.raw`\s+(?:сделай|оформи)\s+(?:в\s+)?(?:т[её]мн|светл)\p{L}*`),
     rx(R76.notOn + R76.det + R76.scr + R76.name + R76.and + String.raw`\s+(?:в|с)\s+\p{L}+\s+акцент(?:ом|е)` + R76.end),
+    // круг 79 (SPEC §15.16): «верни экрану Итог цвета документа», «сбрось свои цвета экрана», «цвета экрана — как
+    // в документе» — снять с экрана свои цвета; «верни кнопке цвет» (не экран) — как было
+    rx(String.raw`(?![^.!?]*(?:прежн|стар(?:ые|ых|ым|ыми)|исходн|бывш)\p{L}*\s+цвет)(?:верни|сбрось|сними)\s+(?:всем\s+)?` + R76.det + R76.scr + R76.name + R76.and + String.raw`,?\s+(?:(?:общ|сво)\p{L}*\s+)?цвет\p{L}*(?:\s+(?:документа|как\s+в\s+документе))?` + R76.end),
+    rx(String.raw`(?:сбрось|сними)\s+(?:сво\p{L}*\s+)?цвет\p{L}*\s+(?:у\s+)?(?:этого\s+)?` + R76.det + R76.scr + R76.name + R76.end),
+    rx(String.raw`цвет\p{L}*\s+` + R76.det + R76.scr + R76.name + String.raw`\s*[—:-]?\s*как\s+в\s+документе` + R76.end),
     rx(String.raw`(?:перекрась|покрась|затемни|осветли)\s+` + R76.det + R76.scr + R76.name + R76.and + String.raw`(?=\s*(?:$|[.!?]|\s+в\s))`),
   ],
   create: [
@@ -10861,7 +10871,8 @@ export function themeStageLine(data, doc, scope) {
   const as = (forms) => who.replace(/^(?:выбранного экрана|экрана|экранов|всех экранов)(?=\s|$)/u, (m) => forms[m])
     .replace(/ и (экрана|экранов) /u, (m, w) => ` и ${forms[w]} `);
   if (like) return `${verb}${from}${to}${as({ 'выбранного экрана': 'выбранный экран', 'экрана': 'экран', 'экранов': 'экраны', 'всех экранов': 'все экраны' })}${but}`;
-  if (d.reset === true) return `Возвращаю ${as({ 'выбранного экрана': 'выбранному экрану', 'экрана': 'экрану', 'экранов': 'экранам', 'всех экранов': 'всем экранам' })}${but}${but ? ',' : ''} общее оформление`;
+  const back = d.resetPart === 'colors' ? 'цвета документа' : d.resetPart === 'type' ? 'шрифты документа' : 'общее оформление';
+  if (d.reset === true) return `Возвращаю ${as({ 'выбранного экрана': 'выбранному экрану', 'экрана': 'экрану', 'экранов': 'экранам', 'всех экранов': 'всем экранам' })}${but}${but ? ',' : ''} ${back}`;
   return `${verb} ${who}${but}`;
 }
 
@@ -11340,6 +11351,17 @@ function oneBoardThemeOps({ doc, theme, engine, note, boardId, byName, label, sa
   }
   if (theme.reset === true && !likeId) {
     if (board.theme === undefined) throw ERR('schema', 'У этого экрана своей темы и так нет — он в оформлении документа', { reason: 'своей темы и так нет — в оформлении документа' });
+    // круг 79 (SPEC §15.16): только цвета или только шрифты; другая часть остаётся своей
+    const part = theme.resetPart === 'colors' || theme.resetPart === 'type' ? theme.resetPart : null;
+    const now = part && engine && engine.boardTheme ? engine.boardTheme(board) : null;
+    if (part && !now) note(`Тема экрана «${label(boardId)}» была повреждена — снята целиком`);
+    if (now) {
+      const has = (k) => now[k] && typeof now[k] === 'object' && Object.keys(now[k]).length > 0;
+      const what = part === 'colors' ? 'цветов' : 'шрифтов';
+      if (!has(part)) throw ERR('schema', `У этого экрана своих ${what} и так нет — они как в документе`, { reason: `своих ${what} и так нет — они как в документе` });
+      if (has(part === 'colors' ? 'type' : 'colors')) return [mkOp(engine, 'set', { id: boardId, path: `theme.${part}`, value: undefined })];
+    }
+    // последняя своя часть (или тема повреждена) — снимается вся тема: пустой theme:{} не остаётся
     return [mkOp(engine, 'set', { id: boardId, path: 'theme', value: undefined })];
   }
   const mineTheme = engine && engine.boardTheme ? engine.boardTheme(board) : (board.theme && typeof board.theme === 'object' ? board.theme : null);
@@ -15688,7 +15710,7 @@ export function describeChange(ops, doc, after = null, engine = null) {
   const sameTheme = new Map();
   for (const [id, ops] of themeOps) {
     const op = themeOpsValue(id, ops);
-    const key = JSON.stringify(op.value === undefined ? null : op.value);
+    const key = op.part ? `part:${op.part}` : JSON.stringify(op.value === undefined ? null : op.value);
     if (!sameTheme.has(key)) sameTheme.set(key, { op, ids: [] });
     sameTheme.get(key).ids.push(id);
   }
@@ -15741,6 +15763,10 @@ export function describeChange(ops, doc, after = null, engine = null) {
 function themeOpsValue(id, ops) {
   const whole = ops.filter((o) => o.path === 'theme').pop();
   if (whole && ops.length === 1) return whole;
+  // круг 79: снята одна часть темы целиком (theme.colors → undefined) — «цвета — как в документе»
+  if (ops.length === 1 && /^theme\.(colors|type)$/.test(String(ops[0].path)) && ops[0].value === undefined) {
+    return { op: 'set', id, path: 'theme', value: undefined, part: ops[0].path.slice(6) };
+  }
   const v = whole && whole.value && typeof whole.value === 'object' ? JSON.parse(JSON.stringify(whole.value)) : {};
   let known = !!whole;
   for (const o of ops) {
@@ -15760,6 +15786,7 @@ function boardThemePhrase(op, doc, born, ids = [op.id]) {
   const who = names.length > 3 ? `${names.slice(0, 3).join(', ')} и ещё ${names.length - 3}` : names.join(', ');
   const many = names.length > 1;
   const v = op.value;
+  if (op.part) return `${many ? 'экраны' : 'экран'} ${who}: ${op.part === 'colors' ? 'цвета' : 'шрифты'} — как в документе`;
   if (!v || typeof v !== 'object') return many ? `экраны ${who} вернулись к оформлению документа` : `экран ${who} вернулся к оформлению документа`;
   const items = [];
   for (const [k, hex] of Object.entries(v.colors || {})) items.push(`${ruToken('colors', k)} ${hex}`);
