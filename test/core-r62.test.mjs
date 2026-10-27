@@ -127,8 +127,9 @@ test('круг62: правки мастера, экземпляров и сло�
           if (flatInst.every((i) => others.every((c) => inc.expanded[i + '/' + c] === geo.expanded[i + '/' + c]))) kept++;
         }
       }
-      // ветка: правка от документа два шага назад, по его (уже отданной) геометрии
+      // правка мастера заново пишет записи кеша — дальше снова считаем
       if (masterEdit) branched = false;
+      // ветка: правка от документа два шага назад, по его (уже отданной) геометрии
       if (back && step % 5 === 0) {
         const op2 = [{ op: 'set', id: 'fs', path: 'characters', value: 'Ветка ' + step }];
         const r2 = quiet(() => applyOps(back.doc, op2, { checkExpand: false }));

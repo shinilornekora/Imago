@@ -7250,7 +7250,9 @@ function solveWith(doc, opts, seed, pre) {
  * раскрытые узлы»; правка мастера пачкает все его экземпляры, правка вне экземпляров — ни одного.
  * Круг 61: правка вне экземпляров — без раскрытия (quickAfter). Круг 62: изменённые id — по частям
  * раскрытия (changedParts), без сравнения двух общих карт целиком; карта памяти правится на месте.
- * prevGeo после этого — использованная: её кеши перешли новой геометрии.
+ * prevGeo после этого — использованная: её кеши перешли новой геометрии. Исключение — полная раскладка
+ * мимо afterDirty (коллизия, предел глубины, токены или корень, правка мастера на половину карты): там
+ * память не тронута и prevGeo остаётся годной.
  * @param {object} prevGeo @param {object} prevDoc @param {object} nextDoc @param {object[]} [opsList]
  * @param {{measureText?:Function}} [opts]
  * @returns {object} geo
@@ -7294,7 +7296,8 @@ function solveAfter(prevGeo, prevDoc, nextDoc, opsList, opts) {
     const had = hasOwnProp.call(M, id);
     if (getN(id) !== undefined) { if (!had) size += 1; } else if (had) size -= 1;
   }
-  // предки — по прежней карте, поэтому до её правки
+  // предки — по прежней карте, до её правки. Осторожность: при переносе узла оба родителя и так среди
+  // изменённых (у обоих новый список детей), но прежняя цепочка предков — только в прежней карте
   const dirty = many ? null : dirtyOf(changed, (id) => ownNode(M, id), getN, nextDoc.root, Math.floor(size / 2));
   for (const id of changed) {
     const n = getN(id);
