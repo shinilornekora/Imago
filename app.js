@@ -6926,7 +6926,7 @@ function layerTipFor(n) {
   const name = n.name || defaultName(n);
   if (n.type === 'vector') {
     const paths = SHELL.vectorPaths(n);
-    const fill = paths.length ? SHELL.paintWord(paths[0].fill, { colors: state.doc.tokens.colors, colorWord: (v) => humanValue(v) }) : '';
+    const fill = paths.length ? SHELL.paintWord(paths[0].fill, { colors: colorsAt(n), colorWord: (v) => humanValue(v) }) : '';
     const inIll = SHELL.isIllustration(state.doc, nodeById(state.doc, n.parent));
     return `${name} — ${inIll ? 'деталь иллюстрации' : 'вектор'}, ${paths.length} ${plural(paths.length, 'контур', 'контура', 'контуров')}`
       + `${fill && fill !== 'нет' ? `, заливка ${fill}` : ''}`;
@@ -7930,10 +7930,10 @@ function renderInspector() {
     body.appendChild(group('Типографика', [
       row('Стиль', selectField(Object.keys(state.doc.tokens.type), st.token || 'body',
         (v) => setProp(node.id, 'style', { ...st, token: v }), TYPE_LABELS)),
-      row('Кегль', numberField(st.fontSize ?? tokenType(st.token).fontSize,
+      row('Кегль', numberField(st.fontSize ?? tokenType(st.token, node).fontSize,
         (v) => setProp(node.id, 'style', { ...st, fontSize: v }))),
       row('Жирность', selectField(['400', '500', '600', '700'],
-        String(st.fontWeight ?? tokenType(st.token).fontWeight),
+        String(st.fontWeight ?? tokenType(st.token, node).fontWeight),
         (v) => setProp(node.id, 'style', { ...st, fontWeight: Number(v) }), WEIGHT_LABELS)),
       row('Выключка', segField(['left', 'center', 'right'], node.align || 'left',
         (v) => setProp(node.id, 'align', v),
@@ -8015,6 +8015,7 @@ function renderInspector() {
   if ('fill' in node || node.type === 'frame' || node.type === 'rect' || node.type === 'ellipse') {
     body.appendChild(fillGroup(node));
   }
+  { const tg = boardThemeGroup(node); if (tg) body.appendChild(tg); }
   if (node.type === 'text') {
     body.appendChild(group('Цвет текста', [swatches(node, 'color', 'Цвет текста')]));
   }
@@ -8156,7 +8157,7 @@ function stateColorField(node, key, field, cur, title) {
   const dot = document.createElement('span');
   dot.className = 'swatch-dot';
   const tok = colorToken(cur);
-  const hex = tok ? (state.doc.tokens.colors || {})[tok] : null;
+  const hex = tok ? colorsAt(node)[tok] : null;
   // «как в покое» — пунктирное кольцо, а не перечёркнутый кружок «без заливки»: это не цвет
   if (cur !== undefined && hex) dot.style.background = hex; else dot.classList.add(cur === undefined ? 'same' : 'none');
   const txt = document.createElement('span');
@@ -8293,13 +8294,31 @@ const paintOpen = new Set();
 /** Выбранный контур вектора: {node, i} — список контуров помнит выбор для слоя. */
 let pathPick = null;
 
+/**
+ * Круг 48 (SPEC §15): документ, каким его видит слой — токены его доски (тема поверх документа).
+ * Образцы цветов инспектора и кружки краски показывают значения той доски, где слой лежит.
+ */
+function tokenDoc(node) {
+  if (!node || !node.id || typeof CORE.docAt !== 'function') return state.doc;
+  // узлы раскрытых экземпляров есть только в geo.expanded — доску ищем и по ним
+  const ex = state.geo && state.geo.expanded;
+  const get = (id) => (ex && typeof id === 'string' && Object.prototype.hasOwnProperty.call(ex, id) ? ex[id]
+    : state.doc.nodes && typeof id === 'string' && Object.prototype.hasOwnProperty.call(state.doc.nodes, id) ? state.doc.nodes[id] : undefined);
+  try { return CORE.docAt(state.doc, node.id, get) || state.doc; } catch { return state.doc; }
+}
+/** Цвета токенов на доске слоя. */
+function colorsAt(node) {
+  const d = tokenDoc(node);
+  return (d && d.tokens && d.tokens.colors) || state.doc.tokens.colors || {};
+}
+
 /** Фон кружка-образца краски: ядро знает градиенты точнее (resolvePaint), без него — словарь. */
-function paintBg(p) {
+function paintBg(p, node) {
   if (p === undefined || p === null) return '';
   if (typeof CORE.paintCss === 'function') {
-    try { const css = CORE.paintCss(state.doc, p); if (css) return css; } catch { /* ниже — своё */ }
+    try { const css = CORE.paintCss(tokenDoc(node), p); if (css) return css; } catch { /* ниже — своё */ }
   }
-  return SHELL.paintCss(p, state.doc.tokens.colors || {});
+  return SHELL.paintCss(p, colorsAt(node));
 }
 
 /** Записать поле контура (или всех контуров) одной транзакцией. */
@@ -8349,7 +8368,7 @@ function colorInput(hex, onPick, label) {
  * @param {{key:string, title:string, mixed?:boolean, onPick:(v:any)=>void, node:object, noneLabel?:string}} o
  */
 function paintField(cur, o) {
-  const colors = state.doc.tokens.colors || {};
+  const colors = colorsAt(o.node);
   const d = document.createElement('details');
   d.className = 'state-color paint-field';
   d.dataset.paint = o.key;
@@ -8358,7 +8377,7 @@ function paintField(cur, o) {
   const sum = document.createElement('summary');
   const dot = document.createElement('span');
   dot.className = 'swatch-dot';
-  const css = o.mixed ? '' : paintBg(cur);
+  const css = o.mixed ? '' : paintBg(cur, o.node);
   if (css) dot.style.background = css; else dot.classList.add(o.mixed ? 'same' : 'none');
   const txt = document.createElement('span');
   txt.className = 'paint-word';
@@ -8372,15 +8391,38 @@ function paintField(cur, o) {
   body.className = 'paint-body';
   const kind = o.mixed ? 'color' : SHELL.paintKind(cur);
   const isGrad = kind === 'gradient';
+  const isPat = kind === 'pattern';
   const base = (!o.mixed && SHELL.paintHex(cur, colors)) || '#F4A261';
-  const modeSeg = segField(['solid', 'gradient'], isGrad ? 'gradient' : 'solid', (v) => {
+  // круг 49 (SPEC §16): фактура — третьим видом, только там, где ядро её принимает (заливка)
+  const modes = o.pattern ? ['solid', 'gradient', 'pattern'] : ['solid', 'gradient'];
+  const modeSeg = segField(modes, isPat ? 'pattern' : isGrad ? 'gradient' : 'solid', (v) => {
     if (v === 'gradient' && !isGrad) o.onPick(SHELL.gradientWith(o.mixed ? base : (cur ?? base), {}, colors));
-    else if (v === 'solid' && isGrad) o.onPick(SHELL.paintHex(cur, colors) || base);
-  }, ['Цвет', 'Градиент']);
-  nameControl(modeSeg, `${o.title}: цвет или градиент`);
+    else if (v === 'pattern' && !isPat) o.onPick(SHELL.patternWith(o.mixed ? undefined : cur, {}, colors));
+    else if (v === 'solid' && (isGrad || isPat)) o.onPick(isPat ? (SHELL.patternOf(cur).bg || base) : (SHELL.paintHex(cur, colors) || base));
+  }, o.pattern ? ['Цвет', 'Градиент', 'Фактура'] : ['Цвет', 'Градиент']);
+  nameControl(modeSeg, o.pattern ? `${o.title}: цвет, градиент или фактура` : `${o.title}: цвет или градиент`);
   body.appendChild(modeSeg);
 
-  if (!isGrad) {
+  if (isPat) {
+    const pt = SHELL.patternOf(cur);
+    const set = (ch) => o.onPick(SHELL.patternWith(cur, ch, colors));
+    const kindSel = selectField(SHELL.PATTERN_KINDS, pt.kind, (v) => set({ kind: v }), SHELL.PATTERN_RU);
+    nameControl(kindSel, `${o.title}: вид фактуры`);
+    body.appendChild(row('Узор', kindSel));
+    const hexOf = (v) => SHELL.paintHex(v, colors) || '';
+    body.appendChild(row('Цвет', colorInput(hexOf(pt.color), (h) => set({ color: h }), `${o.title}: цвет узора`)));
+    body.appendChild(row('Подложка', colorInput(hexOf(pt.bg), (h) => set({ bg: h }), `${o.title}: цвет подложки`)));
+    body.appendChild(row('Шаг', numberField(Number(pt.size) || 12, (v) => set({ size: v }), { min: 4, max: 200, label: `${o.title}: шаг узора, px` })));
+    if (pt.kind === 'lines' || pt.kind === 'waves' || pt.kind === 'grid' || pt.kind === 'checks') {
+      body.appendChild(row('Угол', numberField(Number(pt.angle) || 0, (v) => set({ angle: v }), { min: 0, max: 360, label: `${o.title}: угол узора` })));
+    }
+    const off = document.createElement('button');
+    off.type = 'button';
+    off.className = 'btn ghost small';
+    off.textContent = o.noneLabel || 'Без заливки';
+    off.addEventListener('click', () => o.onPick(undefined));
+    body.appendChild(off);
+  } else if (!isGrad) {
     body.appendChild(row('Код', colorInput(kind === 'none' ? '' : base, (h) => o.onPick(h), `${o.title}: цвет`)));
     body.appendChild(swatches(o.node, 'fill', `${o.title}: палитра`, {
       // «разные» — ни один образец не нажат, и «без заливки» тоже
@@ -8493,7 +8535,7 @@ function vectorGroup(node) {
   if (widthC.mixed && (strokeC.mixed || SHELL.paintKind(strokeC.value) !== 'none')) kids.push(noteEl('Толщина у контуров разная — новое число встанет всем.'));
 
   if (paths.length > 1) {
-    const colors = state.doc.tokens.colors || {};
+    const colors = colorsAt(node);
     const pick = pathPick && pathPick.node === node.id && pathPick.i < paths.length ? pathPick.i : -1;
     const list = document.createElement('div');
     list.className = 'path-list';
@@ -8510,7 +8552,7 @@ function vectorGroup(node) {
       // что контур показывает на деле: своя краска или унаследованная от вектора
       const fillNow = SHELL.effectivePathValue(node, p, 'fill');
       const strokeNow = SHELL.effectivePathValue(node, p, 'stroke');
-      const css = paintBg(fillNow);
+      const css = paintBg(fillNow, node);
       if (css) dot.style.background = css; else dot.classList.add('none');
       const sc = SHELL.paintHex(strokeNow, colors);
       if (sc && Number(SHELL.effectivePathValue(node, p, 'strokeWidth')) > 0) dot.style.boxShadow = `0 0 0 2px var(--panel-2), 0 0 0 3.5px ${sc}`;
@@ -8565,15 +8607,15 @@ function vectorGroup(node) {
 function fillGroup(node) {
   const kind = SHELL.paintKind(node.fill);
   const pick = (v) => setProp(node.id, 'fill', v);
-  if (kind === 'gradient' || kind === 'color') {
-    return group('Заливка', [paintField(node.fill, { key: `${node.id}|fill`, title: 'Заливка', node, onPick: pick })]);
+  if (kind === 'gradient' || kind === 'color' || kind === 'pattern') {
+    return group('Заливка', [paintField(node.fill, { key: `${node.id}|fill`, title: 'Заливка', node, onPick: pick, pattern: true })]);
   }
   const grad = document.createElement('button');
   grad.type = 'button';
   grad.className = 'linkish';
-  grad.textContent = 'Градиент или свой цвет…';
+  grad.textContent = 'Градиент, фактура или свой цвет…';
   grad.title = 'Залить градиентом из текущего цвета — вернуть можно отменой';
-  grad.addEventListener('click', () => pick(SHELL.gradientWith(node.fill, {}, state.doc.tokens.colors || {})));
+  grad.addEventListener('click', () => pick(SHELL.gradientWith(node.fill, {}, colorsAt(node))));
   return group('Заливка', [swatches(node, 'fill', 'Заливка'), grad]);
 }
 
@@ -8694,8 +8736,31 @@ function overrideGroup(node) {
   return group('Положение', [note, btn]);
 }
 
-function tokenType(token) {
-  return (state.doc.tokens.type && state.doc.tokens.type[token]) || { fontSize: 16, fontWeight: 400 };
+function tokenType(token, node) {
+  const d = node ? tokenDoc(node) : state.doc;
+  return (d.tokens.type && d.tokens.type[token]) || { fontSize: 16, fontWeight: 400 };
+}
+
+/**
+ * Круг 48 (SPEC §15): тема выделенной доски — строка «что своё» и кнопка «Вернуть общее
+ * оформление». Задают тему словами агенту; здесь — увидеть и снять.
+ */
+function boardThemeGroup(node) {
+  if (!node || node.type !== 'frame' || node.parent !== state.doc.root || typeof CORE.boardTheme !== 'function') return null;
+  const t = CORE.boardTheme(node);
+  if (!t) return null;
+  const bits = [];
+  for (const [k, v] of Object.entries(t.colors || {})) bits.push(`${k} ${v}`);
+  for (const [k, v] of Object.entries(t.type || {})) bits.push(`${k} — ${[v.font, v.fontWeight].filter(Boolean).join(' ')}`);
+  const line = document.createElement('div');
+  line.className = 'note';
+  line.textContent = bits.length ? `Своё у экрана: ${bits.slice(0, 4).join(', ')}${bits.length > 4 ? ` и ещё ${bits.length - 4}` : ''}` : 'Тема пустая';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn';
+  btn.textContent = 'Вернуть общее оформление';
+  btn.addEventListener('click', () => commit([OPS.set(node.id, 'theme', undefined)], 'Тема экрана снята'));
+  return group('Тема экрана', [line, btn]);
 }
 
 function setProp(id, path, value) {
@@ -9069,7 +9134,7 @@ function swatches(node, prop, label, opts = {}) {
   w.className = 'swatch-groups';
   w.setAttribute('role', 'group');
   w.setAttribute('aria-label', label || 'Цвет');
-  const colors = state.doc.tokens.colors || {};
+  const colors = colorsAt(node);
   const cur = colorToken('value' in opts ? opts.value : node[prop]);
   const pick = typeof opts.onPick === 'function' ? opts.onPick : ((v) => setProp(node.id, prop, v));
   const used = new Set();

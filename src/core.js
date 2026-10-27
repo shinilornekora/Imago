@@ -112,8 +112,14 @@ const MAX_DEPTH = 256;
  * читать нельзя (сервер переводит проект в «устарел», см. SPEC §9).
  * Обратно — можно: всё, что писал движок 1, движок 2 читает и применяет как
  * раньше (формат только расширялся; миграции записей нет).
+ *
+ * Круг 48: 3. Поле `theme` доски (SPEC §15) меняет, КАК рисуются её узлы: движок 2
+ * принял бы его простыми данными и нарисовал доску цветами документа — молча
+ * чужой макет. Круг 49: фактура в заливке (SPEC §16) — та же версия. Записи
+ * движков 1–2 движок 3 читает через liftOps: поле `theme` у них было простыми
+ * данными без действия — оно снимается, и запись применяется как раньше.
  */
-const ENGINE_VERSION = 2;
+const ENGINE_VERSION = 3;
 /**
  * Круг 39: самая старая версия движка, записи и снимки которой этот движок
  * читает без миграции. Документ, транзакция журнала или снимок с `engine` в
@@ -940,7 +946,7 @@ function strokeProblem(v, noGradient) {
     const rule = STROKE_FIELDS[k];
     if (v[k] === undefined) continue;
     if (rule === 'paint') {
-      const err = paintProblem(v[k], 'stroke.' + k, noGradient);
+      const err = paintProblem(v[k], 'stroke.' + k, noGradient, true);
       if (err) return err;
     } else if (rule === 'str') {
       if (typeof v[k] !== 'string') return `stroke.${k} должен быть строкой`;
@@ -1234,6 +1240,29 @@ function gradientProblem(g, what) {
   return null;
 }
 
+/* Круг 49 (SPEC §16): фактура — повторяющийся узор в заливке: {pattern:{kind, color, bg?, size?,
+   weight?, angle?, opacity?}}. color и bg — как любой цвет краски: токен или #hex. Узор — плитка
+   size×size в координатах холста (userSpaceOnUse), angle поворачивает плитку. */
+const PATTERN_KINDS = Object.freeze(['dots', 'lines', 'grid', 'checks', 'waves', 'grain']);
+const PATTERN_KIND_SET = new Set(PATTERN_KINDS);
+const PATTERN_KEYS = Object.freeze(['kind', 'color', 'bg', 'size', 'weight', 'angle', 'opacity']);
+const PATTERN_LIMITS = Object.freeze({ minSize: 4, maxSize: 200, defaultSize: 12, minWeight: 0.5, maxWeight: 50 });
+
+/** Фактура. @returns {string|null} */
+function patternProblem(p, what) {
+  const w = what + '.pattern';
+  if (!isObj(p)) return `${w}: нужен объект {kind, color, …}`;
+  for (const k of Object.keys(p)) if (PATTERN_KEYS.indexOf(k) < 0) return `${w}.${k}: поля фактуры — ${PATTERN_KEYS.join(', ')}`;
+  if (!PATTERN_KIND_SET.has(p.kind)) return `${w}.kind: ${PATTERN_KINDS.join(' | ')}`;
+  if (typeof p.color !== 'string' || !p.color) return `${w}.color: нужен цвет строкой (токен или #hex)`;
+  if (p.bg !== undefined && (typeof p.bg !== 'string' || !p.bg)) return `${w}.bg: цвет подложки строкой`;
+  if (!optNum(p, 'size', PATTERN_LIMITS.minSize, PATTERN_LIMITS.maxSize)) return `${w}.size: шаг ${PATTERN_LIMITS.minSize}..${PATTERN_LIMITS.maxSize} px`;
+  if (!optNum(p, 'weight', PATTERN_LIMITS.minWeight, PATTERN_LIMITS.maxWeight)) return `${w}.weight: толщина ${PATTERN_LIMITS.minWeight}..${PATTERN_LIMITS.maxWeight} px`;
+  if (!optNum(p, 'angle', 0, 360)) return `${w}.angle: градусы 0..360`;
+  if (!optNum(p, 'opacity', 0, 1)) return `${w}.opacity вне 0..1`;
+  return null;
+}
+
 /** Круг 43: ключи обёртки краски-цвета (кроме {gradient}) — строки. */
 const PAINT_WRAP_KEYS = Object.freeze(['token', 'color', 'value']);
 
@@ -1244,9 +1273,15 @@ const PAINT_WRAP_KEYS = Object.freeze(['token', 'color', 'value']);
  * @param {any} v @param {string} what @param {boolean} [noGradient]
  * @returns {string|null}
  */
-function paintProblem(v, what, noGradient) {
+function paintProblem(v, what, noGradient, noPattern) {
   if (v === null || typeof v === 'string') return null;
   if (!isObj(v)) return `${what}: цвет — строка или объект`;
+  // круг 49: фактура — только в заливке (не в цвете текста, обводке и состояниях)
+  if (v.pattern !== undefined) {
+    if (noGradient || noPattern) return `${what}: здесь фактура недопустима — она бывает только в заливке`;
+    if (Object.keys(v).length !== 1) return `${what}: у фактуры других ключей нет — {pattern:{…}}`;
+    return patternProblem(v.pattern, what);
+  }
   if (v.gradient !== undefined) {
     if (noGradient) return `${what}: здесь градиент недопустим — только цвет`;
     if (Object.keys(v).length !== 1) return `${what}: у градиента других ключей нет — {gradient:{…}}`;
@@ -1258,6 +1293,8 @@ function paintProblem(v, what, noGradient) {
 
 /** Есть ли в значении градиент. */
 const isGradientPaint = (v) => isObj(v) && isObj(v.gradient);
+/** Круг 49: есть ли в значении фактура. */
+const isPatternPaint = (v) => isObj(v) && isObj(v.pattern);
 
 /**
  * Кеш проверки путей: d → {err, at, count}. Путь проверяется на каждый set узла.
@@ -1427,7 +1464,7 @@ function vpathProblem(p, what) {
   if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > VECTOR_LIMITS.maxPathName)) return `${what}.name: строка до ${VECTOR_LIMITS.maxPathName} символов`;
   for (const k of ['fill', 'stroke']) {
     if (p[k] === undefined) continue;
-    const err = paintProblem(p[k], `${what}.${k}`);
+    const err = paintProblem(p[k], `${what}.${k}`, false, k === 'stroke');
     if (err) return err;
   }
   if (!optNum(p, 'strokeWidth', 0, VECTOR_LIMITS.maxStrokeWidth)) return `${what}.strokeWidth: 0..${VECTOR_LIMITS.maxStrokeWidth}`;
@@ -1713,6 +1750,184 @@ function fitVector(paths, opts) {
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * 2b. Тема доски (круг 48, SPEC §15)
+ *
+ * Поле `theme` фрейма-доски: свои значения части токенов документа —
+ * `{colors?: {<имя>: '#rrggbb'}, type?: {<имя>: {font?, fontWeight?}}}`.
+ * Узлы доски ссылаются на ТЕ ЖЕ имена токенов (`{token:'accent'}`, style
+ * 'display'); разрешаются они сначала по теме своей доски, затем по документу.
+ * Тема — только у доски (фрейм — ребёнок корня): у фрейма внутри макета поле
+ * допустимо по форме, но не действует (validate: theme-not-board).
+ * ЕДИНСТВЕННОЕ место, где тема становится токенами, — themedDoc: решатель,
+ * валидатор, сцена, экспорт и мозг читают токены узла через docAt/themeScope.
+ * ------------------------------------------------------------------ */
+
+/** Пределы темы: число цветов и стилей, длина имени шрифта. */
+const THEME_LIMITS = Object.freeze({ colors: 64, type: 32, font: 80 });
+/** Ключи темы и ключи стиля в теме (кегль и интерлиньяж — у документа: тема не двигает раскладку шкалой). */
+const THEME_KEYS = Object.freeze(['colors', 'type']);
+const THEME_TYPE_FIELDS = Object.freeze(['font', 'fontWeight']);
+const THEME_HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+/** Имя токена в теме: как имя в палитре — буква, затем буквы, цифры, «-» и «_». */
+const THEME_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+
+/**
+ * Форма поля theme. Строгая: тему читает отрисовка каждой доски.
+ * @returns {string|null}
+ */
+function themeProblem(v) {
+  if (!isObj(v)) return 'theme: нужен объект';
+  for (const k of Object.keys(v)) if (THEME_KEYS.indexOf(k) < 0) return `theme: неизвестный ключ «${shown(k)}»`;
+  if (v.colors !== undefined) {
+    if (!isObj(v.colors)) return 'theme.colors: нужен объект';
+    const names = Object.keys(v.colors);
+    if (names.length > THEME_LIMITS.colors) return `theme.colors: больше ${THEME_LIMITS.colors} цветов`;
+    for (const k of names) {
+      if (!THEME_NAME_RE.test(k) || PROTO_KEYS.has(k)) return `theme.colors: имя «${shown(k)}» не годится`;
+      const c = v.colors[k];
+      if (typeof c !== 'string' || !THEME_HEX_RE.test(c)) return `theme.colors.${k}: нужен цвет #rrggbb`;
+    }
+  }
+  if (v.type !== undefined) {
+    if (!isObj(v.type)) return 'theme.type: нужен объект';
+    const names = Object.keys(v.type);
+    if (names.length > THEME_LIMITS.type) return `theme.type: больше ${THEME_LIMITS.type} стилей`;
+    for (const k of names) {
+      if (!THEME_NAME_RE.test(k) || PROTO_KEYS.has(k)) return `theme.type: имя «${shown(k)}» не годится`;
+      const e = v.type[k];
+      if (!isObj(e)) return `theme.type.${k}: нужен объект`;
+      for (const f of Object.keys(e)) if (THEME_TYPE_FIELDS.indexOf(f) < 0) return `theme.type.${k}: поле «${shown(f)}» темой не задаётся`;
+      if (e.font !== undefined && (typeof e.font !== 'string' || !e.font.trim() || e.font.length > THEME_LIMITS.font)) {
+        return `theme.type.${k}.font: имя шрифта — строка до ${THEME_LIMITS.font} знаков`;
+      }
+      if (e.fontWeight !== undefined && !(isNum(e.fontWeight) && e.fontWeight >= 100 && e.fontWeight <= 900)) {
+        return `theme.type.${k}.fontWeight вне диапазона 100..900`;
+      }
+    }
+  }
+  return null;
+}
+
+/** Доска узла: предок-или-сам, чей родитель — корень (только фрейм). get — карта узлов с раскрытыми. */
+function boardOf(doc, id, get) {
+  const look = get || ((x) => ownNode(doc.nodes, x));
+  let cur = typeof id === 'string' ? look(id) : id;
+  for (let guard = 0; cur && guard <= MAX_DEPTH + 1; guard++) {
+    if (cur.parent === doc.root) return cur.type === 'frame' ? cur : null;
+    if (typeof cur.parent !== 'string') return null;
+    cur = look(cur.parent);
+  }
+  return null;
+}
+
+/**
+ * Круг 48: запись журнала прежнего движка → операции нынешнего. Движки 1–2 принимали `theme`
+ * простыми данными и ничего по нему не рисовали; движок 3 такое поле проверяет строго — запись с
+ * `set theme 'dark'` отвергалась бы целиком вместе с соседними правками. Поэтому у записей
+ * движка ниже 3 поле `theme` снимается (create — без поля, set/снятие по пути theme — пропуск):
+ * вид документа тот же, что у прежнего движка. Своя и неизвестная версия — как есть.
+ * @param {any[]} list @param {any} engine версия записи
+ * @returns {any[]}
+ */
+function liftOps(list, engine) {
+  if (!Array.isArray(list) || !(Number.isInteger(engine) && engine < 3)) return list;
+  let out = null;
+  for (let i = 0; i < list.length; i++) {
+    const op = list[i];
+    let next = op;
+    if (op && op.op === 'set' && typeof op.path === 'string' && (op.path === 'theme' || op.path.indexOf('theme.') === 0)) next = null;
+    else if (op && op.op === 'create' && isObj(op.node) && hasOwnProp.call(op.node, 'theme')) {
+      const node = { ...op.node };
+      delete node.theme;
+      next = { ...op, node };
+    }
+    if (next !== op && !out) out = list.slice(0, i);
+    if (out && next) out.push(next);
+  }
+  return out || list;
+}
+
+/** Есть ли у доски годная тема (документ прежней версии мог принести мусор — он не действует). */
+function boardTheme(board) {
+  const t = board && board.theme;
+  return t !== undefined && t !== null && !themeProblem(t) ? t : null;
+}
+
+const themedCache = new WeakMap();
+/**
+ * Документ, каким его видит доска: токены документа, поверх — тема доски.
+ * Без темы — сам doc. Узлы — общие (копия поверхностная), поэтому результат
+ * годится только для ЧТЕНИЯ токенов. Кеш — по объекту темы и токенам документа.
+ * @param {object} doc @param {object|null} board
+ * @returns {object}
+ */
+function themedDoc(doc, board) {
+  const theme = boardTheme(board);
+  if (!theme || !doc) return doc;
+  const hit = themedCache.get(theme);
+  if (hit && hit.doc === doc) return hit.out;
+  const tokens = isObj(doc.tokens) ? doc.tokens : DEFAULT_TOKENS;
+  let out;
+  if (hit && hit.tokens === tokens) out = { ...doc, tokens: hit.out.tokens };
+  else {
+    const colors = { ...(isObj(tokens.colors) ? tokens.colors : DEFAULT_TOKENS.colors) };
+    if (theme.colors) for (const k of Object.keys(theme.colors)) colors[k] = theme.colors[k];
+    const docType = isObj(tokens.type) ? tokens.type : DEFAULT_TOKENS.type;
+    const type = { ...docType };
+    if (theme.type) {
+      for (const k of Object.keys(theme.type)) {
+        const base = isObj(ownNode(docType, k)) ? docType[k] : (ownNode(DEFAULT_TOKENS.type, k) || docType.body || DEFAULT_TOKENS.type.body);
+        type[k] = { ...base, ...theme.type[k] };
+      }
+    }
+    out = { ...doc, tokens: { ...tokens, colors, type } };
+  }
+  themedCache.set(theme, { doc, tokens, out });
+  return out;
+}
+
+/** Документ для токенов узла: тема его доски поверх документа. */
+function docAt(doc, id, get) {
+  if (!doc || !doc.nodes) return doc;
+  return themedDoc(doc, boardOf(doc, id, get));
+}
+
+/**
+ * Разрешатель «узел → документ его доски» на один проход (validate, сцена):
+ * доска каждого узла считается один раз. Без тем в документе — сам doc сразу.
+ * @param {object} doc @param {(id:string)=>object|undefined} [get]
+ * @returns {(id:string)=>object}
+ */
+function themeScope(doc, get) {
+  if (!doc || !doc.nodes || !doc.nodes[doc.root]) return () => doc;
+  const boards = new Map();
+  let any = false;
+  for (const id of kidsOf(doc.nodes[doc.root])) {
+    const b = ownNode(doc.nodes, id);
+    if (b && b.type === 'frame' && boardTheme(b)) { boards.set(id, themedDoc(doc, b)); any = true; }
+  }
+  if (!any) return () => doc;
+  const look = get || ((x) => ownNode(doc.nodes, x));
+  const memo = new Map();
+  return (id) => {
+    if (memo.has(id)) return memo.get(id);
+    const path = [];
+    let cur = look(id);
+    let res = doc;
+    for (let guard = 0; cur && guard <= MAX_DEPTH + 1; guard++) {
+      if (memo.has(cur.id)) { res = memo.get(cur.id); break; }
+      path.push(cur.id);
+      if (cur.parent === doc.root) { res = boards.get(cur.id) || doc; break; }
+      if (typeof cur.parent !== 'string') break;
+      cur = look(cur.parent);
+    }
+    for (const p of path) memo.set(p, res);
+    if (!memo.has(id)) memo.set(id, res);
+    return res;
+  };
+}
+
 /**
  * Круг 43: поля узла с собственной формой — ЕДИНСТВЕННАЯ таблица и для проверки
  * (fieldProblem), и для отпечатка формата (formatSignature → тест «формат меняется
@@ -1724,7 +1939,7 @@ function fitVector(paths, opts) {
 const FIELD_RULES = Object.freeze({
   style: { check: (v) => styleProblem(v) },
   fill: { check: (v, n, k) => paintProblem(v, k) },
-  color: { check: (v, n, k) => paintProblem(v, k) },
+  color: { check: (v, n, k) => paintProblem(v, k, false, true) },
   stroke: { check: (v) => strokeProblem(v) },
   align: {
     check: (v, node) => (node.type === 'text' ? (TEXT_ALIGNS.has(v) ? null : 'text.align') : (typeof v === 'string' ? null : 'align должен быть строкой'))
@@ -1754,7 +1969,9 @@ const FIELD_RULES = Object.freeze({
     check: (v) => (isNum(v) && v >= -ROTATE_LIMIT && v <= ROTATE_LIMIT ? null : `rotate: градусы −${ROTATE_LIMIT}..${ROTATE_LIMIT}`)
   },
   viewBox: { only: Object.freeze(['vector']), typeMsg: 'viewBox бывает только у vector', check: (v) => viewBoxProblem(v) },
-  paths: { only: Object.freeze(['vector']), typeMsg: 'paths бывают только у vector', check: (v) => pathsProblem(v) }
+  paths: { only: Object.freeze(['vector']), typeMsg: 'paths бывают только у vector', check: (v) => pathsProblem(v) },
+  // круг 48 (SPEC §15): тема доски — свои значения токенов цвета и шрифтов
+  theme: { only: Object.freeze(['frame']), typeMsg: 'theme бывает только у фрейма-доски', check: (v) => themeProblem(v) }
 });
 
 /**
@@ -2301,6 +2518,9 @@ function expandOne(doc, inst, rootId, ownerId, depth, chain, out, deps, budget) 
       // видимость и имя — от экземпляра, вид и содержимое — от мастера
       sn.parent = inst.parent;
       delete sn.component;
+      // круг 48: тема — поле доски-узла документа; у раскрытого корня мастера её нет (иначе экземпляр
+      // прямо на холсте мерился бы темой мастера, а рисовался без неё)
+      delete sn.theme;
       sn.size = instanceSize(inst, mn);
       if (inst.name !== undefined) sn.name = inst.name;
       for (const k of ['pos', 'override', 'visible', 'opacity']) {
@@ -4840,7 +5060,7 @@ function formatSignature() {
     enums: {
       ...enums, sizeModes: sortedList(SIZE_MODES), textAligns: sortedList(TEXT_ALIGNS), propKinds: sortedList(PROP_KINDS),
       fillRules: sortedList(FILL_RULES), lineCaps: sortedList(LINE_CAPS), lineJoins: sortedList(LINE_JOINS),
-      gradientKinds: sortedList(GRADIENT_KINDS), easings: sortedList(Object.keys(EASINGS)), motionFollow: sortedList(MOTION_FOLLOW),
+      gradientKinds: sortedList(GRADIENT_KINDS), patternKinds: sortedList(PATTERN_KINDS), patternKeys: PATTERN_KEYS.slice(), easings: sortedList(Object.keys(EASINGS)), motionFollow: sortedList(MOTION_FOLLOW),
       states: sortedList(STATE_NAMES)
     },
     keys: {
@@ -4853,7 +5073,10 @@ function formatSignature() {
     tokens: { groups: sortedList(Object.keys(TOKEN_RULES)), scales: sortedList(Object.keys(SCALE_NAMES)), motionSteps: MOTION_STEPS.slice(), shadowSteps: SHADOW_STEPS.slice() },
     ops: sortedList(OP_NAMES),
     paths: { commands: { ...PATH_ARGS }, number: PATH_NUM_RE.source },
-    limits: { maxSize: MAX_SIZE, maxDepth: MAX_DEPTH, plainDepth: PLAIN_DEPTH, rotate: ROTATE_LIMIT, instanceDepth: MAX_INSTANCE_DEPTH, vector, state: STATE_LIMITS, shadow: SHADOW_LIMITS }
+    limits: { maxSize: MAX_SIZE, maxDepth: MAX_DEPTH, plainDepth: PLAIN_DEPTH, rotate: ROTATE_LIMIT, instanceDepth: MAX_INSTANCE_DEPTH, vector, state: STATE_LIMITS, shadow: SHADOW_LIMITS,
+      // круг 48: тема доски — пределы, ключи и поля стиля
+      pattern: { ...PATTERN_LIMITS },
+      theme: { ...THEME_LIMITS, keys: THEME_KEYS.slice(), typeFields: THEME_TYPE_FIELDS.slice(), name: THEME_NAME_RE.source, hex: THEME_HEX_RE.source } }
   };
 }
 
@@ -4922,6 +5145,10 @@ function probeObjects() {
     { x: 0, y: 0, w: 1, h: 1 }, { x: 0, y: 0, w: -1 }, { w: 1, h: 1 }, { x: '1', y: 0 }, { mode: 'fixed', value: 10 }, { mode: 'hug' },
     { w: { mode: 'fixed', value: 10 }, h: { mode: 'hug' } }, { w: { mode: 'fill' } }, { color: '#000000' }, { token: 'accent' },
     { value: 'x' }, { color: 1 }, { gradient: grad }, { gradient: { ...grad, kind: 'conic' } }, { hover: { opacity: 0.5 } },
+    // круг 49: фактура — годная, чужого вида, без цвета, с шагом вне пределов, с лишним ключом
+    { pattern: { kind: 'dots', color: 'accent' } }, { pattern: { kind: 'stars', color: 'accent' } }, { pattern: { kind: 'grid' } },
+    { pattern: { kind: 'lines', color: '#000000', size: 2 } }, { pattern: { kind: 'waves', color: 'text', bg: 'canvas', angle: 45, weight: 2, opacity: 0.5 } },
+    { pattern: { kind: 'checks', color: 'text' }, x: 1 },
     { duration: 100 }, { name: 'K', props: [] }, { mode: 'row', gap: 8 }, { a: { b: 1 } }, deep(PLAIN_DEPTH - 1), deep(PLAIN_DEPTH + 1)];
 }
 
@@ -5110,6 +5337,42 @@ function formatBehavior() {
     }
     for (const d of dList) ps += bit(() => parsePath(d).ok);
     out.svg = ps;
+
+    // 5а. круг 48: тема доски — форма поля и разрешение токенов узла доски (сначала тема, затем документ)
+    let th = '';
+    const themes = [undefined, null, 1, 'x', [], {}, { colors: {} }, { type: {} }, { bogus: {} },
+      { colors: { accent: '#abc' } }, { colors: { accent: '#aabbcc' } }, { colors: { accent: '#aabbccdd' } }, { colors: { accent: 'red' } },
+      { colors: { accent: 'accent' } }, { colors: { '1a': '#000' } }, { colors: { constructor: '#000' } }, { colors: { brandNew: '#123456' } },
+      { colors: Object.fromEntries(Array.from({ length: THEME_LIMITS.colors + 1 }, (_, i) => ['c' + i, '#000'])) },
+      { type: { body: { font: 'Prata' } } }, { type: { body: { font: '' } } }, { type: { body: { font: 'x'.repeat(THEME_LIMITS.font + 1) } } },
+      { type: { body: { fontWeight: 700 } } }, { type: { body: { fontWeight: 950 } } }, { type: { body: { fontSize: 20 } } },
+      { type: { body: 'Prata' } }, { type: { fresh: { font: 'Prata' } } }];
+    for (const v of themes) th += bit(() => themeProblem(v) === null);
+    const tdocBase = { root: 'r', nodes: { r: { id: 'r', type: 'page', parent: null, children: ['b', 'f'] } }, tokens: DEFAULT_TOKENS };
+    for (const v of themes) {
+      const b = { id: 'b', type: 'frame', parent: 'r', children: ['n'], theme: v };
+      const nn = { id: 'n', type: 'text', parent: 'b', characters: 'a', style: 'display' };
+      const d0 = { ...tdocBase, nodes: { ...tdocBase.nodes, b, n: nn, f: { id: 'f', type: 'frame', parent: 'r', children: [] } } };
+      // бит — «тема подействовала»: свой цвет, новое имя, шрифт стиля, соседняя доска не задета
+      const d1 = () => docAt(d0, 'n');
+      const dflt = DEFAULT_TOKENS.colors;
+      th += bit(() => resolveColor(d1(), 'accent') !== dflt.accent.toLowerCase());
+      th += bit(() => resolveColor(d1(), 'brandNew') !== null);
+      th += bit(() => resolveColor(d1(), 'text') !== dflt.text.toLowerCase());
+      th += bit(() => resolveTextStyle(d1(), nn).font !== DEFAULT_TOKENS.type.display.font);
+      th += bit(() => resolveTextStyle(d1(), { ...nn, style: 'body' }).font !== DEFAULT_TOKENS.type.body.font);
+      th += bit(() => resolveTextStyle(d1(), { ...nn, style: 'body' }).fontWeight !== DEFAULT_TOKENS.type.body.fontWeight);
+      th += bit(() => resolveColor(docAt(d0, 'f'), 'accent') !== dflt.accent.toLowerCase());
+      // тема на фрейме внутри доски не действует; раскладка меряет шрифтом темы
+      const nd = { ...d0, nodes: { ...d0.nodes, b: { ...b, theme: undefined, children: ['g'] }, g: { id: 'g', type: 'frame', parent: 'b', children: ['n'], theme: v }, n: { ...nn, parent: 'g' } } };
+      th += bit(() => docAt(nd, 'n') !== nd);
+      th += bit(() => {
+        const sd = { ...d0, nodes: { ...d0.nodes, n: { ...nn, size: { w: { mode: 'hug' }, h: { mode: 'hug' } } } } };
+        const g = solve(sd, { measureText: (t, st) => String(t).length * (st.font === DEFAULT_TOKENS.type.display.font ? 10 : 7) });
+        return g.rects.n && g.rects.n.w !== 10;
+      });
+    }
+    out.theme = th;
 
     // 6. настоящие операции (applyOps): пути set, операции, создание, перемещение
     const doc = probeDoc();
@@ -6622,9 +6885,13 @@ function solve(doc, opts) {
     const child = ownNode(ctx.nodes, id);
     if (!child) continue;
     const pos = nodePos(child);
+    // круг 48: шрифты темы доски меняют меры её текстов — доска меряется своими токенами
+    const real = ownNode(doc.nodes, id);
+    ctx.doc = real && real.type === 'frame' ? themedDoc(doc, real) : doc;
     const m = measureNode(ctx, child, null, null);
     placeNode(ctx, child, r2(pos.x), r2(pos.y), m.w, m.h);
   }
+  ctx.doc = doc;
   const forced = options.selfTest === true;
   if ((selfTestState === 0 || forced) && !options.__inSelfTest) {
     const prev = selfTestState;
@@ -6681,6 +6948,8 @@ function resolveColor(doc, value) {
   let v = value;
   // круг 37: градиент — цвет стопа, ближайшего к середине (контраст, описания, плашка доски)
   if (isGradientPaint(v)) return gradientMidColor(doc, v.gradient);
+  // круг 49: фактура как один цвет — её подложка (на ней стоит текст); без подложки — прозрачна
+  if (isPatternPaint(v)) return typeof v.pattern.bg === 'string' ? resolveColor(doc, v.pattern.bg) : null;
   if (v && typeof v === 'object') {
     v = v.token !== undefined ? v.token : v.color !== undefined ? v.color : v.value;
   }
@@ -6722,6 +6991,18 @@ function gradientMidColor(doc, g) {
  *   stops:Array<{at:number, color:string, opacity:number}>}}
  */
 function resolvePaint(doc, paint) {
+  // круг 49 (SPEC §16): фактура — цвет узора обязателен, подложка — по желанию
+  if (isPatternPaint(paint)) {
+    const pt = paint.pattern;
+    const color = resolveColor(doc, pt.color);
+    if (!color || !PATTERN_KIND_SET.has(pt.kind)) return null;
+    const size = numIn(pt.size, PATTERN_LIMITS.minSize, PATTERN_LIMITS.maxSize, PATTERN_LIMITS.defaultSize);
+    return {
+      type: 'pattern', kind: pt.kind, color, bg: typeof pt.bg === 'string' ? resolveColor(doc, pt.bg) : null,
+      size, weight: numIn(pt.weight, PATTERN_LIMITS.minWeight, PATTERN_LIMITS.maxWeight, patternWeight(pt.kind, size)),
+      angle: numIn(pt.angle, 0, 360, 0), opacity: numIn(pt.opacity, 0, 1, 1)
+    };
+  }
   if (isGradientPaint(paint)) {
     const g = paint.gradient;
     const stops = [];
@@ -6742,6 +7023,41 @@ function resolvePaint(doc, paint) {
   return color ? { type: 'color', color } : null;
 }
 
+/** Круг 49: толщина узора по умолчанию — от шага плитки. */
+function patternWeight(kind, size) {
+  const w = kind === 'dots' ? size * 0.12 : kind === 'lines' ? size * 0.25 : kind === 'waves' ? size * 0.08
+    : kind === 'grain' ? size * 0.05 : 1;
+  return clamp(r2(Math.max(kind === 'grain' ? 0.6 : 1, w)), PATTERN_LIMITS.minWeight, PATTERN_LIMITS.maxWeight);
+}
+
+/** Круг 49: точки «зерна» в плитке — постоянные доли (детерминированно, без случайности). */
+const GRAIN_POINTS = Object.freeze([[0.13, 0.21], [0.62, 0.08], [0.41, 0.47], [0.86, 0.39], [0.24, 0.78], [0.71, 0.69], [0.52, 0.93], [0.93, 0.88]]);
+
+/**
+ * Круг 49: плитка фактуры — список фигур {tag, attrs} в координатах плитки size×size.
+ * Одна запись и для сцены, и для экспорта SVG, и для снимка без страницы.
+ */
+function patternTile(p) {
+  const s = p.size;
+  const w = p.weight;
+  const c = p.color;
+  const o = p.opacity < 1 ? r2(p.opacity) : undefined;
+  const fillShape = (tag, attrs) => ({ tag, attrs: { ...attrs, fill: c, 'fill-opacity': o } });
+  switch (p.kind) {
+    case 'dots': return [fillShape('circle', { cx: r2(s / 2), cy: r2(s / 2), r: r2(Math.min(w, s / 2)) })];
+    case 'lines': return [fillShape('rect', { x: 0, y: 0, width: s, height: r2(Math.min(w, s)) })];
+    case 'grid': return [fillShape('rect', { x: 0, y: 0, width: s, height: r2(Math.min(w, s)) }), fillShape('rect', { x: 0, y: 0, width: r2(Math.min(w, s)), height: s })];
+    case 'checks': return [fillShape('rect', { x: 0, y: 0, width: r2(s / 2), height: r2(s / 2) }), fillShape('rect', { x: r2(s / 2), y: r2(s / 2), width: r2(s / 2), height: r2(s / 2) })];
+    case 'waves': {
+      const m = r2(s / 2);
+      const a = r2(s / 4);
+      return [{ tag: 'path', attrs: { d: `M0 ${m} Q${a} ${r2(m - a)} ${m} ${m} T${s} ${m}`, fill: 'none', stroke: c, 'stroke-width': r2(Math.min(w, s / 2)), 'stroke-opacity': o } }];
+    }
+    case 'grain': return GRAIN_POINTS.map(([fx, fy]) => fillShape('circle', { cx: r2(fx * s), cy: r2(fy * s), r: r2(Math.min(w, s / 4)) }));
+    default: return [];
+  }
+}
+
 /** '#rrggbb' + прозрачность → CSS. */
 function cssColor(hex, opacity) {
   if (!isNum(opacity) || opacity >= 1) return hex;
@@ -6757,10 +7073,26 @@ function paintCss(doc, paint) {
   const p = resolvePaint(doc, paint);
   if (!p) return null;
   if (p.type === 'color') return p.color;
+  if (p.type === 'pattern') return patternCss(p);
   const stops = p.stops.map((s) => `${cssColor(s.color, s.opacity)} ${r2(s.at * 100)}%`).join(', ');
   return p.kind === 'radial'
     ? `radial-gradient(circle at ${r2(p.cx * 100)}% ${r2(p.cy * 100)}%, ${stops})`
     : `linear-gradient(${r2(p.angle)}deg, ${stops})`;
+}
+
+/** Круг 49: фактура как CSS-фон образца (приближённо: вид узора, шаг, цвет и подложка). */
+function patternCss(p) {
+  const c = cssColor(p.color, p.opacity);
+  const s = r2(p.size);
+  const w = r2(p.weight);
+  const tile = `0 0 / ${s}px ${s}px`;
+  let layers;
+  if (p.kind === 'dots' || p.kind === 'grain') layers = [`radial-gradient(circle, ${c} ${w}px, transparent ${r2(p.weight + 0.5)}px) ${tile}`];
+  else if (p.kind === 'lines' || p.kind === 'waves') layers = [`repeating-linear-gradient(${r2((p.angle + 180) % 360)}deg, ${c} 0 ${w}px, transparent ${w}px ${s}px)`];
+  else if (p.kind === 'grid') layers = [`linear-gradient(${c} ${w}px, transparent ${w}px) ${tile}`, `linear-gradient(90deg, ${c} ${w}px, transparent ${w}px) ${tile}`];
+  else layers = [`conic-gradient(${c} 25%, transparent 0 50%, ${c} 0 75%, transparent 0) ${tile}`];
+  if (p.bg) layers.push(p.bg);
+  return layers.join(', ');
 }
 
 /**
@@ -6991,7 +7323,9 @@ const SEVERITY = { overflow: 'error', 'out-of-parent': 'error', 'dead-instance':
   /* Круг 36 (SPEC §11.2): состояния и движение */
   'state-on-page': 'error', 'motion-slow': 'warn', 'dead-motion-ref': 'warn', 'state-no-effect': 'info', 'press-without-hover': 'info',
   /* Круг 37 (SPEC §12.1): векторы и краски */
-  'bad-path': 'error', 'vector-empty': 'warn', 'dead-color-ref': 'warn', 'path-heavy': 'info' };
+  'bad-path': 'error', 'vector-empty': 'warn', 'dead-color-ref': 'warn', 'path-heavy': 'info',
+  /* Круг 48 (SPEC §15): тема доски */
+  'theme-not-board': 'info' };
 const SEV_RANK = { error: 0, warn: 1, info: 2 };
 
 function nearestFill(doc, node) {
@@ -7189,6 +7523,10 @@ function validateMotion(doc, node, add) {
 function paintRefs(v, path, out) {
   if (typeof v === 'string') { out.push({ path, value: v }); return; }
   if (!isObj(v)) return;
+  if (isPatternPaint(v)) {
+    for (const k of ['color', 'bg']) if (typeof v.pattern[k] === 'string') out.push({ path: `${path}.pattern.${k}`, value: v.pattern[k] });
+    return;
+  }
   if (isGradientPaint(v)) {
     const stops = Array.isArray(v.gradient.stops) ? v.gradient.stops : [];
     stops.forEach((st, i) => {
@@ -7257,6 +7595,17 @@ function validatePaint(doc, node, add) {
   }
 }
 
+/**
+ * Круг 48 (SPEC §15): тема не на доске не действует — сказать, а не молчать;
+ * тема-мусор документа прежней версии (не по форме) — тоже не действует.
+ */
+function validateTheme(doc, node, add) {
+  const name = displayName(doc, node);
+  const bad = themeProblem(node.theme);
+  if (bad) { add('theme-not-board', node.id, `«${name}»: тема не по форме (${bad}) — доска рисуется цветами документа`); return; }
+  if (!isArtboard(doc, node)) add('theme-not-board', node.id, `«${name}»: тема действует только у доски (фрейма прямо на холсте) — здесь она не меняет ничего`);
+}
+
 function validate(doc, geo, opts) {
   const out = [];
   if (!doc || !doc.nodes || !geo || !geo.rects) return out;
@@ -7265,10 +7614,13 @@ function validate(doc, geo, opts) {
   const inScale = (v) => !isNum(v) || v === 0 || spacing.some((s) => Math.abs(s - v) < 0.01);
   const add = (code, nodeId, message) => out.push({ code, nodeId, message, severity: SEVERITY[code] || 'warn' });
   const ids = Object.keys(doc.nodes);
+  // круг 48: цвета и шрифты узла — по теме его доски
+  const at = themeScope(doc);
 
   for (const id of ids) {
     const node = doc.nodes[id];
     const rect = geo.rects[id];
+    const tdoc = at(id);
     /* Круг 20 (SPEC §6.1): мёртвые ссылки на шкалу — до всего остального и для
        любого узла, включая страницу-библиотеку (у неё есть раскладка). Это
        свойство документа, а не геометрии: шкалу укоротили или файл принёс
@@ -7284,8 +7636,9 @@ function validate(doc, geo, opts) {
     }
     // круг 36: мёртвый шаг в подъёме состояния — dead-motion-ref (warn), см. validateMotion
     const dead = deadScaleRefs(doc, node).filter((d) => d.path.indexOf('states.') !== 0);
-    validateMotion(doc, node, add);
-    if (node && typeof node === 'object') validatePaint(doc, node, add);
+    validateMotion(tdoc, node, add);
+    if (node && typeof node === 'object') validatePaint(tdoc, node, add);
+    if (node && node.theme !== undefined) validateTheme(doc, node, add);
     if (dead.length) {
       add('dead-scale-ref', id, `«${displayName(doc, node)}»: ${dead.map((d) => `${d.path} → ${d.reason}`).join('; ')}`);
     }
@@ -7317,7 +7670,7 @@ function validate(doc, geo, opts) {
     }
 
     if (node.type === 'text') {
-      const style = resolveTextStyle(doc, node);
+      const style = resolveTextStyle(tdoc, node);
       const mode = (node.size && node.size.w && node.size.w.mode) || 'hug';
       const lines = (geo.lines && geo.lines[id])
         || m.wrap(node.characters, style, textWrapWidth(mode, rect.w, m.natural(node.characters, style)));
@@ -7328,9 +7681,9 @@ function validate(doc, geo, opts) {
       } else if (widest > rect.w + 0.5) {
         add('overflow', id, `текст «${strOf(node.characters).slice(0, 24)}…» шире рамки: ${r2(widest)} > ${r2(rect.w)}`);
       }
-      const fg = resolveColor(doc, node.color) || resolveColor(doc, 'text') || '#000000';
+      const fg = resolveColor(tdoc, node.color) || resolveColor(tdoc, 'text') || '#000000';
       const parent = node.parent ? ownNode(doc.nodes, node.parent) : null;
-      const bg = nearestFill(doc, parent || node);
+      const bg = nearestFill(tdoc, parent || node);
       const ratio = contrastRatio(fg, bg);
       const large = style.fontSize >= 24 || (style.fontSize >= 18.66 && style.fontWeight >= 700);
       const need = large ? 3 : 4.5;
@@ -7941,6 +8294,8 @@ function repairNode(n, doc) {
     if (v === undefined || v === null) continue;
     if (typeof v === 'string') continue;
     if (typeof v === 'object' && typeof v.token === 'string') continue;
+    // круг 49: годная фактура заливки остаётся; негодная — снимается
+    if (k === 'fill' && isPatternPaint(v) && !paintProblem(v, k)) continue;
     // круг 37: градиент чиним по стопам, а не снимаем целиком
     if (isGradientPaint(v)) {
       const g = repairGradient(v.gradient);
@@ -9421,6 +9776,21 @@ class Stage {
    * @param {string} id
    * @returns {object|undefined}
    */
+  /**
+   * Круг 48 (SPEC §15): документ для токенов узла — тема его доски поверх
+   * документа. Разрешатель живёт, пока те же документ и геометрия (раскрытые
+   * экземпляры берут доску по месту экземпляра).
+   * @param {string} id
+   * @returns {object}
+   */
+  _td(id) {
+    const sc = this._themeScope;
+    if (!sc || sc.doc !== this.doc || sc.geo !== this.geo) {
+      this._themeScope = { doc: this.doc, geo: this.geo, at: themeScope(this.doc, (x) => this._rn(x)) };
+    }
+    return this._themeScope.at(id);
+  }
+
   _rn(id) {
     // круг 29: только своё свойство и только по строке — id из чужого children
     // бывает объектом, и `nodes[{toString:1}]` бросает посреди отрисовки
@@ -9557,7 +9927,7 @@ class Stage {
       abIds.push(ab.id);
       const g = svgEl('g', { class: 'imago-ab', 'data-id': ab.id });
       // подложка: артборд без разрешимой заливки иначе выглядит как чёрный экран
-      const plate = resolveColor(doc, ab.fill);
+      const plate = resolveColor(this._td(ab.id), ab.fill);
       const plateEl = svgEl('rect', {
         class: 'imago-ab-plate', x: r2(rect.x), y: r2(rect.y),
         width: r2(rect.w), height: r2(rect.h), rx: resolveRadius(doc, ab.radius),
@@ -9599,7 +9969,7 @@ class Stage {
     while (this.svg.firstChild) this.svg.removeChild(this.svg.firstChild);
     this.svg.appendChild(frag);
     // слепок сцены: по нему следующий кадр решит, можно ли обойтись точечным обновлением
-    this._drawnState = { tokens: doc.tokens, abs: abIds, loose };
+    this._drawnState = { tokens: doc.tokens, abs: abIds, loose, themes: abIds.map((id) => boardTheme(doc.nodes[id])) };
     this._renderGrid();
   }
 
@@ -9618,6 +9988,8 @@ class Stage {
     if (doc.tokens !== st.tokens) return false;   // палитра и типографика красят всё
     const abs = artboards(doc).filter((a) => this.geo.rects[a.id]);
     if (!sameIdList(abs.map((a) => a.id), st.abs)) return false;
+    // круг 48: тема доски красит всю доску — сменилась тема, собираем заново
+    if (abs.some((a, i) => boardTheme(a) !== st.themes[i])) return false;
     const root = doc.nodes[doc.root];
     const loose = kidsOf(root).filter((id) => {
       const n = this._rn(id);
@@ -9698,7 +10070,7 @@ class Stage {
     const rect = this.geo.rects[ab.id];
     if (!e || !rect) return false;
     if (e.node === ab && sameRect(rect, e.rect)) return false;
-    const plate = resolveColor(this.doc, ab.fill);
+    const plate = resolveColor(this._td(ab.id), ab.fill);
     const attr = (el, k, v) => {
       if (v === undefined || v === null) el.removeAttribute(k);
       else el.setAttribute(k, v);
@@ -9813,10 +10185,10 @@ class Stage {
    * @returns {Element[]} в порядке отрисовки
    */
   _nodeShapes(node, rect, dx, dy) {
-    const doc = this.doc;
+    const doc = this._td(node.id);   // круг 48: цвета и шрифты — по теме доски
     const out = [];
     const defs = [];   // круг 37: градиенты этого узла — в его же <defs>
-    const paint = (v) => this._paintRef(v, defs);
+    const paint = (v) => this._paintRef(v, defs, doc);
     const x = r2(rect.x + dx);
     const y = r2(rect.y + dy);
     const fill = paint(node.fill);
@@ -9896,12 +10268,23 @@ class Stage {
    * уникален на сборку: префикс сцены/экспорта + общий счётчик с обрезками.
    * @returns {string|null}
    */
-  _paintRef(v, defs) {
+  _paintRef(v, defs, tdoc) {
     if (v === undefined || v === null) return null;
-    const p = resolvePaint(this.doc, v);
+    const p = resolvePaint(tdoc || this.doc, v);
     if (!p) return null;
     if (p.type === 'color') return p.color;
     const id = String(this._clipPrefix || 'imago-clip-').replace(/^imago-clip-/, 'imago-paint-') + (this._clipSeq++);
+    // круг 49 (SPEC §16): фактура — <pattern> плиткой в координатах холста
+    if (p.type === 'pattern') {
+      const pat = svgEl('pattern', {
+        id, patternUnits: 'userSpaceOnUse', width: r2(p.size), height: r2(p.size),
+        patternTransform: p.angle ? `rotate(${r2(p.angle)})` : undefined
+      });
+      if (p.bg) pat.appendChild(svgEl('rect', { x: 0, y: 0, width: r2(p.size), height: r2(p.size), fill: p.bg }));
+      for (const sh of patternTile(p)) pat.appendChild(svgEl(sh.tag, sh.attrs));
+      defs.push(pat);
+      return `url(#${id})`;
+    }
     let el;
     if (p.kind === 'radial') {
       el = svgEl('radialGradient', { id, cx: r2(p.cx), cy: r2(p.cy), r: r2(p.r) });
@@ -10097,7 +10480,7 @@ class Stage {
       if (!n || n.type !== 'text' || n.visible === false) continue;
       const chars = textOf(n.characters);
       if (!chars) continue;
-      const style = resolveTextStyle(doc, n);
+      const style = resolveTextStyle(this._td(n.id), n);
       const family = String(style.font || '').trim().replace(/^['"]|['"]$/g, '');
       // системные и мусорные имена не тянем: у первых нет файла, вторые сломают адрес
       if (!family || GENERIC_FONTS.has(family.toLowerCase())) continue;
@@ -10239,7 +10622,7 @@ class Stage {
       this.lastSVG = { artboard: id, fonts: fonts.state, families: fonts.families, missing: fonts.missing };
       svg.appendChild(svgEl('rect', {
         x: 0, y: 0, width: r2(rect.w), height: r2(rect.h),
-        fill: resolveColor(this.doc, node.fill) || resolveColor(this.doc, 'canvas') || '#ffffff'
+        fill: resolveColor(this._td(id), node.fill) || resolveColor(this._td(id), 'canvas') || '#ffffff'
       }));
       this._drawNode(svg, node, -rect.x, -rect.y, true);
       // круг 36 (SPEC §11.3): состояния — CSS в самом файле, он реагирует на мышь
@@ -11037,7 +11420,7 @@ class Stage {
     const g = c.el;
     if (!g || !g.style) return;
     const list = this._activeStates(id, node, 0);
-    const r = resolveState(this.doc, node, list);
+    const r = resolveState(this._td(id), node, list);
     const mo = this._motionFor(node);
     const trG = reduced ? 'none' : transitionCss(mo, ['transform', 'opacity', 'filter']);
     const trS = reduced ? 'none' : transitionCss(mo, ['fill', 'stroke', 'stroke-width', 'filter']);
@@ -11195,7 +11578,7 @@ class Stage {
       for (const [s, pseudo] of PSEUDO) {
         if (!isObj(node.states[s])) continue;
         // нажатие мышью идёт поверх наведения — как и на холсте
-        const r = resolveState(doc, node, s === 'press' ? ['hover', 'press'] : [s]);
+        const r = resolveState(this._td(node.id), node, s === 'press' ? ['hover', 'press'] : [s]);
         if (!r.changed.length) continue;
         const sel = lead ? `.${lead}${pseudo} .${e.cls}` : `.${e.cls}${pseudo}`;
         const gp = [];
@@ -12212,7 +12595,8 @@ class Stage {
       ed.hint.style.top = r2(y) + 'px';
     }
     const node = this.doc.nodes[ed.id];
-    const style = resolveTextStyle(this.doc, node);
+    const tdoc = this._td(ed.id);
+    const style = resolveTextStyle(tdoc, node);
     const z = this.view.zoom;
     Object.assign(ed.el.style, {
       left: r2(sr.x) + 'px', top: r2(sr.y) + 'px',
@@ -12222,7 +12606,7 @@ class Stage {
       fontWeight: String(style.fontWeight),
       lineHeight: r2(style.lineHeight * z) + 'px',
       letterSpacing: r2((style.letterSpacing || 0) * z) + 'px',
-      color: resolveColor(this.doc, node.color) || '#14161C',
+      color: resolveColor(tdoc, node.color) || '#14161C',
       textAlign: node.align === 'center' ? 'center' : node.align === 'right' ? 'right' : 'left'
     });
   }
@@ -12565,6 +12949,8 @@ export {
   resetMeasureCache, measureEpoch, onMeasureEpoch,
   hashGeometry, nodeById, ancestors, isArtboard, artboards, subtreeIds, cloneSubtree,
   resolveTarget, resolveColor, resolveTextStyle, contrastRatio, sizeSpec, normalizeLayout,
+  /* Круг 48 (SPEC §15): тема доски */
+  themeProblem, themedDoc, docAt, themeScope, boardOf, boardTheme, THEME_LIMITS, liftOps,
   placeholderName, displayName,
   /* Круг 39 (N3): дублирование — одна реализация на оболочку и холст — */
   duplicateOps, DUPLICATE_OFFSET,
@@ -12596,6 +12982,8 @@ export {
      с градиентами, сводка вектора, свободная рамка, пример иллюстрации — */
   parsePath, formatPath, pathBounds, fitVector, translatePath, resolvePaint, paintCss, paintProblem,
   vectorSummary, isFreeFrame, sampleIllustration, VECTOR_LIMITS, GRADIENT_KINDS,
+  /* Круг 49 (SPEC §16): фактуры */
+  PATTERN_KINDS, PATTERN_LIMITS, patternProblem, patternTile, isPatternPaint,
   /* Круг 39: кеш проверки путей с пределом по памяти — */
   pathCacheStats, PATH_CACHE_CHARS
 };

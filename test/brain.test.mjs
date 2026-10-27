@@ -4403,7 +4403,7 @@ test('круг15 п.4: чисто типографическая тема не �
   assert.ok(!/перекрасить/i.test(w), w);
 });
 
-test('круг15 п.4: цветовая тема по-прежнему советует про заливку и цвет узлов', async () => {
+test('круг15 п.4 (с круга 48 — совет про тему экрана): цветовая тема документа советует, как перекрасить один экран', async () => {
   const doc = makeDoc3();
   const engine = makeStubEngine();
   const theme = { colors: [{ name: 'bg', value: '#101418' }] };
@@ -4415,7 +4415,7 @@ test('круг15 п.4: цветовая тема по-прежнему сове�
   assert.equal(res.error, undefined, JSON.stringify(res.error));
   const w = res.warnings.join(' | ');
   assert.match(w, /цвета/i, w);
-  assert.match(w, /заливку и цвет/i, w);
+  assert.match(w, /сделай только этот экран[\s\S]*собственную тему/i, w);
 });
 
 test('круг15 п.4: шкала отступов не притворяется перекраской', async () => {
