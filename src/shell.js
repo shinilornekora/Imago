@@ -4812,7 +4812,7 @@ export function themedBoardsIntent(doc) {
  * Круг 85 (SPEC §15.21): цвета экрана, записанные кодом (#hex), тема не перекрашивает — слой держит
  * не токен, а число. Здесь — такие цвета, которые совпадают ровно с одним цветом палитры, какой её
  * видит этот экран (с его темой): привязка к токену внешний вид экрана не меняет. Совпало с двумя
- * токенами — неоднозначно, не трогаем; фактуры и градиенты — тоже. Одна частая пара решается по месту:
+ * токенами — неоднозначно, не трогаем. Круг 95: стопы градиентов и цвета фактур — тоже (каждый отдельно). Одна частая пара решается по месту:
  * у текста «текст» и «на акценте» одного цвета — на акцентной подложке это «на акценте», иначе «текст».
  * @returns {{refs: Array<{id: string, path: string, token: string, value: any}>, ambiguous: number}}
  */
@@ -4868,7 +4868,18 @@ function hexRefsOf(doc, board, visited = []) {
     return null;
   };
   const look = (node, path, v) => {
-    // строка «#…» или {color:'#…'}: токен в {token} уже привязан, градиент и фактура — мимо
+    /* Круг 95 (SPEC §15.29): у градиента — каждый стоп ({at, color} → {at, token}), у фактуры — цвет узора
+       и подложка; прозрачность у них своим полем, токен её не теряет */
+    if (isObj(v) && isObj(v.gradient) && Array.isArray(v.gradient.stops)) {
+      v.gradient.stops.forEach((st, i) => { if (isObj(st) && st.at !== undefined) look(node, `${path}.gradient.stops.${i}`, st); });
+      return;
+    }
+    if (isObj(v) && isObj(v.pattern)) {
+      if (typeof v.pattern.color === 'string') look(node, `${path}.pattern.color`, v.pattern.color);
+      if (typeof v.pattern.bg === 'string') look(node, `${path}.pattern.bg`, v.pattern.bg);
+      return;
+    }
+    // строка «#…» или {color:'#…'}: токен в {token} уже привязан
     const raw = typeof v === 'string' ? v : isObj(v) && v.token === undefined && typeof v.color === 'string' && !v.gradient && !v.pattern ? v.color : null;
     if (typeof raw !== 'string' || raw[0] !== '#') return;
     // #rrggbbaa с прозрачностью — токен её не хранит; полупрозрачный код оставляем как есть
@@ -4894,6 +4905,8 @@ function hexRefsOf(doc, board, visited = []) {
     const node = doc.nodes[id];
     if (!node) continue;
     visited.push(node);
+    // круг 95: рисунок (role 'illustration') — цвета художника, не роли палитры: белок глаза не темнеет с темой
+    if (node.role === 'illustration') continue;
     // контуры вектора — свои заливка и обводка (так их пишут пипетки контуров)
     if (Array.isArray(node.paths)) node.paths.forEach((p, i) => { if (isObj(p)) { look(node, `paths.${i}.fill`, p.fill); look(node, `paths.${i}.stroke`, p.stroke); } });
     look(node, 'fill', node.fill);

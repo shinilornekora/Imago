@@ -90,7 +90,7 @@ test('круг86: в браузере — «привяжи цвета к пал�
     await page.locator('#inspector .theme-hex').waitFor({ timeout: 10000 });
     await say('привяжи цвета к палитре');
     await page.waitForFunction(() => !document.querySelector('#inspector .theme-hex'), null, { timeout: 5000 });
-    await page.waitForFunction(() => /цвета 4 слоёв привязаны к палитре/.test(document.body.innerText), null, { timeout: 5000 });
+    await page.waitForFunction(() => /цвета 5 слоёв привязаны к палитре/.test(document.body.innerText), null, { timeout: 5000 });
     await page.waitForTimeout(400);   // строка не принимает два Enter подряд быстрее 250 мс
     await say('привяжи цвета к палитре');
     await page.waitForFunction(() => /нет цветов кодом, равных цветам палитры/.test(document.body.innerText), null, { timeout: 5000 });
