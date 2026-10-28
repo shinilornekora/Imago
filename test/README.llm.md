@@ -7,7 +7,7 @@
 
 ## Как устроено
 - Имя `<область>-r<круг>.test.mjs` (или `round<круг>`) — тесты конкретного круга; без номера — базовые тесты области. Круг ↔ раздел SPEC: см. оглавление SPEC.md («Круг N» в заголовках).
-- `test/*.test.mjs` — клиентские модули: `core*` (движок), `brain*` (мозг), `shell*` (таблица команд и слова), `sync*` (реплика), `agent` (клиент агента), `merge`, `scale`, `theme-*-r67…r71` (тема доски), картинки и образец (`image-insert-r55`, `reference-r56`, `command-image-r58`, `moodboard-r59`, `moodboard-shot-r60`, `canvas-multi-r63`, `moodboard-shrink-r65`), `swatches-r53`, `bench-r66`, `deploy` (Dockerfile, nginx, build), `smoke-r45`, `sidecars` (правило заметок).
+- `test/*.test.mjs` — клиентские модули: `core*` (движок), `brain*` (мозг), `shell*` (таблица команд и слова), `sync*` (реплика), `agent` (клиент агента), `merge`, `scale`, `theme-*-r67…r71` (тема доски), картинки и образец (`image-insert-r55`, `reference-r56`, `command-image-r58`, `moodboard-r59`, `moodboard-shot-r60`, `canvas-multi-r63`, `moodboard-shrink-r65`), `swatches-r53`, `bench-r66`, `deploy` (Dockerfile, nginx, build), `smoke-r45`, `zen-r94` (зен-режим в Chromium с подставным распознаванием речи), `sidecars` (правило заметок).
 - `test/server/` — Document service: `helpers.mjs` (сервис на случайном порту с памятью или Postgres, HTTP- и WS-клиенты), `load.mjs` (нагрузка), темы: backpressure, coldload, config, document, hardening, migrations, presence, projects, resilience, rollback, storage, strings, tombstones, `round27…round45`.
 - `test/orchestrator/` — агент: `helpers.mjs` (Document service в памяти + поддельный OpenAI-совместимый сервер модели + Orchestrator + SSE-клиент), contract, dslr, dslts, dslv, llm, orchestrator, process, `round25…round64`.
 

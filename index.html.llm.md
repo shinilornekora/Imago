@@ -9,7 +9,8 @@
 - id элементов — контракт с `app.js` (`el(id)`, `dom.*`): переименовал id — найди его в app.js.
 - Серверные элементы (`btn-projects`, `sync-status`, `agent-status`) по умолчанию `hidden` — без сервера оболочка работает как прежде.
 - Иконки — `<span class="i" data-icon="…">`, рисует app.js (раздел «иконки»).
+- Зен-режим (круг 94, §24): кнопка `btn-zen` в шапке, `zenbar` (статус `zen-status`/`zen-text` и «Выйти» `btn-zen-exit`) в холсте рядом с `worklog`, микрофон `btn-zen-mic` — последним в доке после `voicebar`; `zenbar` и `btn-zen-mic` по умолчанию `hidden`. Круглые кнопки голоса (`btn-zen-mic`, `btn-voice-off`) — со знаком `mic-solid` (капсула залита), в строке команды — тонкий `mic`.
 
 ## Ссылки
-- SPEC: §1 (модули), §3 (дизайн), §9.5, §10
-- Тесты: `test/shell-r38.test.mjs` (тексты интерфейса), `test/deploy.test.mjs`
+- SPEC: §1 (модули), §3 (дизайн), §9.5, §10, §24 (зен-режим)
+- Тесты: `test/shell-r38.test.mjs` (тексты интерфейса), `test/deploy.test.mjs`, `test/zen-r94.test.mjs`

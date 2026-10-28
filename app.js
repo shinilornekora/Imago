@@ -302,6 +302,7 @@ async function boot() {
      и ветка «сложить шторку» не срабатывала). */
   applyRail();
   applyRailWidth(settings.railW);   // ручная ширина рельса (круг 18, п.3)
+  applyZen();                       // круг 94: зен-режим переживает перезагрузку
   syncPanelModes();
 
   // серверный режим ожидается (ссылка или отметка) — демо-документу на холсте делать нечего:
@@ -491,6 +492,8 @@ const ICONS = {
   plus: '<path d="M8 3.5v9"/><path d="M3.5 8h9"/>',
   'artboard-add': '<rect x="2" y="2.75" width="8.5" height="10.5" rx="1.5"/><path d="M13 8.5v4.75"/><path d="M10.6 10.9h4.8"/>',
   mic: '<rect x="6" y="2" width="4" height="7.5" rx="2"/><path d="M3.75 7.5A4.25 4.25 0 0 0 12.25 7.5"/><path d="M8 11.75V14"/>',
+  // круг 94: крупная круглая кнопка голоса — капсула залита, иначе тонкий контур теряется в 60 px
+  'mic-solid': '<rect x="5.5" y="1.5" width="5" height="8.25" rx="2.5" fill="currentColor" stroke="none"/><path d="M3.25 7.75a4.75 4.75 0 0 0 9.5 0"/><path d="M8 12.5v2"/>',
   'chevron-left': '<path d="M9.75 3.5 5.25 8l4.5 4.5"/>',
   'chevron-right': '<path d="M6.25 3.5 10.75 8l-4.5 4.5"/>',
   'chevron-down': '<path d="M3.5 6.25 8 10.75l4.5-4.5"/>',
@@ -510,6 +513,8 @@ const ICONS = {
   /* Круг 36 (SPEC §11.3): «Просмотр» — треугольник проигрывания; «состояния» у слоя —
      указатель с дугой движения (значок в «Слоях» и заголовок раздела инспектора). */
   play: '<path d="M5.25 3.25v9.5L12.75 8z"/>',
+  // круг 94: зен-режим — незамкнутый круг энсо
+  zen: '<path d="M12.6 5.1A5.5 5.5 0 1 0 13.5 8.6"/>',
   motion: '<path d="M4.5 3.5 11 8.25l-2.9.6-1.35 2.7z"/><path d="M11.5 3.25a4.5 4.5 0 0 1 1.75 3.5"/>',
   /* Круг 37 (SPEC §12.3): вектор — кривая Безье с узлами; иллюстрация — картинка в рамке
      (значки в «Слоях» и на заголовке раздела «Контуры»). */
@@ -550,6 +555,7 @@ function cacheDom() {
     'btn-history', 'btn-export', 'btn-scales', 'btn-theme', 'btn-settings', 'rail-grip',
     'btn-insp-close', 'btn-sheet-close', 'btn-empty-artboard',
     'voicebar', 'voice-said', 'btn-voice-off',
+    'btn-zen', 'zenbar', 'zen-status', 'zen-text', 'btn-zen-exit', 'btn-zen-mic',
     'dockmsg', 'dockmsg-text', 'dockmsg-note', 'dockmsg-issue', 'dockmsg-ask', 'dockmsg-chips', 'dockmsg-actions', 'btn-msg-close',
     'empty-state', 'empty-title', 'empty-sub', 'empty-examples', 'dock', 'viewbar',
     'peekbar', 'peekbar-text', 'agent-dot',
@@ -4035,6 +4041,7 @@ function setRunnable(ok) {
   dom.command.placeholder = ok
     ? (isNarrow() ? 'Что построить?' : 'Что построить или изменить? «/» — команды')
     : 'Агент не подключён — откройте настройки';
+  renderZenStatus();
 }
 
 /** Текст ошибки применения: по новому контракту core отдаёт {code, message}, раньше — строку. */
@@ -9739,7 +9746,7 @@ function submitCommand(opts = {}) {
 /* Круг 38: справка, палитра, ошибки набора «/…», выделение и вид — тоже не ждут агента. Правки
    командами таблицы — те же ручные правки (стрелка M, мимо очереди агента): холст во время работы
    агента правится руками, значит, и командой. */
-const SHELL_WHILE_BUSY = new Set(['stop', 'variants-close', 'fit', 'zoom', 'sheet', 'rail', 'theme', 'export', 'preview',
+const SHELL_WHILE_BUSY = new Set(['stop', 'variants-close', 'fit', 'zoom', 'sheet', 'rail', 'theme', 'export', 'preview', 'zen',
   'help', 'palette', 'slash-unknown', 'slash-bad', 'fit-selection', 'inspector', 'select', 'select-all', 'select-rel',
   'delete', 'duplicate', 'rename', 'visible', 'lock', 'order', 'wrap', 'ungroup', 'align', 'direction', 'gap', 'bind-colors']);
 
@@ -11004,6 +11011,7 @@ function showStage(rec, variantsTotal = 0) {
   dom.worklog.hidden = false;
   dom.worklog.dataset.done = '';
   dom.app.dataset.work = 'on';   // по нему тосты уступают место списку (круг 18, п.2)
+  state.zenLast = null;          // круг 94: новая работа — итог прошлой в статусе не нужен
   dom['work-label'].textContent = human(state.stageGoal || 'Агент работает');
   const parts = [];
   if (variantsTotal && state.variantSeen.length) {
@@ -11134,6 +11142,17 @@ function showMsg(kind, text, opts = {}) {
   host.dataset.role = opts.role || '';
   host.hidden = false;
   host.dataset.kind = kind;
+  /* Круг 94 (SPEC §24): в зен-режиме итог правки (и с замечанием) уходит в статус наверху
+     справа, а внизу остаётся только то, на что нужен ответ. */
+  const zenQuiet = (['result', 'plain', 'answer'].includes(kind) || (kind === 'warn' && !!(opts.issue || opts.undoTx)))
+    && opts.role !== 'busy';
+  host.dataset.zenQuiet = zenQuiet ? 'on' : '';
+  const zenState = ZEN_LAST_KIND[kind];
+  if (zenState && !opts.intro) {
+    const head = kind === 'warn' ? (zenQuiet ? 'Готово с замечанием' : 'Внимание') : ZEN_HEAD[zenState];
+    state.zenLast = { state: zenState, text: `${head} · ${human(text)}` };
+  }
+  renderZenStatus();
 
   // ошибку экранный диктор читает сразу, остальное — в свою очередь
   host.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
@@ -11392,6 +11411,7 @@ function hideMsg() {
   }
   if (state.introOpen) state.introOpen = false;
   renderHints();
+  renderZenStatus();
   // сообщение ушло — холста стало больше (п.12)
   scheduleViewRecheck();
 }
@@ -12070,6 +12090,11 @@ function applyShellIntent(intent, said) {
       setPreview(intent.on !== false, { say: true });
       return true;
     }
+    // круг 94 (SPEC §24): зен-режим — словами, голосом, «/зен»
+    case 'zen': {
+      setZen(intent.on !== false, { say: true });
+      return true;
+    }
     // круг 50 (SPEC §17.2): настройки агента; без «вкл/выкл» — сказать, как сейчас
     case 'agent-setting': {
       if (intent.on == null) {
@@ -12419,6 +12444,8 @@ function paletteOpen() { return !!(dom.palette && !dom.palette.hidden); }
 /** Открыть палитру. Набранное в строке не теряется: вернётся, когда палитра закроется. */
 function openPalette() {
   if (!dom.palette) return;
+  // круг 94: палитра — это строка команд, а её в зен-режиме нет; набирать — значит выйти
+  if (zenOn()) setZen(false);
   if (dom.app.dataset.voice === 'on' && typeof toggleVoice === 'function') toggleVoice();
   if (!dom.sheet.hidden) closeSheet();   // палитра — у строки команд, шторка-диалог ей мешала бы
   const cur = dom.command.value;
@@ -12798,6 +12825,11 @@ function initVoice() {
     });
     btn.addEventListener('click', say);
     toggleVoice = say;
+    if (dom['btn-zen-mic']) {
+      dom['btn-zen-mic'].dataset.unavailable = 'on';
+      dom['btn-zen-mic'].title = btn.title;
+      dom['btn-zen-mic'].setAttribute('aria-label', 'Голос недоступен — почему');
+    }
     return;
   }
 
@@ -12838,6 +12870,7 @@ function initVoice() {
        включённого микрофона (круг 18, п.4). Макет при этом ничем не заслонён. */
     dom.app.dataset.voice = wanted ? 'on' : '';
     if (dom.voicebar) dom.voicebar.hidden = !wanted;
+    renderZenMic();     // круг 94: спокойный микрофон зен-режима уступает место включённому
     paintSaid();
     renderHints();      // подсказки уходят вместе со строкой и возвращаются с ней
     paintRunButton();   // «Стоп» остаётся доступен: главной кнопки сейчас не видно
@@ -13096,6 +13129,10 @@ function bindUi() {
   // круг 36: «Просмотр» в панели масштаба и «Выйти» на плашке
   if (dom['btn-preview']) dom['btn-preview'].addEventListener('click', () => setPreview(!previewOn()));
   if (dom['btn-preview-exit']) dom['btn-preview-exit'].addEventListener('click', () => setPreview(false));
+  // круг 94 (SPEC §24): зен-режим — кнопка в шапке, «Выйти» у статуса, микрофон в углу
+  if (dom['btn-zen']) dom['btn-zen'].addEventListener('click', () => setZen(true, { say: true }));
+  if (dom['btn-zen-exit']) dom['btn-zen-exit'].addEventListener('click', () => setZen(false, { say: true }));
+  if (dom['btn-zen-mic']) dom['btn-zen-mic'].addEventListener('click', () => { if (typeof toggleVoice === 'function') toggleVoice(); });
   dom['btn-rail-close'].addEventListener('click', () => setRail('off', true));
   dom['btn-rail'].addEventListener('click', () => setRail(dom.app.dataset.rail === 'off' ? 'on' : 'off', true));
   dom.scrim.addEventListener('click', () => {
@@ -13214,7 +13251,17 @@ function bindUi() {
     }
     // Escape закрывает по одному: сперва варианты (они лежат поверх), потом сообщение (п.19)
     if (e.key === 'Escape' && !dom.variants.hidden) { e.preventDefault(); hideVariants(); return; }
-    if (e.key === 'Escape' && !dom.dockmsg.hidden) { e.preventDefault(); hideMsg(); return; }
+    if (e.key === 'Escape' && !dom.dockmsg.hidden && !zenHidesMsg()) { e.preventDefault(); hideMsg(); return; }
+    /* Круг 94: из зен-режима Esc выводит после голоса, шторок, просмотра, вариантов и
+       сообщения — это режим всего окна, его снимают последним. Выделение сцена снимает
+       своим Esc раньше (defaultPrevented). */
+    if (e.key === 'Escape' && zenOn() && !typing && !e.defaultPrevented) { e.preventDefault(); setZen(false, { say: true }); return; }
+    // круг 94: Ctrl/⌘+\ — зен-режим туда и обратно (как «спрятать интерфейс» в Figma)
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === '\\' || e.code === 'Backslash')) {
+      e.preventDefault();
+      setZen(!zenOn(), { say: true });
+      return;
+    }
     // варианты выбираются с клавиатуры: цифра — сразу, стрелки — переход, Enter — на карточке
     if (!dom.variants.hidden && !typing) {
       if (/^[1-9]$/.test(e.key)) { e.preventDefault(); takeVariant(Number(e.key) - 1); return; }
@@ -13309,6 +13356,94 @@ function bareKeyOk() {
 
 /** Выделение до просмотра: выйдя, человек возвращается к тому, что правил. */
 let previewMemo = null;
+
+/* ------------------------- круг 94 (SPEC §24): зен-режим ------------------------- */
+/*
+ * Редактор, которым управляет агент, человек может просто смотреть — с дивана, издалека.
+ * Зен-режим оставляет холст, статус задач справа сверху и микрофон справа снизу; голос
+ * пишет в ту же строку команды (dom.command) и идёт тем же путём — handleVoiceUtterance.
+ * Что скрыто, решает CSS по data-zen; настройки рельса и инспектора не трогаются.
+ */
+function zenOn() { return !!(dom.app && dom.app.dataset.zen === 'on'); }
+
+/** Сообщение внизу, которое зен-режим прячет в статус (итог, ответ, служебное). */
+function zenHidesMsg() {
+  if (!zenOn() || !dom.dockmsg || dom.dockmsg.hidden) return false;
+  return dom.dockmsg.dataset.zenQuiet === 'on';
+}
+
+/** Какие сообщения попадают в статус зен-режима и с каким видом точки. */
+const ZEN_LAST_KIND = { result: 'done', answer: 'done', error: 'error', warn: 'warn' };
+const ZEN_HEAD = { done: 'Готово', error: 'Не вышло' };
+
+/** Состояние при загрузке — из настроек, без тостов и вписывания (boot впишет сам). */
+function applyZen() {
+  const on = !!settings.zen;
+  dom.app.dataset.zen = on ? 'on' : '';
+  if (dom.zenbar) dom.zenbar.hidden = !on;
+  if (dom['btn-zen']) dom['btn-zen'].setAttribute('aria-pressed', String(on));
+  renderZenMic();
+  renderZenStatus();
+}
+
+/** Включить или выключить зен-режим. say — сказать, как выйти (или что он уже такой). */
+function setZen(on, { say = false } = {}) {
+  const want = !!on;
+  if (want === zenOn()) {
+    if (say) toast(want ? 'Зен-режим уже включён.' : 'Зен-режим и так выключен.', 'plain', 4000);
+    return false;
+  }
+  if (want) {
+    closePalette();
+    if (!dom.sheet.hidden) closeSheet();
+    if (previewOn()) setPreview(false, { restore: false });
+    // смотреть, а не править: выделение с рамками на холсте зен-режиму ни к чему
+    if (state.selection.length) setSelection([], { quiet: true });
+  }
+  settings.zen = want;
+  saveSettings();
+  applyZen();
+  renderHints();
+  // колонки сменились — вписываем, когда сетка уже перестроилась
+  requestAnimationFrame(() => { syncPanelModes(); fitSmart(); });
+  if (say) {
+    const k = keyText('Mod+\\');
+    toast(want
+      ? `Зен-режим: только холст. Говорите в микрофон справа внизу. Выйти — Esc${k ? `, ${k}` : ''} или «выйди из зен-режима».`
+      : 'Зен-режим выключен — панели на месте.', 'plain', want ? 7000 : 3500);
+  }
+  if (!want && dom['btn-zen'] && document.activeElement === dom['btn-zen-exit']) dom['btn-zen'].focus();
+  return true;
+}
+
+/** Микрофон в углу: только в зен-режиме и только пока голосовая сессия выключена. */
+function renderZenMic() {
+  const b = dom['btn-zen-mic'];
+  if (!b) return;
+  b.hidden = !zenOn() || dom.app.dataset.voice === 'on';
+}
+
+/** Статус задач справа сверху: агент недоступен / спрашивает / итог последней / жду команду. */
+function renderZenStatus() {
+  const box = dom['zen-status'];
+  if (!box || !zenOn()) return;
+  const msg = dom.dockmsg && !dom.dockmsg.hidden ? dom.dockmsg : null;
+  let st = 'ready';
+  let text = 'Жду команду';
+  if (msg && (msg.dataset.role === 'clarify' || msg.dataset.role === 'busy' || msg.dataset.kind === 'question')) {
+    st = 'ask';
+    text = 'Агент спрашивает — ответьте голосом';
+  } else if (state.zenLast) {
+    st = state.zenLast.state;
+    ({ text } = state.zenLast);
+  } else if (!state.provider && !commandReady()) {
+    st = 'off';
+    text = 'Агент не подключён';
+  }
+  box.dataset.state = st;
+  dom['zen-text'].textContent = text;
+  box.title = text;
+}
 
 function previewOn() { return !!(dom.app && dom.app.dataset.preview === 'on'); }
 
