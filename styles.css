@@ -1907,6 +1907,9 @@ button.t-action:hover { text-decoration: underline; }
 .doc-color-row .theme-color-name { flex: 0 0 120px; }
 .doc-color-row .theme-color-mark { color: var(--muted); font-family: var(--mono); }
 .doc-color-row .scale-use { margin-left: auto; }
+.doc-color-rename, .doc-color-remove { flex: none; padding: 2px 8px; }
+.doc-color-remove[aria-disabled="true"] { opacity: .45; }
+.doc-color-name-input { flex: 0 0 120px; min-width: 0; font-family: var(--mono); }
 .doc-color-new { display: flex; align-items: center; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
 .doc-color-new > input.field { flex: 1 1 160px; min-width: 0; }
 /* круг 73: шрифты по стилям */

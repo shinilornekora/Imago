@@ -4568,6 +4568,58 @@ export function themeColorOps(doc, board, name, hex, { title } = {}) {
 /* ------------------------- круг 96: цвета документа в шторке ------------------------- */
 
 /**
+ * Круг 97 (SPEC §15.31): каждая ссылка слоя на цвет палитры по имени — путь до самой строки имени
+ * (переименование — `set` этого пути). Как `paintRefs` ядра: строка-имя, обёртка `{token|color|value}`,
+ * стоп `{token|color}`, цвет и подложка фактуры; заливка, цвет текста, обводка, состояния, контуры и
+ * пропс-цвет экземпляра. Экземпляры здесь не раскрываются — у них ссылки мастера.
+ * @returns {Array<{id: string, path: string, name: string}>}
+ */
+export function colorTokenRefs(doc) {
+  const out = [];
+  if (!doc || !doc.nodes) return out;
+  const names = (doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  const known = (v) => typeof v === 'string' && Object.prototype.hasOwnProperty.call(names, v);
+  const paint = (id, path, v) => {
+    if (typeof v === 'string') { if (known(v)) out.push({ id, path, name: v }); return; }
+    if (!isObj(v)) return;
+    if (isObj(v.pattern)) {
+      for (const k of ['color', 'bg']) if (known(v.pattern[k])) out.push({ id, path: `${path}.pattern.${k}`, name: v.pattern[k] });
+      return;
+    }
+    if (isObj(v.gradient)) {
+      if (Array.isArray(v.gradient.stops)) v.gradient.stops.forEach((st, i) => {
+        if (!isObj(st)) return;
+        const key = typeof st.token === 'string' ? 'token' : 'color';
+        if (known(st[key])) out.push({ id, path: `${path}.gradient.stops.${i}.${key}`, name: st[key] });
+      });
+      return;
+    }
+    const key = v.token !== undefined ? 'token' : v.color !== undefined ? 'color' : 'value';
+    if (known(v[key])) out.push({ id, path: `${path}.${key}`, name: v[key] });
+  };
+  const part = (id, base, o) => {
+    if (!isObj(o)) return;
+    paint(id, `${base}fill`, o.fill);
+    paint(id, `${base}color`, o.color);
+    if (isObj(o.stroke) && !o.stroke.gradient && o.stroke.color !== undefined) paint(id, `${base}stroke.color`, o.stroke.color);
+    else paint(id, `${base}stroke`, o.stroke);
+  };
+  for (const [id, n] of Object.entries(doc.nodes)) {
+    if (!isObj(n)) continue;
+    part(id, '', n);
+    if (isObj(n.states)) for (const k of STATE_KEYS) part(id, `states.${k}.`, n.states[k]);
+    if (Array.isArray(n.paths)) n.paths.forEach((p, i) => { if (isObj(p)) { paint(id, `paths.${i}.fill`, p.fill); paint(id, `paths.${i}.stroke`, p.stroke); } });
+    // пропс-цвет экземпляра ({тон: 'accent'}) — тоже ссылка
+    if (n.type === 'instance' && isObj(n.props)) {
+      const m = doc.nodes[n.of];
+      const defs = m && isObj(m.component) && Array.isArray(m.component.props) ? m.component.props : [];
+      for (const d of defs) if (isObj(d) && d.kind === 'color' && Object.prototype.hasOwnProperty.call(n.props, d.name)) paint(id, `props.${d.name}`, n.props[d.name]);
+    }
+  }
+  return out;
+}
+
+/**
  * Круг 96 (SPEC §15.30): сколько слоёв ссылается на каждый цвет палитры — по имени токена в краске:
  * строка-имя, `{token}`, стоп градиента `{token}`, цвет и подложка фактуры; заливка, цвет текста,
  * обводка, состояния и контуры вектора. Библиотека тоже считается: её мастера рисуют экземпляры.
@@ -4576,41 +4628,9 @@ export function themeColorOps(doc, board, name, hex, { title } = {}) {
 export function colorTokenUsers(doc) {
   const out = new Map();
   if (!doc || !doc.nodes) return out;
-  const names = (doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
-  const hit = (id, name) => {
-    if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(names, name)) return;
-    if (!out.has(name)) out.set(name, new Set());
-    out.get(name).add(id);
-  };
-  // как paintRefs ядра: стоп — token или color, обёртка — token, color или value
-  const paint = (id, v) => {
-    if (typeof v === 'string') { hit(id, v); return; }
-    if (!isObj(v)) return;
-    if (isObj(v.pattern)) { hit(id, v.pattern.color); hit(id, v.pattern.bg); return; }
-    if (isObj(v.gradient)) {
-      if (Array.isArray(v.gradient.stops)) for (const st of v.gradient.stops) if (isObj(st)) hit(id, typeof st.token === 'string' ? st.token : st.color);
-      return;
-    }
-    hit(id, v.token !== undefined ? v.token : v.color !== undefined ? v.color : v.value);
-  };
-  const part = (id, o) => {
-    if (!isObj(o)) return;
-    paint(id, o.fill);
-    paint(id, o.color);
-    if (isObj(o.stroke) && !o.stroke.gradient && o.stroke.color !== undefined) paint(id, o.stroke.color);
-    else paint(id, o.stroke);
-  };
-  for (const [id, n] of Object.entries(doc.nodes)) {
-    if (!isObj(n)) continue;
-    part(id, n);
-    if (isObj(n.states)) for (const k of STATE_KEYS) part(id, n.states[k]);
-    if (Array.isArray(n.paths)) for (const p of n.paths) if (isObj(p)) { paint(id, p.fill); paint(id, p.stroke); }
-    // пропс-цвет экземпляра ({bg: 'accent'}) — тоже ссылка
-    if (n.type === 'instance' && isObj(n.props)) {
-      const m = doc.nodes[n.of];
-      const defs = m && isObj(m.component) && Array.isArray(m.component.props) ? m.component.props : [];
-      for (const d of defs) if (isObj(d) && d.kind === 'color' && Object.prototype.hasOwnProperty.call(n.props, d.name)) paint(id, n.props[d.name]);
-    }
+  for (const r of colorTokenRefs(doc)) {
+    if (!out.has(r.name)) out.set(r.name, new Set());
+    out.get(r.name).add(r.id);
   }
   // экземпляр рисует поддерево мастера: каждый экземпляр мастера, где цвет есть, — тоже слой с этим цветом
   const subtreeUses = new Map();
@@ -4640,8 +4660,9 @@ export function colorTokenUsers(doc) {
 /**
  * Круг 96: строки шторки «Цвета документа» — каждый цвет палитры документа: `hex` — непрозрачный код для
  * поля выбора (null — задан не кодом без прозрачности: ссылкой на другой цвет или с прозрачностью),
- * `raw` — как записан, `users` — сколько слоёв на него ссылается.
- * @returns {{name: string, raw: string, hex: string|null, alpha: boolean, users: number}[]}
+ * `raw` — как записан, `users` — сколько слоёв на него ссылается, `role` — роль палитры (круг 97: её не
+ * переименовать и не удалить).
+ * @returns {{name: string, raw: string, hex: string|null, alpha: boolean, users: number, role: boolean}[]}
  */
 export function docColorRows(doc) {
   const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
@@ -4649,7 +4670,8 @@ export function docColorRows(doc) {
   return Object.keys(base).map((name) => {
     const raw = typeof base[name] === 'string' ? base[name] : '';
     const hex = opaqueHex(raw);
-    return { name, raw, hex, alpha: !hex && /^#(?:[0-9a-f]{4}|[0-9a-f]{8})$/i.test(raw.trim()), users: users.has(name) ? users.get(name).size : 0 };
+    return { name, raw, hex, alpha: !hex && /^#(?:[0-9a-f]{4}|[0-9a-f]{8})$/i.test(raw.trim()), users: users.has(name) ? users.get(name).size : 0,
+      role: SWATCH_ROLE_NAMES.has(name) };
   });
 }
 
@@ -4717,6 +4739,60 @@ export function newDocColorOps(doc, name, hex) {
   if (!want) return { error: 'Цвет пишется кодом: #F4A261' };
   return { ops: [OPS.setToken(`colors.${n}`, want)], label: `Новый цвет документа: ${n} ${want.toUpperCase()}`, warnings: twinWarning(base, n, want) };
 }
+
+/**
+ * Круг 97 (SPEC §15.31): переименовать цвет палитры документа — одной правкой: новый ключ с тем же
+ * значением, старый снят, каждая ссылка слоёв (§`colorTokenRefs`) и свой цвет этого имени в темах экранов —
+ * под новым именем. Вид не меняется. Имя — по тем же правилам, что у нового цвета (§15.30).
+ * @returns {{ops: object[], label: string, refs: number, screens: number}|{error: string}|null} null — то же имя
+ */
+export function renameDocColorOps(doc, from, to) {
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  if (typeof from !== 'string' || !Object.prototype.hasOwnProperty.call(base, from)) return { error: 'Такого цвета в документе нет' };
+  const n = String(to == null ? '' : to).trim();
+  if (n === from) return null;
+  if (!n) return { error: 'Назовите цвет — латиницей, например brand' };
+  if (!THEME_COLOR_NAME_RE.test(n)) return { error: 'Имя цвета — латиница, цифры, «-» и «_», с буквы, до 40 знаков: например brand или accent-2' };
+  const taken = Object.keys(base).find((k) => k !== from && k.toLowerCase() === n.toLowerCase());
+  if (taken) return { error: `Цвет «${taken}» в документе уже есть` };
+  if (/^(?:none|transparent|inherit|currentcolor)$/i.test(n)) return { error: `«${n}» в краске значит «без цвета» — выберите другое имя` };
+  // роли палитры читают все — макеты, тема экрана, агент: «accent» → «brand» оставил бы их без акцента
+  if (SWATCH_ROLE_NAMES.has(from)) return { error: `«${from}» — роль палитры: на неё опираются агент, темы экранов и проверки контраста — её не переименовать` };
+  const ops = [OPS.setToken(`colors.${n}`, base[from]), OPS.setToken(`colors.${from}`, undefined)];
+  const refs = colorTokenRefs(doc).filter((r) => r.name === from);
+  for (const r of refs) ops.push(OPS.set(r.id, r.path, n));
+  let screens = 0;
+  for (const [id] of boardLabels(doc)) {
+    const t = CORE_NS.boardTheme ? CORE_NS.boardTheme(doc.nodes[id]) : null;
+    if (!t || !isObj(t.colors) || !Object.prototype.hasOwnProperty.call(t.colors, from)) continue;
+    if (Object.prototype.hasOwnProperty.call(t.colors, n)) continue;   // у экрана уже есть своё под новым именем — не затираем
+    ops.push(OPS.set(id, `theme.colors.${n}`, t.colors[from]), OPS.set(id, `theme.colors.${from}`, undefined));
+    screens++;
+  }
+  const layers = new Set(refs.map((r) => r.id)).size;
+  const tail = [layers ? `ссылки ${layers} ${plural(layers, 'слоя', 'слоёв', 'слоёв')}` : '', screens ? `${screens} ${plural(screens, 'тема экрана', 'темы экранов', 'тем экранов')}` : ''].filter(Boolean);
+  return { ops, label: `Цвет «${from}» переименован в «${n}»${tail.length ? ` — ${tail.join(' и ')} тоже` : ''}`, refs: layers, screens };
+}
+
+/**
+ * Круг 97: удалить цвет палитры — только тот, на который никто не ссылается (иначе слои стали бы
+ * прозрачными) и который не роль палитры. Свой цвет этого имени в темах экранов остаётся (он им свой).
+ * @returns {{ops: object[], label: string}|{error: string}}
+ */
+export function removeDocColorOps(doc, name) {
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(base, name)) return { error: 'Такого цвета в документе нет' };
+  if (SWATCH_ROLE_NAMES.has(name)) return { error: `«${name}» — роль палитры: на неё опираются агент, темы экранов и проверки контраста — её не удалить` };
+  const users = colorTokenUsers(doc).get(name);
+  if (users && users.size) {
+    const k = users.size;
+    return { error: `На цвет «${name}» ${plural(k, 'ссылается', 'ссылаются', 'ссылаются')} ${k} ${plural(k, 'слой', 'слоя', 'слоёв')} — без него ${k === 1 ? 'он стал бы прозрачным' : 'они стали бы прозрачными'}. Сначала перекрасьте ${k === 1 ? 'его' : 'их'}` };
+  }
+  return { ops: [OPS.setToken(`colors.${name}`, undefined)], label: `Цвет «${name}» удалён из палитры` };
+}
+
+/** Круг 97: роли палитры (их знают агент, темы экранов, контраст) — переименовать и удалить нельзя. */
+const SWATCH_ROLE_NAMES = new Set(Object.keys((CORE_NS.DEFAULT_TOKENS && CORE_NS.DEFAULT_TOKENS.colors) || {}));
 
 /* ------------------------- круг 68: шрифты экрана в инспекторе ------------------------- */
 

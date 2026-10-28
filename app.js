@@ -14695,7 +14695,70 @@ function docColorRow(row) {
   use.textContent = row.users ? `${row.users} ${plural(row.users, 'слой', 'слоя', 'слоёв')}` : 'не используется';
   use.title = row.users ? `На этот цвет ссылаются ${row.users} ${plural(row.users, 'слой', 'слоя', 'слоёв')}: правка перекрасит их все` : 'На этот цвет сейчас никто не ссылается';
   line.append(name, val, use);
+  // круг 97: свои цвета (не роли палитры) переименовываются со всеми ссылками и удаляются, если не нужны
+  if (!row.role) {
+    const ren = document.createElement('button');
+    ren.type = 'button';
+    ren.className = 'btn subtle small doc-color-rename';
+    ren.textContent = 'Имя';
+    ren.title = `Переименовать «${row.name}» — ссылки слоёв и темы экранов пойдут за новым именем`;
+    ren.setAttribute('aria-label', ren.title);
+    ren.dataset.skey = `color-ren|${row.name}`;
+    ren.addEventListener('click', () => startRenameDocColor(line, row));
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn subtle small doc-color-remove';
+    del.textContent = '×';
+    del.dataset.skey = `color-del|${row.name}`;
+    del.title = row.users ? `Удалить нельзя: на цвет ${plural(row.users, 'ссылается', 'ссылаются', 'ссылаются')} ${row.users} ${plural(row.users, 'слой', 'слоя', 'слоёв')}` : `Удалить «${row.name}» из палитры`;
+    del.setAttribute('aria-label', del.title);
+    // не disabled: человек должен узнать почему — щелчок объяснит
+    if (row.users) del.setAttribute('aria-disabled', 'true');
+    del.addEventListener('click', () => {
+      const r = SHELL.removeDocColorOps(state.doc, row.name);
+      if (r.error) { toast(r.error, 'plain', 7000); return; }
+      const res = commit(r.ops, r.label, 'human', { quiet: true });
+      if (!res || res.ok !== false) toast(`${r.label}.`, 'plain', 5000);
+    });
+    line.append(ren, del);
+  }
   return line;
+}
+
+/** Круг 97: имя цвета правится на месте — поле вместо подписи; Enter — переименовать, Esc — отмена. */
+function startRenameDocColor(line, row) {
+  const name = line.querySelector('.theme-color-name');
+  if (!name || line.querySelector('.doc-color-name-input')) return;
+  const inp = document.createElement('input');
+  inp.className = 'field doc-color-name-input';
+  inp.value = row.name;
+  inp.spellcheck = false;
+  inp.setAttribute('aria-label', `Новое имя цвета «${row.name}»`);
+  inp.dataset.skey = `color-name|${row.name}`;
+  name.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = (apply) => {
+    if (done) return;
+    done = true;
+    if (!apply) { inp.replaceWith(name); return; }
+    const r = SHELL.renameDocColorOps(state.doc, row.name, inp.value);
+    if (!r) { inp.replaceWith(name); return; }
+    if (r.error) { done = false; toast(r.error, 'plain', 7000); inp.focus(); return; }
+    // фокус после перерисовки — на кнопку «Имя» под новым именем
+    const next = String(inp.value).trim();
+    const res = commit(r.ops, r.label, 'human', { quiet: true });
+    if (res && res.ok === false) return;
+    toast(`${r.label}.`, 'plain', 6000);
+    const b = dom['sheet-body'] && dom['sheet-body'].querySelector(`[data-skey="${CSS.escape(`color-ren|${next}`)}"]`);
+    if (b) b.focus();
+  };
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  inp.addEventListener('blur', () => { if (!done) finish(false); });
 }
 
 /** Набранное в «Новый цвет» переживает перерисовку шторки (подтверждение сервера, правка соавтора). */
