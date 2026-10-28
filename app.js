@@ -14695,6 +14695,8 @@ function docColorRow(row) {
   use.textContent = row.users ? `${row.users} ${plural(row.users, 'слой', 'слоя', 'слоёв')}` : 'не используется';
   use.title = row.users ? `На этот цвет ссылаются ${row.users} ${plural(row.users, 'слой', 'слоя', 'слоёв')}: правка перекрасит их все` : 'На этот цвет сейчас никто не ссылается';
   line.append(name, val, use);
+  // круг 97: переименование шло, а шторка перерисовалась (подтверждение сервера, правка соавтора) — поле назад
+  if (docColorRename && docColorRename.from === row.name) queueMicrotask(() => startRenameDocColor(line, row));
   // круг 97: свои цвета (не роли палитры) переименовываются со всеми ссылками и удаляются, если не нужны
   if (!row.role) {
     const ren = document.createElement('button');
@@ -14717,21 +14719,30 @@ function docColorRow(row) {
     del.addEventListener('click', () => {
       const r = SHELL.removeDocColorOps(state.doc, row.name);
       if (r.error) { toast(r.error, 'plain', 7000); return; }
-      const res = commit(r.ops, r.label, 'human', { quiet: true });
-      if (!res || res.ok !== false) toast(`${r.label}.`, 'plain', 5000);
+      const res = commit(r.ops, r.label, 'human', { quiet: true, human: r.label });
+      if (res && res.ok === false) return;
+      toast(`${r.label}.`, 'plain', 5000);
+      // строки больше нет — фокус в форму нового цвета, а не на страницу
+      const f = dom['sheet-body'] && dom['sheet-body'].querySelector('[data-skey="color-new|name"]');
+      if (f) f.focus();
     });
     line.append(ren, del);
   }
   return line;
 }
 
+/** Круг 97: набранное имя переживает перерисовку шторки, как черновик нового цвета. */
+let docColorRename = null;
+
 /** Круг 97: имя цвета правится на месте — поле вместо подписи; Enter — переименовать, Esc — отмена. */
 function startRenameDocColor(line, row) {
   const name = line.querySelector('.theme-color-name');
-  if (!name || line.querySelector('.doc-color-name-input')) return;
+  if (!name || !line.isConnected || line.querySelector('.doc-color-name-input')) return;
   const inp = document.createElement('input');
   inp.className = 'field doc-color-name-input';
-  inp.value = row.name;
+  inp.value = docColorRename && docColorRename.from === row.name ? docColorRename.text : row.name;
+  docColorRename = { from: row.name, text: inp.value };
+  inp.addEventListener('input', () => { docColorRename = { from: row.name, text: inp.value }; });
   inp.spellcheck = false;
   inp.setAttribute('aria-label', `Новое имя цвета «${row.name}»`);
   inp.dataset.skey = `color-name|${row.name}`;
@@ -14739,16 +14750,23 @@ function startRenameDocColor(line, row) {
   inp.focus();
   inp.select();
   let done = false;
+  const back = () => {
+    docColorRename = null;
+    inp.replaceWith(name);
+    const b = line.querySelector('.doc-color-rename');
+    if (b) b.focus();
+  };
   const finish = (apply) => {
     if (done) return;
     done = true;
-    if (!apply) { inp.replaceWith(name); return; }
+    if (!apply) { back(); return; }
     const r = SHELL.renameDocColorOps(state.doc, row.name, inp.value);
-    if (!r) { inp.replaceWith(name); return; }
+    if (!r) { back(); return; }
     if (r.error) { done = false; toast(r.error, 'plain', 7000); inp.focus(); return; }
     // фокус после перерисовки — на кнопку «Имя» под новым именем
     const next = String(inp.value).trim();
-    const res = commit(r.ops, r.label, 'human', { quiet: true });
+    docColorRename = null;
+    const res = commit(r.ops, r.label, 'human', { quiet: true, human: r.label });
     if (res && res.ok === false) return;
     toast(`${r.label}.`, 'plain', 6000);
     const b = dom['sheet-body'] && dom['sheet-body'].querySelector(`[data-skey="${CSS.escape(`color-ren|${next}`)}"]`);
@@ -14758,7 +14776,8 @@ function startRenameDocColor(line, row) {
     if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); finish(true); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
   });
-  inp.addEventListener('blur', () => { if (!done) finish(false); });
+  // уход из поля — отмена; но не когда поле унесла перерисовка шторки (там его вернут с набранным)
+  inp.addEventListener('blur', () => { if (!done && inp.isConnected) finish(false); });
 }
 
 /** Набранное в «Новый цвет» переживает перерисовку шторки (подтверждение сервера, правка соавтора). */

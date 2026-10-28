@@ -25,22 +25,23 @@ function doc0() {
     core.ops.create({ id: 'p', type: 'frame', name: 'Фактура', parent: 'A', children: [], fill: { pattern: { kind: 'dots', color: 'brand', bg: 'surface' } } }),
     core.ops.create({ id: 't', type: 'text', name: 'Текст', parent: 'A', characters: 'Привет', color: 'text' }),
     core.ops.create({ id: 'B', type: 'frame', name: 'Итог', parent: d.root, fill: 'surface', theme: { colors: { brand: '#ff0000' } }, children: [] }),
-    core.ops.create({ id: 'C', type: 'frame', name: 'Свои', parent: d.root, fill: 'surface', theme: { colors: { brand: '#ff0000', brandNew: '#00ff00' } }, children: [] }),
+    core.ops.create({ id: 'C', type: 'frame', name: 'Свои', parent: d.root, fill: 'surface', theme: { colors: { brand: '#ff0000', brand2: '#00ff00' } }, children: [] }),
+    core.ops.create({ id: 'c1', type: 'frame', name: 'Плитка', parent: 'C', fill: 'brand', children: [] }),
   ]);
   assert.equal(r.error, undefined, JSON.stringify(r.error));
   return r.doc;
 }
-const look = (doc) => Object.fromEntries(['A', 'g', 'p', 'B'].map((id) => [id, JSON.stringify(core.resolvePaint(core.themeScope(doc)(id), doc.nodes[id].fill))]));
+const look = (doc) => Object.fromEntries(['A', 'g', 'p', 'B', 'c1'].map((id) => [id, JSON.stringify(core.resolvePaint(core.themeScope(doc)(id), doc.nodes[id].fill))]));
 
 test('круг97: ссылки на цвет — путь до самого имени', () => {
   const refs = colorTokenRefs(doc0()).filter((r) => r.name === 'brand').map((r) => `${r.id}:${r.path}`).sort();
-  assert.deepEqual(refs, ['A:fill', 'A:states.hover.fill.color', 'A:stroke.color.token', 'g:fill.gradient.stops.0.token', 'g:fill.gradient.stops.1.color', 'p:fill.pattern.color']);
+  assert.deepEqual(refs, ['A:fill', 'A:states.hover.fill.color', 'A:stroke.color.token', 'c1:fill', 'g:fill.gradient.stops.0.token', 'g:fill.gradient.stops.1.color', 'p:fill.pattern.color']);
 });
 
 test('круг97: переименование — ключ, ссылки и темы экранов одной правкой, вид прежний; отмена — назад', () => {
   const d = doc0();
   const r = renameDocColorOps(d, 'brand', 'brandNew');
-  assert.equal(r.label, 'Цвет «brand» переименован в «brandNew» — ссылки 3 слоёв и 1 тема экрана тоже');
+  assert.equal(r.label, 'Цвет «brand» переименован в «brandNew» — ссылки 4 слоёв и 2 темы экранов тоже');
   const a = core.applyOps(d, r.ops);
   assert.equal(a.error, undefined, JSON.stringify(a.error));
   const n = a.doc;
@@ -52,14 +53,40 @@ test('круг97: переименование — ключ, ссылки и т�
   assert.deepEqual(n.nodes.g.fill.gradient.stops, [{ at: 0, token: 'brandNew' }, { at: 1, color: 'brandNew' }]);
   assert.equal(n.nodes.p.fill.pattern.color, 'brandNew');
   assert.deepEqual(n.nodes.B.theme.colors, { brandNew: '#ff0000' }, 'свой цвет экрана — под новым именем');
-  assert.deepEqual(n.nodes.C.theme.colors, { brand: '#ff0000', brandNew: '#00ff00' }, 'у экрана уже было своё под новым именем — не затираем');
+  assert.deepEqual(n.nodes.C.theme.colors, { brand2: '#00ff00', brandNew: '#ff0000' });
   assert.deepEqual(look(n), look(d), 'вид прежний');
-  assert.equal(colorTokenUsers(n).get('brandNew').size, 3);
+  assert.equal(colorTokenUsers(n).get('brandNew').size, 4);
   // отмена — одна правка
   const back = core.applyOps(n, core.invertOps(d, r.ops));
   assert.equal(back.error, undefined, JSON.stringify(back.error));
   assert.equal(back.doc.nodes.A.fill, 'brand');
   assert.equal(back.doc.tokens.colors.brand, '#7a5cff');
+});
+
+test('круг97 (критик): перечисление по пути краски — варианты мастера и выбор экземпляра переименовываются, удалить нельзя', () => {
+  let d = doc0();
+  d = core.applyOps(d, [core.ops.create({ id: 'M', type: 'frame', name: 'Плашка', parent: 'A', fill: 'surface', children: [] })]).doc;
+  const made = core.applyOps(d, core.makeComponentOps(d, 'M', { name: 'Плашка', props: [{ name: 'tone', kind: 'enum', target: 'M', path: 'fill', values: ['surface', 'spare'] }] }));
+  assert.equal(made.error, undefined, JSON.stringify(made.error));
+  d = made.doc;
+  const inst = Object.values(d.nodes).find((n) => n.type === 'instance' && n.of === 'M');
+  d = core.applyOps(d, [core.ops.set(inst.id, 'props.tone', 'spare')]).doc;
+  assert.ok(colorTokenUsers(d).get('spare').has(inst.id));
+  assert.match(removeDocColorOps(d, 'spare').error, /ссылаются 2 слоя/);
+  const r = renameDocColorOps(d, 'spare', 'spare2');
+  const a = core.applyOps(d, r.ops);
+  assert.equal(a.error, undefined, JSON.stringify(a.error));
+  assert.deepEqual(a.doc.nodes.M.component.props[0].values, ['surface', 'spare2']);
+  assert.equal(a.doc.nodes[inst.id].props.tone, 'spare2');
+});
+
+test('круг97 (критик): тема экрана на пределе цветов — переименование ложится (старое снимается раньше нового)', () => {
+  let d = doc0();
+  const full = Object.fromEntries(Array.from({ length: core.THEME_LIMITS.colors }, (_, i) => [i ? `c${i}` : 'brand', '#000000']));
+  d = core.applyOps(d, [core.ops.set('B', 'theme', { colors: full })]).doc;
+  const a = core.applyOps(d, renameDocColorOps(d, 'brand', 'brandX').ops);
+  assert.equal(a.error, undefined, JSON.stringify(a.error));
+  assert.equal(a.doc.nodes.B.theme.colors.brandX, '#000000');
 });
 
 test('круг97: правила имени; роли палитры не переименовать и не удалить', () => {
@@ -73,7 +100,12 @@ test('круг97: правила имени; роли палитры не пер
   // регистр своего же имени менять можно
   assert.equal(core.applyOps(d, renameDocColorOps(d, 'brand', 'Brand').ops).doc.nodes.A.fill, 'Brand');
   assert.match(removeDocColorOps(d, 'accent').error, /роль палитры/);
-  assert.equal(removeDocColorOps(d, 'brand').error, 'На цвет «brand» ссылаются 3 слоя — без него они стали бы прозрачными. Сначала перекрасьте их');
+  assert.equal(removeDocColorOps(d, 'brand').error, 'На цвет «brand» ссылаются 4 слоя — без него они стали бы прозрачными. Сначала перекрасьте их');
+  // критик: новое имя уже значит что-то у экрана или у слоя — вид поменялся бы
+  assert.match(renameDocColorOps(d, 'brand', 'brand2').error, /У экрана «Свои» уже есть свой цвет «brand2»/);
+  const hang = core.applyOps(d, [core.ops.create({ id: 'h', type: 'frame', name: 'Висит', parent: 'A', fill: 'ghost', children: [] })]);
+  assert.equal(hang.error, undefined);
+  assert.match(renameDocColorOps(hang.doc, 'brand', 'ghost').error, /уже стоит у слоя «Висит»/);
   const rm = removeDocColorOps(d, 'spare');
   assert.equal(rm.label, 'Цвет «spare» удалён из палитры');
   assert.equal(core.applyOps(d, rm.ops).doc.tokens.colors.spare, undefined);
@@ -127,7 +159,7 @@ test('круг97: в браузере — «Имя» → новое имя → �
     await inp.press('Enter');
     await row('brandNew').waitFor({ timeout: 5000 });
     assert.equal(await row('brand').count(), 0);
-    assert.equal(await row('brandNew').locator('.scale-use').innerText(), '3 слоя');
+    assert.equal(await row('brandNew').locator('.scale-use').innerText(), '4 слоя');
     assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.dataset.skey), 'color-ren|brandNew', 'фокус — на «Имя» под новым именем');
     // удалить ненужный
     await row('spare').locator('.doc-color-remove').click();

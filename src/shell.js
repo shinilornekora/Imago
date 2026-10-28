@@ -4574,11 +4574,12 @@ export function themeColorOps(doc, board, name, hex, { title } = {}) {
  * пропс-цвет экземпляра. Экземпляры здесь не раскрываются — у них ссылки мастера.
  * @returns {Array<{id: string, path: string, name: string}>}
  */
-export function colorTokenRefs(doc) {
+export function colorTokenRefs(doc, { any = false } = {}) {
   const out = [];
   if (!doc || !doc.nodes) return out;
   const names = (doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
-  const known = (v) => typeof v === 'string' && Object.prototype.hasOwnProperty.call(names, v);
+  // any: и имена, которых в палитре нет (не код): переименование не должно «оживить» висящую ссылку
+  const known = (v) => typeof v === 'string' && (any ? !!v && v[0] !== '#' : Object.prototype.hasOwnProperty.call(names, v));
   const paint = (id, path, v) => {
     if (typeof v === 'string') { if (known(v)) out.push({ id, path, name: v }); return; }
     if (!isObj(v)) return;
@@ -4609,15 +4610,28 @@ export function colorTokenRefs(doc) {
     part(id, '', n);
     if (isObj(n.states)) for (const k of STATE_KEYS) part(id, `states.${k}.`, n.states[k]);
     if (Array.isArray(n.paths)) n.paths.forEach((p, i) => { if (isObj(p)) { paint(id, `paths.${i}.fill`, p.fill); paint(id, `paths.${i}.stroke`, p.stroke); } });
-    // пропс-цвет экземпляра ({тон: 'accent'}) — тоже ссылка
+    // мастер: пропс-перечисление по пути краски (values: ['accent', 'surface']) — варианты тоже ссылки
+    if (isObj(n.component) && Array.isArray(n.component.props)) {
+      n.component.props.forEach((d, i) => {
+        if (!isObj(d) || d.kind !== 'enum' || !PAINT_PROP_PATH.test(String(d.path || '')) || !Array.isArray(d.values)) return;
+        d.values.forEach((v, j) => { if (known(v)) out.push({ id, path: `component.props.${i}.values.${j}`, name: v }); });
+      });
+    }
+    // пропс-цвет экземпляра ({тон: 'accent'}) и выбор перечисления по пути краски — тоже ссылка
     if (n.type === 'instance' && isObj(n.props)) {
       const m = doc.nodes[n.of];
       const defs = m && isObj(m.component) && Array.isArray(m.component.props) ? m.component.props : [];
-      for (const d of defs) if (isObj(d) && d.kind === 'color' && Object.prototype.hasOwnProperty.call(n.props, d.name)) paint(id, `props.${d.name}`, n.props[d.name]);
+      for (const d of defs) {
+        if (!isObj(d) || !Object.prototype.hasOwnProperty.call(n.props, d.name)) continue;
+        if (d.kind === 'color' || (d.kind === 'enum' && PAINT_PROP_PATH.test(String(d.path || '')))) paint(id, `props.${d.name}`, n.props[d.name]);
+      }
     }
   }
-  return out;
+  // варианты перечисления у мастера — раньше выбора у экземпляров: ядро сверяет выбор с вариантами
+  return out.sort((a, b) => (b.path.startsWith('component.') ? 1 : 0) - (a.path.startsWith('component.') ? 1 : 0));
 }
+/** Круг 97: путь пропса, который ведёт в краску (перечисление по нему выбирает цвет палитры). */
+const PAINT_PROP_PATH = /^(?:states\.\w+\.)?(?:fill|color|stroke(?:\.color)?)$|^paths\.\d+\.(?:fill|stroke)$/;
 
 /**
  * Круг 96 (SPEC §15.30): сколько слоёв ссылается на каждый цвет палитры — по имени токена в краске:
@@ -4758,6 +4772,15 @@ export function renameDocColorOps(doc, from, to) {
   if (/^(?:none|transparent|inherit|currentcolor)$/i.test(n)) return { error: `«${n}» в краске значит «без цвета» — выберите другое имя` };
   // роли палитры читают все — макеты, тема экрана, агент: «accent» → «brand» оставил бы их без акцента
   if (SWATCH_ROLE_NAMES.has(from)) return { error: `«${from}» — роль палитры: на неё опираются агент, темы экранов и проверки контраста — её не переименовать` };
+  // вид не должен поменяться: новое имя уже значит что-то у экрана (свой цвет темы) или у слоя (висящая
+  // ссылка) — после переименования эти места окрасились бы иначе
+  const themed = [...boardLabels(doc)].find(([id]) => {
+    const t = CORE_NS.boardTheme ? CORE_NS.boardTheme(doc.nodes[id]) : null;
+    return t && isObj(t.colors) && Object.prototype.hasOwnProperty.call(t.colors, n);
+  });
+  if (themed && n !== from) return { error: `У экрана «${themed[1]}» уже есть свой цвет «${n}» — после переименования экран перекрасился бы. Выберите другое имя` };
+  const dangling = colorTokenRefs(doc, { any: true }).find((r) => r.name === n);
+  if (dangling) return { error: `Имя «${n}» уже стоит у слоя «${String((doc.nodes[dangling.id] || {}).name || dangling.id).slice(0, 40)}» (такого цвета нет) — после переименования он перекрасился бы. Выберите другое имя` };
   const ops = [OPS.setToken(`colors.${n}`, base[from]), OPS.setToken(`colors.${from}`, undefined)];
   const refs = colorTokenRefs(doc).filter((r) => r.name === from);
   for (const r of refs) ops.push(OPS.set(r.id, r.path, n));
@@ -4765,8 +4788,8 @@ export function renameDocColorOps(doc, from, to) {
   for (const [id] of boardLabels(doc)) {
     const t = CORE_NS.boardTheme ? CORE_NS.boardTheme(doc.nodes[id]) : null;
     if (!t || !isObj(t.colors) || !Object.prototype.hasOwnProperty.call(t.colors, from)) continue;
-    if (Object.prototype.hasOwnProperty.call(t.colors, n)) continue;   // у экрана уже есть своё под новым именем — не затираем
-    ops.push(OPS.set(id, `theme.colors.${n}`, t.colors[from]), OPS.set(id, `theme.colors.${from}`, undefined));
+    // сначала снять старое: у темы на пределе цветов (64) лишний ключ на миг отклонил бы правку
+    ops.push(OPS.set(id, `theme.colors.${from}`, undefined), OPS.set(id, `theme.colors.${n}`, t.colors[from]));
     screens++;
   }
   const layers = new Set(refs.map((r) => r.id)).size;
