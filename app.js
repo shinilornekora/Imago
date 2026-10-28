@@ -8956,6 +8956,14 @@ function boardThemeGroup(node) {
     sum.addEventListener('click', () => themeColorsOpen.set(node.id, !d.open));
     sum.textContent = ownCount ? `Цвета экрана · своих ${ownCount}` : 'Цвета экрана — только у этого экрана';
     d.appendChild(sum);
+    // круг 96: общий цвет — в шторке палитры документа
+    const all = document.createElement('button');
+    all.type = 'button';
+    all.className = 'linkish';
+    all.textContent = 'Цвета документа…';
+    all.title = 'Палитра документа: общий цвет для всех экранов и новый цвет';
+    all.addEventListener('click', () => openDocColors());
+    d.appendChild(all);
     const pick = (name, hex) => {
       const cur = state.doc.nodes[node.id];
       const r = cur ? SHELL.themeColorOps(state.doc, cur, name, hex, { title: SWATCH_NAMES[name] }) : null;
@@ -12175,6 +12183,7 @@ function applyShellIntent(intent, said) {
     case 'sheet': {
       if (intent.what === 'settings') openSettings();
       else if (intent.what === 'scales') openScales();
+      else if (intent.what === 'colors') openDocColors();
       else openHistory(intent.tab || 'edits');
       return true;
     }
@@ -13832,7 +13841,7 @@ let sheetReturnFocus = null;
    узел ВНУТРИ компонента и должен видеть, какой именно он выбрал на холсте. */
 /* Круг 20, п.4: редактор шкал — тем более разговор о документе: правка шага переверстывает
    холст, и человек должен видеть, как разъезжаются карточки, не закрывая шторку. */
-const QUIET_SHEETS = new Set(['history', 'export', 'artboards', 'make-component', 'add-prop', 'scales']);
+const QUIET_SHEETS = new Set(['history', 'export', 'artboards', 'make-component', 'add-prop', 'scales', 'colors']);
 
 /** Шторка — модальный диалог: фокус внутрь, Esc и клик по затемнению закрывают. */
 function openSheet(title, fill, opts = {}) {
@@ -14282,6 +14291,8 @@ function refreshSheet() {
   if (state.sheetOpen === 'history') openHistory();
   // круг 20: у редактора шкал те же права — после Ctrl+Z шаг обязан показывать прежнее число
   else if (state.sheetOpen === 'scales') openScales(scalesFocus, { keepFocus: true });
+  // круг 96: и шторка цветов — после отмены поле показывает прежний код
+  else if (state.sheetOpen === 'colors') openDocColors({ keepFocus: true });
 }
 
 /* ------------------------------ круг 20: редактор шкал ------------------------------ */
@@ -14463,6 +14474,135 @@ function scaleRow(scale, steps, i, users) {
 
   rowEl.append(idx, val, use, add);
   return rowEl;
+}
+
+/* ------------------------------ круг 96: цвета документа ------------------------------ */
+
+/**
+ * Шторка «Цвета документа» (SPEC §15.30). Палитра документа правится прямо здесь: `setToken colors.<имя>`,
+ * обычный commit — холст перекрашивается сразу, отмена даром; цвета экранов, записанные кодом прежнего
+ * значения, получают то же предложение «Перекрасить и их», что после правки словами (§15.25). У каждого
+ * цвета — сколько слоёв на него ссылается. Внизу — новый цвет: имя латиницей и код.
+ */
+function openDocColors(opts = {}) {
+  const memo = opts.keepFocus ? grabSheetFocus() : null;
+  openSheet('Цвета документа', (body) => fillDocColors(body), { key: 'colors' });
+  if (memo) restoreSheetFocus(memo);
+}
+
+function pickDocColor(name, hex) {
+  const r = SHELL.docColorOps(state.doc, name, hex, { title: SWATCH_NAMES[name] });
+  if (!r) return;
+  const res = commit(r.ops, r.label, 'human', { quiet: true });
+  if (res && res.ok === false) return;
+  const own = r.screens.length
+    ? ` Экран${r.screens.length > 1 ? 'ы' : ''} ${r.screens.slice(0, 3).map((n) => `«${n}»`).join(', ')}${r.screens.length > 3 ? ` и ещё ${r.screens.length - 3}` : ''} — со своим цветом, ${r.screens.length > 1 ? 'их' : 'его'} правка не коснулась.`
+    : '';
+  // одним тостом: рядом может стоять предложение «Перекрасить и его» (§15.25) — три тоста разом не читаются
+  const say = [own.trim(), ...r.warnings.map((w) => `${w}.`)].filter(Boolean).join(' ');
+  if (say) toast(say, 'plain', 8000);
+}
+
+function fillDocColors(body) {
+  body.appendChild(noteEl('Слои, окрашенные цветом палитры, перекрашиваются вместе с ним; '
+    + `${keyText('Mod+Z') ? `отмена — ${keyText('Mod+Z')}` : 'отмена — кнопкой «Отменить»'}. Свой цвет экрана — в инспекторе экрана.`));
+  const rows = SHELL.docColorRows(state.doc);
+  const byName = new Map(rows.map((r) => [r.name, r]));
+  const placed = new Set();
+  const list = document.createElement('div');
+  list.className = 'doc-colors';
+  list.setAttribute('role', 'list');
+  for (const [title, names] of [...SWATCH_GROUPS, ['Прочие', rows.map((r) => r.name)]]) {
+    const here = names.filter((n) => byName.has(n) && !placed.has(n));
+    if (!here.length) continue;
+    const h = document.createElement('h4');
+    h.className = 'scale-ed-title';
+    h.textContent = title;
+    list.appendChild(h);
+    for (const n of here) { placed.add(n); list.appendChild(docColorRow(byName.get(n))); }
+  }
+  body.appendChild(list);
+  body.appendChild(newDocColorForm());
+}
+
+function docColorRow(row) {
+  const line = document.createElement('div');
+  line.className = 'theme-color-row doc-color-row';
+  line.setAttribute('role', 'listitem');
+  line.dataset.token = row.name;
+  const human = SWATCH_NAMES[row.name] || row.name;
+  const name = document.createElement('span');
+  name.className = 'theme-color-name';
+  name.textContent = human;
+  name.title = row.name;
+  if (human !== row.name) {
+    const code = document.createElement('small');
+    code.className = 'theme-color-mark';
+    code.textContent = row.name;
+    name.appendChild(code);
+  }
+  let val;
+  if (row.hex) {
+    val = colorInput(row.hex, (h) => pickDocColor(row.name, h), `Цвет документа «${human}»`);
+    const inp = val.querySelector('input.paint-hex');
+    if (inp) inp.dataset.skey = `color|${row.name}`;
+    // и у кружка выбора: после перерисовки фокус остаётся в шторке, а не падает на страницу
+    const pick = val.querySelector('input.paint-color-input');
+    if (pick) pick.dataset.skey = `color-pick|${row.name}`;
+  } else {
+    // с прозрачностью или ссылкой: поле выбора прозрачность потеряло бы — показываем как есть
+    val = document.createElement('span');
+    val.className = 'theme-color-note';
+    val.textContent = row.alpha ? `${row.raw.toUpperCase()} — с прозрачностью, правится словами` : row.raw ? `${row.raw} — задан не кодом` : 'задан не строкой — правится словами';
+  }
+  const use = document.createElement('span');
+  use.className = 'scale-use';
+  use.textContent = row.users ? `${row.users} ${plural(row.users, 'слой', 'слоя', 'слоёв')}` : 'не используется';
+  use.title = row.users ? `На этот цвет ссылаются ${row.users} ${plural(row.users, 'слой', 'слоя', 'слоёв')}: правка перекрасит их все` : 'На этот цвет сейчас никто не ссылается';
+  line.append(name, val, use);
+  return line;
+}
+
+/** Набранное в «Новый цвет» переживает перерисовку шторки (подтверждение сервера, правка соавтора). */
+const docColorDraft = { name: '', hex: '#7a5cff' };
+
+function newDocColorForm() {
+  const box = document.createElement('form');
+  box.className = 'doc-color-new';
+  box.setAttribute('aria-label', 'Новый цвет документа');
+  const name = document.createElement('input');
+  name.className = 'field';
+  name.placeholder = 'имя латиницей, например brand';
+  name.spellcheck = false;
+  name.setAttribute('aria-label', 'Имя нового цвета');
+  name.dataset.skey = 'color-new|name';
+  name.value = docColorDraft.name;
+  name.addEventListener('input', () => { docColorDraft.name = name.value; });
+  const pick = document.createElement('input');
+  pick.type = 'color';
+  pick.className = 'paint-color-input';
+  pick.value = docColorDraft.hex;
+  pick.setAttribute('aria-label', 'Новый цвет');
+  pick.dataset.skey = 'color-new|pick';
+  pick.addEventListener('input', () => { docColorDraft.hex = pick.value; });
+  pick.addEventListener('change', () => { docColorDraft.hex = pick.value; });
+  const add = document.createElement('button');
+  add.type = 'submit';
+  add.className = 'btn small';
+  add.textContent = 'Добавить цвет';
+  add.dataset.skey = 'color-new|add';
+  box.append(name, pick, add);
+  box.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const r = SHELL.newDocColorOps(state.doc, name.value, pick.value);
+    if (r.error) { toast(r.error, 'plain', 6000); name.focus(); return; }
+    const res = commit(r.ops, r.label, 'human', { quiet: true });
+    if (res && res.ok === false) return;
+    docColorDraft.name = '';
+    // тихая правка — подтверждение сами (одной строкой с предупреждением, если оно есть)
+    toast([`${r.label}.`, ...r.warnings.map((w) => `${w}.`)].join(' '), 'plain', 6000);
+  });
+  return box;
 }
 
 function openExport() {
