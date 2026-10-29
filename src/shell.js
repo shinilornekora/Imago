@@ -1961,6 +1961,10 @@ export function shellIntent(said, ctx = {}) {
   if (RE_THEME_UI.test(t)) return { kind: 'theme', mode: 'cycle' };
   if (RE_THEME_ASK.test(t)) return { kind: 'theme', mode: 'ask' };
 
+  // круг 99: цвета палитры словами — до «переименуй в …» и «удали …»
+  const colorWords = colorWordsIntent(said, doc);
+  if (colorWords) return colorWords;
+
   /* — круг 38 (§13): новые команды таблицы — целиковые фразы, без модели — */
   const fresh = naturalIntent(t, said);
   if (fresh) return fresh;
@@ -2177,6 +2181,11 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'history', group: 'Панели', title: 'История правок', hint: 'Все правки с отменой до любой из них', slash: ['история', 'history'], keys: 'H', phrases: ['история', 'что менялось'] },
   { id: 'chat', group: 'Панели', title: 'Диалог с агентом', hint: 'Что вы сказали и что ответил агент', slash: ['диалог', 'chat'], phrases: ['покажи диалог', 'переписка'] },
   { id: 'scales', group: 'Панели', title: 'Шкалы и токены', hint: 'Шаги отступов и скруглений документа', slash: ['шкалы', 'токены', 'scales'], phrases: ['шкалы', 'покажи токены'] },
+  // круг 99 (SPEC §15.33): цвета палитры словами — без модели и без шторки
+  { id: 'color-new', group: 'Правка', title: 'Новый цвет палитры', hint: 'Свой цвет документа: имя латиницей и код', slash: ['новый цвет', 'new color'], args: [{ name: 'имя', kind: 'text' }, { name: 'код', kind: 'text' }], example: '/новый цвет brand #7A5CFF', phrases: ['заведи цвет brand #7A5CFF', 'добавь фирменный цвет #7A5CFF'], edit: true },
+  { id: 'color-set', group: 'Правка', title: 'Поменять цвет палитры', hint: 'Новый код цвета документа: слои с ним перекрасятся', slash: ['цвет', 'color'], args: [{ name: 'имя', kind: 'text' }, { name: 'код', kind: 'text' }], example: '/цвет brand #5B3DF5', phrases: ['поменяй в палитре цвет brand на #5B3DF5', 'смени в палитре цвет accent на #5B3DF5'], edit: true },
+  { id: 'color-rename', group: 'Правка', title: 'Переименовать цвет палитры', hint: 'Ссылки слоёв и темы экранов — под новым именем', slash: ['переименовать цвет палитры', 'rename color'], args: [{ name: 'имя', kind: 'text' }, { name: 'новое имя', kind: 'text' }], example: '/переименовать цвет палитры brand brandMain', phrases: ['переименуй в палитре цвет brand в brandMain'], edit: true },
+  { id: 'color-remove', group: 'Правка', title: 'Удалить цвет палитры', hint: 'Только цвет, на который не ссылается ни один слой', slash: ['удалить цвет', 'remove color'], args: [{ name: 'имя', kind: 'text' }], example: '/удалить цвет brand', phrases: ['удали из палитры цвет brand'], edit: true },
   { id: 'doc-colors', group: 'Панели', title: 'Цвета документа', hint: 'Палитра: правка цвета и новый цвет', slash: ['цвета документа', 'палитра документа', 'colors'], phrases: ['покажи цвета документа', 'открой палитру документа'] },
   { id: 'settings', group: 'Панели', title: 'Настройки агента', hint: '', slash: ['настройки', 'settings'], phrases: ['настройки', 'открой настройки'] },
 
@@ -2407,6 +2416,11 @@ const SLASH_ARGS = {
     const same = hits.filter((h) => h.score >= best - 0.01).slice(0, 12);
     return { kind: 'select', ids: same.map((h) => h.id), name: same[0].node.name || placeholderName(ctx.doc, same[0].node) };
   },
+  // круг 99: цвета палитры — те же правила, что у фраз (имя, «фирменный», код)
+  'color-new': (rest, raw, ctx, cmd) => colorWordsSlash('new', raw, ctx, cmd),
+  'color-set': (rest, raw, ctx, cmd) => colorWordsSlash('set', raw, ctx, cmd),
+  'color-rename': (rest, raw, ctx, cmd) => colorWordsSlash('rename', raw, ctx, cmd),
+  'color-remove': (rest, raw, ctx, cmd) => colorWordsSlash('remove', raw, ctx, cmd),
   rename(rest, raw, ctx, cmd) {
     const name = renameValue(raw);
     return name ? { kind: 'rename', name } : bad(cmd, 'Скажите новое имя');
@@ -2543,6 +2557,102 @@ const RE_PROJECT_OPEN = /^\s*(?:открой|открыть|откройте|п�
 const RE_PROJECT_RENAME = /^\s*(?:переименуй|переименовать|переименуйте)\s+проект\s+в\s+(.+?)\s*$/i;
 const RE_PROJECT_NEW_NAMED = /^\s*(?:создай|создать|заведи|завести)\s+(?:новый\s+)?проект\s+(.+?)\s*$/i;
 
+/* Круг 99 (SPEC §15.33): цвета палитры документа словами. Имя — латиницей (как в шторке, §15.30), код —
+   «#rrggbb» или «#rgb»; «фирменный цвет» — свой цвет документа, если он один. Фразы только целиковые и
+   только со словом «цвет» перед именем: «покрась кнопку в brand» — по-прежнему работа агента. */
+const CN = '([A-Za-z][A-Za-z0-9_-]{0,39})';
+const CH = '(#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{3})';
+const IN_PAL = '(?:\\s+(?:в\\s+палитр[уеы]|в\\s+цвета\\s+документа|из\\s+палитры))?';
+const WHICH = `(?:(фирменный)\\s+цвет|цвет\\s+${CN})`;
+const RE_COLOR_NEW = new RegExp(`^(заведи|завести|добавь|добавить|создай|создать)${IN_PAL}(?:\\s+(?:новый|свой))?\\s+(фирменный\\s+)?цвет${IN_PAL}(?:\\s+${CN})?\\s*[:=]?\\s*${CH}${IN_PAL}$`, 'iu');
+const RE_COLOR_SET = new RegExp(`^(?:(?:поменяй|смени|измени|сделай|поставь|перекрась|задай)(?:\\s+в\\s+палитре)?\\s+)?${WHICH}\\s*(?:[:=]|\\s+на|\\s+в)?\\s*${CH}$`, 'iu');
+const RE_COLOR_RENAME = new RegExp(`^(?:переименуй|переименовать|переименуйте)(?:\\s+в\\s+палитре)?\\s+${WHICH}\\s+в\\s+${CN}$`, 'iu');
+const RE_COLOR_REMOVE = new RegExp(`^(?:удали|удалить|удалите|убери|убрать)${IN_PAL}\\s+${WHICH}${IN_PAL}$`, 'iu');
+
+/** Свои цвета документа — не роли палитры, с кодом (для «фирменный цвет»). */
+function ownDocColorNames(doc) {
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : {};
+  return Object.keys(base).filter((k) => !SWATCH_ROLE_NAMES.has(k) && typeof base[k] === 'string' && toHex6(base[k]));
+}
+
+/**
+ * Круг 99: что человек назвал — имя цвета (как набрал; с документом — как записано в палитре, без учёта
+ * регистра) или «фирменный». Ответ: `{name}` либо `{say}` — почему не понять.
+ */
+function colorNameSaid(doc, typed, brand, act) {
+  const base = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : null;
+  if (brand) {
+    if (!base) return { name: 'brand', brand: true, fresh: !!doc };
+    const own = ownDocColorNames(doc);
+    if (own.length === 1) return { name: own[0], brand: true };
+    if (!own.length) return act === 'new' || act === 'set' ? { name: 'brand', brand: true, fresh: true } : { say: 'Своих цветов в палитре нет — фирменный ещё не заведён: «заведи фирменный цвет #7A5CFF»' };
+    return { say: `Своих цветов несколько (${own.slice(0, 5).join(', ')}${own.length > 5 ? '…' : ''}) — назовите цвет по имени` };
+  }
+  const name = String(typed || '');
+  if (!base || act === 'new') return { name };
+  const key = Object.prototype.hasOwnProperty.call(base, name) ? name : Object.keys(base).find((k) => k.toLowerCase() === name.toLowerCase());
+  return { name: key || name };
+}
+
+/** Фраза или слэш → намерение `doc-color`; null — не про цвета палитры. */
+function colorWordsIntent(said, doc, { slash = false } = {}) {
+  const s = String(said || '').trim().replace(/[.!…]+$/u, '').replace(/[«»"]/g, '').replace(/\s+/g, ' ');
+  // «в палитре», «фирменный», слэш — явно о палитре; иначе латинское имя после «цвет» может быть именем
+  // слоя («поменяй цвет Header на #fff») — тогда это работа агента, а не наша (критик круга 99)
+  const explicit = slash || /палитр|цвета\s+документа/iu.test(s);
+  const palette = (doc && doc.tokens && isObj(doc.tokens.colors)) ? doc.tokens.colors : null;
+  /** Имя называет цвет палитры наверняка: свой цвет документа; роль («text», «accent») — только явно. */
+  const claims = (name) => {
+    if (explicit) return true;
+    if (!palette) return false;   // сервер без документа: голую фразу с именем отдаём агенту
+    const key = Object.keys(palette).find((k) => k.toLowerCase() === String(name).toLowerCase());
+    return !!key && !SWATCH_ROLE_NAMES.has(key);
+  };
+  let m = RE_COLOR_NEW.exec(s);
+  if (m) {
+    if (!m[2] && !m[3]) return null;   // «добавь цвет #f00» — без имени это о слое, не о палитре
+    // «добавь цвет Header #fff» — может быть о слое; «заведи», «создай», «новый», «в палитру» — о палитре
+    if (/^добав/iu.test(m[1]) && !m[2] && !explicit && !/\s(?:новый|свой)\s/iu.test(s)) return null;
+    m = [m[0], ...m.slice(2)];
+    const who = m[1] && !m[2] ? colorNameSaid(doc, '', true, 'new') : { name: m[2] };
+    if (who.say) return { kind: 'doc-color', act: 'new', say: who.say };
+    // фирменный уже есть — «заведи фирменный» значит поменять его
+    if (who.brand && !who.fresh && doc) return { kind: 'doc-color', act: 'set', name: who.name, hex: m[3], brand: true };
+    return { kind: 'doc-color', act: 'new', name: who.name, hex: m[3], ...(who.brand ? { brand: true } : {}) };
+  }
+  m = RE_COLOR_SET.exec(s);
+  if (m && (m[1] || claims(m[2]))) {
+    const who = colorNameSaid(doc, m[2], !!m[1], 'set');
+    if (who.say) return { kind: 'doc-color', act: 'set', say: who.say };
+    return { kind: 'doc-color', act: who.fresh ? 'new' : 'set', name: who.name, hex: m[3], ...(who.brand ? { brand: true } : {}) };
+  }
+  m = RE_COLOR_RENAME.exec(s);
+  if (m && (m[1] || claims(m[2]))) {
+    const who = colorNameSaid(doc, m[2], !!m[1], 'rename');
+    return who.say ? { kind: 'doc-color', act: 'rename', say: who.say } : { kind: 'doc-color', act: 'rename', name: who.name, to: m[3] };
+  }
+  m = RE_COLOR_REMOVE.exec(s);
+  if (m && (m[1] || claims(m[2]))) {
+    const who = colorNameSaid(doc, m[2], !!m[1], 'remove');
+    return who.say ? { kind: 'doc-color', act: 'remove', say: who.say } : { kind: 'doc-color', act: 'remove', name: who.name };
+  }
+  return null;
+}
+
+const COLOR_SLASH_HEAD = { new: 'новый цвет', set: 'цвет', rename: 'переименовать цвет палитры', remove: 'удалить цвет' };
+/** Слэш-форма: «/новый цвет brand #7A5CFF», «/переименовать цвет brand brandMain». */
+function colorWordsSlash(act, raw, ctx, cmd) {
+  const r = String(raw || '').trim();
+  if (!r) return bad(cmd, act === 'remove' ? 'Скажите, какой цвет удалить' : 'Скажите имя цвета и код');
+  const words = act === 'rename' ? r.replace(/^(\S+)\s+(?:в\s+)?(\S+)$/u, (x, a, b) => `${/^фирменный$/i.test(a) ? 'фирменный цвет' : `цвет ${a}`} в ${b}`)
+    : act === 'new' && /^фирменный\s/i.test(r) ? `фирменный цвет ${r.replace(/^фирменный\s+/i, '')}`
+    : /^фирменный(?:\s|$)/i.test(r) ? r.replace(/^фирменный/i, 'фирменный цвет') : `цвет ${r}`;
+  const head = act === 'new' ? 'заведи' : act === 'rename' ? 'переименуй' : act === 'remove' ? 'удали' : '';
+  const it = colorWordsIntent(`${head ? `${head} ` : ''}${words}`, ctx.doc, { slash: true });
+  if (it && (it.act === act || (act === 'new' && it.act === 'set' && it.brand) || (act === 'set' && it.act === 'new' && it.brand))) return it;
+  return bad(cmd, `Так: ${cmd.example || `/${COLOR_SLASH_HEAD[act]}`}`);
+}
+
 /** Новые фразы таблицы → намерение; null — не они. */
 function naturalIntent(t, said) {
   for (const [id, re, make] of NATURAL) {
@@ -2624,6 +2734,7 @@ export function commandIdOf(intent) {
       if (intent.what === 'scales') return 'scales';
       if (intent.what === 'colors') return 'doc-colors';
       return intent.tab === 'chat' ? 'chat' : 'history';
+    case 'doc-color': return { new: 'color-new', set: 'color-set', rename: 'color-rename', remove: 'color-remove' }[intent.act] || null;
     case 'export': return 'export';
     case 'import': return 'import';
     case 'new-board': return 'new-board';
