@@ -68,6 +68,8 @@
 
 import { DEFAULT_FONT, catalogFont, fontMenu, nearestWeight, FONT_PAIRS } from './fonts.js';
 import { imageSources, imageColorsLine } from './swatches.js';
+// круг 110 (SPEC §25): длинные задачи — сценарий из многих экранов одной командой
+import { recognizeFlow, SCHEMA_FLOW, FLOW_LIMITS, flowPrompt, normalizeFlow, screenBrief, layoutFlow, triggerNode, flowSummary } from './flow.js';
 
 /* ────────────────────────────────────────────────────────────────────────────
  * 0. Движок
@@ -1408,6 +1410,9 @@ export const SCHEMAS = {
       praise: 'Палитра крафта читается',
     },
   },
+
+  /** Круг 110 (SPEC §25): план сценария из многих экранов — экраны и переходы (src/flow.js). */
+  flow: SCHEMA_FLOW,
 };
 
 /**
@@ -2478,6 +2483,11 @@ ${ctx.fontsLocked ? `- ШРИФТЫ ИЗ СЕТИ ВЫКЛЮЧЕНЫ челов�
       entry && entry.hint ? `Схема "${entry.name}":\n${entry.hint}` : '',
       JSON_RULE,
     ].filter(Boolean).join('\n');
+  },
+
+  /** Круг 110 (SPEC §25): план сценария — экраны и переходы; текст промпта — в src/flow.js. */
+  flow(ctx) {
+    return `${flowPrompt(ctx)}\n\n${JSON_RULE}`;
   },
 };
 
@@ -11595,6 +11605,8 @@ const STAGE_LABELS = {
   direct: 'Ищу образ',
   critic: 'Смотрю на результат',
   revise: 'Дорабатываю',
+  // круг 110 (SPEC §25): сценарий из многих экранов
+  flow: 'Собираю сценарий',
   done: 'Готово',
   error: 'Не вышло',
 };
@@ -13347,6 +13359,11 @@ async function runCommandCore(options = {}) {
     imageColors = null,
     /** Круг 56: общее для команды и её вариантов — {refused}: модель уже отвергла картинку-образец. */
     visionState = { refused: false },
+    /**
+     * Круг 110 (SPEC §25): готовое арт-направление (normalizeDirection) — экраны одного сценария
+     * собираются в одном образе: арт-директор зовётся один раз на сценарий, а не на каждый экран.
+     */
+    presetDirection = null,
   } = options;
 
   const stages = [];
@@ -13557,6 +13574,11 @@ async function runCommandCore(options = {}) {
 
     if (!provider || typeof provider.complete !== 'function') throw ERR('model', 'Провайдер модели не настроен');
 
+    /* — 0e. Круг 110 (SPEC §25): длинная задача — сценарий из многих экранов («сделай полный
+     * воркфлоу игрового сценария»). Не один экран, а план сценария → экран за экраном → переходы.
+     * Внутри варианта, по готовому плану и в «только план» — обычный путь. */
+    const wantFlow = insideVariants || presetPlan || planOnly ? null : recognizeFlow(utterance);
+
     const ask = async (schemaEntry, messages, o = {}) => {
       checkAbort(signal);
       const t0 = now();
@@ -13587,6 +13609,10 @@ async function runCommandCore(options = {}) {
         throw e instanceof BrainError ? e : fromClaudeError(e);
       }
     };
+
+    if (wantFlow) {
+      return await runFlowCore({ options, want: wantFlow, engine, ask, emit, warn, serviceNote, usage, stages, warnings, service });
+    }
 
     /* — 1. Классификация — */
     /* Круг 27: выделение, которое поставил сам агент (оболочка выделяет созданное), для
@@ -13750,7 +13776,9 @@ async function runCommandCore(options = {}) {
           : 'Собранный экран не проверен: самопроверка выключена. Включить: /самопроверка вкл');
       }
     }
-    if (intent === 'create' && directionOpt !== false && newBoard) {
+    if (intent === 'create' && presetDirection && directionOpt !== false && newBoard) {
+      direction = presetDirection;
+    } else if (intent === 'create' && directionOpt !== false && newBoard) {
       emit('direct', '');
       try {
         const pictures = await pictureColors(imageColors, doc, selection, signal, serviceNote, geoNow);
@@ -16333,6 +16361,201 @@ async function runVariantsCore(options = {}) {
     ...(res.action ? { action: res.action } : {}),
     ...(res.error ? { error: res.error } : {}),
   }));
+}
+
+/* ──── 14. Длинные задачи: сценарий из многих экранов (круг 110, SPEC §25) ──── */
+
+/** Сколько предупреждений экранов сценария показывать человеку (остальные — одной строкой). */
+const FLOW_WARNINGS_MAX = 12;
+
+/**
+ * Сценарий одной командой: план сценария (экраны и переходы, схема flow) → общий образ (один
+ * арт-директор на весь сценарий) → каждый экран — обычный конвейер «собери экран» новой доской
+ * по брифу (screenBrief) на документе с уже собранными экранами → доски по колонкам шагов
+ * (layoutFlow) → переходы полем доски `flow` (стрелки рисует сцена). Итог — ОДНА правка (один
+ * шаг отмены). Экран, который не собрался, — замечание, а не провал: остальные кладутся, переходы
+ * на него снимаются. Ни один не собрался — ошибка. Прогресс — стадии `flow` с полем
+ * `progress: {done, total, name}`; стадии экрана идут с префиксом «Экран i/n · ».
+ */
+async function runFlowCore({ options, want, engine, ask, emit, warn, serviceNote, usage, stages, warnings, service }) {
+  const {
+    doc, utterance, provider, onStage, signal, persona = null, modelTier, temperature, callTimeout = CALL_TIMEOUT_MS,
+    history = null, geo: geoIn = null, direction: directionOpt = true, webFonts = true, artOffBy = null, render = null,
+  } = options;
+  const geoNow = geoIn || safeSolve(engine, doc);
+  const root = doc.nodes[doc.root];
+  const boardsBefore = asArray(root && root.children).filter((id) => doc.nodes[id] && doc.nodes[id].type === 'frame');
+  emit('classify', `flow — сценарий из многих экранов${want.screens ? ` (${want.screens})` : ''}`);
+
+  /* — план сценария — */
+  emit('flow', 'Составляю план сценария: экраны и переходы', { progress: { done: 0, total: 0, name: '' } });
+  const existing = boardsBefore.map((id) => `«${cutText(strOf(doc.nodes[id].name).trim() || 'Без имени', 40)}»`).slice(0, 20).join(', ');
+  const raw = await ask(SCHEMAS.flow, [
+    { role: 'system', content: PROMPTS.flow({ screens: want.screens || 0, existing, history: describeHistory(history) }) },
+    { role: 'user', content: String(utterance) },
+  ], { stage: 'plan', temperature: temperature == null ? 0.3 : temperature });
+  const flow = normalizeFlow(raw, { screens: want.screens || 0 });
+  if (!flow) {
+    const because = cannotOf(raw);
+    if (because) {
+      const text = cannotText(because);
+      emit('cannot', text);
+      emit('done', 'Так нельзя');
+      return { ops: [], preview: { doc, geo: geoNow }, plan: null, cannot: text, warnings: sortWarnings(warnings), usage, stages };
+    }
+    throw ERR('schema', 'Модель не составила сценарий: в плане меньше двух экранов');
+  }
+  for (const n of flow.notes) serviceNote(`План сценария: ${n}`);
+  const total = flow.screens.length;
+  const plan = {
+    intent: 'flow',
+    title: flow.title,
+    summary: flow.summary || flowSummary(flow.title, total, flow.links.length),
+    steps: flow.screens.map((x) => x.name),
+    targets: [],
+  };
+  emit('plan', plan.summary, { title: plan.title, steps: plan.steps, plan, progress: { done: 0, total, name: '' } });
+
+  /* — общий образ: один арт-директор на сценарий — */
+  let direction = null;
+  if (directionOpt !== false) {
+    emit('direct', 'Один образ на весь сценарий');
+    try {
+      const got = await ask(SCHEMAS.direction, [
+        { role: 'system', content: PROMPTS.direction({
+          subject: `${String(utterance).trim()} — сценарий «${flow.title}» из ${total} экранов: ${plan.steps.join(', ')}`,
+          neighbours: neighboursLine(engine, doc, geoNow),
+          pictures: null,
+          personaHint: persona ? `${persona.label}: ${persona.description}\n${persona.hint || ''}`.trim() : '',
+          variantHint: '',
+          fontsLocked: webFonts === false,
+        }) },
+        { role: 'user', content: String(utterance) },
+      ], { stage: 'direct', temperature: temperature == null ? 0.8 : temperature });
+      direction = normalizeDirection(got, { doc, webFonts });
+      if (direction) emit('direct', directionLine(direction), { direction: slimDirection(direction) });
+      else serviceNote('Арт-директор не дал образа сценарию — экраны собраны без арт-направления');
+    } catch (e) {
+      if (e instanceof BrainError && e.kind === 'cancelled') throw e;
+      serviceNote(`Арт-направление сценария не получилось: ${factOnly(e && e.message ? e.message : e)}`);
+    }
+  }
+
+  /* — экран за экраном, каждый на документе с уже собранными — */
+  let cur = doc;
+  let curGeo = geoNow;
+  const built = [];
+  let screenWarnings = 0;
+  const noteFor = (name, w) => {
+    if (screenWarnings >= FLOW_WARNINGS_MAX) { screenWarnings++; return; }
+    screenWarnings++;
+    warn(`«${name}»: ${w}`);
+  };
+  for (let i = 0; i < total; i++) {
+    checkAbort(signal);
+    const screen = flow.screens[i];
+    const progress = { done: i, total, name: screen.name };
+    emit('flow', `Экран ${i + 1} из ${total}: ${screen.name}`, { title: screen.name, progress });
+    const sub = await runCommandCore({
+      doc: cur, geo: curGeo, selection: [], utterance: screenBrief(flow, screen, i), provider, signal, engine,
+      persona, modelTier, temperature, callTimeout, activeArtboardId: null, selectionBy: 'human',
+      plan: { intent: 'create', title: screen.name, summary: screen.purpose, steps: [screen.name], targets: [] },
+      // экран сценария — не отдельная команда: без своих распознаваний, вариантов и критика (§25.3)
+      insideVariants: true, critic: false,
+      direction: directionOpt, presetDirection: direction, webFonts, artOffBy, render,
+      stagePrefix: `Экран ${i + 1}/${total} · `,
+      onStage: (rec) => {
+        if (typeof onStage !== 'function' || !rec || rec.stage === 'plan' || rec.stage === 'done' || rec.stage === 'error') return;
+        const { plan: _p, steps: _s, ...rest } = rec;
+        try { onStage({ ...rest, progress }); } catch { /* интерфейс не должен ронять конвейер */ }
+      },
+    });
+    const u = sub.usage || {};
+    for (const k of Object.keys(usage)) usage[k] += Number(u[k]) || 0;
+    for (const st of asArray(sub.stages)) if (st && st.stage !== 'plan' && st.stage !== 'done') stages.push(st);
+    if (sub.error) {
+      if (sub.error.kind === 'cancelled') throw ERR('cancelled', sub.error.message || 'Команда отменена');
+      noteFor(screen.name, `экран собрать не вышло (${factOnly(sub.error.message)}) — переходы на него сняты`);
+      continue;
+    }
+    if (!asArray(sub.ops).length) {
+      noteFor(screen.name, sub.cannot ? `экран не собран: ${sub.cannot}` : 'модель не собрала экран — переходы на него сняты');
+      continue;
+    }
+    const applied = engine.applyOps(cur, sub.ops);
+    const boardId = applied && !applied.error ? builtBoard(sub.ops, applied.doc) : null;
+    if (!boardId || !applied.doc.nodes[boardId] || applied.doc.nodes[boardId].parent !== applied.doc.root) {
+      noteFor(screen.name, 'экран не лёг отдельной доской — пропущен');
+      continue;
+    }
+    for (const w of asArray(sub.warnings)) {
+      // «без образа/без проверки» — про весь сценарий, а не про экран: один раз и без имени экрана
+      if (/^Экран собран без образа|^Собранный экран не проверен/.test(w)) warn(w);
+      else noteFor(screen.name, w);
+    }
+    for (const n of asArray(sub.serviceNotes)) serviceNote(`«${screen.name}»: ${n}`);
+    cur = applied.doc;
+    curGeo = safeSolve(engine, cur);
+    built.push({ key: screen.key, id: boardId, name: screen.name, ops: sub.ops });
+  }
+  if (screenWarnings > FLOW_WARNINGS_MAX) warn(`И ещё ${screenWarnings - FLOW_WARNINGS_MAX} замечани(е/й) по экранам сценария`);
+  if (!built.length) throw ERR('model', 'Ни один экран сценария собрать не вышло');
+  checkAbort(signal);
+
+  /* — раскладка по колонкам шагов и переходы — */
+  emit('flow', 'Раскладываю экраны по шагам и провожу переходы', { progress: { done: total, total, name: '' } });
+  let right = null;
+  let top = null;
+  for (const id of boardsBefore) {
+    const r = geoNow && geoNow.rects && geoNow.rects[id];
+    if (!r) continue;
+    right = right == null ? r.x + r.w : Math.max(right, r.x + r.w);
+    top = top == null ? r.y : Math.min(top, r.y);
+  }
+  const origin = right == null ? { x: 0, y: 0 } : { x: Math.round(right + FLOW_LIMITS.offset), y: Math.round(top || 0) };
+  const sizes = built.map((b) => {
+    const r = curGeo && curGeo.rects && curGeo.rects[b.id];
+    return { key: b.key, w: r ? r.w : flow.size.w, h: r ? r.h : flow.size.h };
+  });
+  const pos = layoutFlow(flow, sizes, origin);
+  const idOf = new Map(built.map((b) => [b.key, b.id]));
+  let linked = 0;
+  const ops = [];
+  for (const b of built) {
+    const links = [];
+    for (const l of flow.links) {
+      if (l.from !== b.key || !idOf.has(l.to)) continue;
+      const from = triggerNode(cur, b.id, l.label);
+      links.push({ to: idOf.get(l.to), ...(l.label ? { label: l.label } : {}), ...(from ? { from } : {}) });
+    }
+    linked += links.length;
+    const at = pos.get(b.key);
+    for (const o of b.ops) {
+      if (o && o.op === 'create' && o.node && o.node.id === b.id) {
+        ops.push({ ...o, node: { ...o.node, ...(at ? { pos: at } : {}), ...(links.length ? { flow: links } : {}) } });
+      } else ops.push(o);
+    }
+  }
+  const dropped = flow.links.length - linked;
+  if (dropped > 0 && built.length < total) serviceNote(`Переходов без экрана на конце: ${dropped} — сняты`);
+  const done = engine.applyOps(doc, ops);
+  if (!done || done.error) throw ERR('model', `Сценарий не сложился в одну правку: ${factOnly((done && done.error && done.error.message) || 'ошибка ядра')}`);
+  const geo = safeSolve(engine, done.doc);
+  const changeSummary = flowSummary(flow.title, built.length, linked);
+  emit('validate', built.length < total ? `Собрано экранов: ${built.length} из ${total}` : 'Все экраны собраны');
+  emit('done', changeSummary, { title: plan.title, progress: { done: total, total, name: '' } });
+  return {
+    ops, preview: { doc: done.doc, geo }, plan, changeSummary,
+    flow: {
+      title: flow.title,
+      screens: built.map((b) => ({ id: b.id, name: b.name })),
+      links: linked,
+      ...(built.length < total ? { missing: flow.screens.filter((x) => !idOf.has(x.key)).map((x) => x.name) } : {}),
+    },
+    ...(direction ? { direction: slimDirection(direction) } : {}),
+    ...(service.length ? { serviceNotes: service.slice() } : {}),
+    warnings: sortWarnings(warnings), usage, stages,
+  };
 }
 
 export default {
