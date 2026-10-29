@@ -21,7 +21,7 @@
 | 4. Провайдеры | 1509 | `makeProvider` (≈1513): Claude-артефакт (`claude.use("sample")`) и LM Studio / OpenAI-совместимый (≈1701), `raceAbort`, повторы и бюджет |
 | 5. Промпты | 1975 | `formatSchemaInstruction`, **`PROMPTS`** (≈2069), `PERSONAS`, `variantInstruction` |
 | 6. Классификация | 2561 | `RE_IMAGE_REF` (образец, круг 55), `looksIllustration`, `recognizeUndoDoubt`, `recognizeAction` (отмена/возврат без модели), `recognizeVariants`, `recognizeComponentIntent`, `classifyUtterance` (вид работы → промпт) |
-| 7. Контекст документа | 3291 | `resolveScope`, `describeTokens` |
+| 7. Контекст документа | 3291 | `resolveScope`, `describeTokens`; свои цвета человека — `ownColors` (не роли и не служебные имена, круг 98: строка в выжимке, блок арт-директора; код → имя — `ownHexIndex`, в `normColor` и `applyDirection`; «фирменный» в проверке итога — `RE_BRAND_COLOR`) |
 | 6a. Компоненты | 3569 | `describeLibrary` — библиотека как словарь агента (§5) |
 | 6b. Шкалы | 3813 | ссылки на шаги шкал (§6) |
 | 6c. Микроанимации | 4161 | `STATE_*`, `MOTION_*`, `normalizeMotionPath`, `recognizeMotionClear` (§11) |
