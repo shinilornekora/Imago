@@ -2397,6 +2397,9 @@ export const PROMPTS = {
       ctx.pictures ? `\nЦВЕТА КАРТИНОК ДОКУМЕНТА (посчитаны приложением по пикселям, доля — от непрозрачной части картинки; имена — данные документа)\n${ctx.pictures}
 Просят «в цветах фото/картинки» или картинка — главное на экране: материалы и палитру выводи из ЭТИХ цветов (фон — спокойный
 из них, акцент — самый яркий или контрастный; контраст текста всё равно не меньше 4.5:1). Иначе — новая доска с ними не спорит.` : '',
+      ctx.brand ? `\nФИРМЕННЫЕ ЦВЕТА ДОКУМЕНТА (их завёл человек; имена — данные документа)\n${ctx.brand}
+Просят «фирменный цвет», «в цветах бренда» или называют такой цвет по имени — accent (и accent2, если их два) бери ИЗ НИХ,
+ровно этим кодом; фон и текст подбирай к ним (контраст текста всё равно не меньше 4.5:1). Не просят — можно взять, не обязательно.` : '',
       ctx.personaHint ? `\nХАРАКТЕР ЭТОГО ВАРИАНТА\n${ctx.personaHint}` : '',
       ctx.variantHint ? `\n${ctx.variantHint}` : '',
       '',
@@ -3595,6 +3598,70 @@ export function resolveScope(doc, selection, engine, options = {}) {
 
 const SCOPE_LABELS = { selection: 'выделенная область', artboard: 'активная доска', document: 'весь документ' };
 
+/**
+ * Круг 98 (SPEC §15.32): роли палитры — имена палитры по умолчанию; их знают агент, темы экранов и
+ * проверки контраста. Всё прочее в `tokens.colors` — СВОИ цвета, которые завёл человек (шторка «Цвета
+ * документа», §15.30): обычно это фирменные цвета, и человек зовёт их по имени или «фирменными».
+ */
+const PALETTE_ROLES = new Set(['canvas', 'surface', 'surfaceAlt', 'line', 'text', 'muted', 'onAccent', 'accent',
+  'accentSoft', 'accentInk', 'agent', 'good', 'warn']);
+/** Имя своего цвета годится в промпт: латиница (как требует шторка) — без кавычек и управляющих знаков. */
+const OWN_COLOR_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/**
+ * Служебные имена — не «свои»: старые привычные (`bg`, `ink`, `primary` — синонимы ролей, `TOKEN_ALIAS`)
+ * и смысловые, которые заводит и сам агент в ответе темы (`danger`, `success`…). Фирменным они не бывают.
+ */
+const NOT_OWN_COLOR = new Set(['bg', 'background', 'card', 'ink', 'primary', 'secondary', 'tertiary', 'foreground',
+  'fg', 'border', 'divider', 'shadow', 'overlay', 'link', 'focus', 'highlight', 'danger', 'error', 'success', 'info',
+  'warning', 'caution', 'positive', 'negative', 'neutral', 'disabled', 'white', 'black', 'gray', 'grey']);
+
+/** Круг 98: свои цвета документа (не роли палитры) с кодом: [[имя, '#rrggbb'], …]. */
+export function ownColors(doc) {
+  const colors = (doc && doc.tokens && doc.tokens.colors && typeof doc.tokens.colors === 'object') ? doc.tokens.colors : {};
+  // палитра не из ролей (старые документы и образцы: bg, ink…) — там все имена «основные», своих не выделить
+  if (!['canvas', 'surface', 'text', 'accent'].every((k) => Object.prototype.hasOwnProperty.call(colors, k))) return [];
+  const out = [];
+  for (const [k, v] of Object.entries(colors)) {
+    if (PALETTE_ROLES.has(k) || NOT_OWN_COLOR.has(k.toLowerCase()) || !OWN_COLOR_NAME.test(k) || typeof v !== 'string') continue;
+    const h = v.trim().toLowerCase();
+    if (!/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/.test(h)) continue;
+    out.push([k, h.length === 4 ? '#' + h.slice(1).split('').map((c) => c + c).join('') : h]);
+  }
+  return out.slice(0, 12);
+}
+
+const ownHexCache = new WeakMap();
+/**
+ * Круг 98: какой код ложится ссылкой на свой цвет — `Map('#rrggbb' → имя)`. Только однозначные: код ровно
+ * одного своего цвета, не равный ни одной роли палитры (роль и свой цвет одного кода — код как был:
+ * иначе одинаковые слои разошлись бы по двум ссылкам), и имя, которое не переопределяет тема какого-то
+ * экрана (там ссылка показала бы чужой код).
+ */
+function ownHexIndex(doc) {
+  const colors = doc && doc.tokens && doc.tokens.colors;
+  if (!colors || typeof colors !== 'object') return new Map();
+  const hit = ownHexCache.get(doc);
+  if (hit && hit.colors === colors && hit.nodes === doc.nodes) return hit.map;
+  const map = new Map();
+  const own = ownColors(doc);
+  if (own.length) {
+    const roleHex = new Set();
+    for (const k of PALETTE_ROLES) if (typeof colors[k] === 'string') roleHex.add(hexNorm(colors[k].trim().slice(0, 16)));
+    const themed = new Set();
+    for (const n of Object.values((doc && doc.nodes) || {})) {
+      const tc = n && n.theme && n.theme.colors;
+      if (tc && typeof tc === 'object') for (const k of Object.keys(tc)) themed.add(k);
+    }
+    for (const [k, h] of own) {
+      if (roleHex.has(h) || themed.has(k)) continue;
+      map.set(h, map.has(h) ? null : k);
+    }
+    for (const [h, k] of [...map]) if (k === null) map.delete(h);
+  }
+  ownHexCache.set(doc, { colors, nodes: doc.nodes, map });
+  return map;
+}
+
 /** Компактная выжимка токенов документа. */
 export function describeTokens(doc) {
   const t = (doc && doc.tokens) || {};
@@ -3602,6 +3669,13 @@ export function describeTokens(doc) {
   const group = (g) => (g && typeof g === 'object' && !Array.isArray(g) ? Object.entries(g) : []);
   const colors = group(t.colors);
   out.push(colors.length ? 'colors: ' + colors.map(([k, v]) => `${k}=${wordOf(v)}`).join(', ') : 'colors: (нет)');
+  // круг 98: свои цвета человека — отдельной строкой: по имени их зовёт человек, и «фирменный» — это они
+  const own = ownColors(doc);
+  if (own.length) {
+    out.push(`свои цвета человека (${own.map(([k]) => k).join(', ')}): это не роли палитры, а цвета, которые человек завёл сам —`
+      + ' обычно фирменные. Пиши их ИМЕНЕМ токена, когда человек называет их по имени или просит «фирменный цвет»'
+      + (own.length === 1 ? ` (фирменный — ${own[0][0]})` : '') + '.');
+  }
   const types = group(t.type);
   // Круг 5, п.11: интерлиньяж не показывался вовсе, а промпт темы требовал «1.1-1.6» —
   // модель правила вслепую и в чужих единицах, хотя документ хранит пиксели (18, 22, 30).
@@ -7503,7 +7577,12 @@ function normColor(raw, doc, warn, what) {
     return v ? normColor(v, doc, warn, what) : undefined;
   }
   const s = String(raw).trim();
-  if (HEX_RE.test(s)) return (s.length === 4 ? '#' + s.slice(1).split('').map((c) => c + c).join('') : s).toLowerCase();
+  if (HEX_RE.test(s)) {
+    const hex = (s.length === 4 ? '#' + s.slice(1).split('').map((c) => c + c).join('') : s).toLowerCase();
+    // круг 98 (SPEC §15.32): код, равный ровно одному своему цвету человека, — ссылка на него: правка
+    // цвета в палитре (§15.30) потом перекрасит и это место. Роли палитры так не связываем (как было)
+    return ownHexIndex(doc).get(hex) || hex;
+  }
   const colors = (doc && doc.tokens && doc.tokens.colors) || {};
   if (Object.prototype.hasOwnProperty.call(colors, s)) return s;
   const lower = Object.keys(colors).find((k) => k.toLowerCase() === s.toLowerCase());
@@ -12732,6 +12811,9 @@ export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
   const theme = themed ? directionTheme(dir, doc, { biggest }) : null;
   const hexToken = new Map();
   if (theme) for (const name of HEX_TOKEN_ORDER) if (theme.colors[name] && !hexToken.has(theme.colors[name])) hexToken.set(theme.colors[name], name);
+  // круг 98: код, равный ровно одному своему цвету человека, — ссылкой на этот цвет; код роли темы новой
+  // доски — ролью (иначе одинаковые слои разошлись бы: часть на accent, часть на brand)
+  const ownHex = new Map([...ownHexIndex(doc)].filter(([h]) => !hexToken.has(h)));
   /** Значение цвета на доске: hex — как есть, токен — по теме, затем по документу. */
   const hexOf = (v) => {
     const name = typeof v === 'string' ? v.trim() : v && typeof v === 'object' && typeof v.token === 'string' ? v.token.trim() : '';
@@ -12748,6 +12830,7 @@ export function applyDirection(tree, dir, doc, { asArtboard = false } = {}) {
     const name = typeof v === 'string' ? v.trim() : isTok ? v.token.trim() : '';
     if (!name) return undefined;
     const put = (token) => (isTok ? { ...v, token } : token);
+    if (ownHex.has(hexNorm(name))) return put(ownHex.get(hexNorm(name)));
     if (theme) {
       if (own(TOKEN_ALIAS, name) && !own(docColors, name)) return put(TOKEN_ALIAS[name]);
       if (own(theme.colors, name)) return isTok ? v : name;   // токен: тема даст ему значение
@@ -13796,6 +13879,8 @@ async function runCommandCore(options = {}) {
             subject: `${String(utterance).trim()}${plan && plan.summary ? ` (${plan.summary})` : ''}`,
             neighbours: neighboursLine(engine, doc, geoNow),
             pictures,
+            // круг 98: свои цвета человека — арт-директору (иначе «в фирменном цвете» он выдумывал свой)
+            brand: ownColors(doc).map(([k, v]) => `- ${k} ${v}`).join('\n'),
             personaHint: persona ? `${persona.label}: ${persona.description}\n${persona.hint || ''}`.trim() : '',
             variantHint,
             fontsLocked: webFonts === false,
@@ -16077,14 +16162,27 @@ const TOKEN_COLOR_STEMS = {
   muted: ['приглушен', 'блекл', 'тускл'],
 };
 
+/** Круг 98: «фирменный» — про цвет, если за ним не другое фирменное (шрифт, стиль, логотип…). */
+const RE_BRAND_COLOR = /(?<!\p{L})фирменн\p{L}*(?!\p{L})(?!\s+(?:шрифт|стил|логотип|знак|макет|шаблон|голос|тон\s+голос|блок|иконк|элемент)\p{L}*)/iu;
+/** Имена токенов с «-» и «_» — целиком в тексте реплики, без учёта регистра. */
+function namesInText(raw, colors) {
+  const low = String(raw).toLowerCase();
+  return Object.keys(colors).filter((k) => /[-_]/.test(k) && OWN_COLOR_NAME.test(k)
+    && new RegExp(`(?<![\\p{L}\\p{N}_-])${k.toLowerCase()}(?![\\p{L}\\p{N}_-])`, 'u').test(low));
+}
+
 /** Назвал ли человек цвет — словом в любом падеже, шестнадцатеричным кодом или именем токена. */
-function mentionsColor(utterance, doc) {
+export function mentionsColor(utterance, doc) {
   const raw = String(utterance == null ? '' : utterance);
   if (anyMatch(RE_COLOR_ASK, raw)) return true;
   const words = raw.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
   const colors = (doc && doc.tokens && doc.tokens.colors) || {};
-  if (words.some((w) => COLOR_STEMS.has(stemRu(w))
-    || Object.prototype.hasOwnProperty.call(colors, w))) return true;
+  // круг 98: имена токенов — без учёта регистра («brandNew» в реплике приходит словом «brandnew»)
+  const lowerNames = new Set(Object.keys(colors).map((k) => k.toLowerCase()));
+  if (words.some((w) => COLOR_STEMS.has(stemRu(w)) || lowerNames.has(w))) return true;
+  if (namesInText(raw, colors).length) return true;   // «brand-2»: слова его режут на части
+  // «фирменный цвет», «в фирменном» — цвет, если свои цвета в документе есть; «фирменный шрифт» — нет
+  if (ownColors(doc).length && RE_BRAND_COLOR.test(raw)) return true;
   /* Токен должен и правда быть в палитре ЭТОГО документа: иначе модель не могла им покрасить. */
   const stems = words.map(stemRu).filter((w) => w.length >= 4);
   if (!stems.length) return false;
@@ -16146,13 +16244,22 @@ function askedForViolations(utterance, violations, ops, doc) {
  * Сколько РАЗНЫХ цветов человек назвал в реплике: «сделай кнопку зелёной» — один,
  * «кнопку зелёной, а подпись белой» — два, «сделай кнопку темнее» — ноль (цвет не назван).
  */
-function namedColorCount(utterance, doc) {
-  const words = String(utterance == null ? '' : utterance).toLowerCase().match(/[\p{L}\p{N}#]+/gu) || [];
+export function namedColorCount(utterance, doc) {
   const colors = (doc && doc.tokens && doc.tokens.colors) || {};
-  const out = new Set();
+  const out = new Set(namesInText(utterance == null ? '' : utterance, colors));
+  // имя с дефисом уже посчитано целиком — его части («brand», «2») словами не считаем
+  let text = String(utterance == null ? '' : utterance).toLowerCase();
+  for (const k of out) text = text.split(k.toLowerCase()).join(' ');
+  const words = text.match(/[\p{L}\p{N}#]+/gu) || [];
+  // круг 98: «в фирменном цвете» — свой цвет (один — он; «в фирменных цветах» — все свои)
+  const own = ownColors(doc);
+  const brand = own.length ? String(utterance == null ? '' : utterance).match(RE_BRAND_COLOR) : null;
+  if (brand) for (const [k] of (own.length === 1 || /ых|ыми|ые/i.test(brand[0]) ? own : own.slice(0, 1))) out.add(k);
   for (const w of words) {
     if (/^#[0-9a-f]{3,8}$/.test(w)) { out.add(hexNorm(w)); continue; }
-    if (Object.prototype.hasOwnProperty.call(colors, w)) { out.add(w); continue; }
+    const named = Object.keys(colors).find((k) => k.toLowerCase() === w);
+    if (named) { out.add(named); continue; }
+    if (stemRu(w).startsWith('фирменн')) continue;
     const stem = stemRu(w);
     const dict = Object.keys(COLOR_WORDS).find((k) => COLOR_WORDS[k] && stemRu(k) === stem);
     if (dict) { out.add(COLOR_WORDS[dict]); continue; }
