@@ -2030,6 +2030,8 @@ export function shellIntent(said, ctx = {}) {
     if (/^(png|пнг|картинк[а-яё]*|изображение|снимок|скриншот)$/.test(what)) return { kind: 'export', what: 'png' };
     if (/^(svg|свг|вектор[а-яё]*)$/.test(what)) return { kind: 'export', what: 'svg' };
     if (/^(json|джейсон|документ)$/.test(what)) return { kind: 'export', what: 'json' };
+    // круг 100 (§15.34): токены документа — CSS
+    if (/^(?:css|цсс|токен(?:ы|ов)(?: документа)?(?: в css)?|css-токены|(?:css-)?переменные)$/.test(what)) return { kind: 'export', what: 'css' };
   }
 
   /* — круг 83: экраны со своей темой — */
@@ -2196,7 +2198,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'settings', group: 'Панели', title: 'Настройки агента', hint: '', slash: ['настройки', 'settings'], phrases: ['настройки', 'открой настройки'] },
 
   /* — Файл — */
-  { id: 'export', group: 'Файл', title: 'Экспорт', hint: 'SVG, PNG или JSON; без формата — окно экспорта', slash: ['экспорт', 'export'], args: [{ name: 'формат', kind: 'enum', values: ['svg', 'png', 'json'], optional: true }], bare: true, example: '/экспорт png', phrases: ['экспорт png', 'экспортируй в svg'] },
+  { id: 'export', group: 'Файл', title: 'Экспорт', hint: 'SVG, PNG, JSON или CSS-токены; без формата — окно экспорта', slash: ['экспорт', 'export'], args: [{ name: 'формат', kind: 'enum', values: ['svg', 'png', 'json', 'css'], optional: true }], bare: true, example: '/экспорт png', phrases: ['экспорт png', 'экспортируй в svg', 'экспортируй токены'] },
   { id: 'import', group: 'Файл', title: 'Импорт JSON', hint: 'Открыть документ из файла', slash: ['импорт', 'import'], phrases: ['импорт', 'импортируй файл'] },
   { id: 'new-board', group: 'Файл', title: 'Новая доска', hint: 'Пустая доска рядом с остальными', slash: ['новая доска', 'new board'], phrases: ['новая доска', 'пустая доска'] },
   /* круг 46: проекты — и без сервера (соло-режим), и на сервере (та же шторка «Проекты») */
@@ -2322,7 +2324,7 @@ const ALIGN_WORDS = [
 ];
 const DIRECTION_WORDS = [['row', /^(строка|строкой|в строку|ряд|row|горизонтально)$/], ['column', /^(колонка|колонкой|в колонку|столбец|column|вертикально)$/]];
 const THEME_WORDS = [['dark', /^(т[её]мн[а-я]*|dark)$/], ['light', /^(светлая|светл[а-я]*|light)$/], ['auto', /^(системная|как в системе|авто|auto|system)$/]];
-const EXPORT_WORDS = [['svg', /^(svg|свг|вектор[а-я]*)$/], ['png', /^(png|пнг|картинк[а-я]*|изображение)$/], ['json', /^(json|джейсон|документ)$/]];
+const EXPORT_WORDS = [['svg', /^(svg|свг|вектор[а-я]*)$/], ['png', /^(png|пнг|картинк[а-я]*|изображение)$/], ['json', /^(json|джейсон|документ)$/], ['css', /^(css|цсс|токены|токенов|css-токены|переменные|css-переменные)$/]];
 /** Слова выравнивания для фраз и подписей правки. */
 export const ALIGN_HOW_WORDS = Object.freeze({ left: 'влево', center: 'по центру', right: 'вправо', top: 'вверх', bottom: 'вниз', stretch: 'растянуть' });
 
@@ -2474,7 +2476,7 @@ const SLASH_ARGS = {
   export(rest, raw, ctx, cmd) {
     if (!rest) return { kind: 'export', what: '' };
     const what = argPick(rest, EXPORT_WORDS);
-    return what ? { kind: 'export', what } : bad(cmd, 'Экспорт: svg, png или json');
+    return what ? { kind: 'export', what } : bad(cmd, 'Экспорт: svg, png, json или css');
   },
   undo(rest, raw, ctx, cmd) {
     if (!rest) return { kind: 'undo', times: 1 };
@@ -5490,4 +5492,133 @@ export function copyThemeOps(doc, board, fromId) {
   const replaced = !!mine;
   return { ops: [OPS.set(board.id, 'theme', JSON.parse(JSON.stringify(t)))], replaced,
     label: `Экран ${name(board)} — в теме экрана ${name(src)}${replaced ? ' (своя тема заменена)' : ''}` };
+}
+
+/* ------------------------- круг 100: токены документа в CSS ------------------------- */
+
+/** «surfaceAlt» → «surface-alt»; имя не из латиницы, цифр, «-» и «_» — null (в CSS не пишем). */
+function cssIdent(name) {
+  const s = String(name == null ? '' : name);
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(s)) return null;
+  return s.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+}
+/** Значение цвета — как его видит редактор (`core.resolveColor`): код #rgb/#rrggbb, у 8-значного — без
+ * прозрачности; прочее (rgb(), имя другого токена) редактор не рисует — и в файл не пишем. */
+function cssColor(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (/^#[0-9a-fA-F]{3}$/.test(s)) return '#' + s.slice(1).split('').map((c) => c + c).join('').toLowerCase();
+  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+  if (/^#[0-9a-fA-F]{8}$/.test(s)) return s.slice(0, 7).toLowerCase();
+  return null;
+}
+/** Строка в кавычках CSS: кавычка и обратная косая — экранированы, «<» — кодом (`</style>` в разметке не
+ * закроется), управляющие знаки — пробелом. Длинное — обрезаем ДО экранирования (иначе срез мог бы оставить
+ * висящую косую и строка не закрылась бы). */
+function cssString(v, max = 200) {
+  const raw = String(v == null ? '' : v).slice(0, max);
+  return `"${raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/[\\"]/g, (c) => `\\${c}`).replace(/</g, '\\3c ')}"`;
+}
+/** Текст внутри комментария CSS: без кавычек, косых, управляющих знаков и конца комментария. */
+function cssComment(v) {
+  return String(v == null ? '' : v).slice(0, 80).replace(/[\u0000-\u001f\u007f"\\<>]/g, ' ').replace(/\*\//g, '* /');
+}
+const cssPx = (n) => (Number.isFinite(n) ? `${Math.round(n * 100) / 100}px` : null);
+/** Интерлиньяж как у ядра: до 4 — множитель кегля (в CSS — без единиц), больше — пиксели. */
+const cssLineHeight = (n) => (Number.isFinite(n) && n > 0 ? (n <= 4 ? `${Math.round(n * 1000) / 1000}` : cssPx(n)) : null);
+const CSS_FONT_TAIL = { mono: 'ui-monospace, monospace', default: 'system-ui, sans-serif' };
+/** Моноширинный — как решает ядро: имя шрифта кончается словом Mono («Rubik Mono One» — не он). */
+const cssMonoFont = (font) => /\bmono$/i.test(String(font).trim());
+
+/**
+ * Круг 100 (SPEC §15.34): токены документа — CSS для разработчика. `:root` — цвета палитры (роли, затем
+ * свои), шкалы отступов и скруглений, шрифты стилей; классы `.text-<стиль>` — стили текста целиком;
+ * экран со своей темой — `[data-screen="Имя"]` с его цветами и шрифтами стилей. Порядок и имена
+ * устойчивы: тот же документ — тот же файл (без даты), его удобно класть в репозиторий.
+ * @returns {{css: string, colors: number, styles: number, screens: number}}
+ */
+export function tokensCss(doc, { title } = {}) {
+  const t = (doc && isObj(doc.tokens)) ? doc.tokens : {};
+  const colors = isObj(t.colors) ? t.colors : {};
+  const type = isObj(t.type) ? t.type : {};
+  const lines = [`/* Токены документа ${cssComment(title || (doc && doc.meta && doc.meta.name) || 'Imago')} — Imago. */`, ':root {'];
+  const roleOrder = Object.keys((CORE_NS.DEFAULT_TOKENS && CORE_NS.DEFAULT_TOKENS.colors) || {});
+  const names = [...roleOrder.filter((k) => Object.prototype.hasOwnProperty.call(colors, k)), ...Object.keys(colors).filter((k) => !roleOrder.includes(k))];
+  // два имени в одно имя CSS («accentSoft» и «accent-soft») — первое остаётся, второе пропускаем (и считаем)
+  const colorId = new Map();
+  let skipped = 0;
+  for (const k of names) {
+    const id = cssIdent(k);
+    if (!id || !cssColor(colors[k])) { skipped++; continue; }
+    if ([...colorId.values()].includes(id)) { skipped++; continue; }
+    colorId.set(k, id);
+  }
+  const put = (k) => lines.push(`  --color-${colorId.get(k)}: ${cssColor(colors[k])};`);
+  const roles = names.filter((n) => SWATCH_ROLE_NAMES.has(n) && colorId.has(n));
+  const own = names.filter((n) => !SWATCH_ROLE_NAMES.has(n) && colorId.has(n));
+  if (roles.length) { lines.push('  /* Цвета палитры */'); roles.forEach(put); }
+  if (own.length) { lines.push('  /* Свои цвета */'); own.forEach(put); }
+  // номер шага — его место в шкале (как у ссылок 'spacing.<i>'): негодный шаг пропускаем, нумерацию не сдвигаем
+  const scale = (arr, prefix, label) => {
+    const list = Array.isArray(arr) ? arr : [];
+    const ok = list.map((n, i) => [n, i]).filter(([n]) => Number.isFinite(n));
+    if (!ok.length) return;
+    lines.push(`  /* ${label} */`);
+    for (const [n, i] of ok) lines.push(`  --${prefix}-${i}: ${cssPx(n)};`);
+  };
+  scale(t.spacing, 'space', 'Шкала отступов');
+  scale(t.radii, 'radius', 'Скругления');
+  const styleId = new Map();
+  for (const k of Object.keys(type)) {
+    const id = cssIdent(k);
+    if (!id || !isObj(type[k]) || [...styleId.values()].includes(id)) { skipped++; continue; }
+    styleId.set(k, id);
+  }
+  const styles = [...styleId.keys()];
+  const family = (font) => `${cssString(font)}, ${cssMonoFont(font) ? CSS_FONT_TAIL.mono : CSS_FONT_TAIL.default}`;
+  const fontOf = (e) => (isObj(e) && typeof e.font === 'string' && e.font.trim() ? e.font.trim() : '');
+  const screens = [...boardLabels(doc)].map(([id, label]) => [label, CORE_NS.boardTheme ? CORE_NS.boardTheme(doc.nodes[id]) : null]).filter(([, th]) => th);
+  // стиль, которому шрифт даёт только тема экрана, — класс всё равно берёт его из переменной
+  const themedFont = new Set();
+  for (const [, th] of screens) if (isObj(th.type)) for (const k of Object.keys(th.type)) if (styleId.has(k) && fontOf(th.type[k])) themedFont.add(k);
+  const withFont = styles.filter((k) => fontOf(type[k]));
+  if (withFont.length) {
+    lines.push('  /* Шрифты стилей текста */');
+    for (const k of withFont) lines.push(`  --font-${styleId.get(k)}: ${family(fontOf(type[k]))};`);
+  }
+  lines.push('}');
+  for (const k of styles) {
+    const st = type[k];
+    const id = styleId.get(k);
+    const body = [
+      fontOf(st) || themedFont.has(k) ? `font-family: var(--font-${id});` : '',
+      Number.isFinite(st.fontSize) ? `font-size: ${cssPx(st.fontSize)};` : '',
+      Number.isFinite(st.fontWeight) ? `font-weight: ${Math.round(st.fontWeight)};` : '',
+      cssLineHeight(st.lineHeight) ? `line-height: ${cssLineHeight(st.lineHeight)};` : '',
+      Number.isFinite(st.letterSpacing) && st.letterSpacing ? `letter-spacing: ${cssPx(st.letterSpacing)};` : '',
+    ].filter(Boolean);
+    if (body.length) lines.push('', `.text-${id} {`, ...body.map((b) => `  ${b}`), '}');
+  }
+  let nScreens = 0;
+  for (const [label, th] of screens) {
+    const body = [];
+    const seen = new Set();
+    if (isObj(th.colors)) {
+      for (const k of Object.keys(th.colors)) {
+        const n = cssIdent(k);
+        const v = cssColor(th.colors[k]);
+        if (n && v && !seen.has(n)) { seen.add(n); body.push(`  --color-${n}: ${v};`); }
+      }
+    }
+    // стиль темы, которого нет в документе, — класса для него нет: переменная никому не нужна
+    const tStyles = isObj(th.type) ? Object.keys(th.type).filter((k) => styleId.has(k) && isObj(th.type[k])) : [];
+    for (const k of tStyles) if (fontOf(th.type[k])) body.push(`  --font-${styleId.get(k)}: ${family(fontOf(th.type[k]))};`);
+    const weights = tStyles.filter((k) => Number.isFinite(th.type[k].fontWeight));
+    if (!body.length && !weights.length) continue;
+    nScreens++;
+    const sel = `[data-screen=${cssString(label)}]`;
+    if (body.length) lines.push('', `/* Экран ${cssComment(label)} — своя тема */`, `${sel} {`, ...body, '}');
+    for (const k of weights) lines.push(`${sel} .text-${styleId.get(k)} { font-weight: ${Math.round(th.type[k].fontWeight)}; }`);
+  }
+  const nColors = colorId.size;
+  return { css: `${lines.join('\n')}\n`, colors: nColors, styles: styles.length, screens: nScreens, skipped };
 }

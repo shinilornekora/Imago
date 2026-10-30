@@ -12260,6 +12260,7 @@ function applyShellIntent(intent, said) {
       if (intent.what === 'png') { exportPng(); return true; }
       if (intent.what === 'svg') { exportSvg(); return true; }
       if (intent.what === 'json') { exportJson(); return true; }
+      if (intent.what === 'css') { exportCss(); return true; }
       openExport();
       return true;
     }
@@ -15014,6 +15015,14 @@ function fontWarning(fonts, missing, what) {
   return `${head}${list ? ` (${list})` : ''}: текст посчитан системным шрифтом, и файл может разойтись с тем, что на экране.`;
 }
 
+/** Круг 100 (§15.34): токены документа — CSS-переменные и классы стилей текста, для разработчика. */
+async function exportCss() {
+  const r = SHELL.tokensCss(state.doc, { title: server ? docTitle() : '' });
+  const name = exportName('css', null).replace(/\.css$/, '-tokens.css');
+  // «Сохранено: …» скажет сам offerFile — второй тост рядом не читается
+  return offerFile(name, r.css);
+}
+
 /** Весь документ в JSON — артборд тут ни при чём, имя без него. */
 async function exportJson() {
   return offerFile(exportName('json', null), JSON.stringify(state.doc, null, 2));
@@ -15071,6 +15080,8 @@ function fillExport(body) {
     () => exportSvg(),
     hasBoard ? '' : 'Вектор снимают с доски, а её в документе нет');
   mk('JSON', `Весь документ — ${exportName('json', null)}, его можно вернуть импортом`, () => exportJson());
+  // круг 100: токены для разработчика — переменные цветов, шкал и шрифтов, классы стилей текста
+  mk('CSS-токены', `Палитра, шкалы и стили текста как CSS — ${exportName('css', null).replace(/\.css$/, '-tokens.css')}`, () => exportCss());
   body.appendChild(rest);
   /* Круг 36 (SPEC §11.3): SVG несёт состояния как CSS — в браузере файл реагирует на мышь.
      Об этом сказано только там, где это правда: в доске есть слои с состояниями. */
@@ -15147,6 +15158,7 @@ function guessType(name) {
   if (name.endsWith('.svg')) return 'image/svg+xml';
   if (name.endsWith('.json')) return 'application/json';
   if (name.endsWith('.png')) return 'image/png';
+  if (name.endsWith('.css')) return 'text/css';
   return 'text/plain';
 }
 function safeName(s) {
