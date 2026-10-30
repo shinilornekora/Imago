@@ -7163,9 +7163,11 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     const kids = entry.children;
     let i = 0;
     while (i < kids.length) {
-      const sig = repeatSignature(doc, kids[i].id);
+      // узел на пути к области работы (pinned) — граница группы: свёрнутый в «ещё N таких же», он увёл
+      // бы с собой из выжимки и выделенное под ним (секции, ряды карточек — однотипны)
+      const sig = pinned.has(kids[i].id) ? null : repeatSignature(doc, kids[i].id);
       let j = i + 1;
-      while (j < kids.length && repeatSignature(doc, kids[j].id) === sig) j++;
+      while (sig !== null && j < kids.length && !pinned.has(kids[j].id) && repeatSignature(doc, kids[j].id) === sig) j++;
       if (j - i >= minRepeat && j - i > keepRepeats) {
         const group = kids.slice(i + keepRepeats, j);
         candidates.push({
