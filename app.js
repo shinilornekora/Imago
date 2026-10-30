@@ -12261,6 +12261,7 @@ function applyShellIntent(intent, said) {
       if (intent.what === 'svg') { exportSvg(); return true; }
       if (intent.what === 'json') { exportJson(); return true; }
       if (intent.what === 'css') { exportCss(); return true; }
+      if (intent.what === 'tokens-json') { exportTokensJson(); return true; }
       openExport();
       return true;
     }
@@ -15023,6 +15024,12 @@ async function exportCss() {
   return offerFile(name, r.css);
 }
 
+/** Круг 101 (§15.35): токены документа в формате Design Tokens — для Style Dictionary и плагинов токенов. */
+async function exportTokensJson() {
+  const r = SHELL.tokensJson(state.doc, { title: server ? docTitle() : '' });
+  return offerFile(exportName('json', null).replace(/\.json$/, '.tokens.json'), r.json);
+}
+
 /** Весь документ в JSON — артборд тут ни при чём, имя без него. */
 async function exportJson() {
   return offerFile(exportName('json', null), JSON.stringify(state.doc, null, 2));
@@ -15082,6 +15089,8 @@ function fillExport(body) {
   mk('JSON', `Весь документ — ${exportName('json', null)}, его можно вернуть импортом`, () => exportJson());
   // круг 100: токены для разработчика — переменные цветов, шкал и шрифтов, классы стилей текста
   mk('CSS-токены', `Палитра, шкалы и стили текста как CSS — ${exportName('css', null).replace(/\.css$/, '-tokens.css')}`, () => exportCss());
+  // круг 101: те же токены — JSON в формате Design Tokens (Style Dictionary, Tokens Studio)
+  mk('Токены JSON', `Палитра, шкалы и стили текста в формате Design Tokens — ${exportName('json', null).replace(/\.json$/, '.tokens.json')}`, () => exportTokensJson());
   body.appendChild(rest);
   /* Круг 36 (SPEC §11.3): SVG несёт состояния как CSS — в браузере файл реагирует на мышь.
      Об этом сказано только там, где это правда: в доске есть слои с состояниями. */

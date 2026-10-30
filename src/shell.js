@@ -361,7 +361,10 @@ export function shellIntentFromServer(shell) {
       return { kind: 'zen', on: a.on == null ? true : !(a.on === false || a.on === 'false' || a.on === 0) };
     case 'export':
       // what: '' — «экспорт» без формата: открыть окно экспорта
-      if (typeof a.what === 'string' || typeof a.format === 'string') return { kind: 'export', what: String(a.what ?? a.format).toLowerCase() };
+      if (typeof a.what === 'string' || typeof a.format === 'string') {
+        const what = String(a.what ?? a.format).toLowerCase();
+        return { kind: 'export', what: what === 'tokens.json' || what === 'tokens_json' ? 'tokens-json' : what };
+      }
       return { kind: 'export' };
     case 'sheet':
     case 'history':
@@ -2030,6 +2033,8 @@ export function shellIntent(said, ctx = {}) {
     if (/^(png|пнг|картинк[а-яё]*|изображение|снимок|скриншот)$/.test(what)) return { kind: 'export', what: 'png' };
     if (/^(svg|свг|вектор[а-яё]*)$/.test(what)) return { kind: 'export', what: 'svg' };
     if (/^(json|джейсон|документ)$/.test(what)) return { kind: 'export', what: 'json' };
+    // круг 101 (§15.35): токены в формате Design Tokens — JSON (раньше «json» и «токенов»)
+    if (/^(?:токен(?:ы|ов)(?: документа)? (?:в )?json|json-токены|tokens(?:\.json| json)|design tokens|дизайн-токены|dtcg)$/.test(what)) return { kind: 'export', what: 'tokens-json' };
     // круг 100 (§15.34): токены документа — CSS
     if (/^(?:css|цсс|токен(?:ы|ов)(?: документа)?(?: в css)?|css-токены|(?:css-)?переменные)$/.test(what)) return { kind: 'export', what: 'css' };
   }
@@ -2198,7 +2203,7 @@ export const SHELL_COMMANDS = deepFreeze([
   { id: 'settings', group: 'Панели', title: 'Настройки агента', hint: '', slash: ['настройки', 'settings'], phrases: ['настройки', 'открой настройки'] },
 
   /* — Файл — */
-  { id: 'export', group: 'Файл', title: 'Экспорт', hint: 'SVG, PNG, JSON или CSS-токены; без формата — окно экспорта', slash: ['экспорт', 'export'], args: [{ name: 'формат', kind: 'enum', values: ['svg', 'png', 'json', 'css'], optional: true }], bare: true, example: '/экспорт png', phrases: ['экспорт png', 'экспортируй в svg', 'экспортируй токены'] },
+  { id: 'export', group: 'Файл', title: 'Экспорт', hint: 'SVG, PNG, JSON, CSS-токены или токены JSON; без формата — окно экспорта', slash: ['экспорт', 'export'], args: [{ name: 'формат', kind: 'enum', values: ['svg', 'png', 'json', 'css', 'tokens.json'], optional: true }], bare: true, example: '/экспорт png', phrases: ['экспорт png', 'экспортируй в svg', 'экспортируй токены', 'экспортируй токены в json'] },
   { id: 'import', group: 'Файл', title: 'Импорт JSON', hint: 'Открыть документ из файла', slash: ['импорт', 'import'], phrases: ['импорт', 'импортируй файл'] },
   { id: 'new-board', group: 'Файл', title: 'Новая доска', hint: 'Пустая доска рядом с остальными', slash: ['новая доска', 'new board'], phrases: ['новая доска', 'пустая доска'] },
   /* круг 46: проекты — и без сервера (соло-режим), и на сервере (та же шторка «Проекты») */
@@ -2324,7 +2329,7 @@ const ALIGN_WORDS = [
 ];
 const DIRECTION_WORDS = [['row', /^(строка|строкой|в строку|ряд|row|горизонтально)$/], ['column', /^(колонка|колонкой|в колонку|столбец|column|вертикально)$/]];
 const THEME_WORDS = [['dark', /^(т[её]мн[а-я]*|dark)$/], ['light', /^(светлая|светл[а-я]*|light)$/], ['auto', /^(системная|как в системе|авто|auto|system)$/]];
-const EXPORT_WORDS = [['svg', /^(svg|свг|вектор[а-я]*)$/], ['png', /^(png|пнг|картинк[а-я]*|изображение)$/], ['json', /^(json|джейсон|документ)$/], ['css', /^(css|цсс|токены|токенов|css-токены|переменные|css-переменные)$/]];
+const EXPORT_WORDS = [['svg', /^(svg|свг|вектор[а-я]*)$/], ['png', /^(png|пнг|картинк[а-я]*|изображение)$/], ['json', /^(json|джейсон|документ)$/], ['tokens-json', /^(токены json|токенов json|токены в json|tokens json|tokens-json|tokens\.json|design tokens|дизайн-токены|dtcg)$/], ['css', /^(css|цсс|токены|токенов|css-токены|переменные|css-переменные)$/]];
 /** Слова выравнивания для фраз и подписей правки. */
 export const ALIGN_HOW_WORDS = Object.freeze({ left: 'влево', center: 'по центру', right: 'вправо', top: 'вверх', bottom: 'вниз', stretch: 'растянуть' });
 
@@ -2476,7 +2481,7 @@ const SLASH_ARGS = {
   export(rest, raw, ctx, cmd) {
     if (!rest) return { kind: 'export', what: '' };
     const what = argPick(rest, EXPORT_WORDS);
-    return what ? { kind: 'export', what } : bad(cmd, 'Экспорт: svg, png, json или css');
+    return what ? { kind: 'export', what } : bad(cmd, 'Экспорт: svg, png, json, css или tokens.json');
   },
   undo(rest, raw, ctx, cmd) {
     if (!rest) return { kind: 'undo', times: 1 };
@@ -5537,88 +5542,170 @@ const cssMonoFont = (font) => /\bmono$/i.test(String(font).trim());
  * @returns {{css: string, colors: number, styles: number, screens: number}}
  */
 export function tokensCss(doc, { title } = {}) {
-  const t = (doc && isObj(doc.tokens)) ? doc.tokens : {};
-  const colors = isObj(t.colors) ? t.colors : {};
-  const type = isObj(t.type) ? t.type : {};
+  const m = tokenModel(doc);
   const lines = [`/* Токены документа ${cssComment(title || (doc && doc.meta && doc.meta.name) || 'Imago')} — Imago. */`, ':root {'];
-  const roleOrder = Object.keys((CORE_NS.DEFAULT_TOKENS && CORE_NS.DEFAULT_TOKENS.colors) || {});
-  const names = [...roleOrder.filter((k) => Object.prototype.hasOwnProperty.call(colors, k)), ...Object.keys(colors).filter((k) => !roleOrder.includes(k))];
-  // два имени в одно имя CSS («accentSoft» и «accent-soft») — первое остаётся, второе пропускаем (и считаем)
-  const colorId = new Map();
-  let skipped = 0;
-  for (const k of names) {
-    const id = cssIdent(k);
-    if (!id || !cssColor(colors[k])) { skipped++; continue; }
-    if ([...colorId.values()].includes(id)) { skipped++; continue; }
-    colorId.set(k, id);
-  }
-  const put = (k) => lines.push(`  --color-${colorId.get(k)}: ${cssColor(colors[k])};`);
-  const roles = names.filter((n) => SWATCH_ROLE_NAMES.has(n) && colorId.has(n));
-  const own = names.filter((n) => !SWATCH_ROLE_NAMES.has(n) && colorId.has(n));
+  const put = (c) => lines.push(`  --color-${c.id}: ${c.hex};`);
+  const roles = m.colors.filter((c) => c.role);
+  const own = m.colors.filter((c) => !c.role);
   if (roles.length) { lines.push('  /* Цвета палитры */'); roles.forEach(put); }
   if (own.length) { lines.push('  /* Свои цвета */'); own.forEach(put); }
-  // номер шага — его место в шкале (как у ссылок 'spacing.<i>'): негодный шаг пропускаем, нумерацию не сдвигаем
-  const scale = (arr, prefix, label) => {
-    const list = Array.isArray(arr) ? arr : [];
-    const ok = list.map((n, i) => [n, i]).filter(([n]) => Number.isFinite(n));
-    if (!ok.length) return;
+  const scale = (list, prefix, label) => {
+    if (!list.length) return;
     lines.push(`  /* ${label} */`);
-    for (const [n, i] of ok) lines.push(`  --${prefix}-${i}: ${cssPx(n)};`);
+    for (const [n, i] of list) lines.push(`  --${prefix}-${i}: ${cssPx(n)};`);
   };
-  scale(t.spacing, 'space', 'Шкала отступов');
-  scale(t.radii, 'radius', 'Скругления');
-  const styleId = new Map();
-  for (const k of Object.keys(type)) {
-    const id = cssIdent(k);
-    if (!id || !isObj(type[k]) || [...styleId.values()].includes(id)) { skipped++; continue; }
-    styleId.set(k, id);
-  }
-  const styles = [...styleId.keys()];
+  scale(m.spacing, 'space', 'Шкала отступов');
+  scale(m.radii, 'radius', 'Скругления');
   const family = (font) => `${cssString(font)}, ${cssMonoFont(font) ? CSS_FONT_TAIL.mono : CSS_FONT_TAIL.default}`;
-  const fontOf = (e) => (isObj(e) && typeof e.font === 'string' && e.font.trim() ? e.font.trim() : '');
-  const screens = [...boardLabels(doc)].map(([id, label]) => [label, CORE_NS.boardTheme ? CORE_NS.boardTheme(doc.nodes[id]) : null]).filter(([, th]) => th);
-  // стиль, которому шрифт даёт только тема экрана, — класс всё равно берёт его из переменной
-  const themedFont = new Set();
-  for (const [, th] of screens) if (isObj(th.type)) for (const k of Object.keys(th.type)) if (styleId.has(k) && fontOf(th.type[k])) themedFont.add(k);
-  const withFont = styles.filter((k) => fontOf(type[k]));
+  const withFont = m.styles.filter((st) => st.font);
   if (withFont.length) {
     lines.push('  /* Шрифты стилей текста */');
-    for (const k of withFont) lines.push(`  --font-${styleId.get(k)}: ${family(fontOf(type[k]))};`);
+    for (const st of withFont) lines.push(`  --font-${st.id}: ${family(st.font)};`);
   }
   lines.push('}');
-  for (const k of styles) {
-    const st = type[k];
-    const id = styleId.get(k);
+  for (const st of m.styles) {
     const body = [
-      fontOf(st) || themedFont.has(k) ? `font-family: var(--font-${id});` : '',
+      st.font || st.themedFont ? `font-family: var(--font-${st.id});` : '',
       Number.isFinite(st.fontSize) ? `font-size: ${cssPx(st.fontSize)};` : '',
       Number.isFinite(st.fontWeight) ? `font-weight: ${Math.round(st.fontWeight)};` : '',
       cssLineHeight(st.lineHeight) ? `line-height: ${cssLineHeight(st.lineHeight)};` : '',
       Number.isFinite(st.letterSpacing) && st.letterSpacing ? `letter-spacing: ${cssPx(st.letterSpacing)};` : '',
     ].filter(Boolean);
-    if (body.length) lines.push('', `.text-${id} {`, ...body.map((b) => `  ${b}`), '}');
+    if (body.length) lines.push('', `.text-${st.id} {`, ...body.map((b) => `  ${b}`), '}');
   }
-  let nScreens = 0;
-  for (const [label, th] of screens) {
-    const body = [];
+  for (const sc of m.screens) {
+    const body = [...sc.colors.map((c) => `  --color-${c.id}: ${c.hex};`), ...sc.fonts.map((f) => `  --font-${f.id}: ${family(f.font)};`)];
+    const sel = `[data-screen=${cssString(sc.label)}]`;
+    if (body.length) lines.push('', `/* Экран ${cssComment(sc.label)} — своя тема */`, `${sel} {`, ...body, '}');
+    for (const w of sc.weights) lines.push(`${sel} .text-${w.id} { font-weight: ${w.weight}; }`);
+  }
+  return { css: `${lines.join('\n')}\n`, colors: m.colors.length, styles: m.styles.length, screens: m.screens.length, skipped: m.skipped };
+}
+
+/**
+ * Круг 101: токены документа как данные — общее для CSS (§15.34) и JSON (§15.35). Только то, что видит
+ * редактор, и только безопасные имена: цвета (роли в порядке палитры по умолчанию, затем свои; два имени
+ * в одно имя CSS — первое остаётся), шаги шкал с их местом, стили текста, экраны со своей темой.
+ */
+function tokenModel(doc) {
+  const t = (doc && isObj(doc.tokens)) ? doc.tokens : {};
+  const colorsIn = isObj(t.colors) ? t.colors : {};
+  const type = isObj(t.type) ? t.type : {};
+  const roleOrder = Object.keys((CORE_NS.DEFAULT_TOKENS && CORE_NS.DEFAULT_TOKENS.colors) || {});
+  const names = [...roleOrder.filter((k) => Object.prototype.hasOwnProperty.call(colorsIn, k)), ...Object.keys(colorsIn).filter((k) => !roleOrder.includes(k))];
+  let skipped = 0;
+  const colors = [];
+  const usedIds = new Set();
+  for (const k of names) {
+    const id = cssIdent(k);
+    const hex = cssColor(colorsIn[k]);
+    if (!id || !hex || usedIds.has(id)) { skipped++; continue; }
+    usedIds.add(id);
+    colors.push({ name: k, id, hex, role: SWATCH_ROLE_NAMES.has(k) });
+  }
+  // роли — первыми (как в палитре), свои — следом
+  colors.sort((a, b) => Number(b.role) - Number(a.role));
+  // номер шага — его место в шкале (как у ссылок 'spacing.<i>'): негодный шаг пропускаем, нумерацию не сдвигаем
+  const steps = (arr) => (Array.isArray(arr) ? arr : []).map((n, i) => [n, i]).filter(([n]) => Number.isFinite(n));
+  const styleIds = new Map();
+  for (const k of Object.keys(type)) {
+    const id = cssIdent(k);
+    if (!id || !isObj(type[k]) || [...styleIds.values()].includes(id)) { skipped++; continue; }
+    styleIds.set(k, id);
+  }
+  const fontOf = (e) => (isObj(e) && typeof e.font === 'string' && e.font.trim() ? e.font.trim() : '');
+  const themes = [...boardLabels(doc)].map(([id, label]) => [label, CORE_NS.boardTheme ? CORE_NS.boardTheme(doc.nodes[id]) : null]).filter(([, th]) => th);
+  const screens = [];
+  const themedFont = new Set();
+  for (const [label, th] of themes) {
     const seen = new Set();
+    const sc = { label, colors: [], fonts: [], weights: [] };
     if (isObj(th.colors)) {
       for (const k of Object.keys(th.colors)) {
-        const n = cssIdent(k);
-        const v = cssColor(th.colors[k]);
-        if (n && v && !seen.has(n)) { seen.add(n); body.push(`  --color-${n}: ${v};`); }
+        const id = cssIdent(k);
+        const hex = cssColor(th.colors[k]);
+        if (id && hex && !seen.has(id)) { seen.add(id); sc.colors.push({ name: k, id, hex }); }
       }
     }
     // стиль темы, которого нет в документе, — класса для него нет: переменная никому не нужна
-    const tStyles = isObj(th.type) ? Object.keys(th.type).filter((k) => styleId.has(k) && isObj(th.type[k])) : [];
-    for (const k of tStyles) if (fontOf(th.type[k])) body.push(`  --font-${styleId.get(k)}: ${family(fontOf(th.type[k]))};`);
-    const weights = tStyles.filter((k) => Number.isFinite(th.type[k].fontWeight));
-    if (!body.length && !weights.length) continue;
-    nScreens++;
-    const sel = `[data-screen=${cssString(label)}]`;
-    if (body.length) lines.push('', `/* Экран ${cssComment(label)} — своя тема */`, `${sel} {`, ...body, '}');
-    for (const k of weights) lines.push(`${sel} .text-${styleId.get(k)} { font-weight: ${Math.round(th.type[k].fontWeight)}; }`);
+    const tStyles = isObj(th.type) ? Object.keys(th.type).filter((k) => styleIds.has(k) && isObj(th.type[k])) : [];
+    for (const k of tStyles) {
+      if (fontOf(th.type[k])) { sc.fonts.push({ name: k, id: styleIds.get(k), font: fontOf(th.type[k]) }); themedFont.add(k); }
+      if (Number.isFinite(th.type[k].fontWeight)) sc.weights.push({ name: k, id: styleIds.get(k), weight: Math.round(th.type[k].fontWeight) });
+    }
+    if (sc.colors.length || sc.fonts.length || sc.weights.length) screens.push(sc);
   }
-  const nColors = colorId.size;
-  return { css: `${lines.join('\n')}\n`, colors: nColors, styles: styles.length, screens: nScreens, skipped };
+  const styles = [...styleIds].map(([k, id]) => {
+    const st = type[k];
+    return { name: k, id, font: fontOf(st), themedFont: themedFont.has(k), fontSize: st.fontSize, fontWeight: st.fontWeight, lineHeight: st.lineHeight, letterSpacing: st.letterSpacing };
+  });
+  return { colors, spacing: steps(t.spacing), radii: steps(t.radii), styles, screens, skipped };
+}
+
+/** Имя в дереве Design Tokens: без «{», «}», «.» и «$» в начале (их формат занимает под ссылки и служебное). */
+function dtName(v) {
+  const s = String(v == null ? '' : v).replace(/[{}.\u0000-\u001f\u007f]/g, ' ').replace(/^\$+/, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  return s || null;
+}
+const dtPx = (n) => `${Math.round(n * 100) / 100}px`;
+
+/**
+ * Круг 101 (SPEC §15.35): токены документа в формате W3C Design Tokens (DTCG) — для Style Dictionary,
+ * Tokens Studio и им подобных. Группы: `color`, `space`, `radius`, `font`, `typography` (составной токен
+ * стиля текста со ссылкой на шрифт `{font.<стиль>}`) и `screen.<Имя экрана>` — свои цвета и шрифты темы
+ * экрана. Имена — как в документе (не kebab-case: инструменты сами переводят под платформу). Те же правила
+ * отбора, что у CSS (`tokenModel`).
+ * @returns {{json: string, colors: number, styles: number, screens: number, skipped: number}}
+ */
+export function tokensJson(doc, { title } = {}) {
+  const m = tokenModel(doc);
+  const out = { $description: `Токены документа ${String(title || (doc && doc.meta && doc.meta.name) || 'Imago').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 80)} — Imago` };
+  if (m.colors.length) {
+    out.color = { $type: 'color' };
+    for (const c of m.colors) out.color[c.name] = { $value: c.hex, ...(c.role ? {} : { $description: 'свой цвет документа' }) };
+  }
+  const scale = (key, list) => {
+    if (!list.length) return;
+    out[key] = { $type: 'dimension' };
+    for (const [n, i] of list) out[key][String(i)] = { $value: dtPx(n) };
+  };
+  scale('space', m.spacing);
+  scale('radius', m.radii);
+  const withFont = m.styles.filter((st) => st.font);
+  if (withFont.length) {
+    out.font = { $type: 'fontFamily' };
+    for (const st of withFont) out.font[st.name] = { $value: st.font };
+  }
+  const typo = {};
+  for (const st of m.styles) {
+    const v = {};
+    if (st.font) v.fontFamily = `{font.${st.name}}`;
+    if (Number.isFinite(st.fontSize)) v.fontSize = dtPx(st.fontSize);
+    if (Number.isFinite(st.fontWeight)) v.fontWeight = Math.min(1000, Math.max(1, Math.round(st.fontWeight)));
+    // DTCG: интерлиньяж — множитель кегля. У ядра до 4 — он и есть; больше — пиксели: делим на кегль
+    if (Number.isFinite(st.lineHeight) && st.lineHeight > 0) {
+      if (st.lineHeight <= 4) v.lineHeight = Math.round(st.lineHeight * 1000) / 1000;
+      else if (Number.isFinite(st.fontSize) && st.fontSize > 0) v.lineHeight = Math.round((st.lineHeight / st.fontSize) * 1000) / 1000;
+    }
+    if (Number.isFinite(st.letterSpacing)) v.letterSpacing = dtPx(st.letterSpacing);
+    if (Object.keys(v).length) typo[st.name] = { $value: v };
+  }
+  if (Object.keys(typo).length) out.typography = { $type: 'typography', ...typo };
+  let screens = 0;
+  const used = new Set();
+  for (const sc of m.screens) {
+    // «v1.2» и «v1 2» после чистки совпадут — второму номер, экран не теряется
+    const base = dtName(sc.label) || 'Экран';
+    let name = base;
+    for (let k = 2; used.has(name); k++) name = `${base} (${k})`;
+    used.add(name);
+    const g = { $description: `Своя тема экрана «${name}»` };
+    if (sc.colors.length) { g.color = { $type: 'color' }; for (const c of sc.colors) g.color[c.name] = { $value: c.hex }; }
+    if (sc.fonts.length) { g.font = { $type: 'fontFamily' }; for (const f of sc.fonts) g.font[f.name] = { $value: f.font }; }
+    if (sc.weights.length) { g.fontWeight = { $type: 'fontWeight' }; for (const w of sc.weights) g.fontWeight[w.name] = { $value: Math.min(1000, Math.max(1, w.weight)) }; }
+    out.screen = out.screen || {};
+    out.screen[name] = g;
+    screens++;
+  }
+  return { json: `${JSON.stringify(out, null, 2)}\n`, colors: m.colors.length, styles: m.styles.length, screens, skipped: m.skipped };
 }
