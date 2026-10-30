@@ -12263,6 +12263,10 @@ function applyShellIntent(intent, said) {
       openExport();
       return true;
     }
+    case 'doc-color': {
+      colorByWords(intent);
+      return true;
+    }
     case 'bind-colors': {
       // круг 87 (§15.23): все экраны разом — одна правка, одна отмена
       if (intent.all) {
@@ -14676,6 +14680,45 @@ function pickDocColor(name, hex) {
   // одним тостом: рядом может стоять предложение «Перекрасить и его» (§15.25) — три тоста разом не читаются
   const say = [own.trim(), ...r.warnings.map((w) => `${w}.`)].filter(Boolean).join(' ');
   if (say) toast(say, 'plain', 8000);
+}
+
+/**
+ * Круг 99 (SPEC §15.33): цвет палитры словами — те же правки и проверки, что у шторки «Цвета документа»
+ * (§15.30–§15.31), одна правка — одна отмена; подтверждение — тостом.
+ */
+function colorByWords(intent) {
+  if (intent.say) { toast(intent.say, 'plain', 7000); return; }
+  const colors = (state.doc.tokens && state.doc.tokens.colors) || {};
+  const known = Object.prototype.hasOwnProperty.call(colors, intent.name);
+  const nope = () => toast(`Цвета «${clip(intent.name, 40)}» в палитре нет. Все цвета — в шторке «Цвета документа»`, 'plain', 7000);
+  if (intent.act === 'new') {
+    const taken = Object.keys(colors).find((k) => k.toLowerCase() === String(intent.name).toLowerCase());
+    if (taken) { toast(`Цвет «${taken}» в палитре уже есть — поменять код: «цвет ${taken} ${String(intent.hex).toUpperCase()}»`, 'plain', 7000); return; }
+    const r = SHELL.newDocColorOps(state.doc, intent.name, intent.hex);
+    if (r.error) { toast(r.error, 'plain', 7000); return; }
+    const res = commit(r.ops, r.label, 'human', { quiet: true, human: r.label });
+    if (res && res.ok === false) return;
+    toast([`${r.label}.`, ...r.warnings.map((w) => `${w}.`)].join(' '), 'plain', 6000);
+    return;
+  }
+  if (!known) { nope(); return; }
+  if (intent.act === 'set') {
+    const r = SHELL.docColorOps(state.doc, intent.name, intent.hex, { title: SWATCH_NAMES[intent.name] });
+    if (!r) { toast(`«${intent.name}» уже ${String(intent.hex).toUpperCase()}`, 'plain', 4000); return; }
+    const res = commit(r.ops, r.label, 'human', { quiet: true, human: r.label });
+    if (res && res.ok === false) return;
+    const own = r.screens.length
+      ? `Экран${r.screens.length > 1 ? 'ы' : ''} ${r.screens.slice(0, 3).map((n) => `«${n}»`).join(', ')}${r.screens.length > 3 ? ` и ещё ${r.screens.length - 3}` : ''} — со своим цветом, ${r.screens.length > 1 ? 'их' : 'его'} правка не коснулась.`
+      : '';
+    toast([`${r.label}.`, own, ...r.warnings.map((w) => `${w}.`)].filter(Boolean).join(' '), 'plain', 7000);
+    return;
+  }
+  const r = intent.act === 'rename' ? SHELL.renameDocColorOps(state.doc, intent.name, intent.to) : SHELL.removeDocColorOps(state.doc, intent.name);
+  if (!r) { toast(`Цвет уже называется «${intent.name}»`, 'plain', 4000); return; }
+  if (r.error) { toast(r.error, 'plain', 7000); return; }
+  const res = commit(r.ops, r.label, 'human', { quiet: true, human: r.label });
+  if (res && res.ok === false) return;
+  toast(`${r.label}.`, 'plain', 6000);
 }
 
 function fillDocColors(body) {
