@@ -6974,7 +6974,10 @@ export function describeDoc(doc, scopeIds, opts = {}) {
   if (limit - footer.length - 1 - TAIL_RESERVE < 400) footer = workAreaLine(doc, boardWork, activeArtboard, scopeKind, true, libInfo);
   // из бюджета сразу вычтены строка «РАБОТАЕМ С:» и место под итоговое «… ещё N скрыто»,
   // иначе выжимка вылезала за предел на длину этих строк
-  const budget = Math.max(40, limit - footer.length - 1 - TAIL_RESERVE);
+  // круг 101 (поток диплома): пояснение «свёрнутое можно назвать по имени» — один раз, а не в каждой заметке:
+  // на 50 тыс. узлов по две такие заметки на дальнюю доску съедали весь предел и путь к выделенному
+  const nameHint = 'Свёрнутое («… ещё N») — не тупик: такой узел называй по имени, цель ищется по всему документу.';
+  let budget = Math.max(40, limit - footer.length - 1 - TAIL_RESERVE);
 
   /* Три степени важности узла.
    * pinned — строка есть в выжимке при любом размере документа: корень, САМИ артборды
@@ -7056,11 +7059,41 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     return sum;
   };
   let total = measure();
-  /** Свернуть диапазон детей в одну строку-заметку. */
+  // место под пояснение — только если сворачивать придётся (иначе документ на грани предела терял бы строки зря)
+  if (total > budget) budget = Math.max(40, budget - (nameHint.length + 1));
+  /** Сколько знаков сейчас занимает поддерево (с учётом уже свёрнутого внутри). */
+  const visibleCost = (e) => {
+    let sum = e.text.length + 1;
+    const ranges = e.collapsed || [];
+    e.children.forEach((child, i) => {
+      const range = ranges.find((r) => i >= r.from && i < r.to);
+      if (range) { if (i === range.from) sum += range.note.length + 1; return; }
+      sum += visibleCost(child);
+    });
+    return sum;
+  };
+  /**
+   * Свернуть диапазон детей в одну строку-заметку. Соседний (впритык) свёрнутый диапазон того же родителя
+   * сливается с новым в одну заметку: две подряд «… ещё N свёрнуто» у каждой дальней доски на 50 тыс. узлов
+   * съедали предел. Размер выжимки пересчитываем по разнице этого куска, а не полным обходом после
+   * каждого свёртывания (полный обход давал 1,2–1,6 с на 50 тыс. узлов).
+   */
   const collapseRange = (parent, from, to, note) => {
-    parent.collapsed = (parent.collapsed || []).concat([{ from, to, note }]);
+    const ranges = parent.collapsed || [];
+    const touching = ranges.filter((r) => r.to === from || r.from === to);
+    let lo = from, hi = to;
+    for (const r of touching) { lo = Math.min(lo, r.from); hi = Math.max(hi, r.to); }
+    const rangeAt = (i) => ranges.find((r) => i >= r.from && i < r.to);
+    let before = 0;
+    for (let i = lo; i < hi; i++) {
+      const r = rangeAt(i);
+      if (r) { if (i === r.from) before += r.note.length + 1; continue; }
+      before += visibleCost(parent.children[i]);
+    }
+    const merged = touching.length ? shortNote(parent, lo, hi) : note;
+    parent.collapsed = ranges.filter((r) => !touching.includes(r)).concat([{ from: lo, to: hi, note: merged }]);
     parent.children.slice(from, to).forEach(markHidden);
-    total = measure();
+    total += merged.length + 1 - before;
   };
   /**
    * Свернуть ХВОСТ диапазона — ровно столько, сколько нужно, чтобы влезть в бюджет.
@@ -7138,10 +7171,13 @@ export function describeDoc(doc, scopeIds, opts = {}) {
      * ИМЕНИ во всём документе, а не только по строкам выжимки, так что свёрнутый узел вполне
      * адресуем — его надо назвать.
      */
-    return `${pad}… ещё ${count} узл(ов) свёрнуто ${why}, около ${inner} знаков `
-      + `(«${first}» … «${last}»). Их можно назвать по имени: цель ищется `
-      + 'по всему документу, а не только по этим строкам.';
+    // круг 101: заметка короткая — пояснение про имена стоит один раз в конце выжимки (nameHint)
+    if (why === FAR_WHY) return `${pad}… ещё ${count} узл(ов) свёрнуто («${first}» … «${last}»)`;
+    return `${pad}… ещё ${count} узл(ов) свёрнуто ${why}, около ${inner} знаков («${first}» … «${last}»)`;
   };
+  /** Заметка о слитых соседних диапазонах — короткая, как у дальнего. */
+  const shortNote = (parent, from, to) => `${'  '.repeat(parent.depth + 1)}… ещё ${to - from} узл(ов) свёрнуто («${nameAt(parent, from)}» … «${nameAt(parent, to - 1)}»)`;
+  const FAR_WHY = '— далеко от области работы';
   const applyRuns = (eligible, keeps, deepFirst, why) => {
     for (const keepN of keeps) {
       if (total <= budget) return;
@@ -7155,7 +7191,7 @@ export function describeDoc(doc, scopeIds, opts = {}) {
   // 2. дальние от области работы поддеревья — первыми и сверху вниз (круг 2, п.1).
   //    Порог 2: у каждого дальнего родителя остаются первые два ребёнка, чтобы «шапка
   //    со второго экрана» осталась называемой даже в очень большом документе.
-  applyRuns((e) => e.far, [2], false, '— далеко от области работы');
+  applyRuns((e) => e.far, [2], false, FAR_WHY);
 
   // 3. однотипные повторы («ещё 6 таких же»): дальние прежде близких
   const candidates = [];
@@ -7192,10 +7228,14 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     collapseTail(c.parent, c.from, c.to, (from, to) => collapsedNote(c.parent, from, to));
   }
 
-  // 4. крайний случай — сама область работы: сворачиваем с листьев, имена артбордов целы
-  applyRuns(() => true, [6, 2], true, '(не хватило места)');
+  // 4. крайний случай — сама область работы: сворачиваем с листьев, имена артбордов целы. Дети самих
+  //    выделенных узлов — в последнюю очередь (шаг 5): «цена в этой карточке» — это они, а соседние
+  //    карточки ряда, сворачиваясь с листьев раньше, съедали их место (поток диплома, 10–50 тыс. узлов)
+  const workKids = new Set();
+  for (const id of workSet) for (const k of kidsOf(nodeOf(doc, id))) workKids.add(k);
+  applyRuns((e) => !workKids.has(e.id), [6, 2], true, '(не хватило места)');
   // 5. совсем крайний: дальнее до нуля, потом всё до нуля
-  applyRuns((e) => e.far, [0], false, '— далеко от области работы');
+  applyRuns((e) => e.far, [0], false, FAR_WHY);
   applyRuns(() => true, [0], true, '(не хватило места)');
 
   // 6. отрисовка. Корень, артборды и сами выделенные узлы печатаются даже после того, как
@@ -7235,6 +7275,10 @@ export function describeDoc(doc, scopeIds, opts = {}) {
     if (used + tail.length + footer.length + 2 <= limit) lines.push(tail);
   }
   if (!lines.length) return '(область пуста)';
+  // пояснение — только если что-то свёрнуто и оно влезает в предел (у крошечного бюджета — без него)
+  const sizeNow = lines.reduce((n, l) => n + l.length + 1, 0);
+  if ((hiddenTail || [...index.values()].some((e) => e.collapsed && e.collapsed.length))
+    && sizeNow + nameHint.length + 1 + footer.length <= limit) lines.push(nameHint);
   lines.push(footer);
   return lines.join('\n');
 }
