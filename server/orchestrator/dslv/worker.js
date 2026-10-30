@@ -161,7 +161,11 @@ async function run(id, job) {
       if (!rec || rec.partial !== undefined) return;
       parentPort.postMessage({
         type: 'stage', id,
-        rec: { stage: rec.stage, label: rec.label, ...(rec.detail ? { detail: core.cutText(rec.detail, 500) } : {}), ...(rec.variant != null ? { variant: rec.variant } : {}) },
+        rec: {
+          stage: rec.stage, label: rec.label, ...(rec.detail ? { detail: core.cutText(rec.detail, 500) } : {}), ...(rec.variant != null ? { variant: rec.variant } : {}),
+          // круг 110 (SPEC §25.3): ход длинной задачи — экран i из n и имена экранов на плане
+          ...(rec.progress ? { progress: rec.progress, ...(Array.isArray(rec.steps) ? { steps: rec.steps.slice(0, 24) } : {}) } : {}),
+        },
       });
     };
     // круг 47 (SPEC §14): арт-направление и критик — по настройке сервиса (job.art)

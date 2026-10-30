@@ -9,6 +9,7 @@
 - Экспорт: `RECOGNIZE_MAX` 2000, `EDITOR_COMMAND_TEXT`, `isEditorCommand(text)` (реплика — команда редактора из `src/shell.js`: ответ без модели и записи), `intentOf(text, ctx)` (≈109; `classifyUtterance`, `recognizeVariants`, местные ответы brain → `{kind, needsModel, intent}`), `globalizeIds(ops)` (≈155), `createPipeline(deps)` (≈198).
 - Внутри `createPipeline`: `admit`/`runTask`/`next`/`unqueue` (очередь проекта, `MAX_QUEUE_PER_PROJECT` → 429), `preflight` (модель и сервис живы), `command` (≈346), `execute` (≈385 — сам прогон, стадии `step()`, трасса, `lease` семафора полного чтения), `brainError`, `finishRun`/`finishVariants`, `write` (≈717, транзакция с `author:'Агент'`, `command_author`), `resultOf`, `stop` (≈807), `apply` (≈847), `health` (≈912), `close` (≈938).
 - `BRAIN_STAGE` — стадии brain → ключи §10.3 (`direct`→llm, `critic`→validate, `revise`→repair — круг 47); `LABELS` — подписи по-русски.
+- Круг 110 (SPEC §25.3): `flow` → `llm` в `BRAIN_STAGE`; `stageProgress(rec)` — `progress` и `steps` в событие `stage` (`step(key, label, detail, extra)`).
 
 ## Поток данных
 http.js → `command` → очередь → `execute`: dslr.read → duil → dslv.run (вызовы модели воркер шлёт сюда, их исполняет llm) → dslts.write → `result` в sink; трасса в traces.js.

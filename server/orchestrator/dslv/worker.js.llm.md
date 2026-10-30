@@ -15,6 +15,8 @@
 - `renderFor(id)` — снимок доски для критика (render.js `createRenderer`), `createImageColors` — цвета картинок.
 - `testHooks` (только в тестах): `oom`, `env`, `throw`, `heap`, медленный старт.
 
+- Круг 110 (SPEC §25.3): стадия несёт `progress` и (на плане сценария) `steps` — ход длинной задачи.
+
 ## Инварианты
 Исключение кода (не модели) → `internal`, а `BrainError('model', …)` → текст до клиента как есть (круг 31).
 

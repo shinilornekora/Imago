@@ -3474,6 +3474,35 @@ function artboards(doc) {
 }
 
 /**
+ * Круг 110 (SPEC §25): переходы сценария с доски — поле `flow: [{to, label?, from?}]` (простые
+ * данные, формат их принимает без смены ENGINE_VERSION). Годные записи: `to` — другая доска
+ * документа, `from` — слой этой доски (иначе стрелка от края доски), `label` — строка. Мусор и
+ * переходы на удалённые доски молча пропускаются: документ с ними открывается и рисуется.
+ * @returns {{to:string, label:string, from:string|null}[]}
+ */
+/** Круг 110: ниже этого зума подписи переходов не рисуются — на обзоре сценария они слипаются. */
+const FLOW_LABEL_MIN_ZOOM = 0.4;
+
+function boardFlow(doc, node) {
+  if (!doc || !doc.nodes || !node || !Array.isArray(node.flow)) return [];
+  const out = [];
+  for (const l of node.flow.slice(0, 64)) {
+    if (!l || typeof l !== 'object' || typeof l.to !== 'string' || l.to === node.id) continue;
+    const t = doc.nodes[l.to];
+    if (!t || t.type !== 'frame' || t.parent !== doc.root) continue;
+    let from = typeof l.from === 'string' && doc.nodes[l.from] ? l.from : null;
+    // слой должен лежать на этой доске (после переноса в другую доску — от края)
+    if (from) {
+      let at = from;
+      for (let i = 0; i < MAX_DEPTH && at && at !== node.id; i++) at = doc.nodes[at] ? doc.nodes[at].parent : null;
+      if (at !== node.id) from = null;
+    }
+    out.push({ to: l.to, label: typeof l.label === 'string' ? l.label.slice(0, 80) : '', from });
+  }
+  return out;
+}
+
+/**
  * Все id поддерева, родитель раньше детей (прямой порядок обхода). Цикл обходится
  * стороной. Круг 27: без предела глубины и без рекурсии — поддерево глубже
  * MAX_DEPTH (документ прежней версии) раньше обрывалось, и надгробия remove
@@ -9379,6 +9408,12 @@ const STAGE_CSS = `
    тон темнее (#4A505C на #d9d4cb = 5,49:1; на токене холста #F7F6F3 — 7,52:1).
    Оболочка может задать свой цвет через --imago-ab-label. */
 .imago-ab-label{fill:var(--imago-ab-label,var(--muted,#8A92A6))}
+/* Круг 110 (SPEC §25): стрелки переходов сценария; цвет — --imago-flow оболочки */
+.imago-flow{pointer-events:none}
+.imago-flow-line{stroke:var(--imago-flow,#3D7BFF);stroke-opacity:.9}
+.imago-flow-head,.imago-flow-dot{fill:var(--imago-flow,#3D7BFF)}
+.imago-flow-tag{fill:var(--imago-flow,#3D7BFF)}
+.imago-flow-text{fill:#fff;font-family:inherit}
 :root[data-theme="light"] .imago-ab-label{fill:var(--imago-ab-label,#4A505C)}
 @media (prefers-color-scheme: light){
   :root:not([data-theme="dark"]) .imago-ab-label{fill:var(--imago-ab-label,#4A505C)}
@@ -10224,6 +10259,8 @@ class Stage {
       this._vbBase = { z, px: this.view.pan.x, py: this.view.pan.y, w: this.vw, h: this.vh };
     }
     if (this._gridGroup) this._renderGrid();
+    // круг 110: кегль подписей и наконечники стрелок — постоянные на экране, пересчёт только по зуму
+    if (this._flowGroup && this._flowZoom !== z) this._renderFlow();
     this._updateLabels();
   }
 
@@ -10568,11 +10605,15 @@ class Stage {
         this._drawNode(frag, n, 0, 0);
       }
     }
+    // круг 110 (SPEC §25): стрелки переходов сценария — поверх досок
+    this._flowGroup = svgEl('g', { class: 'imago-flow' });
+    frag.appendChild(this._flowGroup);
     while (this.svg.firstChild) this.svg.removeChild(this.svg.firstChild);
     this.svg.appendChild(frag);
     // слепок сцены: по нему следующий кадр решит, можно ли обойтись точечным обновлением
     this._drawnState = { tokens: doc.tokens, abs: abIds, loose, themes: abIds.map((id) => boardTheme(doc.nodes[id])) };
     this._renderGrid();
+    this._renderFlow();
   }
 
   /**
@@ -10628,6 +10669,7 @@ class Stage {
       for (const id of plan.shapes) this._repaintShapes(id);
       if (labels) this._updateLabels();
       this._renderGrid();
+      this._renderFlow();
       return true;
     } catch (e) {
       // на полпути — не беда: вызывающий тут же соберёт сцену заново
@@ -10775,6 +10817,112 @@ class Stage {
         d: path.join(''), stroke: '#0D0E12', 'stroke-opacity': clamp((z - 1.5) / 2, 0.02, 0.07),
         'stroke-width': r2(1 / z), fill: 'none'
       }));
+    }
+  }
+
+  /**
+   * Круг 110 (SPEC §25): стрелки переходов сценария (поле доски `flow`, см. boardFlow), как флоу
+   * в Figma. Вперёд (цель правее) — от правого края слоя-кнопки (или доски) к левому краю цели;
+   * назад — дугой над досками; в той же колонке — от низа к верху. Подпись — у середины стрелки.
+   * Кегль, толщина и наконечник постоянны на экране (пересчёт при смене зума). Мимо щелчков.
+   */
+  _renderFlow() {
+    const g = this._flowGroup;
+    if (!g) return;
+    while (g.firstChild) g.removeChild(g.firstChild);
+    const doc = this.doc;
+    const z = this.view.zoom || 1;
+    this._flowZoom = z;
+    if (!doc || !doc.nodes) return;
+    const rects = this.geo.rects || {};
+    const k = 1 / z;
+    const sw = r2(1.75 * k);
+    const head = 9 * k;
+    const font = r2(11 * k);
+    for (const ab of artboards(doc)) {
+      const links = boardFlow(doc, ab);
+      if (!links.length) continue;
+      const fb = rects[ab.id];
+      if (!fb) continue;
+      for (const l of links) {
+        const tb = rects[l.to];
+        if (!tb) continue;
+        const fr = (l.from && rects[l.from]) || fb;
+        let x1;
+        let y1;
+        let x2;
+        let y2;
+        let c1;
+        let c2;
+        if (tb.x >= fb.x + fb.w - 1) {
+          x1 = fr.x + fr.w; y1 = fr.y + fr.h / 2;
+          x2 = tb.x; y2 = tb.y + Math.min(tb.h / 2, 160);
+          const dx = Math.max(60, (x2 - x1) / 2);
+          c1 = [x1 + dx, y1]; c2 = [x2 - dx, y2];
+        } else if (tb.x + tb.w <= fb.x + 1 && fb.x - (tb.x + tb.w) < Math.min(fb.w, tb.w)) {
+          // назад в соседнюю колонку: от левого края кнопки к правому краю цели через зазор
+          x1 = fr.x; y1 = fr.y + fr.h / 2;
+          x2 = tb.x + tb.w; y2 = tb.y + Math.min(tb.h / 2, 160);
+          const dx = Math.max(60, (x1 - x2) / 2);
+          c1 = [x1 - dx, y1]; c2 = [x2 + dx, y2];
+        } else if (tb.x + tb.w <= fb.x + 1) {
+          // назад через колонки: дугой над досками (из верхнего ряда) или под ними (из нижних),
+          // от края доски, а не от кнопки, — иначе линия шла бы сквозь саму доску
+          const above = fb.y <= tb.y + tb.h / 2;
+          x1 = fb.x + fb.w / 2; y1 = above ? fb.y : fb.y + fb.h;
+          x2 = tb.x + tb.w / 2; y2 = above ? tb.y : tb.y + tb.h;
+          const bend = 80 + Math.abs(x2 - x1) * 0.12;
+          const lift = above ? Math.min(y1, y2) - bend : Math.max(y1, y2) + bend;
+          c1 = [x1, lift]; c2 = [x2, lift];
+        } else if (tb.y >= fb.y) {
+          x1 = fr.x + fr.w / 2; y1 = fr === fb ? fb.y + fb.h : fr.y + fr.h;
+          x2 = tb.x + tb.w / 2; y2 = tb.y;
+          const dy = Math.max(40, (y2 - y1) / 2);
+          c1 = [x1, y1 + dy]; c2 = [x2, y2 - dy];
+        } else {
+          x1 = fr.x + fr.w / 2; y1 = fr === fb ? fb.y : fr.y;
+          x2 = tb.x + tb.w / 2; y2 = tb.y + tb.h;
+          const dy = Math.max(40, (y1 - y2) / 2);
+          c1 = [x1, y1 - dy]; c2 = [x2, y2 + dy];
+        }
+        const link = svgEl('g', { class: 'imago-flow-link', 'data-from': ab.id, 'data-to': l.to });
+        // наконечник по касательной в конце; линия кончается у основания наконечника
+        let ux = x2 - c2[0];
+        let uy = y2 - c2[1];
+        const len = Math.hypot(ux, uy) || 1;
+        ux /= len; uy /= len;
+        const bx = x2 - ux * head;
+        const by = y2 - uy * head;
+        link.appendChild(svgEl('path', {
+          class: 'imago-flow-line', fill: 'none', 'stroke-width': sw, 'stroke-linecap': 'round',
+          d: `M${r2(x1)} ${r2(y1)}C${r2(c1[0])} ${r2(c1[1])} ${r2(c2[0])} ${r2(c2[1])} ${r2(bx)} ${r2(by)}`,
+        }));
+        link.appendChild(svgEl('circle', { class: 'imago-flow-dot', cx: r2(x1), cy: r2(y1), r: r2(3.5 * k) }));
+        const px = -uy * head * 0.55;
+        const py = ux * head * 0.55;
+        link.appendChild(svgEl('path', {
+          class: 'imago-flow-head',
+          d: `M${r2(x2)} ${r2(y2)}L${r2(bx + px)} ${r2(by + py)}L${r2(bx - px)} ${r2(by - py)}Z`,
+        }));
+        // подписи — только когда их можно прочесть рядом с досками: на обзоре сценария одни стрелки
+        if (l.label && z >= FLOW_LABEL_MIN_ZOOM) {
+          // середина кривой Безье (t = 0.5)
+          const mx = (x1 + 3 * c1[0] + 3 * c2[0] + bx) / 8;
+          const my = (y1 + 3 * c1[1] + 3 * c2[1] + by) / 8;
+          const text = l.label.length > 32 ? `${l.label.slice(0, 31)}…` : l.label;
+          const w = (text.length * 6.2 + 12) * k;
+          const h = 18 * k;
+          link.appendChild(svgEl('rect', {
+            class: 'imago-flow-tag', x: r2(mx - w / 2), y: r2(my - h / 2), width: r2(w), height: r2(h), rx: r2(9 * k),
+          }));
+          const t = svgEl('text', {
+            class: 'imago-flow-text', x: r2(mx), y: r2(my + 3.8 * k), 'font-size': font, 'text-anchor': 'middle', 'font-weight': 500,
+          });
+          t.appendChild(document.createTextNode(text));
+          link.appendChild(t);
+        }
+        g.appendChild(link);
+      }
     }
   }
 
@@ -13532,6 +13680,8 @@ async function boardPNG(doc, artboardId, opts = {}) {
 
 export {
   createDoc, applyOps, invertOps, solve, validate, Stage, ops,
+  /* Круг 110 (SPEC §25): переходы сценария с доски — */
+  boardFlow,
   /* Круг 47 (SPEC §14.4): SVG доски без страницы — снимок для критика агента — */
   renderSVG, boardPNG, solveAfter, solveCarry, solveNext, solveShapeCopies, solveMemoMap,
   /* Круг 31 (K1): большая отмена/правка — пачками в пределах транзакции — */

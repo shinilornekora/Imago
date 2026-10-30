@@ -549,7 +549,7 @@ function cacheDom() {
   for (const id of [
     'app', 'canvas', 'layers', 'rail', 'inspector', 'insp-body', 'insp-title',
     'commandbar', 'command', 'btn-run', 'btn-variants', 'btn-mic', 'mic-live', 'worklog',
-    'work-label', 'work-detail', 'work-steps', 'btn-work-stop', 'variants', 'hints', 'toasts',
+    'work-label', 'work-detail', 'work-steps', 'work-progress', 'btn-work-stop', 'variants', 'hints', 'toasts',
     'artboard-tabs', 'docname', 'sheet', 'sheet-body', 'sheet-title', 'sheet-tabs',
     'btn-zoom', 'btn-zoom-in', 'btn-zoom-out', 'btn-fit', 'btn-preview', 'previewbar', 'btn-preview-exit', 'btn-rail', 'btn-rail-close', 'scrim',
     'btn-history', 'btn-export', 'btn-scales', 'btn-theme', 'btn-settings', 'rail-grip',
@@ -10064,6 +10064,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
   state.lastUtterance = utterance;
   state.stageGoal = '';
   state.stageSteps = [];
+  state.stageProgress = null;
   state.variantSeen = [];
   if (!(keepResult && msgUndoTx)) hideMsg();
   if (!variants) hideVariants();
@@ -10236,7 +10237,9 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
      * дня»; перенёс «Ярлыки» и ещё 1 правка» вместо «Компонент из «Ярлыки»». Человек просил
      * одну вещь, и одной вещью она и должна называться — а перечень правок уходит второй
      * строкой, где он к месту. */
-    const conceptual = res.local ? String((res.plan && res.plan.title) || '').trim() : '';
+    const conceptual = res.local ? String((res.plan && res.plan.title) || '').trim()
+      // круг 110 (SPEC §25): сценарий — одной фразой «Сценарий «…»: 6 экранов, 7 переходов»
+      : res.flow && res.changeSummary ? String(res.changeSummary) : '';
     const headline = conceptual || r.tx.human || summary;
     const aside = res.local
       ? [r.tx.human, summary && summary !== conceptual ? summary : ''].filter(Boolean).join(' · ')
@@ -10973,7 +10976,9 @@ function onAgentStage(rec, variantsTotal = 0, runId = 0) {
   const plan = rec.plan || null;
   // план модели содержит шаги — и до сих пор оболочка их нигде не показывала (круг 11, п.17)
   const steps = (plan && Array.isArray(plan.steps) ? plan.steps : (Array.isArray(rec.steps) ? rec.steps : null));
-  if (steps) state.stageSteps = steps.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 5);
+  // круг 110 (SPEC §25): у сценария шагов — экраны, их до 12; показываем окно вокруг текущего
+  if (steps) state.stageSteps = steps.map((x) => String(x || '').trim()).filter(Boolean).slice(0, rec.progress ? 24 : 5);
+  if (rec.progress && rec.progress.total > 0) state.stageProgress = rec.progress;
   if (plan && (plan.title || plan.summary)) state.stageGoal = plan.title || plan.summary;
   else if (rec.stage === 'plan') state.stageGoal = rec.title || rec.detail || rec.label || state.stageGoal;
   if (rec.variant && !state.variantSeen.includes(rec.variant)) state.variantSeen.push(rec.variant);
@@ -11048,7 +11053,13 @@ function showStage(rec, variantsTotal = 0) {
 function renderStageSteps(rec) {
   const host = dom['work-steps'];
   if (!host) return;
-  const list = (state.stageSteps || []).slice(0, 5);
+  renderStageProgress();
+  const all = state.stageSteps || [];
+  const pr = state.stageProgress;
+  // круг 110: длинный список экранов — окно из пяти вокруг текущего
+  const from = pr && all.length > 5 ? Math.max(0, Math.min(all.length - 5, pr.done - 1)) : 0;
+  const list = all.slice(from, from + 5);
+  host.dataset.from = String(from);
   const sig = list.join('|');
   if (host.dataset.sig !== sig) {
     host.dataset.sig = sig;
@@ -11069,9 +11080,37 @@ function renderStageSteps(rec) {
    гасим ровно столько шагов, сколько стадий работы позади. */
 const STAGE_PROGRESS = { plan: 0, generate: 1, materialize: 2, solve: 3, verify: 4, repair: 4, done: 5 };
 
+/**
+ * Круг 110 (SPEC §25): ход длинной задачи — полоса «собрано экранов из N» и текущий экран в
+ * списке шагов. Без хода (обычная команда) полоса спрятана.
+ */
+function renderStageProgress() {
+  const bar = dom['work-progress'];
+  const pr = state.stageProgress;
+  if (!bar) return;
+  if (!pr || !(pr.total > 0)) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const done = Math.max(0, Math.min(pr.total, pr.done));
+  bar.setAttribute('aria-valuemax', String(pr.total));
+  bar.setAttribute('aria-valuenow', String(done));
+  bar.setAttribute('aria-label', `Собрано экранов: ${done} из ${pr.total}`);
+  bar.firstElementChild.style.width = `${Math.round((done / pr.total) * 100)}%`;
+}
+
 function markStepsDone(rec) {
   const host = dom['work-steps'];
   if (!host || host.hidden) return;
+  const pr = state.stageProgress;
+  if (pr && pr.total > 0) {
+    // шаги сценария — экраны: собранные гаснут, текущий выделен
+    const from = Number(host.dataset.from) || 0;
+    const rows = host.children;
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].dataset.done = from + i < pr.done ? 'on' : '';
+      rows[i].dataset.now = from + i === pr.done && pr.done < pr.total ? 'on' : '';
+    }
+    return;
+  }
   const stage = rec && typeof rec.stage === 'string' ? rec.stage : '';
   const done = STAGE_PROGRESS[stage];
   if (done === undefined) return;
@@ -11091,6 +11130,7 @@ function hideStage() {
     dom.worklog.hidden = true;
     dom.worklog.dataset.done = '';
     if (host) { host.hidden = true; host.dataset.sig = ''; host.textContent = ''; }
+    if (dom['work-progress']) dom['work-progress'].hidden = true;
   }, 500);
 }
 

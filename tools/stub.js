@@ -130,7 +130,10 @@
         targets: [],
       };
     },
-    tree() {
+    tree(u) {
+      // круг 110 (SPEC §25): экран сценария — по брифу (имя, что на нём, кнопки переходов)
+      const flowScreen = screenFromBrief(u);
+      if (flowScreen) return flowScreen;
       return {
         type: 'frame',
         name: 'Карточка оплаты',
@@ -237,8 +240,99 @@
     critique() {
       return { score: 8, generic: false, verdict: 'ok', issues: [], fixes: [], praise: 'Образ читается' };
     },
+    /** Круг 110 (SPEC §25): план сценария — игра (по слову «игр») или регистрация. */
+    flow(u) {
+      const low = String(u || '').toLowerCase();
+      if (/игр|гейм|game/.test(low)) {
+        return {
+          title: 'Игра: от запуска до награды',
+          summary: 'Заставка, меню, уровни, игра, пауза, победа и поражение, магазин',
+          device: 'mobile',
+          screens: [
+            { key: 'splash', name: 'Заставка', purpose: 'Название игры крупно и полоса загрузки.' },
+            { key: 'menu', name: 'Главное меню', purpose: 'Монеты игрока, кнопки «Играть», «Магазин» и «Настройки».' },
+            { key: 'levels', name: 'Выбор уровня', purpose: 'Сетка уровней со звёздами, закрытые — с замком.' },
+            { key: 'game', name: 'Игровой экран', purpose: 'Счёт, таймер, игровое поле и кнопка паузы.' },
+            { key: 'pause', name: 'Пауза', purpose: 'Продолжить, заново или выйти в меню.' },
+            { key: 'win', name: 'Победа', purpose: 'Три звезды, награда монетами и следующий уровень.' },
+            { key: 'lose', name: 'Поражение', purpose: 'Сколько не хватило и попытка ещё раз.' },
+            { key: 'shop', name: 'Магазин', purpose: 'Бустеры и скины за монеты.' },
+            { key: 'settings', name: 'Настройки', purpose: 'Звук, музыка, язык и вибрация.' },
+          ],
+          links: [
+            { from: 'splash', to: 'menu', trigger: 'Загрузка закончилась' },
+            { from: 'menu', to: 'levels', trigger: 'Нажал «Играть»' },
+            { from: 'menu', to: 'shop', trigger: 'Нажал «Магазин»' },
+            { from: 'menu', to: 'settings', trigger: 'Нажал «Настройки»' },
+            { from: 'levels', to: 'game', trigger: 'Нажал «Начать»' },
+            { from: 'game', to: 'pause', trigger: 'Нажал «Пауза»' },
+            { from: 'game', to: 'win', trigger: 'Собрал все звёзды' },
+            { from: 'game', to: 'lose', trigger: 'Время вышло' },
+            { from: 'pause', to: 'game', trigger: 'Нажал «Продолжить»' },
+            { from: 'pause', to: 'menu', trigger: 'Нажал «В меню»' },
+            { from: 'win', to: 'levels', trigger: 'Нажал «Дальше»' },
+            { from: 'lose', to: 'game', trigger: 'Нажал «Ещё раз»' },
+            { from: 'shop', to: 'menu', trigger: 'Нажал «Назад»' },
+            { from: 'settings', to: 'menu', trigger: 'Нажал «Готово»' },
+          ],
+        };
+      }
+      return {
+        title: 'Регистрация',
+        summary: 'Приветствие, телефон, код, профиль, готово',
+        device: 'mobile',
+        screens: [
+          { key: 'hello', name: 'Приветствие', purpose: 'Что умеет приложение и кнопка «Начать».' },
+          { key: 'phone', name: 'Телефон', purpose: 'Поле номера и кнопка «Получить код».' },
+          { key: 'code', name: 'Код из СМС', purpose: 'Четыре клетки кода и «Отправить ещё раз».' },
+          { key: 'profile', name: 'Профиль', purpose: 'Имя, аватар и кнопка «Готово».' },
+          { key: 'done', name: 'Готово', purpose: 'Поздравление и кнопка «В приложение».' },
+        ],
+        links: [
+          { from: 'hello', to: 'phone', trigger: 'Нажал «Начать»' },
+          { from: 'phone', to: 'code', trigger: 'Нажал «Получить код»' },
+          { from: 'code', to: 'phone', trigger: 'Нажал «Изменить номер»' },
+          { from: 'code', to: 'profile', trigger: 'Код верный' },
+          { from: 'profile', to: 'done', trigger: 'Нажал «Готово»' },
+        ],
+      };
+    },
     unknown() { return {}; },
   };
+
+  /**
+   * Круг 110 (SPEC §25): экран сценария по брифу brain («Собери новым экраном «Имя» (экран i из n
+   * …): что на нём … Переходы с экрана: кнопка «X» → …»). Не бриф — null.
+   */
+  function screenFromBrief(u) {
+    const text = String(u || '');
+    const m = /экраном «([^»]+)»(?:\s*\([^)]*\))?:\s*([^\n]*)/.exec(text);
+    if (!m) return null;
+    const name = m[1];
+    const purpose = m[2].trim();
+    const size = /экран (\d+)×(\d+) px/.exec(text);
+    const w = size ? Number(size[1]) : 390;
+    const h = size ? Number(size[2]) : 844;
+    const acts = (/Переходы с экрана[^:]*:\s*([^\n]+)/.exec(text) || [])[1] || '';
+    const buttons = [...acts.matchAll(/кнопка «([^»]+)»/g)].map((x) => x[1]);
+    const btn = (label, i) => ({
+      type: 'frame', name: `Кнопка «${label}»`, layout: { mode: 'row', padding: [12, 20], justify: 'center' },
+      size: { w: 'fill', h: 'hug' }, fill: i ? 'surfaceAlt' : 'accent', radius: 16,
+      children: [{ type: 'text', name: 'Надпись', text: label, style: 'body', color: i ? 'text' : 'onAccent' }],
+    });
+    const rows = purpose.split(/[,.;]\s*/).map((x) => x.trim()).filter(Boolean).slice(0, 4);
+    return {
+      type: 'frame', name, layout: { mode: 'column', gap: 16, padding: 24 }, size: { w, h }, fill: 'canvas',
+      children: [
+        { type: 'text', name: 'Заголовок', text: name, style: 'display', color: 'text' },
+        {
+          type: 'frame', name: 'Содержимое', layout: { mode: 'column', gap: 12, padding: 16 }, size: { w: 'fill', h: 'fill' }, fill: 'surface', radius: 20,
+          children: rows.map((r, i) => ({ type: 'text', name: `Строка ${i + 1}`, text: r, style: i ? 'body' : 'title', color: i ? 'muted' : 'text' })),
+        },
+        ...buttons.map(btn),
+      ],
+    };
+  }
 
   async function sampleFn(input, opts = {}) {
     const text = allText(input);

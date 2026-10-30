@@ -659,6 +659,19 @@ button, input, textarea { font: inherit; color: inherit; }
 /* Шаг, до которого работа уже дошла, гаснет: список читается сверху вниз. */
 .worklog-steps li[data-done="on"] { opacity: .45; }
 .worklog-steps li[data-done="on"]::before { background: var(--agent); }
+/* Круг 110 (SPEC §25): длинная задача — полоса хода (сколько экранов сценария собрано) и
+   текущий экран в списке шагов. */
+.worklog-progress {
+  height: 4px; border-radius: 2px; overflow: hidden;
+  background: color-mix(in srgb, var(--agent) 16%, var(--line));
+}
+.worklog-progress[hidden] { display: none; }
+.worklog-progress > span {
+  display: block; height: 100%; width: 0; border-radius: inherit;
+  background: var(--agent); transition: width .35s ease;
+}
+.worklog-steps li[data-now="on"] { color: var(--text); font-weight: 500; }
+.worklog-steps li[data-now="on"]::before { background: var(--agent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent) 25%, transparent); }
 
 /* Сообщение агента: результат, ошибка, ответ, переспрос. */
 .dockmsg {

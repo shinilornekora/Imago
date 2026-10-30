@@ -219,6 +219,12 @@ export function serverStageRec(data = {}) {
   const rec = { stage: `srv:${key || 'stage'}`, label };
   if (data.variant != null) rec.variant = data.variant;
   if (data.detail) rec.detail = String(data.detail);
+  // круг 110 (SPEC §25): ход длинной задачи — «экран 3 из 9» и имена экранов сценария
+  const p = data.progress;
+  if (p && typeof p === 'object' && Number.isFinite(p.total) && p.total >= 0) {
+    rec.progress = { done: Number.isFinite(p.done) ? p.done : 0, total: p.total, name: String(p.name || '') };
+    if (Array.isArray(data.steps)) rec.steps = data.steps.map((x) => String(x || '')).filter(Boolean);
+  }
   return rec;
 }
 

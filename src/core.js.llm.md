@@ -33,6 +33,10 @@
 ## Поток данных
 Документ `Doc = {id, version, root, nodes, tokens, meta}` (§1.2) → `applyOps` (правка) → `solve`/`solveAfter` (геометрия; раскрытые экземпляры — в `geo.expanded`, не в `doc.nodes`) → `validate` → `Stage.render(doc, geo, state)` или `renderSVG`. На сервере: транзакция → `rebase` поверх головы → `applyOps`/`applyBatches` → журнал.
 
+## Переходы сценария (круг 110, SPEC §25)
+- `boardFlow(doc, node)` (рядом с `artboards`) — годные переходы доски из поля `flow` (простые данные, формат не менялся): `to` — другая доска, `from` — слой этой доски, иначе null.
+- `Stage._renderFlow` — стрелки группой `.imago-flow` последней в SVG (мимо щелчков): вперёд, назад в соседнюю колонку, назад дугой, в колонке; пересчёт в `_renderSVG`, `_patchSVG` и `_applyView` (только при смене зума, `_flowZoom`); подписи от зума `FLOW_LABEL_MIN_ZOOM` (0,4). CSS — `.imago-flow-*` в `STAGE_CSS`, цвет `--imago-flow`.
+
 ## Инварианты
 - Детерминизм: `solve(doc)` — чистая функция документа; все быстрые пути (`solveAfter`, `solveNext`) обязаны давать тот же `hashGeometry`, что полная раскладка (бенч и тесты это сверяют).
 - Операций пять и они не растут (§5.2); новые возможности — новые поля/типы, а не новые операции.

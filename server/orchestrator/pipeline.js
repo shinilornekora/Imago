@@ -45,7 +45,22 @@ const BRAIN_STAGE = {
   materialize: 'validate', validate: 'validate', repair: 'repair',
   // круг 47 (SPEC §14): образ — шаг модели, критик — проверка, доработка — починка
   direct: 'llm', critic: 'validate', revise: 'repair',
+  // круг 110 (SPEC §25): сценарий из многих экранов — шаг модели
+  flow: 'llm',
 };
+
+/**
+ * Круг 110 (SPEC §25): ход длинной задачи — `progress {done, total, name}` и (на плане сценария)
+ * имена экранов `steps` — в событии `stage` как есть, только числа и короткие строки.
+ */
+function stageProgress(rec) {
+  const p = rec && rec.progress;
+  if (!p || typeof p !== 'object') return null;
+  const num = (v) => (Number.isFinite(v) && v >= 0 ? Math.min(Math.floor(v), 1000) : 0);
+  const out = { progress: { done: num(p.done), total: num(p.total), name: String(p.name || '').slice(0, 80) } };
+  if (Array.isArray(rec.steps) && rec.steps.length) out.steps = rec.steps.slice(0, 24).map((x) => String(x || '').slice(0, 80));
+  return out;
+}
 
 const LABELS = {
   intent: 'Разбираю запрос',
@@ -394,12 +409,12 @@ export function createPipeline(deps) {
       kind: verdict.kind, started_at: new Date(task.t0).toISOString(), engine: ENGINE_VERSION,
       llm_kind: llm.kind, model: llm.model || undefined,
     };
-    const step = (key, label, detail) => {
+    const step = (key, label, detail, extra = null) => {
       if (!curStep || curStep.key !== key) {
         if (curStep) steps.push({ key: curStep.key, ms: Date.now() - curStep.at });
         curStep = { key, at: Date.now() };
       }
-      sink.send('stage', { key, label: label || LABELS[key], at: Date.now(), ...(detail ? { detail: llm.redact(detail) } : {}) });
+      sink.send('stage', { key, label: label || LABELS[key], at: Date.now(), ...(detail ? { detail: llm.redact(detail) } : {}), ...(extra || {}) });
     };
     const guard = () => { if (signal.aborted) throw cancelledErr(); };
     /** Круг 39: доля семафора полных чтений, которую держит документ этой команды. */
@@ -519,7 +534,7 @@ export function createPipeline(deps) {
         onQueued: ({ position }) => sink.send('queued', { position, scope: 'workers' }),
         onStage: (rec) => {
           const key = BRAIN_STAGE[rec.stage];
-          if (key) step(key, rec.label, rec.detail);
+          if (key) step(key, rec.label, rec.detail, stageProgress(rec));
         },
       });
       // круг 39: документ команде больше не нужен (расчёт кончился) — его байты другим чтениям
