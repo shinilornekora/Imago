@@ -549,7 +549,7 @@ function cacheDom() {
   for (const id of [
     'app', 'canvas', 'layers', 'rail', 'inspector', 'insp-body', 'insp-title',
     'commandbar', 'command', 'btn-run', 'btn-variants', 'btn-mic', 'mic-live', 'worklog',
-    'work-label', 'work-detail', 'work-steps', 'btn-work-stop', 'variants', 'hints', 'toasts',
+    'work-label', 'work-detail', 'work-steps', 'work-progress', 'btn-work-stop', 'variants', 'hints', 'toasts',
     'artboard-tabs', 'docname', 'sheet', 'sheet-body', 'sheet-title', 'sheet-tabs',
     'btn-zoom', 'btn-zoom-in', 'btn-zoom-out', 'btn-fit', 'btn-preview', 'previewbar', 'btn-preview-exit', 'btn-rail', 'btn-rail-close', 'scrim',
     'btn-history', 'btn-export', 'btn-scales', 'btn-theme', 'btn-settings', 'rail-grip',
@@ -10064,6 +10064,7 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
   state.lastUtterance = utterance;
   state.stageGoal = '';
   state.stageSteps = [];
+  state.stageProgress = null;
   state.variantSeen = [];
   if (!(keepResult && msgUndoTx)) hideMsg();
   if (!variants) hideVariants();
@@ -10236,7 +10237,9 @@ async function runUtterance(text, { variants = false, toModel = false, local = f
      * дня»; перенёс «Ярлыки» и ещё 1 правка» вместо «Компонент из «Ярлыки»». Человек просил
      * одну вещь, и одной вещью она и должна называться — а перечень правок уходит второй
      * строкой, где он к месту. */
-    const conceptual = res.local ? String((res.plan && res.plan.title) || '').trim() : '';
+    const conceptual = res.local ? String((res.plan && res.plan.title) || '').trim()
+      // круг 110 (SPEC §25): сценарий — одной фразой «Сценарий «…»: 6 экранов, 7 переходов»
+      : res.flow && res.changeSummary ? String(res.changeSummary) : '';
     const headline = conceptual || r.tx.human || summary;
     const aside = res.local
       ? [r.tx.human, summary && summary !== conceptual ? summary : ''].filter(Boolean).join(' · ')
@@ -10973,7 +10976,9 @@ function onAgentStage(rec, variantsTotal = 0, runId = 0) {
   const plan = rec.plan || null;
   // план модели содержит шаги — и до сих пор оболочка их нигде не показывала (круг 11, п.17)
   const steps = (plan && Array.isArray(plan.steps) ? plan.steps : (Array.isArray(rec.steps) ? rec.steps : null));
-  if (steps) state.stageSteps = steps.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 5);
+  // круг 110 (SPEC §25): у сценария шагов — экраны, их до 12; показываем окно вокруг текущего
+  if (steps) state.stageSteps = steps.map((x) => String(x || '').trim()).filter(Boolean).slice(0, rec.progress ? 24 : 5);
+  if (rec.progress && rec.progress.total > 0) state.stageProgress = rec.progress;
   if (plan && (plan.title || plan.summary)) state.stageGoal = plan.title || plan.summary;
   else if (rec.stage === 'plan') state.stageGoal = rec.title || rec.detail || rec.label || state.stageGoal;
   if (rec.variant && !state.variantSeen.includes(rec.variant)) state.variantSeen.push(rec.variant);
@@ -11048,7 +11053,13 @@ function showStage(rec, variantsTotal = 0) {
 function renderStageSteps(rec) {
   const host = dom['work-steps'];
   if (!host) return;
-  const list = (state.stageSteps || []).slice(0, 5);
+  renderStageProgress();
+  const all = state.stageSteps || [];
+  const pr = state.stageProgress;
+  // круг 110: длинный список экранов — окно из пяти вокруг текущего
+  const from = pr && all.length > 5 ? Math.max(0, Math.min(all.length - 5, pr.done - 1)) : 0;
+  const list = all.slice(from, from + 5);
+  host.dataset.from = String(from);
   const sig = list.join('|');
   if (host.dataset.sig !== sig) {
     host.dataset.sig = sig;
@@ -11069,9 +11080,37 @@ function renderStageSteps(rec) {
    гасим ровно столько шагов, сколько стадий работы позади. */
 const STAGE_PROGRESS = { plan: 0, generate: 1, materialize: 2, solve: 3, verify: 4, repair: 4, done: 5 };
 
+/**
+ * Круг 110 (SPEC §25): ход длинной задачи — полоса «собрано экранов из N» и текущий экран в
+ * списке шагов. Без хода (обычная команда) полоса спрятана.
+ */
+function renderStageProgress() {
+  const bar = dom['work-progress'];
+  const pr = state.stageProgress;
+  if (!bar) return;
+  if (!pr || !(pr.total > 0)) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const done = Math.max(0, Math.min(pr.total, pr.done));
+  bar.setAttribute('aria-valuemax', String(pr.total));
+  bar.setAttribute('aria-valuenow', String(done));
+  bar.setAttribute('aria-label', `Собрано экранов: ${done} из ${pr.total}`);
+  bar.firstElementChild.style.width = `${Math.round((done / pr.total) * 100)}%`;
+}
+
 function markStepsDone(rec) {
   const host = dom['work-steps'];
   if (!host || host.hidden) return;
+  const pr = state.stageProgress;
+  if (pr && pr.total > 0) {
+    // шаги сценария — экраны: собранные гаснут, текущий выделен
+    const from = Number(host.dataset.from) || 0;
+    const rows = host.children;
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].dataset.done = from + i < pr.done ? 'on' : '';
+      rows[i].dataset.now = from + i === pr.done && pr.done < pr.total ? 'on' : '';
+    }
+    return;
+  }
   const stage = rec && typeof rec.stage === 'string' ? rec.stage : '';
   const done = STAGE_PROGRESS[stage];
   if (done === undefined) return;
@@ -11091,6 +11130,7 @@ function hideStage() {
     dom.worklog.hidden = true;
     dom.worklog.dataset.done = '';
     if (host) { host.hidden = true; host.dataset.sig = ''; host.textContent = ''; }
+    if (dom['work-progress']) dom['work-progress'].hidden = true;
   }, 500);
 }
 
@@ -12221,6 +12261,10 @@ function applyShellIntent(intent, said) {
       if (intent.what === 'svg') { exportSvg(); return true; }
       if (intent.what === 'json') { exportJson(); return true; }
       openExport();
+      return true;
+    }
+    case 'doc-color': {
+      colorByWords(intent);
       return true;
     }
     case 'bind-colors': {
@@ -14636,6 +14680,45 @@ function pickDocColor(name, hex) {
   // одним тостом: рядом может стоять предложение «Перекрасить и его» (§15.25) — три тоста разом не читаются
   const say = [own.trim(), ...r.warnings.map((w) => `${w}.`)].filter(Boolean).join(' ');
   if (say) toast(say, 'plain', 8000);
+}
+
+/**
+ * Круг 99 (SPEC §15.33): цвет палитры словами — те же правки и проверки, что у шторки «Цвета документа»
+ * (§15.30–§15.31), одна правка — одна отмена; подтверждение — тостом.
+ */
+function colorByWords(intent) {
+  if (intent.say) { toast(intent.say, 'plain', 7000); return; }
+  const colors = (state.doc.tokens && state.doc.tokens.colors) || {};
+  const known = Object.prototype.hasOwnProperty.call(colors, intent.name);
+  const nope = () => toast(`Цвета «${clip(intent.name, 40)}» в палитре нет. Все цвета — в шторке «Цвета документа»`, 'plain', 7000);
+  if (intent.act === 'new') {
+    const taken = Object.keys(colors).find((k) => k.toLowerCase() === String(intent.name).toLowerCase());
+    if (taken) { toast(`Цвет «${taken}» в палитре уже есть — поменять код: «цвет ${taken} ${String(intent.hex).toUpperCase()}»`, 'plain', 7000); return; }
+    const r = SHELL.newDocColorOps(state.doc, intent.name, intent.hex);
+    if (r.error) { toast(r.error, 'plain', 7000); return; }
+    const res = commit(r.ops, r.label, 'human', { quiet: true, human: r.label });
+    if (res && res.ok === false) return;
+    toast([`${r.label}.`, ...r.warnings.map((w) => `${w}.`)].join(' '), 'plain', 6000);
+    return;
+  }
+  if (!known) { nope(); return; }
+  if (intent.act === 'set') {
+    const r = SHELL.docColorOps(state.doc, intent.name, intent.hex, { title: SWATCH_NAMES[intent.name] });
+    if (!r) { toast(`«${intent.name}» уже ${String(intent.hex).toUpperCase()}`, 'plain', 4000); return; }
+    const res = commit(r.ops, r.label, 'human', { quiet: true, human: r.label });
+    if (res && res.ok === false) return;
+    const own = r.screens.length
+      ? `Экран${r.screens.length > 1 ? 'ы' : ''} ${r.screens.slice(0, 3).map((n) => `«${n}»`).join(', ')}${r.screens.length > 3 ? ` и ещё ${r.screens.length - 3}` : ''} — со своим цветом, ${r.screens.length > 1 ? 'их' : 'его'} правка не коснулась.`
+      : '';
+    toast([`${r.label}.`, own, ...r.warnings.map((w) => `${w}.`)].filter(Boolean).join(' '), 'plain', 7000);
+    return;
+  }
+  const r = intent.act === 'rename' ? SHELL.renameDocColorOps(state.doc, intent.name, intent.to) : SHELL.removeDocColorOps(state.doc, intent.name);
+  if (!r) { toast(`Цвет уже называется «${intent.name}»`, 'plain', 4000); return; }
+  if (r.error) { toast(r.error, 'plain', 7000); return; }
+  const res = commit(r.ops, r.label, 'human', { quiet: true, human: r.label });
+  if (res && res.ok === false) return;
+  toast(`${r.label}.`, 'plain', 6000);
 }
 
 function fillDocColors(body) {

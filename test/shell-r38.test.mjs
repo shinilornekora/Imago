@@ -33,6 +33,8 @@ function sampleArg(c) {
   if (a.values) return ` ${a.values[0]}`;
   if (a.kind === 'number') return ' 150';
   if (c.id === 'board') return ' 2';
+  // круг 99: цвет палитры — имя и код, как в примере команды
+  if (/^color-/.test(c.id)) return ' ' + c.example.replace(/^\/\S+(?:\s+цвет(?:\s+палитры)?)?\s+/, '');
   return c.id === 'rename' ? ' Новое имя' : ' заголовок экрана';
 }
 

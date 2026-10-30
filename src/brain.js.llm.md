@@ -36,6 +36,7 @@
 | 9a. Палитра | 14758 | починка негодной палитры; `expandOverflow` (≈14949, предел раскрытия) |
 | Итог | ≈15231 | `checkOutcome` (итог против просьбы), `describeChange` (что сделано словами → `title`) |
 | 10. Варианты | 15792 | `runVariantsCore` |
+| 14. Длинные задачи | конец файла | **`runFlowCore`** (круг 110, SPEC §25): `recognizeFlow` в `runCommandCore` (шаг 0e, до классификации) → план сценария (`SCHEMAS.flow`/`PROMPTS.flow` из `src/flow.js`) → один арт-директор на сценарий (`presetDirection`) → каждый экран — `runCommandCore` по `screenBrief` (insideVariants, без критика, префикс стадий «Экран i/n · ») → `layoutFlow` + `triggerNode` → `pos` и `flow` прямо в `create` досок; одна правка; стадия `flow` с `progress` |
 
 ## Поток данных одной команды
 `classifyUtterance`/`recognize*` (без модели: отмена, варианты, переспрос) → план (`PROMPTS.planner`, `SCHEMAS.plan`) → [арт-направление `direction`, круг 47] → генерация (`tree` | `patch` | `theme` | `illustration` | `answer`) → материализация (`treeToOps` / `patchToOps` / `themeToOps`) → `core.applyOps` на копии + `solve` + `validate` → починка (`repair`, ≤ 1) → [критик `critique` со снимком доски `render`, доработка `revise`, второй взгляд] → `checkOutcome` / `describeChange` → результат. Стадии — через `onStage` (plan, generate, retry, variant, materialize, validate, repair, direct, critic, revise; Orchestrator сводит их к ключам §10.3).
@@ -52,6 +53,7 @@
 - Новая схема/поле схемы → `SCHEMAS`, промпт в `PROMPTS`, `tools/stub.js` (заглушка отвечает формой), тест `test/brain-r*.test.mjs`.
 - Тема нескольких экранов (круг 72): отказ одного экрана — заметка «пропущен», заметки «правка легла» — только если хоть одна операция вышла; выделение, оставленное агентом (`selectionBy:'agent'`), — не список экранов.
 - `RE.theme` (круг 76): «сделай эти экраны тёмными» и т. п. — оформление, только если экран — прямое дополнение глагола и между ним и цветом одно имя экрана (части — `R76`); `\b` в регулярках с кириллицей не работает (ASCII) — границы через `(?<!\p{L})`, а `rx()` уже ставит `WB` в начало.
+- Сценарий (круг 110): `presetDirection` у `runCommandCore` — готовый образ, арт-директор не зовётся; экран сценария идёт с `insideVariants: true` (без распознаваний и критика) — не путать с настоящими вариантами.
 - `downgradeSchema` — для провайдеров, которые не принимают полную JSON Schema (LM Studio): проверяй оба пути.
 
 ## Отладка

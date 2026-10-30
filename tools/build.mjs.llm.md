@@ -10,6 +10,8 @@
 2. `dist/local/` — соло-сборка: голос + LM Studio на этой машине, без сервера; `START.cmd`, `server.mjs` (статический сервер на node:http), `ЧИТАТЬ.txt`.
 3. `dist/web/` — то же для nginx (`deploy/Dockerfile.web`), `IMAGO_DEFAULTS.server:true`: агент — Orchestrator; модель браузера включает только сам человек (круг 25).
 
+- `SRC_MODULES` с круга 110 включает `flow.js`.
+
 ## Инварианты
 - `SRC_MODULES` — белый список модулей `src/`, которые копируются: `core, brain, fonts, swatches, sync, agent, shell`. **Новый клиентский модуль обязан попасть сюда** (иначе сборка ломается в браузере; ловит `test/deploy.test.mjs`).
 - Сайдкары `*.llm.md` в сборку не копируются — копируется только перечисленное.
